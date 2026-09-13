@@ -727,7 +727,30 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
 /// shared. Deliberately never touches the PIC -- `keyboard_interrupt_handler` (the only caller
 /// actually inside a real hardware IRQ) sends its own EOI unconditionally after calling this,
 /// whether or not this returns early.
-fn handle_decoded_key(key: DecodedKey) {
+///
+/// **Return value, found live via a real crash**: `true` means the process this interrupt
+/// actually landed on (`scheduler::current_pid()`) is no longer `Running` -- the caller must call
+/// `scheduler::schedule()` itself, right after its own EOI, exactly like `timer_interrupt_handler`
+/// already does for ring-3 preemption (same "EOI before schedule()" ordering — see that function's
+/// own doc comment). Without this, a Ctrl+C/Ctrl+Z that terminates or stops the *currently
+/// running* process only updates its `Process` table entry (`Zombie`/`Stopped`) -- nothing stops
+/// the plain `iretq` this interrupt would otherwise take back into that exact process's own,
+/// still-live ring-3 instruction stream. That "zombie/stopped but still actually executing" window
+/// (up to a full preemption quantum) is real, not theoretical: found live running the fbdoom port
+/// (a real, tight, never-blocking `for(;;) doomgeneric_Tick();` loop, so extremely likely to make
+/// another syscall inside that exact window) -- `Ctrl+C` mid-game reliably panicked the whole
+/// kernel (`activate_and_prepare: picked a process with no address space`). Root cause: the
+/// process's very next `usleep()` (`process::timers::do_nanosleep`) unconditionally overwrote its
+/// already-`Zombie` state with `Blocked(Sleeping(deadline))` and blocked normally -- once that
+/// deadline passed, `timer_interrupt_handler`'s own sleeper-wake loop dutifully re-`Ready`'d and
+/// re-enqueued what was, by every real invariant this codebase depends on, supposed to be a dead
+/// process -- and by the time the scheduler actually popped it, its address space had already been
+/// torn down by the deferred zombie-reap path that assumed nothing could ever touch that entry
+/// again. Every other blocking primitive in this codebase (`pause`, pipe/mqueue/futex waits, ...)
+/// has the identical latent hazard for the same reason; forcing an immediate, synchronous
+/// reschedule here closes all of them at the actual source, rather than auditing every blocking
+/// syscall to check `state == Zombie`/`Stopped` before overwriting it.
+fn handle_decoded_key(key: DecodedKey) -> bool {
     match key {
         DecodedKey::Unicode(character) => {
             // Non-ASCII is silently dropped here -- a US keyboard layout won't produce it,
@@ -766,8 +789,12 @@ fn handle_decoded_key(key: DecodedKey) {
                     && let Some(pgid) = crate::console::stdin::foreground_pgid()
                 {
                     serial_print!("^C\n");
+                    let cur = crate::process::scheduler::current_pid();
                     crate::process::signal_foreground_group(pgid, crate::process::SIGINT);
-                    return;
+                    return !matches!(
+                        crate::process::table().lock().get(&cur).map(|p| p.state),
+                        Some(crate::process::ProcState::Running)
+                    );
                 }
                 // Real tty-driver SUSP behavior, same shape as the Ctrl+C/SIGINT interception
                 // directly above (ASCII SUB, `0x1a`, is Ctrl+Z's real terminal-driver INTR-
@@ -783,8 +810,12 @@ fn handle_decoded_key(key: DecodedKey) {
                     && let Some(pgid) = crate::console::stdin::foreground_pgid()
                 {
                     serial_print!("^Z\n");
+                    let cur = crate::process::scheduler::current_pid();
                     crate::process::signal_foreground_group(pgid, crate::process::SIGTSTP);
-                    return;
+                    return !matches!(
+                        crate::process::table().lock().get(&cur).map(|p| p.state),
+                        Some(crate::process::ProcState::Running)
+                    );
                 }
                 if crate::console::stdin::echo_enabled()
                     && (byte == b'\n' || byte == b'\r' || (0x20..=0x7e).contains(&byte))
@@ -801,6 +832,7 @@ fn handle_decoded_key(key: DecodedKey) {
         // which is exactly the kind of noise a real shell shouldn't produce.
         DecodedKey::RawKey(_) => {}
     }
+    false
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -814,18 +846,34 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // gated on how the scancode later decodes, so every keyboard IRQ contributes.
     crate::random::mix_entropy(scancode as u64);
 
-    let mut keyboard = KEYBOARD.lock();
-    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        // Captured here, before `process_keyevent` below discards release information for
-        // nearly every key -- see `console::keyevents`'s own doc comment.
-        crate::console::keyevents::record_raw_key_event(&key_event);
-        if let Some(key) = keyboard.process_keyevent(key_event) {
-            handle_decoded_key(key);
+    // Scoped so KEYBOARD's own lock is dropped before the possible `schedule()` call below --
+    // holding it across a real context switch (which can run arbitrary other code, including a
+    // *different* keyboard IRQ once this one's own EOI has gone out) would deadlock this
+    // single-locked-at-all resource against itself.
+    let must_reschedule = {
+        let mut keyboard = KEYBOARD.lock();
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+            // Captured here, before `process_keyevent` below discards release information for
+            // nearly every key -- see `console::keyevents`'s own doc comment.
+            crate::console::keyevents::record_raw_key_event(&key_event);
+            match keyboard.process_keyevent(key_event) {
+                Some(key) => handle_decoded_key(key),
+                None => false,
+            }
+        } else {
+            false
         }
-    }
+    };
 
     unsafe {
         pic::notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+
+    // See `handle_decoded_key`'s own doc comment for why this can't just be an ordinary `iretq`
+    // back into a process a Ctrl+C/Ctrl+Z just terminated/stopped. Same "EOI before schedule()"
+    // ordering `timer_interrupt_handler`'s own ring-3 preemption already establishes.
+    if must_reschedule {
+        crate::process::scheduler::schedule();
     }
 }
 
@@ -836,11 +884,26 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 /// hardware IRQ (called from `drivers::usb::poll()`, in turn called once per timer tick), so
 /// unlike `keyboard_interrupt_handler` it never touches the PIC.
 pub(crate) fn feed_synthetic_scancode(byte: u8) {
-    let mut keyboard = KEYBOARD.lock();
-    if let Ok(Some(key_event)) = keyboard.add_byte(byte) {
-        crate::console::keyevents::record_raw_key_event(&key_event);
-        if let Some(key) = keyboard.process_keyevent(key_event) {
-            handle_decoded_key(key);
+    // Scoped so KEYBOARD's own lock is dropped before the possible `schedule()` call below -- see
+    // `keyboard_interrupt_handler`'s own identical comment.
+    let must_reschedule = {
+        let mut keyboard = KEYBOARD.lock();
+        if let Ok(Some(key_event)) = keyboard.add_byte(byte) {
+            crate::console::keyevents::record_raw_key_event(&key_event);
+            match keyboard.process_keyevent(key_event) {
+                Some(key) => handle_decoded_key(key),
+                None => false,
+            }
+        } else {
+            false
         }
+    };
+    // Safe here too: called from `drivers::usb::poll()`, itself called from
+    // `timer_interrupt_handler` *after* that handler's own EOI (see this function's own doc
+    // comment) -- same "EOI before schedule()" ordering as `keyboard_interrupt_handler`. See
+    // `handle_decoded_key`'s own doc comment for why this can't just fall through to a plain
+    // return.
+    if must_reschedule {
+        crate::process::scheduler::schedule();
     }
 }
