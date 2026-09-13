@@ -397,6 +397,13 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
         SetPending,
     }
 
+    // Pids genuinely resumed from `Stopped` by a real `SIGCONT` below -- collected here (rather
+    // than re-deriving it after the fact) so display/keyboard ownership can be restored for any
+    // of them holding a live phys mapping, once `PROCESS_TABLE` is no longer locked (see the
+    // `has_live_phys_mapping` calls right after this block -- same reasoning `Action::Stop`'s own
+    // identical restore-after-unlock call has).
+    let mut resumed: Vec<Pid> = Vec::new();
+
     let targets: Vec<(Pid, Action)> = {
         // Mutable, not just read-locked, so the real SIGCONT-resume pre-check below (same
         // "always wakes an actually-stopped target regardless of its own disposition" semantics
@@ -420,6 +427,7 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                     proc.pending_signals &= !((1 << (SIGSTOP - 1)) | (1 << (SIGTSTP - 1)));
                     scheduler::enqueue_ready(pid);
                     notify_parent_sigchld(&mut table, pid, CLD_CONTINUED, SIGCONT);
+                    resumed.push(pid);
                 }
             }
         }
@@ -447,6 +455,17 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
             .collect()
     };
 
+    // Real job-control resume of a real display/keyboard owner -- restores what `Action::Stop`
+    // below (a previous `SIGTSTP`/`SIGSTOP` on this same process) released. `PROCESS_TABLE` is
+    // unlocked here (the block above already returned), matching `has_live_phys_mapping`'s own
+    // locking.
+    for pid in resumed {
+        if crate::process::mm::has_live_phys_mapping(pid) {
+            crate::console::framebuffer::set_owned_by_userspace(true);
+            crate::console::stdin::set_raw_keyboard_owned(true);
+        }
+    }
+
     for (pid, action) in targets {
         match action {
             Action::Discard => {}
@@ -464,6 +483,13 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                     proc.pending_signals &= !(1 << (SIGCONT - 1));
                     wake_parent_if_waiting(&mut table, pid);
                     notify_parent_sigchld(&mut table, pid, CLD_STOPPED, sig);
+                }
+                drop(table);
+                // Real job-control stop of a real display/keyboard owner -- see
+                // `mm::has_live_phys_mapping`'s own doc comment for the real bug this closes.
+                if crate::process::mm::has_live_phys_mapping(pid) {
+                    crate::console::framebuffer::set_owned_by_userspace(false);
+                    crate::console::stdin::set_raw_keyboard_owned(false);
                 }
             }
             Action::SetPending => {

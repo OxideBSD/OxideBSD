@@ -1103,6 +1103,23 @@ pub fn cleanup_mmap_phys_regions_for_exit(pid: Pid) {
     }
 }
 
+/// Whether `pid` currently holds any live real `/dev/fb0` (or future MMIO) mapping -- used by
+/// `process::signals`'s own real `SIGSTOP`/`SIGTSTP`/`SIGCONT` handling to correctly suspend and
+/// restore display/keyboard ownership across a real job-control stop/resume (Ctrl+Z / `fg`), not
+/// just a full process exit. **Found live, a real bug**: without this, stopping a process that
+/// owns the framebuffer left `console::framebuffer::redraw()` permanently suppressed and
+/// `console::stdin`'s own echo permanently gated off even once control genuinely returned to the
+/// foreground shell -- the shell kept running and reading input correctly, but with the graphical
+/// screen frozen on the stopped program's last frame and every subsequent keystroke silently
+/// unechoed, looking exactly like "nothing responds anymore" even though the shell itself was
+/// perfectly alive underneath.
+pub fn has_live_phys_mapping(pid: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .is_some_and(|p| !p.shared.lock().mmap_phys_regions.is_empty())
+}
+
 /// `SYS_MPROTECT`'s real logic — a permissive no-op success stub, exactly like `do_munmap` above.
 /// This kernel doesn't enforce page protection anywhere yet (`do_mmap` already ignores its own
 /// `prot` argument and unconditionally grants `WRITABLE`; `NO_EXECUTE`/`EFER.NXE` isn't plumbed at
