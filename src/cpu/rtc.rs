@@ -93,6 +93,15 @@ pub fn unix_epoch_seconds() -> i64 {
     days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64
 }
 
+/// Just the chip's current month (`1..=12`) -- cheap enough to read standalone (raw port I/O,
+/// same as every other function here) without needing a full `unix_epoch_seconds`-style
+/// timestamp. Safe to call before `crate::init` has run anything else: no heap/paging/interrupt
+/// dependency, identical to `unix_epoch_seconds`'s own reasoning. The one real caller today is
+/// `main.rs`'s own boot-time Pride Month greeting.
+pub fn current_month() -> u8 {
+    read_datetime().1
+}
+
 /// Exposed to `modules/oxfs` (see `src/module.rs`'s `resolve_external_symbol`) for real
 /// `st_mtime`/`st_ctime` tracking (`write_inode_data`/`resize_inode_data`) -- a relocated module
 /// can't call kernel functions directly, only through this hand-curated symbol table, the same

@@ -43,6 +43,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("OxideBSD kernel booting...");
 
+    // A small, harmless easter egg -- real CMOS RTC read (`cpu::rtc::current_month`), safe this
+    // early (raw port I/O only, no heap/paging/interrupt dependency yet, same reasoning
+    // `unix_epoch_seconds` already establishes). Zero effect on anything real POSIX conformance
+    // cares about.
+    if oxidebsd::cpu::rtc::current_month() == 6 {
+        serial_println!("Happy Pride Month!");
+    }
+
     let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
