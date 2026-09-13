@@ -2297,7 +2297,13 @@ needed to write a file. Explains the ~86%→~2026-09-10 full-corpus UNRESOLVED s
 Limine timing at the time: real trigger was corpus content/order exercising this path for the
 first time, not a timing-sensitive scheduler race. Fixed: reject any `ofs` other than exactly
 `u64::MAX` (the real "current position" sentinel) that's negative. Closes the whole cascade —
-53-file minimal repro moved 15P/8F/28U/1CRASH → 49P/0F/3U(pre-existing, unrelated)/0CRASH.
+53-file minimal repro moved 15P/8F/28U/1CRASH → 49P/0F/3U(pre-existing, unrelated)/0CRASH. A fresh
+full ~1687-file supervised run confirms it: clean on the first iteration, zero exclusions needed
+(previously required excluding wedged files to complete at all) — **1515P/26F/18U/29US/77UT/8TO/
+14CRASH, 89.8% raw / 94.1% excl-untested**, a new high (prior best: 88.4%/92.5%, before this
+regression dropped it to 86.6% excl-untested). Every remaining FAIL/CRASH/TIMEOUT matches an
+already-documented, accepted gap elsewhere in this file (musl's stale-tid UAF class, `strftime/
+2-1.c`'s known upstream bug, `shm_open/39-2.c`'s `ENAMETOOLONG` gap, etc.) — nothing new.
 
 ## Dependency notes
 
