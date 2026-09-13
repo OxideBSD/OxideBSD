@@ -117,6 +117,12 @@ unsafe extern "C" {
     /// `crate::fs::fd::oxidebsd_set_fd_access_mode`/`FdAccessMode`'s own doc comment (kernel tree).
     /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_pread_pwrite`.
     fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: extern "C" fn(u64) -> i64);
+    /// Overrides `fd`'s real `fb_geometry` callback -- see
+    /// `crate::fs::fd::oxidebsd_set_fd_fb_geometry`/`FdFbGeometry`'s own doc comment (kernel tree).
+    /// `register_open_file` is the one caller, unconditionally for every fd (the callback itself
+    /// discriminates by `OpenFile` variant, same precedent `oxfs_access_mode`/`oxfs_content_id`
+    /// already establish).
+    fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: extern "C" fn(u64, u64) -> i32);
     fn oxidebsd_get_cwd() -> u64;
     fn oxidebsd_set_cwd(inode: u64);
     fn oxidebsd_get_root() -> u64;
@@ -133,6 +139,13 @@ unsafe extern "C" {
     fn oxidebsd_proc_modules(buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_fd_at(pid: u64, index: u64) -> i64;
     fn oxidebsd_random_bytes(ptr: u64, len: u64) -> i64;
+    /// Real framebuffer geometry -- see `src/drivers/fbdev.rs`'s own doc comment (kernel tree).
+    /// Writes a `RawFbGeometry` (this module's own local copy of that file's `FbGeometry` --
+    /// modules can't depend on kernel-crate types directly, so this is duplicated, not shared;
+    /// see this codebase's own "audit duplicated wire structs on kernel-side change" precedent)
+    /// through `out`, returning `0` on success or `-1` if no usable (32bpp) framebuffer exists
+    /// this boot. `known_device`'s `(29, 0)` arm is the one caller.
+    fn oxidebsd_fb_geometry(out: u64) -> i32;
     fn oxidebsd_current_uid() -> u64;
     fn oxidebsd_current_gid() -> u64;
     fn oxidebsd_current_umask() -> u64;
@@ -1524,6 +1537,8 @@ fn inode_of_open_file(real_fd: u64) -> Option<u32> {
         // as -EBADF, a documented known gap for this tier (no target applet needs it).
         OpenFile::ProcRead { .. } | OpenFile::ProcDir { .. } => None,
         OpenFile::DevRandom | OpenFile::DevNull | OpenFile::DevZero => None,
+        // No real inode backs a /dev/fb0 fd either -- same reasoning as the /proc/dev arms above.
+        OpenFile::Framebuffer { .. } => None,
     }
 }
 
@@ -2475,6 +2490,20 @@ enum OpenFile {
     /// A synthetic `/dev/zero` fd -- every read fills the caller's buffer with zero bytes (never
     /// EOF), every write succeeds and discards its input, same as `DevNull`.
     DevZero,
+    /// A real `/dev/fb0` fd -- see `known_device`'s `(29, 0)` arm and `src/drivers/fbdev.rs`'s own
+    /// module doc comment (kernel tree). Real pixel I/O happens only through `mmap()` (see
+    /// `process::mm::do_mmap_fb`, kernel tree) -- `read`/`write`/`lseek` on this fd are all
+    /// real, honest failures (`EBADF`/`ESPIPE`), matching real Linux's own `/dev/fb0` (which does
+    /// support `write()`, but no target in this port's roster needs that path, so it's left
+    /// unimplemented rather than half-modeled).
+    Framebuffer {
+        phys_base: u64,
+        len: u64,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        bpp: u32,
+    },
 }
 
 /// What a synthetic `/proc` directory fd lists -- see `oxfs_getdents`'s own `ProcDir` handling.
@@ -2525,6 +2554,7 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         // `oxfs_pwrite`'s own doc comments for what each real variant actually supports.
         oxidebsd_set_fd_pread_pwrite(fd, oxfs_pread, oxfs_pwrite);
         oxidebsd_set_fd_access_mode(fd, oxfs_access_mode);
+        oxidebsd_set_fd_fb_geometry(fd, oxfs_fb_geometry);
     };
     fd as i64
 }
@@ -2557,6 +2587,38 @@ extern "C" fn oxfs_access_mode(real_fd: u64) -> i64 {
             bits
         }
         _ => 0b11,
+    }
+}
+
+/// `fb_geometry` callback for `oxidebsd_set_fd_fb_geometry` -- see that import's own doc comment.
+/// `-1` for every `OpenFile` variant except `Framebuffer`, matching `oxfs_content_id`'s own
+/// "discriminates by variant, harmless default for everything else" shape.
+extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
+    match find_open_file(real_fd) {
+        Some(OpenFile::Framebuffer {
+            phys_base,
+            len,
+            width,
+            height,
+            pitch,
+            bpp,
+        }) => {
+            let geom = RawFbGeometry {
+                phys_base: *phys_base,
+                len: *len,
+                width: *width,
+                height: *height,
+                pitch: *pitch,
+                bpp: *bpp,
+            };
+            // SAFETY: same known pointer-validation gap every other module-boundary write in this
+            // file already has -- `out` is always a kernel-owned stack buffer in practice (see
+            // `fs::fd::framebuffer_geometry_of`, the only caller, kernel tree), never a raw
+            // userland pointer.
+            unsafe { *(out as *mut RawFbGeometry) = geom };
+            0
+        }
+        _ => -1,
     }
 }
 
@@ -3076,8 +3138,56 @@ fn known_device(rdev: u32, device_char: bool) -> Option<OpenFile> {
         (1, 3) => Some(OpenFile::DevNull),
         (1, 5) => Some(OpenFile::DevZero),
         (1, 8) | (1, 9) => Some(OpenFile::DevRandom),
+        // Real Linux's own standard fbdev major:minor (29, 0) -- cosmetic here (no general
+        // device-driver framework backs this number choice), but matches a real `mknod /dev/fb0 c
+        // 29 0`. Queries the real, current framebuffer geometry at *open* time, not once at boot
+        // -- harmless to re-query every open since Limine's response never changes across a boot.
+        (29, 0) => framebuffer_open_file(),
         _ => None,
     }
+}
+
+/// This module's own local copy of `src/drivers/fbdev.rs`'s `FbGeometry` (kernel tree) -- modules
+/// can't depend on kernel-crate types directly, only on the plain `u64`/`i32` FFI boundary, so the
+/// wire layout is duplicated rather than shared. Any future change to the kernel-side struct needs
+/// the identical change mirrored here (same "audit duplicated wire structs" precedent this
+/// codebase already follows for userland smoke-test crates that hand-duplicate kernel structs).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawFbGeometry {
+    phys_base: u64,
+    len: u64,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+}
+
+/// `known_device`'s `(29, 0)` arm -- `None` if no usable (32bpp) framebuffer exists this boot,
+/// matching real Linux's own `-ENXIO` for a device number with no bound driver (the `known_device`
+/// caller already turns a `None` here into exactly that).
+fn framebuffer_open_file() -> Option<OpenFile> {
+    let mut geom = RawFbGeometry {
+        phys_base: 0,
+        len: 0,
+        width: 0,
+        height: 0,
+        pitch: 0,
+        bpp: 0,
+    };
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let ok = unsafe { oxidebsd_fb_geometry(&mut geom as *mut RawFbGeometry as u64) };
+    if ok != 0 {
+        return None;
+    }
+    Some(OpenFile::Framebuffer {
+        phys_base: geom.phys_base,
+        len: geom.len,
+        width: geom.width,
+        height: geom.height,
+        pitch: geom.pitch,
+        bpp: geom.bpp,
+    })
 }
 
 /// Closes a real visibility gap in this filesystem's own deferred-commit `open(O_CREAT)` design
@@ -3464,6 +3574,9 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
             out.fill(0);
             len as i64
         }
+        // Real pixel I/O only ever happens through mmap() (process::mm::do_mmap_fb, kernel
+        // tree) -- see OpenFile::Framebuffer's own doc comment.
+        OpenFile::Framebuffer { .. } => -EBADF,
     }
 }
 
@@ -5014,7 +5127,11 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         OpenFile::DirListing { content: _, len, position, .. } => (position, *len as i64),
         OpenFile::ProcRead { len, position, .. } => (position, *len as i64),
         OpenFile::ProcDir { len, position, .. } => (position, *len as i64),
-        OpenFile::Write { .. } | OpenFile::DevRandom | OpenFile::DevNull | OpenFile::DevZero => {
+        OpenFile::Write { .. }
+        | OpenFile::DevRandom
+        | OpenFile::DevNull
+        | OpenFile::DevZero
+        | OpenFile::Framebuffer { .. } => {
             return -ESPIPE;
         }
     };
@@ -5889,6 +6006,18 @@ fn format_fresh_filesystem() -> bool {
 
     ok &= seed_file(bin, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
     ok &= seed_file(bin, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
+    ok &= seed_file(
+        bin,
+        b"float-smoke",
+        include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
+    );
+    // A real, playable port of Doom -- see build.rs's own build_doomgeneric doc comment.
+    // doom1.wad seeded at root (not e.g. /usr/share/) since real, unmodified doomgeneric's own
+    // d_iwad.c always searches "." first, and root's own $HOME (see /etc/passwd) is "/" -- the
+    // ordinary hush prompt's default cwd -- so a bare `doom` invocation finds it with no `-iwad`
+    // argument needed.
+    ok &= seed_file(bin, b"doom", include_bytes!(env!("OXFS_DOOM_ELF_PATH")));
+    ok &= seed_file(root, b"doom1.wad", include_bytes!(env!("OXFS_DOOM1_WAD_PATH")));
     // lsoxmod: a real standalone Rust userland ELF (userland/lsoxmod/, same "freestanding,
     // raw-SYSCALL, no musl/BusyBox involved" category as smoke/musl above), not a BusyBox applet
     // -- lists OxideBSD's own dynamically loaded kernel modules by reading the real /proc/modules
@@ -6553,6 +6682,23 @@ fn format_fresh_filesystem() -> bool {
         let mut inode = read_inode(dev_shm);
         inode.mode = 0o1777;
         write_inode(dev_shm, inode);
+    }
+
+    // /dev/fb0 -- a real character device node backing process::mm::do_mmap_fb (see
+    // known_device's own (29, 0) arm and src/drivers/fbdev.rs's module doc comment, kernel tree).
+    // Major:minor (29, 0) matches real Linux's own standard fbdev numbering (cosmetic here -- no
+    // general device-driver framework backs the number choice, same precedent
+    // /dev/{null,zero,random,urandom}'s own real-Linux-matching numbers already set). Mode 0o666:
+    // any process may open/mmap the one real console framebuffer, matching this kernel's
+    // single-session design (no "who owns the display" permission concept exists at all).
+    {
+        let fb0 = alloc_inode().expect("oxfs: failed to allocate /dev/fb0 inode");
+        let mut inode = Inode::new(InodeKind::Device);
+        inode.mode = 0o666;
+        inode.rdev = (29u32 << 8) | 0;
+        inode.device_char = true;
+        write_inode(fb0, inode);
+        dir_insert(dev, b"fb0", fb0).expect("oxfs: failed to insert /dev/fb0 into /dev");
     }
 
     // TinyCC's own on-target runtime tree -- see CLAUDE.md's TinyCC section. `/usr/include`,

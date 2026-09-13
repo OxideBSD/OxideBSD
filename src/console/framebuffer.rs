@@ -35,7 +35,32 @@
 //! `vga::Writer`'s existing SGR handling already computes correctly for every color BusyBox's
 //! `hush`/`vi`/coloured `ls` etc. actually use.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use limine::framebuffer::Framebuffer;
+
+/// Set while a userland process holds a real `/dev/fb0` physical mmap (`process::mm::do_mmap_fb`)
+/// -- `redraw()` below early-returns while this is set. Load-bearing, not a nicety: this module's
+/// own rasterizer writes real pixels with no locking and no awareness of userland writes (see
+/// this file's own module doc comment), diffing against `PREV_CELLS`' *shadow text buffer*
+/// content, never actual VRAM -- so left unguarded, the very next `serial_println!` anywhere in
+/// the kernel would silently overwrite arbitrary rectangles of a mapped process's own pixels with
+/// stale glyph content. Cleared once no such mapping remains (see `process::mm`'s
+/// `cleanup_mmap_phys_regions_for_exit`/`do_munmap`).
+///
+/// **Known simplification**: a single global flag, not reference-counted across every process
+/// that might independently hold a mapping -- matches this kernel's existing "exactly one real
+/// console, no multi-session concept" precedent (`console::stdin`'s own `CONTROLLING_SESSION`/
+/// `FOREGROUND_PGID` are the same shape). Two *separate* processes (not `CLONE_THREAD` siblings,
+/// who already share one `ThreadGroupShared`/one region list) both mapping `/dev/fb0` at once,
+/// where one unmaps first, would incorrectly resume `redraw()` while the other still owns the
+/// screen -- not a scenario any real consumer of this primitive creates today (one process, one
+/// display), so left as a documented gap rather than a real per-mapping refcount.
+static FB_OWNED_BY_USERSPACE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_owned_by_userspace(owned: bool) {
+    FB_OWNED_BY_USERSPACE.store(owned, Ordering::Relaxed);
+}
 
 /// The real, standard 16-color CGA/VGA palette, indexed exactly like `console::vga::Color`'s own
 /// discriminants (0=black, 1=blue, ..., 15=white) -- the values every real VGA adapter's default
@@ -440,8 +465,13 @@ fn redraw_target() -> Option<RedrawTarget> {
 /// Repaints only the cells that actually changed since the previous call (see `PREV_CELLS`'s own
 /// doc comment for why this is load-bearing, not just an optimization), then redraws the cursor
 /// mark. Called after every `serial_println!`/`serial_print!` (see `console::serial::_print`,
-/// this function's only real caller). No-op if Limine reported no usable framebuffer at all.
+/// this function's only real caller). No-op if Limine reported no usable framebuffer at all, or
+/// if a userland process currently holds a real `/dev/fb0` mmap (see `FB_OWNED_BY_USERSPACE`'s
+/// own doc comment).
 pub fn redraw() {
+    if FB_OWNED_BY_USERSPACE.load(Ordering::Relaxed) {
+        return;
+    }
     let Some(target) = redraw_target() else {
         return;
     };

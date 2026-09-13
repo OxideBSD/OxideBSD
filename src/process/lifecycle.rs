@@ -129,6 +129,7 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
             gid: 0,
             brk: VirtAddr::new(elf.highest_loaded_address()),
             mmap_file_regions: Vec::new(),
+            mmap_phys_regions: Vec::new(),
             mlockall_future: false,
             locked_bytes: 0,
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
@@ -350,6 +351,7 @@ pub fn do_fork_from_current() -> Result<u64, u64> {
                 gid: parent_shared.gid,
                 brk: parent_shared.brk,
                 mmap_file_regions: Vec::new(),
+                mmap_phys_regions: Vec::new(),
                 // Not inherited -- see ThreadGroupShared::mlockall_future's own doc comment (real
                 // POSIX mlockall()/fork() semantics).
                 mlockall_future: false,
@@ -1139,6 +1141,7 @@ pub fn do_execve(
     // Same story for any real fd-backed mmap the old image had live -- see `mm::
     // cleanup_mmap_file_regions_for_exit`'s own doc comment.
     mm::cleanup_mmap_file_regions_for_exit(caller_pid);
+    mm::cleanup_mmap_phys_regions_for_exit(caller_pid);
     // Real close-on-exec: any fd this process marked FD_CLOEXEC (fcntl(F_SETFD)/open(O_CLOEXEC),
     // see `crate::fs::fd::CLOEXEC`'s own doc comment) doesn't survive into the new program image.
     // Keyed by tgid, not caller_pid directly -- see `crate::fs::fd`'s own module doc comment on
@@ -1588,6 +1591,7 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
     // and, for the same reentrant-`Mutex` reason as the two calls above, before `PROCESS_TABLE` is
     // locked below.
     mm::cleanup_mmap_file_regions_for_exit(pid);
+    mm::cleanup_mmap_phys_regions_for_exit(pid);
     let mut table = PROCESS_TABLE.lock();
     match table.get_mut(&pid) {
         Some(me) if matches!(me.state, ProcState::Zombie(_)) => return, // already dead

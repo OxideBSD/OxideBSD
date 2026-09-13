@@ -211,6 +211,10 @@ fn main() {
         "pshared-cond-crash-smoke",
         "PSHARED_COND_CRASH_SMOKE_ELF_PATH",
     );
+    // Phase 1 verification for the fbdoom/doomgeneric port's own new kernel primitives -- see
+    // these two crates' own module doc comments.
+    build_userland_crate("fb-mmap-syscall-smoke", "FB_MMAP_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("keyevent-syscall-smoke", "KEYEVENT_SYSCALL_SMOKE_ELF_PATH");
     // A real standalone userland utility (embedded into oxfs's own /bin below, not a test) --
     // same category as ring3-smoke/musl-smoke above, not a BusyBox applet. Lists OxideBSD's own
     // loaded kernel modules by reading the real /proc/modules this pass added to modules/oxfs.
@@ -237,6 +241,10 @@ fn main() {
     let musl_smoke_elf = std::fs::read(&musl_smoke_elf_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", musl_smoke_elf_path.display()));
 
+    // Derisk check for the fbdoom/doomgeneric port -- see userland/float-smoke/main.c's own doc
+    // comment.
+    let float_smoke_elf_path = build_float_smoke(&musl_sysroot);
+
     // "Real threading" phases 1-5's own finish line -- see userland/pthread-smoke/main.c's own
     // doc comment.
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
@@ -261,6 +269,14 @@ fn main() {
     let tinycc_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/tinycc");
     let tcc_elf_path = build_tinycc(&musl_sysroot);
     let tcc_runtime_manifest_path = write_tcc_runtime_manifest(&musl_sysroot, &tinycc_dir);
+
+    // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
+    // comment for the source list, and `third_party/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
+    // for the backend. `doom1.wad` (the freely-redistributable shareware IWAD) is vendored
+    // directly, not built.
+    let doom_elf_path = build_doomgeneric(&musl_sysroot);
+    let doom1_wad_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
 
     // A real POSIX conformance baseline: see `docs/POSIX_COMPLIANCE_CHECKLIST.md`'s own
     // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment. Source-only
@@ -366,6 +382,10 @@ fn main() {
         ),
         ("OXFS_MUSL_ELF_PATH", musl_smoke_elf_path.to_str().unwrap()),
         (
+            "OXFS_FLOAT_SMOKE_ELF_PATH",
+            float_smoke_elf_path.to_str().unwrap(),
+        ),
+        (
             "OXFS_PTHREAD_SMOKE_ELF_PATH",
             pthread_smoke_elf_path.to_str().unwrap(),
         ),
@@ -383,6 +403,8 @@ fn main() {
         ),
         ("OXFS_LSOXMOD_ELF_PATH", lsoxmod_elf_path.to_str().unwrap()),
         ("OXFS_TCC_ELF_PATH", tcc_elf_path.to_str().unwrap()),
+        ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
+        ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
             "TCC_RUNTIME_MANIFEST_PATH",
             tcc_runtime_manifest_path.to_str().unwrap(),
@@ -563,6 +585,118 @@ fn build_musl_smoke(sysroot: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for musl-smoke: {e}"));
     if !status.success() {
         panic!("building musl-smoke failed: {status}");
+    }
+    out
+}
+
+/// Derisk check for the fbdoom/doomgeneric port -- see `userland/float-smoke/main.c`'s own doc
+/// comment for why. Same `build_musl_smoke` recipe, next free slot in that family
+/// (`0x8200000`, clear of `sem-open-smoke`/its neighbors' own `0x81c0000`).
+/// The real id Software Doom engine sources this build compiles, matching `third_party/
+/// doomgeneric/doomgeneric/Makefile.linuxvt`'s own `SRC_DOOM` list -- the closest existing
+/// upstream Makefile to this port (no SDL/X11, real framebuffer + input) -- **minus** `i_video`/
+/// `i_input`/`doomgeneric_linuxvt` (real Linux fbdev/evdev-specific; `i_video.c` doesn't even
+/// compile against this musl fork's sysroot, which vendors no `<linux/fb.h>`), **plus** this
+/// port's own `doomgeneric_oxidebsd`/`i_video_oxidebsd` (see those two files' own doc comments).
+const DOOMGENERIC_SOURCES: &[&str] = &[
+    "dummy", "am_map", "doomdef", "doomstat", "dstrings", "d_event", "d_items", "d_iwad", "d_loop",
+    "d_main", "d_mode", "d_net", "f_finale", "f_wipe", "g_game", "hu_lib", "hu_stuff", "info",
+    "i_cdmus", "i_endoom", "i_joystick", "i_scale", "i_sound", "i_system", "i_timer", "memio",
+    "m_argv", "m_bbox", "m_cheat", "m_config", "m_controls", "m_fixed", "m_menu", "m_misc",
+    "m_random", "p_ceilng", "p_doors", "p_enemy", "p_floor", "p_inter", "p_lights", "p_map",
+    "p_maputl", "p_mobj", "p_plats", "p_pspr", "p_saveg", "p_setup", "p_sight", "p_spec",
+    "p_switch", "p_telept", "p_tick", "p_user", "r_bsp", "r_data", "r_draw", "r_main", "r_plane",
+    "r_segs", "r_sky", "r_things", "sha1", "sounds", "statdump", "st_lib", "st_stuff", "s_sound",
+    "tables", "v_video", "wi_stuff", "w_checksum", "w_file", "w_main", "w_wad", "z_zone",
+    "w_file_stdc", "mus2mid", "doomgeneric", "doomgeneric_oxidebsd", "i_video_oxidebsd",
+];
+
+/// Same three-way staleness-check shape `build_tinycc` established (`build.rs`'s own mtime,
+/// `musl_sysroot/lib/libc.a`'s mtime, a recursive source-tree walk) -- reuses `latest_mtime`
+/// directly rather than a bespoke walker, since this tree has no generated build artifacts of its
+/// own to skip (compiled straight into `target/doomgeneric/`, never in-tree).
+fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let doomgeneric_dir = Path::new(manifest_dir).join("third_party/doomgeneric/doomgeneric");
+    let target_dir = Path::new(manifest_dir).join("target/doomgeneric");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/doomgeneric");
+    let out = target_dir.join("doom");
+
+    let build_rs_mtime = std::fs::metadata(Path::new(manifest_dir).join("build.rs"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let freshness_floor = build_rs_mtime
+        .max(musl_mtime)
+        .max(latest_mtime(&doomgeneric_dir));
+    let already_fresh = std::fs::metadata(&out)
+        .and_then(|m| m.modified())
+        .map(|m| m >= freshness_floor)
+        .unwrap_or(false);
+    if already_fresh {
+        return out;
+    }
+
+    let sources: Vec<std::path::PathBuf> = DOOMGENERIC_SOURCES
+        .iter()
+        .map(|name| doomgeneric_dir.join(format!("{name}.c")))
+        .collect();
+
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+    let invocation = compiler_invocation(&musl_gcc);
+    let mut cmd = Command::new(&invocation[0]);
+    cmd.args(&invocation[1..]);
+    cmd.arg("-static")
+        .arg("-no-pie")
+        // 0x13000000 -- next free slot past every currently-claimed userland load address (the
+        // Rust smoke-test family's own highest, keyevent-syscall-smoke's 0x12800000, as of this
+        // crate's own addition) -- re-derive via `readelf -l target/x86_64-oxidebsd/debug/oxidebsd
+        // | grep -A1 LOAD` before trusting this if the kernel image has grown meaningfully since.
+        .arg("-Wl,-Ttext-segment=0x13000000")
+        .arg("-O2")
+        .arg("-DNORMALUNIX")
+        .arg("-DLINUX") // Real upstream's own portable-POSIX-behavior guard, not Linux-specific.
+        .arg("-D_DEFAULT_SOURCE")
+        .arg("-Wno-implicit-function-declaration")
+        .arg("-o")
+        .arg(&out);
+    for src in &sources {
+        cmd.arg(src);
+    }
+    cmd.arg("-lm");
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for doomgeneric: {e}"));
+    if !status.success() {
+        panic!("building doomgeneric failed: {status}");
+    }
+    out
+}
+
+fn build_float_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("userland/float-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/float-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/float-smoke");
+    let out = target_dir.join("float-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let musl_gcc = sysroot.join("bin/musl-gcc");
+    let status = Command::new(&musl_gcc)
+        .arg("-static")
+        .arg("-no-pie")
+        .arg("-Wl,-Ttext-segment=0x8200000")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for float-smoke: {e}"));
+    if !status.success() {
+        panic!("building float-smoke failed: {status}");
     }
     out
 }

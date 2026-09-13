@@ -262,7 +262,19 @@ pub fn do_mmap(
         shared.mlockall_future
     };
 
-    let result = if effective_fd >= 0 {
+    // A real `/dev/fb0` fd is checked *before* the ordinary file-backed path -- see
+    // `crate::fs::fd::framebuffer_geometry_of`'s own doc comment: this fd's own `content_id_of`
+    // always returns `None`/`ENODEV` too (oxfs's `OpenFile::Framebuffer` has no real inode behind
+    // it), so it would otherwise just fail there instead of ever reaching real MMIO-mapping logic.
+    let fb_geometry = if effective_fd >= 0 {
+        crate::fs::fd::framebuffer_geometry_of(effective_fd as u64)
+    } else {
+        None
+    };
+
+    let result = if let Some(geom) = fb_geometry {
+        do_mmap_fb(caller_pid, geom, page_count, fixed_base)
+    } else if effective_fd >= 0 {
         do_mmap_file_backed(
             caller_pid,
             effective_fd as u64,
@@ -345,6 +357,100 @@ fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64) -> Re
         Ok(())
     })?;
 
+    Ok(base)
+}
+
+/// One real, still-live physical (MMIO) mapping in a process's own address space -- currently only
+/// ever a real `/dev/fb0` mapping (`do_mmap_fb` below), but named generically since any future
+/// device-backed mmap needing raw physical frames (not oxfs content) would use the identical
+/// shape. Distinct from `MmapFileRegion`: no content/writeback semantics apply to MMIO -- these
+/// frames are never allocator-owned RAM, so there's nothing to free on unmap and nothing to write
+/// back on exit, unlike a real fd-backed mapping.
+pub struct MmapPhysRegion {
+    va_start: u64,
+    /// Not read yet -- `do_munmap`'s own generic per-page loop (not this field) is what actually
+    /// drives unmapping, keyed by the caller's own `addr`/`len`. Kept for parity with
+    /// `MmapFileRegion::npages` and because a real future partial-unmap check (POSIX allows
+    /// `munmap()` of a sub-range) would need it.
+    #[allow(dead_code)]
+    npages: u64,
+}
+
+/// Real `/dev/fb0` mmap -- maps the console framebuffer's own real physical frames directly into
+/// the caller's address space, entirely bypassing `MMAP_FILE_CACHE`/`content_id` (this isn't oxfs
+/// content, it's raw MMIO -- see `crate::fs::fd::framebuffer_geometry_of`'s own doc comment).
+/// Reuses `drivers::usb::xhci`'s own `map_bar_pages` mapping shape (kernel-owned MMIO mapped into a
+/// *user* page table this time, instead of the kernel's) -- every mapped leaf is tagged
+/// `SHARED_LEAF` so `do_munmap`'s generic per-page unmap loop (and `AddressSpace::teardown`'s own
+/// walk) never return these frames to the RAM frame allocator: they were never RAM to begin with,
+/// and handing one back would let a later, wholly unrelated allocation get real framebuffer
+/// physical memory. Clamped to the real framebuffer's own extent (`geom.len`) regardless of what
+/// length the caller's `mmap()` requested -- asking for more than the real device provides maps
+/// exactly the real device, never a page past its own physical end.
+fn do_mmap_fb(
+    caller_pid: Pid,
+    geom: crate::drivers::fbdev::FbGeometry,
+    requested_pages: u64,
+    fixed_base: Option<u64>,
+) -> Result<u64, u64> {
+    let max_pages = (geom.len.max(1)).div_ceil(4096);
+    let page_count = requested_pages.min(max_pages);
+    let region_len = page_count * 4096;
+
+    let base = match fixed_base {
+        Some(base) => base,
+        None => {
+            let mut next = NEXT_MMAP_PAGE.lock();
+            let base = *next;
+            let end = base.checked_add(region_len).ok_or(ENOMEM)?;
+            if end > MMAP_REGION_CEILING {
+                return Err(ENOMEM);
+            }
+            *next = end;
+            base
+        }
+    };
+
+    let phys_offset = memory::phys_mem_offset();
+    let table = PROCESS_TABLE.lock();
+    let me = table
+        .get(&caller_pid)
+        .expect("mmap: current process missing from table");
+    // SAFETY: me.address_space is the currently active address space -- same reasoning
+    // do_mmap_anon's own identical comment already establishes.
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
+
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::USER_ACCESSIBLE
+        | memory::address_space::SHARED_LEAF;
+    for i in 0..page_count {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + i * 4096));
+        let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(
+            geom.phys_base + i * 4096,
+        ));
+        with_frame_allocator(|fa| {
+            // SAFETY: `frame` is the real framebuffer's own physical MMIO range (never RAM this
+            // kernel hands out for anything else); `page` is this process's own freshly
+            // bump-allocated (or MAP_FIXED-cleared) mmap VA -- can't alias any other live mapping.
+            match unsafe { mapper.map_to(page, frame, flags, fa) } {
+                Ok(flush) => flush.flush(),
+                Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {}
+                Err(_) => {}
+            }
+        });
+    }
+    me.shared.lock().mmap_phys_regions.push(MmapPhysRegion {
+        va_start: base,
+        npages: page_count,
+    });
+    drop(table);
+    crate::console::framebuffer::set_owned_by_userspace(true);
     Ok(base)
 }
 
@@ -785,6 +891,12 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         .mmap_file_regions
         .iter()
         .position(|r| r.va_start == addr);
+    let phys_region_idx = me
+        .shared
+        .lock()
+        .mmap_phys_regions
+        .iter()
+        .position(|r| r.va_start == addr);
 
     // SAFETY: me.address_space is the currently active address space -- same reasoning do_mmap's
     // own identical comment already establishes.
@@ -867,6 +979,20 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         if region.shared {
             release_mmap_file_ref(region.content_id);
         }
+    } else if let Some(idx) = phys_region_idx {
+        // No writeback/refcount to release -- see MmapPhysRegion's own doc comment. The per-page
+        // unmap loop above already skipped freeing these frames (SHARED_LEAF) -- this just drops
+        // this process's own bookkeeping entry and, once no such mapping remains anywhere, lets
+        // `console::framebuffer::redraw()` resume (see `set_owned_by_userspace`'s own doc
+        // comment).
+        let mut shared = me.shared.lock();
+        shared.mmap_phys_regions.remove(idx);
+        let none_left = shared.mmap_phys_regions.is_empty();
+        drop(shared);
+        drop(table);
+        if none_left {
+            crate::console::framebuffer::set_owned_by_userspace(false);
+        }
     }
 
     Ok(0)
@@ -947,6 +1073,28 @@ pub fn cleanup_mmap_file_regions_for_exit(pid: Pid) {
         if region.shared {
             release_mmap_file_ref(region.content_id);
         }
+    }
+}
+
+/// Real cleanup for every real `/dev/fb0` (or future MMIO-backed) mapping a process still had live
+/// at exit/`execve` -- sibling of `cleanup_mmap_file_regions_for_exit` above, called from the same
+/// two sites. No writeback/refcount to release (see `MmapPhysRegion`'s own doc comment); the actual
+/// page-table teardown for a self-exit or execve happens generically elsewhere (`AddressSpace::
+/// teardown`'s own `SHARED_LEAF`-skipping walk) -- this just drops the bookkeeping and, once no
+/// such mapping remains anywhere, lets `console::framebuffer::redraw()` resume.
+pub fn cleanup_mmap_phys_regions_for_exit(pid: Pid) {
+    let had_any = {
+        let table = PROCESS_TABLE.lock();
+        let Some(me) = table.get(&pid) else {
+            return;
+        };
+        let mut shared = me.shared.lock();
+        let had_any = !shared.mmap_phys_regions.is_empty();
+        shared.mmap_phys_regions.clear();
+        had_any
+    };
+    if had_any {
+        crate::console::framebuffer::set_owned_by_userspace(false);
     }
 }
 

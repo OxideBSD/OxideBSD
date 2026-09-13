@@ -41,6 +41,8 @@ members = [
   "userland/sem-open-syscall-smoke",
   "userland/pthread-cancel-crash-smoke",
   "userland/pshared-cond-crash-smoke",
+  "userland/fb-mmap-syscall-smoke",
+  "userland/keyevent-syscall-smoke",
   "userland/posix-conformance-driver",
   "userland/lsoxmod",
   "modules/hello",
@@ -270,6 +272,14 @@ harness = false
 
 [[test]]
 name = "posix_conformance_smoke"
+harness = false
+
+[[test]]
+name = "fb_mmap_syscall_smoke"
+harness = false
+
+[[test]]
+name = "keyevent_syscall_smoke"
 harness = false
 
 # QEMU run/test args (accel/serial/RAM size/NIC/the real ATA data-disk attachment) used to live

@@ -103,6 +103,19 @@ extern "C" fn default_access_mode(_real_fd: u64) -> i64 {
     0b11
 }
 
+/// Real framebuffer geometry query -- see `crate::drivers::fbdev::FbGeometry`'s own doc comment
+/// for the wire shape and `process::mm::do_mmap_fb`'s own doc comment for the one real consumer.
+/// `(real_fd, out_ptr_as_u64) -> i32` (`0` = wrote a real `FbGeometry` through `out_ptr`, `-1` =
+/// not a framebuffer fd) -- same "plain `u64`s at the module FFI boundary, discriminate inside"
+/// shape `FdContentId`/`FdAccessMode` already establish. Optional per fd kind (defaults to
+/// `no_fb_geometry` below) -- only `modules/oxfs`'s own `OpenFile::Framebuffer` fds ever register
+/// a real one.
+pub(crate) type FdFbGeometry = extern "C" fn(u64, u64) -> i32;
+
+extern "C" fn no_fb_geometry(_real_fd: u64, _out: u64) -> i32 {
+    -1
+}
+
 #[derive(Clone, Copy)]
 struct FdOps {
     read: FdReadWrite,
@@ -110,6 +123,7 @@ struct FdOps {
     close: FdClose,
     content_id: FdContentId,
     access_mode: FdAccessMode,
+    fb_geometry: FdFbGeometry,
     pread: FdReadWriteAt,
     pwrite: FdReadWriteAt,
     /// The fd this entry's callbacks are actually invoked with — itself for a fresh registration,
@@ -263,6 +277,7 @@ fn register(
             close,
             content_id,
             access_mode: default_access_mode,
+            fb_geometry: no_fb_geometry,
             pread: no_pread_pwrite,
             pwrite: no_pread_pwrite,
             real_fd: fd,
@@ -278,6 +293,17 @@ fn register(
 pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: FdAccessMode) {
     if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
         ops.access_mode = access_mode;
+    }
+}
+
+/// Overrides `real_fd`'s `fb_geometry` callback after the fact -- same shape
+/// `oxidebsd_set_fd_access_mode` already establishes. `modules/oxfs` is the one real caller,
+/// unconditionally for every fd it registers (the callback itself discriminates by `OpenFile`
+/// variant, same "always registered, harmless default for everything else" precedent
+/// `oxidebsd_set_fd_access_mode`'s own call site already sets).
+pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: FdFbGeometry) {
+    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
+        ops.fb_geometry = fb_geometry;
     }
 }
 
@@ -527,6 +553,25 @@ pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
     (bits & 0b01 != 0, bits & 0b10 != 0)
 }
 
+/// Live "is this fd a real `/dev/fb0` mapping-eligible framebuffer, and if so what's its real
+/// geometry" query -- see `FdFbGeometry`'s own doc comment. `None` covers both "no such fd" and
+/// "not a framebuffer fd." Used by `crate::process::mm::do_mmap` (checked *before* `content_id_of`
+/// -- a framebuffer fd's `content_id_of` always returns `None`/`ENODEV` too, so order matters) and
+/// by `syscall::ffi::sys_ioctl`'s framebuffer-info request.
+pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::FbGeometry> {
+    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let mut geom = crate::drivers::fbdev::FbGeometry {
+        phys_base: 0,
+        len: 0,
+        width: 0,
+        height: 0,
+        pitch: 0,
+        bpp: 0,
+    };
+    let ok = (ops.fb_geometry)(ops.real_fd, &mut geom as *mut crate::drivers::fbdev::FbGeometry as u64);
+    if ok == 0 { Some(geom) } else { None }
+}
+
 /// Real fd-backed `MAP_SHARED` mmap (`crate::process::mm`) reads/writes content *directly* by
 /// `content_id` (a real inode number), not through a fd's own read/write callbacks — found live,
 /// not designed in up front: `modules/oxfs`'s `oxfs_read` unconditionally fails (`-EBADF`) for a
@@ -692,6 +737,7 @@ pub fn init() {
             close: stdio_close,
             content_id: no_content_id,
             access_mode: default_access_mode,
+            fb_geometry: no_fb_geometry,
             pread: no_pread_pwrite,
             pwrite: no_pread_pwrite,
             real_fd: 1,

@@ -767,6 +767,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_set_fd_access_mode" => {
             Some(crate::fs::fd::oxidebsd_set_fd_access_mode as *const () as u64)
         }
+        "oxidebsd_set_fd_fb_geometry" => {
+            Some(crate::fs::fd::oxidebsd_set_fd_fb_geometry as *const () as u64)
+        }
         "oxidebsd_get_cwd" => Some(crate::process::oxidebsd_get_cwd as *const () as u64),
         "oxidebsd_set_cwd" => Some(crate::process::oxidebsd_set_cwd as *const () as u64),
         "oxidebsd_get_root" => Some(crate::process::oxidebsd_get_root as *const () as u64),
@@ -794,6 +797,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_setsid" => Some(crate::syscall::oxidebsd_sys_setsid as *const () as u64),
         "oxidebsd_sys_getsid" => Some(crate::syscall::oxidebsd_sys_getsid as *const () as u64),
         "oxidebsd_sys_ioctl" => Some(crate::syscall::oxidebsd_sys_ioctl as *const () as u64),
+        "oxidebsd_sys_get_keyevent" => {
+            Some(crate::syscall::oxidebsd_sys_get_keyevent as *const () as u64)
+        }
         "oxidebsd_sys_dup" => Some(crate::syscall::oxidebsd_sys_dup as *const () as u64),
         "oxidebsd_sys_uname" => Some(crate::syscall::oxidebsd_sys_uname as *const () as u64),
         "oxidebsd_sys_socketpair" => {
@@ -805,6 +811,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_fcntl" => Some(crate::syscall::oxidebsd_sys_fcntl as *const () as u64),
         "oxidebsd_sys_shutdown" => Some(crate::syscall::oxidebsd_sys_shutdown as *const () as u64),
         "oxidebsd_random_bytes" => Some(crate::random::oxidebsd_random_bytes as *const () as u64),
+        "oxidebsd_fb_geometry" => Some(crate::drivers::fbdev::oxidebsd_fb_geometry as *const () as u64),
         "oxidebsd_sys_clock_gettime" => {
             Some(crate::syscall::oxidebsd_sys_clock_gettime as *const () as u64)
         }

@@ -702,6 +702,10 @@ pub struct ThreadGroupShared {
     pub gid: u32,
     pub brk: VirtAddr,
     pub mmap_file_regions: Vec<mm::MmapFileRegion>,
+    /// Real, still-live `/dev/fb0` (or any future MMIO-backed) mappings -- see `mm::MmapPhysRegion`'s
+    /// own doc comment. Same fork/execve treatment as `mmap_file_regions` (not inherited by `fork`,
+    /// cleaned up by `mm::cleanup_mmap_phys_regions_for_exit` on both self-exit and `execve`).
+    pub mmap_phys_regions: Vec<mm::MmapPhysRegion>,
     /// Real `mlockall(MCL_FUTURE)` state (`process::mm::do_mlockall`/`do_mmap`) — `true` once this
     /// address space has called `mlockall(MCL_FUTURE)`, making every later `mmap()` implicitly
     /// locked (subject to `RLIMIT_MEMLOCK`, see `process::mm::do_mmap`'s own `auto_lock` handling).

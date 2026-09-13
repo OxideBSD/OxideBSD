@@ -792,6 +792,12 @@ const TIOCSCTTY: u64 = 0x540E;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCNOTTY: u64 = 0x5422;
+/// OxideBSD's own invention, not real Linux's `FBIOGET_VSCREENINFO` (`0x4600`) -- deliberately a
+/// distinct, smaller wire struct (`RawFbInfo` below) rather than emulating that ioctl's real,
+/// much larger `struct fb_var_screeninfo` layout, since nothing in this port's roster needs real
+/// Linux fbdev source compatibility (see the doomgeneric/fbdoom port's own design notes: a
+/// backend file written against this kernel's own syscalls, not a literal Linux fbdev emulation).
+const FBIOGET_OXIDEBSD: u64 = 0x4600;
 
 /// A fixed, plausible `struct winsize` (`third_party/musl`'s `include/alltypes.h.in`: four `u16`s,
 /// `ws_row`/`ws_col`/`ws_xpixel`/`ws_ypixel`, no padding) -- this kernel has no real display-size
@@ -814,6 +820,18 @@ const FIXED_WINSIZE: RawWinsize = RawWinsize {
     ws_ypixel: 0,
 };
 
+/// `FBIOGET_OXIDEBSD`'s own wire struct -- real, runtime-queried framebuffer geometry (see
+/// `drivers::fbdev::FbGeometry`, which this mirrors exactly, minus `phys_base`/`len`: a userland
+/// caller has no use for the physical address itself, only what `mmap()` on the same fd already
+/// hands back as a virtual pointer).
+#[repr(C)]
+struct RawFbInfo {
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+}
+
 /// `SYS_IOCTL` (`124`) — real request codes (see above), but **not** real `ioctl(2)`'s full
 /// surface: only the handful of tty-specific requests this kernel's own console can plausibly
 /// answer (`TCGETS`/`TCSETS*`/`TIOCGWINSZ`/`TIOCSWINSZ`/`TIOCSCTTY`/`TIOCNOTTY`/`TIOCGPGRP`/
@@ -824,7 +842,8 @@ const FIXED_WINSIZE: RawWinsize = RawWinsize {
 /// **Only ever succeeds against the console** (`crate::fs::fd::real_fd_of(fd)` resolving to
 /// stdin's or stdout's own `real_fd`, `0`/`1` -- see `src/fs/fd.rs`'s module doc comment for why
 /// checking `fd` itself, rather than what it currently resolves to, would be wrong after a
-/// `dup2`), `ENOTTY` otherwise. This is load-bearing, not incidental: musl's own `isatty(fd)`
+/// `dup2`) **or a real `/dev/fb0` fd** (`crate::fs::fd::framebuffer_geometry_of`, backing
+/// `FBIOGET_OXIDEBSD` below), `ENOTTY` otherwise. This is load-bearing, not incidental: musl's own `isatty(fd)`
 /// (`third_party/musl`'s `src/unistd/isatty.c`) is implemented as "does `ioctl(fd, TIOCGWINSZ,
 /// ...)` succeed" -- if this answered every fd successfully, every regular `oxfs` file and every
 /// pipe end would suddenly report itself as a tty too, which would be a real regression: BusyBox's
@@ -838,9 +857,12 @@ const FIXED_WINSIZE: RawWinsize = RawWinsize {
 /// is already the correct behavior for the two "drain first" variants and a harmless
 /// oversimplification for the third.
 pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
-    match crate::fs::fd::real_fd_of(fd) {
-        Some(0) | Some(1) => {}
-        _ => return Err(ENOTTY),
+    // Widened for a real `/dev/fb0` fd (see `FBIOGET_OXIDEBSD` below) -- checked only once the
+    // fast console-fd path already fails, so the ordinary tty-ioctl case never pays for the extra
+    // FFI round trip.
+    let is_console = matches!(crate::fs::fd::real_fd_of(fd), Some(0) | Some(1));
+    if !is_console && crate::fs::fd::framebuffer_geometry_of(fd).is_none() {
+        return Err(ENOTTY);
     }
 
     match request {
@@ -927,10 +949,42 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
             crate::console::stdin::set_foreground_pgid(pgid as u64);
             Ok(0)
         }
+        FBIOGET_OXIDEBSD => {
+            let geom = crate::fs::fd::framebuffer_geometry_of(fd).ok_or(ENOTTY)?;
+            let info = RawFbInfo {
+                width: geom.width,
+                height: geom.height,
+                pitch: geom.pitch,
+                bpp: geom.bpp,
+            };
+            // SAFETY: same known pointer-validation gap every other user-memory write in this
+            // file already has.
+            unsafe { *(argp as *mut RawFbInfo) = info };
+            Ok(0)
+        }
         _ => {
             serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
             Err(ENOTTY)
         }
+    }
+}
+
+/// `SYS_GET_KEYEVENT` (`558`) — real, general-purpose raw keyboard-event polling: pops one
+/// `console::keyevents::RawKeyEvent` (press/release, this kernel's own small stable keycode
+/// space) into the caller's pointer. **Never blocks** — `Ok(0)` means nothing is currently
+/// buffered (not an error), `Ok(1)` means one event was written to `out_ptr`. Deliberately
+/// distinct from `console::stdin`'s own (blocking) ASCII byte stream — see
+/// `console::keyevents`'s own module doc comment for why a held-key-state consumer (a game loop,
+/// a future window system) needs this instead.
+pub(crate) fn sys_get_keyevent(out_ptr: u64) -> Result<u64, u64> {
+    match crate::console::keyevents::pop_event() {
+        Some(event) => {
+            // SAFETY: same known pointer-validation gap every other user-memory write in this
+            // file already has.
+            unsafe { *(out_ptr as *mut crate::console::keyevents::RawKeyEvent) = event };
+            Ok(1)
+        }
+        None => Ok(0),
     }
 }
 
@@ -1740,6 +1794,10 @@ pub(crate) extern "C" fn oxidebsd_sys_futex_requeue(
 
 pub(crate) extern "C" fn oxidebsd_sys_ioctl(fd: u64, request: u64, argp: u64) -> i64 {
     result_to_ffi(sys_ioctl(fd, request, argp))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_get_keyevent(out_ptr: u64) -> i64 {
+    result_to_ffi(sys_get_keyevent(out_ptr))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_uname(uts_ptr: u64) -> i64 {

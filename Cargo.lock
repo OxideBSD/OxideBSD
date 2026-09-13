@@ -138,6 +138,10 @@ name = "fat32"
 version = "0.1.0"
 
 [[package]]
+name = "fb-mmap-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "fork-exec-smoke"
 version = "0.1.0"
 
@@ -179,6 +183,10 @@ dependencies = [
 
 [[package]]
 name = "itimer-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "keyevent-syscall-smoke"
 version = "0.1.0"
 
 [[package]]

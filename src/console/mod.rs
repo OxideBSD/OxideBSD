@@ -6,6 +6,7 @@
 //! interactive-shell section for the full design.
 
 pub mod framebuffer;
+pub mod keyevents;
 pub mod serial;
 pub mod stdin;
 pub mod vga;

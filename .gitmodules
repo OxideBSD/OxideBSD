@@ -19,3 +19,7 @@
 	path = third_party/limine
 	url = https://github.com/Pomsky2011/limine-oxidebsd.git
 	branch = oxidebsd
+[submodule "third_party/doomgeneric"]
+	path = third_party/doomgeneric
+	url = https://github.com/Pomsky2011/doomgeneric-oxidebsd.git
+	branch = oxidebsd

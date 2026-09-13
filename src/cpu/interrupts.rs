@@ -815,10 +815,13 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     crate::random::mix_entropy(scancode as u64);
 
     let mut keyboard = KEYBOARD.lock();
-    if let Ok(Some(key_event)) = keyboard.add_byte(scancode)
-        && let Some(key) = keyboard.process_keyevent(key_event)
-    {
-        handle_decoded_key(key);
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        // Captured here, before `process_keyevent` below discards release information for
+        // nearly every key -- see `console::keyevents`'s own doc comment.
+        crate::console::keyevents::record_raw_key_event(&key_event);
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            handle_decoded_key(key);
+        }
     }
 
     unsafe {
@@ -834,9 +837,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 /// unlike `keyboard_interrupt_handler` it never touches the PIC.
 pub(crate) fn feed_synthetic_scancode(byte: u8) {
     let mut keyboard = KEYBOARD.lock();
-    if let Ok(Some(key_event)) = keyboard.add_byte(byte)
-        && let Some(key) = keyboard.process_keyevent(key_event)
-    {
-        handle_decoded_key(key);
+    if let Ok(Some(key_event)) = keyboard.add_byte(byte) {
+        crate::console::keyevents::record_raw_key_event(&key_event);
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            handle_decoded_key(key);
+        }
     }
 }

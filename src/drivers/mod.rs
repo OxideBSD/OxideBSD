@@ -6,5 +6,6 @@
 //! (this kernel's only input source on hardware with no PS/2 controller, e.g. a Surface Pro).
 
 pub mod ata;
+pub mod fbdev;
 pub mod pci;
 pub mod usb;

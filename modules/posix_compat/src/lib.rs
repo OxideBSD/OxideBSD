@@ -129,6 +129,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_setsid() -> i64;
     fn oxidebsd_sys_getsid(pid: u64) -> i64;
     fn oxidebsd_sys_ioctl(fd: u64, request: u64, argp: u64) -> i64;
+    fn oxidebsd_sys_get_keyevent(out_ptr: u64) -> i64;
     fn oxidebsd_sys_dup(oldfd: u64) -> i64;
     fn oxidebsd_sys_uname(uts_ptr: u64) -> i64;
     fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64;
@@ -283,6 +284,13 @@ const SYS_FUTEX: u64 = 202;
 /// in `src/process/limits.rs` for why real `FUTEX_REQUEUE` needed a dedicated syscall rather than
 /// riding `SYS_FUTEX` itself, and the real `pthread_cond_timedwait/2-5.c` hang this closes.
 const SYS_FUTEX_REQUEUE: u64 = 557;
+/// OxideBSD's own invention (`558`, continuing right past `SYS_FUTEX_REQUEUE=557`, the current
+/// highest assigned number as of this addition) -- real, general-purpose raw keyboard-event
+/// polling for the fbdoom/doomgeneric port and any future consumer needing held-key state (not
+/// recoverable from `console::stdin`'s own decoded-ASCII stream). See
+/// `console::keyevents`'s own module doc comment and `syscall::ffi::sys_get_keyevent`'s doc
+/// comment.
+const SYS_GET_KEYEVENT: u64 = 558;
 /// Real Linux's own `__NR_mlock`/`__NR_munlock`/`__NR_mlockall`/`__NR_munlockall` are `149`-`152`,
 /// but those slots are already claimed by this ABI's own live `SYS_SOCKETPAIR`/
 /// `SYS_SET_TID_ADDRESS`/`SYS_FCNTL`/`SYS_SHUTDOWN` — `third_party/musl/arch/x86_64/bits/
@@ -415,6 +423,10 @@ extern "C" fn handle_getsid(pid: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 
 extern "C" fn handle_ioctl(fd: u64, request: u64, argp: u64, _arg3: u64) -> i64 {
     unsafe { oxidebsd_sys_ioctl(fd, request, argp) }
+}
+
+extern "C" fn handle_get_keyevent(out_ptr: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
+    unsafe { oxidebsd_sys_get_keyevent(out_ptr) }
 }
 
 extern "C" fn handle_dup(oldfd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
@@ -667,6 +679,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_SETSID, handle_setsid);
         oxidebsd_register_syscall(SYS_GETSID, handle_getsid);
         oxidebsd_register_syscall(SYS_IOCTL, handle_ioctl);
+        oxidebsd_register_syscall(SYS_GET_KEYEVENT, handle_get_keyevent);
         oxidebsd_register_syscall(SYS_DUP, handle_dup);
         oxidebsd_register_syscall(SYS_UNAME, handle_uname);
         oxidebsd_register_syscall(SYS_SOCKETPAIR, handle_socketpair);
@@ -725,7 +738,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_SHMDT, handle_shmdt);
     }
     log(
-        "[module] posix_compat: module_init running (registered SYS_PIPE/SYS_PIPE2/SYS_SET_ROBUST_LIST/SYS_DUP2/SYS_SETPGID/SYS_GETPGID/SYS_SETSID/SYS_GETSID/SYS_IOCTL/SYS_DUP/SYS_UNAME/SYS_SOCKETPAIR/SYS_FCNTL/SYS_SHUTDOWN/SYS_GETUID/SYS_GETEUID/SYS_GETGID/SYS_GETEGID/SYS_SETUID/SYS_SETGID/SYS_SETRESUID/SYS_GETGROUPS/SYS_SETGROUPS/SYS_PRLIMIT64/SYS_SETPRIORITY/SYS_GETPRIORITY/SYS_SCHED_SETSCHEDULER/SYS_SCHED_SETPARAM/SYS_SCHED_GETSCHEDULER/SYS_SCHED_GETPARAM/SYS_SCHED_GETAFFINITY/SYS_SCHED_GET_PRIORITY_MAX/SYS_SCHED_GET_PRIORITY_MIN/SYS_SCHED_RR_GET_INTERVAL/SYS_SCHED_YIELD/SYS_REBOOT/SYS_FUTEX/SYS_FUTEX_REQUEUE/SYS_MLOCK/SYS_MUNLOCK/SYS_MLOCKALL/SYS_MUNLOCKALL/SYS_UMASK/SYS_GETRUSAGE/SYS_TIMES/SYS_GETRANDOM/SYS_SYSINFO/SYS_MQ_OPEN/SYS_MQ_UNLINK/SYS_MQ_TIMEDSEND/SYS_MQ_TIMEDRECEIVE/SYS_MQ_NOTIFY/SYS_MQ_GETSETATTR/SYS_MSGGET/SYS_MSGSND/SYS_MSGRCV/SYS_MSGCTL/SYS_SEMGET/SYS_SEMOP/SYS_SEMCTL/SYS_SEMTIMEDOP/SYS_SHMGET/SYS_SHMAT/SYS_SHMCTL/SYS_SHMDT)\n",
+        "[module] posix_compat: module_init running (registered SYS_PIPE/SYS_PIPE2/SYS_SET_ROBUST_LIST/SYS_DUP2/SYS_SETPGID/SYS_GETPGID/SYS_SETSID/SYS_GETSID/SYS_IOCTL/SYS_DUP/SYS_UNAME/SYS_SOCKETPAIR/SYS_FCNTL/SYS_SHUTDOWN/SYS_GETUID/SYS_GETEUID/SYS_GETGID/SYS_GETEGID/SYS_SETUID/SYS_SETGID/SYS_SETRESUID/SYS_GETGROUPS/SYS_SETGROUPS/SYS_PRLIMIT64/SYS_SETPRIORITY/SYS_GETPRIORITY/SYS_SCHED_SETSCHEDULER/SYS_SCHED_SETPARAM/SYS_SCHED_GETSCHEDULER/SYS_SCHED_GETPARAM/SYS_SCHED_GETAFFINITY/SYS_SCHED_GET_PRIORITY_MAX/SYS_SCHED_GET_PRIORITY_MIN/SYS_SCHED_RR_GET_INTERVAL/SYS_SCHED_YIELD/SYS_REBOOT/SYS_FUTEX/SYS_FUTEX_REQUEUE/SYS_MLOCK/SYS_MUNLOCK/SYS_MLOCKALL/SYS_MUNLOCKALL/SYS_UMASK/SYS_GETRUSAGE/SYS_TIMES/SYS_GETRANDOM/SYS_SYSINFO/SYS_MQ_OPEN/SYS_MQ_UNLINK/SYS_MQ_TIMEDSEND/SYS_MQ_TIMEDRECEIVE/SYS_MQ_NOTIFY/SYS_MQ_GETSETATTR/SYS_MSGGET/SYS_MSGSND/SYS_MSGRCV/SYS_MSGCTL/SYS_SEMGET/SYS_SEMOP/SYS_SEMCTL/SYS_SEMTIMEDOP/SYS_SHMGET/SYS_SHMAT/SYS_SHMCTL/SYS_SHMDT/SYS_GET_KEYEVENT)\n",
     );
     0
 }
