@@ -113,11 +113,33 @@ pub(crate) fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64>
 /// special-cased for the *non*-vectored, no-flags case (`writev`) before ever reaching this
 /// syscall at all; this handler covers every other case (a genuine offset, or any nonzero `flags`)
 /// uniformly through the one real code path. Same partial-write semantics as `sys_writev` above.
+///
+/// **Any other negative `ofs` is a real `EINVAL`, matching real Linux** -- only the exact `-1`
+/// sentinel means "current position"; every other negative value is a genuinely invalid offset,
+/// same as plain `pwrite`'s own check in `sys_pwrite` above. This handler used to skip that check
+/// entirely and call `crate::fs::fd::pwrite` directly, which mattered because real, unmodified
+/// musl's own `pwrite()` (`third_party/musl/src/unistd/pwrite.c`) issues `SYS_pwritev2` first, not
+/// `SYS_pwrite` -- so `sys_pwrite`'s own offset check was never actually reached for a plain
+/// `pwrite()` call. musl's `pwrite()` also deliberately maps a caller-supplied `ofs == -1` to `-2`
+/// before issuing the syscall (`if (ofs == -1) ofs--`), specifically so the real "-1 = current
+/// position" sentinel isn't accidentally triggered by a genuinely invalid `pwrite(fd, buf, n, -1)`
+/// call -- so `-2` (not `u64::MAX`) is exactly what reached this handler unvalidated. Found live
+/// chasing a real, severe POSIX-pilot regression: `aio_write/9-1.c` (`aio_offset = -1`) spawns a
+/// real worker thread that calls `pwrite(fd, buf, len, -1)`, which used to sail straight through to
+/// `write_inode_at`/`resize_inode_data` with an effective offset near `u64::MAX` -- draining oxfs's
+/// *entire* remaining free-block pool in one call (bounded, not a memory-safety bug -- `alloc_block`
+/// just returns `None` once exhausted -- but a real, severe resource-exhaustion cascade) before
+/// finally failing with `EIO` instead of the `EINVAL` real POSIX requires, starving every later test
+/// in the same boot that needed to write any file at all.
 pub(crate) fn sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> Result<u64, u64> {
     #[repr(C)]
     struct IoVec {
         base: u64,
         len: u64,
+    }
+
+    if ofs != u64::MAX && (ofs as i64) < 0 {
+        return Err(EINVAL);
     }
 
     let mut total: u64 = 0;

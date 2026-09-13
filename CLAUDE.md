@@ -2284,6 +2284,21 @@ plain PS/2 too, confirmed via the identical byte-level trace.
   Limine/USB work landing alongside it — real Ctrl+C/Ctrl+D affects every interactive session,
   PS/2 included, on that branch too.
 
+## A real `sys_pwritev2` gap closed the post-Limine full-corpus POSIX regression (`src/syscall/ffi.rs`)
+
+`sys_pwritev2` was missing the negative-offset check `sys_pwrite` already has. Real musl's own
+`pwrite()` issues `SYS_pwritev2`, not `SYS_pwrite` — so that existing check never ran for an
+ordinary `pwrite()` call. `aio_write/9-1.c`'s real worker thread calls `pwrite(fd, buf, len, -1)`;
+musl maps `-1`→`-2` (avoiding pwritev2's own "`-1` = current position" sentinel) and the resulting
+huge, unvalidated offset drained oxfs's *entire* free-block pool in one `resize_inode_data` call
+(bounded, not memory-unsafe — `alloc_block` just returns `None` once exhausted) before failing
+`EIO` instead of the `EINVAL` POSIX requires — starving every later test in the same boot that
+needed to write a file. Explains the ~86%→~2026-09-10 full-corpus UNRESOLVED spike blamed on
+Limine timing at the time: real trigger was corpus content/order exercising this path for the
+first time, not a timing-sensitive scheduler race. Fixed: reject any `ofs` other than exactly
+`u64::MAX` (the real "current position" sentinel) that's negative. Closes the whole cascade —
+53-file minimal repro moved 15P/8F/28U/1CRASH → 49P/0F/3U(pre-existing, unrelated)/0CRASH.
+
 ## Dependency notes
 
 - `x86_64` crate: `default-features = false, features = ["instructions", "abi_x86_interrupt"]` —
