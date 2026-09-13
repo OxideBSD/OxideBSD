@@ -87,10 +87,11 @@ not instead of, eventually closing this loop for `rustc`/`cargo` themselves.
   within the running OS.
 - A working bootstrap: boot an OxideBSD image, rebuild OxideBSD from source on it, boot the result.
 
-## Release sequence: v0.2.0 → v0.3.0 → v0.4.0
+## Release sequence: v0.2.0 → v0.3.0 → v0.4.0 → v0.5.0 → v0.6.0 → v0.7.0 → v0.8.0 → v0.9.0 → v0.10.0 → v0.11.0 → v1.0.0
 
-As of 2026-09-04, the old single "v0.2.x goals" bucket below is split into three separate,
-sequential releases — each ships standalone rather than bundling everything into one v0.2.0:
+As of 2026-09-04, the old single "v0.2.x goals" bucket below is split into separate, sequential
+releases — each ships standalone rather than bundling everything into one v0.2.0. v0.5.0 onward
+(added 2026-09-12) reflects the user's own longer-term plan past the original three-release split.
 
 - **v0.2.0 — POSIX pilot compliance.** The current focus. **Concrete target (set 2026-09-08):
   >91% raw pass rate, >95% excluding UNTESTED**, on the full corpus via
@@ -140,6 +141,51 @@ sequential releases — each ships standalone rather than bundling everything in
   own existing `Cargo.toml` profile. Scope narrow at first: only what `rustrc` itself needs (process
   spawn/wait, signals, stdio, basic fs), not full `std` fidelity.
 - **v0.4.0 — a real glibc port**, alongside (not replacing) the existing native-ABI musl port.
+- **v0.5.0 — SMP.** Real multi-core support. A substantial architectural undertaking, not a
+  bolt-on: huge parts of this codebase currently lean on "single core" as a real correctness
+  argument, not just a performance ceiling — `IA32_SFMASK` clearing `IF` for a syscall's entire
+  duration is the *entire* lock-safety reasoning behind most of this kernel's `spin::Mutex` usage
+  (see `CLAUDE.md`'s syscall-ABI section), and several already-landed fixes (the scheduler-race
+  fix in "Closing a real scheduler race...", `sched_yield/1-1.c`'s own resolution) explicitly
+  depend on there being only one core to preempt at all. Real work: per-CPU GDT/TSS/IDT and
+  kernel-stack state, genuine SMP-safe locking once two cores can actually execute kernel code
+  simultaneously (not just take turns via preemption), ACPI/MADT parsing to discover other cores,
+  a real AP (application processor) boot/startup sequence, and IPI-based scheduling/TLB shootdown.
+  Not started.
+- **v0.6.0 — self-hosting `rustc`/`cargo` on-target.** Distinct from v0.3.0's Rust `std` target
+  (which only lets Rust *programs* run on OxideBSD, for `rustrc`'s sake): this is Phase 3's own
+  "OxideBSD builds itself" goal, closed from the Rust side specifically — a real `rustc`+`cargo`+
+  linker+assembler toolchain running *as OxideBSD userland processes*, capable of rebuilding
+  OxideBSD's own kernel and userland from source, on-target, with no host OS involved. v0.3.0's
+  `std` target work is the direct prerequisite this builds on (rustc/cargo are themselves real
+  `std`-using Rust programs). Not started.
+- **v0.7.0 — `oxlibc`.** OxideBSD's own from-scratch native libc (BSD-3-Clause licensed — a
+  deliberate licensing choice, not a fork of `relibc` or anything else with different terms),
+  standing alongside the existing vendored musl/glibc ports rather than replacing them outright.
+  Long-term/deferred until this point in the sequence; not started.
+- **v0.8.0 — the graphical update: more advanced graphics.** Builds directly on real
+  groundwork already landed ahead of this release: a real `/dev/fb0` character device
+  (`process::mm::do_mmap_fb` maps the actual framebuffer's physical MMIO frames into a userland
+  process) and a real, general-purpose raw keyboard-event source (`SYS_GET_KEYEVENT`,
+  `console::keyevents`) — both deliberately built as general infrastructure, not specific to any
+  one program, and proven end-to-end by a real, playable port of Doom (via `doomgeneric`,
+  `third_party/doomgeneric`). This future release is where that groundwork grows into something
+  closer to a real desktop environment: real mouse support (currently entirely absent — no mouse
+  driver exists anywhere in this kernel, PS/2 or USB), a real windowing/compositing model, and
+  real display-mode negotiation beyond whatever Limine's boot-time GOP/VBE choice happens to be.
+  Not started beyond the v0.2.0-era groundwork above.
+- **v0.9.0 — the hardware support update.** Broader real hardware support by porting drivers from
+  Linux/BSD sources (**license terms need real, per-driver scrutiny** — not a blanket "copy it
+  over," since Linux's GPL and the BSDs' own licenses aren't interchangeable with this project's
+  own). This is also the real-hardware readiness gate for actually switching the user's own
+  Surface Pro over to OxideBSD as a daily driver (see `CLAUDE.md`'s USB/xHCI section — the Surface
+  has no PS/2 controller at all, already closed — real WiFi/networking hardware and real graphics
+  acceleration are the remaining pieces this release would need to close). Not started.
+- **v0.10.0 — the package manager update.** A real package manager — no such infrastructure exists
+  anywhere in this project today (BusyBox/tcc/musl/etc. are all baked into the kernel image itself
+  via `build.rs`, not independently installable). Not started, not yet designed.
+- **v0.11.0 — v1.0.0 prep.** A stabilization/hardening pass ahead of a real 1.0 release; specific
+  scope not yet defined.
 
 A separate idea — replacing some BusyBox utilities with Rust `uutils` ahead of GCC/Clang — was
 raised and set aside: not a real dependency of GCC/Clang bring-up (unrelated subsystems), just a
