@@ -117,6 +117,10 @@ unsafe extern "C" {
     /// `crate::fs::fd::oxidebsd_set_fd_access_mode`/`FdAccessMode`'s own doc comment (kernel tree).
     /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_pread_pwrite`.
     fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: extern "C" fn(u64) -> i64);
+    /// Overrides `fd`'s real `is_append` callback -- see
+    /// `crate::fs::fd::oxidebsd_set_fd_append`/`FdIsAppend`'s own doc comment (kernel tree).
+    /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_access_mode`.
+    fn oxidebsd_set_fd_append(fd: u64, is_append: extern "C" fn(u64) -> i64);
     /// Overrides `fd`'s real `fb_geometry` callback -- see
     /// `crate::fs::fd::oxidebsd_set_fd_fb_geometry`/`FdFbGeometry`'s own doc comment (kernel tree).
     /// `register_open_file` is the one caller, unconditionally for every fd (the callback itself
@@ -2458,6 +2462,17 @@ enum OpenFile {
         /// inode, which keeps whatever real mode it already has. See `oxfs_open`'s own `mode`
         /// parameter doc comment for why this exists at all.
         mode: u16,
+        /// Real `O_APPEND` at `open()` time -- reported back to userspace via `oxfs_is_append`/
+        /// `oxidebsd_set_fd_append` (`src/fs/fd.rs`)'s `F_GETFL` support, distinct from
+        /// `write_pos`'s own one-time-at-open use of this same bit (that field only ever needed
+        /// the *initial* write offset, not this open file description's actual `O_APPEND` status
+        /// for later querying). Found live via the Open POSIX Test Suite's `aio_write/2-1.c`: real,
+        /// unmodified musl's own AIO implementation calls `fcntl(fd, F_GETFL) & O_APPEND` once per
+        /// fd to decide whether queued writes must serialize behind each other -- `F_GETFL` used to
+        /// never report this bit at all, so every `O_APPEND`-opened aio fd looked non-appending,
+        /// letting three concurrent `aio_write()`s skip ordering *and* all target the same `pwrite`
+        /// offset `0` (an all-zero `memset`'d `aiocb`), each overwriting the last.
+        append: bool,
     },
     /// A synthetic `/proc/<pid>/{stat,cmdline,status}` file's content, generated once at `open`
     /// time by calling into `src/process.rs`'s kernel-exported accessors (see `open_proc_leaf`) --
@@ -2554,6 +2569,7 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         // `oxfs_pwrite`'s own doc comments for what each real variant actually supports.
         oxidebsd_set_fd_pread_pwrite(fd, oxfs_pread, oxfs_pwrite);
         oxidebsd_set_fd_access_mode(fd, oxfs_access_mode);
+        oxidebsd_set_fd_append(fd, oxfs_is_append);
         oxidebsd_set_fd_fb_geometry(fd, oxfs_fb_geometry);
     };
     fd as i64
@@ -2587,6 +2603,18 @@ extern "C" fn oxfs_access_mode(real_fd: u64) -> i64 {
             bits
         }
         _ => 0b11,
+    }
+}
+
+/// `is_append` callback for `oxidebsd_set_fd_append` -- see `crate::fs::fd::FdIsAppend`'s own doc
+/// comment (kernel tree) for the real bug this closes. `1` only for a `Write` fd actually opened
+/// with `O_APPEND`; every other `OpenFile` variant (including a `Write` fd without it) reports `0`,
+/// matching `oxfs_content_id`/`oxfs_access_mode`'s own "discriminates by variant, harmless default
+/// for everything else" shape.
+extern "C" fn oxfs_is_append(real_fd: u64) -> i64 {
+    match find_open_file(real_fd) {
+        Some(OpenFile::Write { append: true, .. }) => 1,
+        _ => 0,
     }
 }
 
@@ -3425,6 +3453,7 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                         // touches `inode.mode` -- overwriting/appending to a file that already
                         // exists never changes its own real, already-stored permission bits.
                         mode: inode.mode,
+                        append: flags & O_APPEND != 0,
                     })
                 }
                 _ => register_open_file(OpenFile::FileRead {
@@ -3471,6 +3500,7 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                 // Suite pilot), which sets a real, non-default umask and expects those exact bits
                 // gone from the resulting object's permissions.
                 mode: (mode as u16 & !(unsafe { oxidebsd_current_umask() } as u16)) & 0o777,
+                append: flags & O_APPEND != 0,
             })
         }
         None => -ENOENT,
@@ -3692,6 +3722,7 @@ fn commit_write_buffer(file: &mut OpenFile) -> i64 {
         readwrite: _,
         position: _,
         mode,
+        append: _,
     } = file
     else {
         return 0;
@@ -3842,14 +3873,17 @@ fn resolve_write_fd_inode(real_fd: u64) -> Option<u32> {
         return Some(inode_num);
     }
     let file = find_open_file(real_fd)?;
-    if let OpenFile::Write {
-        existing_inode: None,
-        ..
-    } = file
-    {
-        if commit_write_buffer(file) != 0 {
-            return None;
-        }
+    // Real, previously-live bug, found via the Open POSIX Test Suite's `aio_write/2-1.c`: this
+    // used to only call `commit_write_buffer` the *first* time (gated on `existing_inode: None`,
+    // i.e. "only if a real inode doesn't exist yet") -- correct for allocating the inode, but wrong
+    // for flushing content, since a `Write` fd can keep accumulating *more* buffered bytes via
+    // ordinary `write()` calls after that first commit. Any later `lseek()`/`read()`/`pread()` on
+    // the same still-open `O_RDWR` fd would then never see that later-written content at all,
+    // since nothing re-flushed it. `commit_write_buffer` is cheap to call unconditionally -- it
+    // already no-ops (`return 0`) whenever there's nothing currently buffered (`len == 0`), the
+    // same real invariant every other call site here relies on.
+    if matches!(file, OpenFile::Write { .. }) && commit_write_buffer(file) != 0 {
+        return None;
     }
     match file {
         OpenFile::Write {

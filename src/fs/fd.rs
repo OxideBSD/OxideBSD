@@ -103,6 +103,33 @@ extern "C" fn default_access_mode(_real_fd: u64) -> i64 {
     0b11
 }
 
+/// A fd's real, fixed-at-`open()`-time `O_APPEND` bit -- queried live like `content_id`/
+/// `access_mode` rather than cached here, same reasoning as both (the owning module already has
+/// to remember this for its own write-positioning logic, see `modules/oxfs`'s `OpenFile::Write::
+/// append`). Unlike `O_NONBLOCK` (which `fcntl(F_SETFL, ...)` can flip after the fact, hence its
+/// own separate mutable `NONBLOCKING` set below), POSIX gives `O_APPEND` no such setter here (this
+/// port's `F_SETFL` only ever touches `O_NONBLOCK`), so a fixed-at-open callback is sufficient.
+///
+/// Found live via the Open POSIX Test Suite's `aio_write/2-1.c`: `sys_fcntl`'s `F_GETFL` used to
+/// report only `O_NONBLOCK`, never `O_APPEND` -- real, unmodified musl's own AIO implementation
+/// (`third_party/musl/src/aio/aio.c`) queries exactly this bit once per fd (`q->append =
+/// !seekable || (fcntl(fd, F_GETFL) & O_APPEND)`) to decide whether a queued `aio_write()` must
+/// serialize behind any other still-in-flight write to the same fd. A false negative here made
+/// every `O_APPEND`-opened aio fd look non-appending, which (a) let musl skip that ordering wait
+/// entirely and (b) made it call `pwrite(fd, buf, len, aio_offset)` instead of `write(fd, buf,
+/// len)` -- and since this suite's own `aiocb`s are `memset` to all-zero, every one of the three
+/// concurrent writes landed at the *same* offset `0`, each fully overwriting the last (confirmed
+/// live: the final file held only the last-completing write's own content). The default
+/// (`default_is_append` below, `false`) is correct for every fd kind except `modules/oxfs`'s own
+/// file-backed `OpenFile::Write` variant opened with `O_APPEND` -- every other kind (pipes,
+/// sockets, mqueues, devices, and a `Write` fd opened without `O_APPEND`) has no real append
+/// semantics to report.
+pub(crate) type FdIsAppend = extern "C" fn(u64) -> i64;
+
+extern "C" fn default_is_append(_real_fd: u64) -> i64 {
+    0
+}
+
 /// Real framebuffer geometry query -- see `crate::drivers::fbdev::FbGeometry`'s own doc comment
 /// for the wire shape and `process::mm::do_mmap_fb`'s own doc comment for the one real consumer.
 /// `(real_fd, out_ptr_as_u64) -> i32` (`0` = wrote a real `FbGeometry` through `out_ptr`, `-1` =
@@ -123,6 +150,7 @@ struct FdOps {
     close: FdClose,
     content_id: FdContentId,
     access_mode: FdAccessMode,
+    is_append: FdIsAppend,
     fb_geometry: FdFbGeometry,
     pread: FdReadWriteAt,
     pwrite: FdReadWriteAt,
@@ -277,6 +305,7 @@ fn register(
             close,
             content_id,
             access_mode: default_access_mode,
+            is_append: default_is_append,
             fb_geometry: no_fb_geometry,
             pread: no_pread_pwrite,
             pwrite: no_pread_pwrite,
@@ -293,6 +322,17 @@ fn register(
 pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: FdAccessMode) {
     if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
         ops.access_mode = access_mode;
+    }
+}
+
+/// Overrides `real_fd`'s `is_append` callback after the fact -- same shape
+/// `oxidebsd_set_fd_access_mode` already establishes. `modules/oxfs` is the one real caller,
+/// unconditionally for every `OpenFile::Write` fd it registers (the callback itself discriminates
+/// by whether that fd was actually opened with `O_APPEND`, same "always registered, harmless
+/// default for everything else" precedent `oxidebsd_set_fd_access_mode`'s own call site sets).
+pub(crate) extern "C" fn oxidebsd_set_fd_append(fd: u64, is_append: FdIsAppend) {
+    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
+        ops.is_append = is_append;
     }
 }
 
@@ -553,6 +593,17 @@ pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
     (bits & 0b01 != 0, bits & 0b10 != 0)
 }
 
+/// Real, fixed-at-`open()`-time `O_APPEND` state, per `FdIsAppend`'s own doc comment. Used by
+/// `syscall::sys_fcntl`'s `F_GETFL` arm to report this bit back correctly -- `false` for a fd not
+/// found in `TABLE` at all, matching `F_GETFL`'s existing `EBADF`-before-ever-reaching-this
+/// resolution (`real_fd_of` already fails first for that case).
+pub(crate) fn is_append_of(fd: u64) -> bool {
+    let Some(ops) = TABLE.lock().get(&(scheduler::current_tgid(), fd)).copied() else {
+        return false;
+    };
+    (ops.is_append)(ops.real_fd) != 0
+}
+
 /// Live "is this fd a real `/dev/fb0` mapping-eligible framebuffer, and if so what's its real
 /// geometry" query -- see `FdFbGeometry`'s own doc comment. `None` covers both "no such fd" and
 /// "not a framebuffer fd." Used by `crate::process::mm::do_mmap` (checked *before* `content_id_of`
@@ -737,6 +788,7 @@ pub fn init() {
             close: stdio_close,
             content_id: no_content_id,
             access_mode: default_access_mode,
+            is_append: default_is_append,
             fb_geometry: no_fb_geometry,
             pread: no_pread_pwrite,
             pwrite: no_pread_pwrite,

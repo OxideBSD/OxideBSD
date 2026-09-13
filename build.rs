@@ -1711,7 +1711,11 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
     // `timer_settime/{2-1,6-1,9-1}.c` (real timer-expiry signal wake, `wake_if_sigwaiting`),
     // `clock_settime/7-2.c` (a `clock_settime(CLOCK_REALTIME, ...)` forwarding the wall clock past
     // an already-sleeping `clock_nanosleep()` target now actively re-wakes it,
-    // `process::timers::wake_realtime_sleepers_after_clock_change`), and the full
+    // `process::timers::wake_realtime_sleepers_after_clock_change`), `aio_write/2-1.c` (real
+    // `F_GETFL` `O_APPEND` reporting, `crate::fs::fd::FdIsAppend` -- real, unmodified musl's own
+    // AIO code needs this bit to serialize concurrent writes to the same fd; also fixed
+    // `resolve_write_fd_inode` to keep re-committing on every call instead of only the first,
+    // `modules/oxfs/src/lib.rs`), and the full
     // `shm_open`+`shm_unlink`+`sigaction/1-{1,2}.c` block **including** `shm_open/23-1.c`
     // itself (the real `MAX_OPEN_FILES`/`WRITE_BUFFERS` global-fd-table-exhaustion-cascade fix,
     // `modules/oxfs/src/lib.rs` -- `shm_open/23-1.c` no longer needs excluding at all, see
@@ -1749,6 +1753,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             "timer_settime/6-1.c",
             "timer_settime/9-1.c",
             "clock_settime/7-2.c",
+            "aio_write/2-1.c",
             "shm_open/1-1.c",
             "shm_open/10-1.c",
             "shm_open/11-1.c",

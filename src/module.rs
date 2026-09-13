@@ -767,6 +767,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_set_fd_access_mode" => {
             Some(crate::fs::fd::oxidebsd_set_fd_access_mode as *const () as u64)
         }
+        "oxidebsd_set_fd_append" => {
+            Some(crate::fs::fd::oxidebsd_set_fd_append as *const () as u64)
+        }
         "oxidebsd_set_fd_fb_geometry" => {
             Some(crate::fs::fd::oxidebsd_set_fd_fb_geometry as *const () as u64)
         }

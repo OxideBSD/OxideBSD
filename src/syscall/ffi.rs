@@ -335,6 +335,10 @@ const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const O_NONBLOCK: u64 = 0o4000;
+/// Real `open(2)` `O_APPEND` value (`third_party/musl/arch/generic/bits/fcntl.h`) -- `F_GETFL`
+/// reports this bit back via `crate::fs::fd::is_append_of`, see that function's own doc comment
+/// for the real bug (`aio_write/2-1.c`) this closes.
+const O_APPEND: u64 = 0o2000;
 /// Real `fcntl(2)` `FD_CLOEXEC` value (`third_party/musl/include/fcntl.h`) -- distinct from
 /// `open(2)`'s own `O_CLOEXEC` flag value (`0o2000000`, consulted by `modules/oxfs`'s `oxfs_open`
 /// directly, not here).
@@ -353,11 +357,16 @@ pub(crate) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
     // sharing -- see `crate::fs::fd`'s own module doc comment.
     let pid = crate::process::scheduler::current_tgid();
     match cmd {
-        F_GETFL => Ok(if crate::fs::fd::is_nonblocking(real_fd) {
-            O_NONBLOCK
-        } else {
-            0
-        }),
+        F_GETFL => {
+            let mut flags = 0;
+            if crate::fs::fd::is_nonblocking(real_fd) {
+                flags |= O_NONBLOCK;
+            }
+            if crate::fs::fd::is_append_of(fd) {
+                flags |= O_APPEND;
+            }
+            Ok(flags)
+        }
         F_SETFL => {
             crate::fs::fd::set_nonblocking(real_fd, arg & O_NONBLOCK != 0);
             Ok(0)
