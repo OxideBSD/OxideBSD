@@ -482,6 +482,11 @@ pub(crate) fn do_mq_timedsend(
 /// `SYS_MQ_TIMEDRECEIVE` (`539`, item 14) -- same `mqd_and_len` packing as `do_mq_timedsend`;
 /// `prio_ptr` is real `mq_timedreceive`'s own output parameter (the received message's priority),
 /// left untouched if null (real POSIX allows a null `msg_prio`).
+///
+/// **`at_ptr` is deliberately resolved lazily, only once actually about to block** -- real POSIX:
+/// "If the message can be removed from the queue immediately, the operation shall never fail and
+/// the validity of `abs_timeout` need not be checked" (closes `mq_timedreceive/10-2.c`, which
+/// passes a deliberately-invalid `tv_nsec` alongside an already-available message).
 pub(crate) fn do_mq_timedreceive(
     mqd_and_len: u64,
     msg_ptr: u64,
@@ -500,7 +505,6 @@ pub(crate) fn do_mq_timedreceive(
         // O_WRONLY
         return Err(EBADF);
     }
-    let deadline = resolve_deadline(at_ptr)?;
 
     loop {
         let msg = {
@@ -517,6 +521,7 @@ pub(crate) fn do_mq_timedreceive(
                 if crate::fs::fd::is_nonblocking(real_fd) {
                     return Err(EAGAIN);
                 }
+                let deadline = resolve_deadline(at_ptr)?;
                 if crate::cpu::interrupts::ticks() >= deadline {
                     return Err(ETIMEDOUT);
                 }
