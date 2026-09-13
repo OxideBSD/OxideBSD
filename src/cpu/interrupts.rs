@@ -817,12 +817,19 @@ fn handle_decoded_key(key: DecodedKey) -> bool {
                         Some(crate::process::ProcState::Running)
                     );
                 }
-                if crate::console::stdin::echo_enabled()
-                    && (byte == b'\n' || byte == b'\r' || (0x20..=0x7e).contains(&byte))
-                {
-                    serial_print!("{character}");
+                // Suppressed while a process owns real raw keyboard input (`SYS_GET_KEYEVENT`,
+                // e.g. the fbdoom/doomgeneric port) -- see `console::stdin::RAW_KEYBOARD_OWNED`'s
+                // own doc comment for the real bug this closes (every ASCII-producing keystroke
+                // visibly "leaking" into the console while a program reads it correctly through
+                // the raw keyevent path instead).
+                if !crate::console::stdin::raw_keyboard_owned() {
+                    if crate::console::stdin::echo_enabled()
+                        && (byte == b'\n' || byte == b'\r' || (0x20..=0x7e).contains(&byte))
+                    {
+                        serial_print!("{character}");
+                    }
+                    crate::console::stdin::push_byte(byte);
                 }
-                crate::console::stdin::push_byte(byte);
             }
         }
         // Modifier/lock keys (Shift, Ctrl, CapsLock, ...) and any other non-Unicode key --

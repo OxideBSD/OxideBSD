@@ -451,6 +451,9 @@ fn do_mmap_fb(
     });
     drop(table);
     crate::console::framebuffer::set_owned_by_userspace(true);
+    // See `console::stdin::RAW_KEYBOARD_OWNED`'s own doc comment -- a real `/dev/fb0` mapper is
+    // exactly the shape of program that also wants exclusive raw keyboard ownership.
+    crate::console::stdin::set_raw_keyboard_owned(true);
     Ok(base)
 }
 
@@ -992,6 +995,7 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         drop(table);
         if none_left {
             crate::console::framebuffer::set_owned_by_userspace(false);
+            crate::console::stdin::set_raw_keyboard_owned(false);
         }
     }
 
@@ -1095,6 +1099,7 @@ pub fn cleanup_mmap_phys_regions_for_exit(pid: Pid) {
     };
     if had_any {
         crate::console::framebuffer::set_owned_by_userspace(false);
+        crate::console::stdin::set_raw_keyboard_owned(false);
     }
 }
 

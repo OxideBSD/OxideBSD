@@ -37,6 +37,8 @@
 //! holding `BUFFER`'s lock; it's just no longer true that it can never preempt *any* syscall in
 //! progress at all.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use spin::Mutex;
 
 use crate::process::{self, BlockReason, ProcState};
@@ -201,6 +203,37 @@ pub(crate) fn get_termios() -> RawTermios {
 
 pub(crate) fn set_termios(new: RawTermios) {
     *TERMIOS.lock() = new;
+}
+
+/// Set while a process owns real raw keyboard input via `SYS_GET_KEYEVENT`
+/// (`console::keyevents`) instead of this module's own decoded-ASCII stream -- currently toggled
+/// alongside `console::framebuffer`'s own `set_owned_by_userspace` (`process::mm::do_mmap_fb`/
+/// `do_munmap`/`cleanup_mmap_phys_regions_for_exit`), since a real `/dev/fb0` mapper is exactly
+/// the shape of program (the fbdoom/doomgeneric port, or a future desktop environment) that also
+/// wants exclusive real-time keyboard ownership.
+///
+/// **Found live, not designed in up front**: a program driven entirely by raw keyevents (never
+/// calling `sys_read` on stdin at all) still had every one of its own ASCII-producing keystrokes
+/// (letters, digits, space -- anything `DecodedKey::Unicode` decodes to) silently echoed to the
+/// real serial console and pushed into *this* module's own ring buffer regardless, since
+/// `keyboard_interrupt_handler`'s auto-echo/push-to-stdin tail has no notion of "a different
+/// consumer already owns this keystroke." From that program's own perspective this looked exactly
+/// like "the console is stealing my keypresses" -- every letter/space/etc. it read correctly via
+/// `SYS_GET_KEYEVENT` *also* visibly echoed into the totally unrelated serial/console stream, with
+/// nothing to show for it on the program's own side (its screen updates happen through a separate,
+/// unrelated `/dev/fb0` mmap the echo path knows nothing about). Gating the echo/push-to-stdin
+/// tail on this flag -- while leaving the earlier Ctrl+C/Ctrl+Z interception (and the raw keyevent
+/// capture itself, in `console::keyevents`) completely unaffected -- fixes this at the actual
+/// source: real raw-keyevent ownership genuinely means exclusive ownership, the same way a real
+/// terminal's raw mode does.
+static RAW_KEYBOARD_OWNED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_raw_keyboard_owned(owned: bool) {
+    RAW_KEYBOARD_OWNED.store(owned, Ordering::Relaxed);
+}
+
+pub(crate) fn raw_keyboard_owned() -> bool {
+    RAW_KEYBOARD_OWNED.load(Ordering::Relaxed)
 }
 
 /// The session (`process::Process::sid`) that currently owns this kernel's one real controlling
