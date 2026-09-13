@@ -1708,8 +1708,11 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
     // `fork/11-1.c`/`pthread_attr_destroy/1-1.c`/`pthread_atfork/3-3.c` (real thread-group signal
     // delivery + `exit_group(2)`), the four named-semaphore files (real physical-address-keyed
     // shared-futex, `process::limits::futex_key` in `src/process/limits.rs`), `sigwait/4-1.c`/
-    // `timer_settime/{2-1,6-1,9-1}.c` (real timer-expiry signal wake, `wake_if_sigwaiting`), and
-    // the full `shm_open`+`shm_unlink`+`sigaction/1-{1,2}.c` block **including** `shm_open/23-1.c`
+    // `timer_settime/{2-1,6-1,9-1}.c` (real timer-expiry signal wake, `wake_if_sigwaiting`),
+    // `clock_settime/7-2.c` (a `clock_settime(CLOCK_REALTIME, ...)` forwarding the wall clock past
+    // an already-sleeping `clock_nanosleep()` target now actively re-wakes it,
+    // `process::timers::wake_realtime_sleepers_after_clock_change`), and the full
+    // `shm_open`+`shm_unlink`+`sigaction/1-{1,2}.c` block **including** `shm_open/23-1.c`
     // itself (the real `MAX_OPEN_FILES`/`WRITE_BUFFERS` global-fd-table-exhaustion-cascade fix,
     // `modules/oxfs/src/lib.rs` -- `shm_open/23-1.c` no longer needs excluding at all, see
     // `POSIX_KNOWN_HANGS`'s own doc comment; its own `TIMEOUT` here is a real, expected, bounded
@@ -1745,6 +1748,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             "timer_settime/2-1.c",
             "timer_settime/6-1.c",
             "timer_settime/9-1.c",
+            "clock_settime/7-2.c",
             "shm_open/1-1.c",
             "shm_open/10-1.c",
             "shm_open/11-1.c",

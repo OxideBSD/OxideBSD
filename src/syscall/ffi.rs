@@ -1469,6 +1469,7 @@ pub(crate) fn sys_clock_settime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
     match clockid {
         CLOCK_REALTIME => {
             crate::cpu::rtc::set_unix_epoch(ts.tv_sec, ts.tv_nsec);
+            crate::process::timers::wake_realtime_sleepers_after_clock_change();
             Ok(0)
         }
         CLOCK_MONOTONIC => Err(EINVAL),

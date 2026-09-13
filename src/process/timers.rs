@@ -646,13 +646,16 @@ pub fn do_timer_delete(pid: Pid, timerid: u64) -> Result<u64, u64> {
 /// deadline once and needing some separate mechanism to shift it later (what `PosixTimer::
 /// realtime_target` needs, since nothing re-enters that code path once armed), this function
 /// re-derives its own deadline via `abstime_to_ticks` fresh on **every** loop pass -- cheap, and
-/// self-correcting for free: if a concurrent `clock_settime` moved the real target further out
-/// than this loop's last computed (now-stale, too-early) deadline, the timer IRQ still wakes this
-/// process at that stale tick (an ordinary, harmless spurious wake, using the same plain
-/// `BlockReason::Sleeping` every other tick-deadline wait already uses -- no new variant needed),
-/// this loop's next pass recomputes a fresh, now-correct deadline from the *current* wall clock,
-/// and re-blocks. A `clock_settime` moving the target *closer* is handled directly by the same
-/// recompute, with no extra wake needed at all.
+/// self-correcting for free when a concurrent `clock_settime` moves the real target *further
+/// out*: the timer IRQ still wakes this process at its own already-correct, unaffected tick
+/// deadline (an ordinary, harmless spurious wake, using the same plain `BlockReason::Sleeping`
+/// every other tick-deadline wait already uses -- no new variant needed), this loop's next pass
+/// recomputes a fresh deadline from the *current* wall clock, and re-blocks (closes
+/// `clock_settime/7-1.c`). Moving the target *into the past* needs an active nudge instead --
+/// nothing here changes `ticks()`, so a process blocked on a now-stale, too-far-out deadline would
+/// otherwise never wake early on its own at all. `sys_clock_settime`'s `CLOCK_REALTIME` arm
+/// supplies that nudge via `wake_realtime_sleepers_after_clock_change` below, right after
+/// `rtc::set_unix_epoch` (closes `clock_settime/7-2.c`).
 pub fn do_clock_nanosleep(
     pid: Pid,
     clockid: u64,
@@ -730,4 +733,33 @@ pub fn do_clock_nanosleep(
         };
     }
     Ok(0)
+}
+
+/// Real, active nudge for `clock_settime(CLOCK_REALTIME, ...)` moving the wall clock *forward*
+/// past a process's own absolute `CLOCK_REALTIME` `clock_nanosleep()` target -- closes
+/// `clock_settime/7-2.c`. `do_clock_nanosleep`'s own self-correcting recompute (see its doc
+/// comment above) only ever runs *after* a blocked process actually wakes -- fine when a
+/// concurrent `clock_settime` moves the target *further out* (the process's already-correct,
+/// `ticks()`-based deadline is entirely unaffected by any wall-clock change, so it naturally
+/// fires once real elapsed time catches up, closing `clock_settime/7-1.c` for free) -- but wrong
+/// when it moves the target *into the past*: nothing here ever changes `ticks()` itself, so a
+/// process blocked on a now-stale, too-far-in-the-future tick deadline would otherwise never wake
+/// early at all. Real POSIX requires immediate expiry in exactly this case.
+///
+/// Force-wakes *every* `Sleeping`-blocked process unconditionally, not just ones known to be on a
+/// `CLOCK_REALTIME` absolute wait (this kernel's `BlockReason::Sleeping` carries no clock-id to
+/// distinguish them) -- safe because both `do_nanosleep` and `do_clock_nanosleep` already re-check
+/// their own real deadline before ever re-blocking, so a spurious wake here is a harmless no-op
+/// for anything not actually expired -- the same discipline real `SIGCONT` resuming a `Stopped`
+/// sleeper already established (see `do_nanosleep`'s own doc comment). Only `sys_clock_settime`'s
+/// `CLOCK_REALTIME` arm calls this -- `CLOCK_MONOTONIC`/CPU-time clocks can never retarget an
+/// already-armed wall-clock deadline.
+pub(crate) fn wake_realtime_sleepers_after_clock_change() {
+    let mut table = PROCESS_TABLE.lock();
+    for (&pid, proc) in table.iter_mut() {
+        if let ProcState::Blocked(BlockReason::Sleeping(_)) = proc.state {
+            proc.state = ProcState::Ready;
+            scheduler::enqueue_ready(pid);
+        }
+    }
 }

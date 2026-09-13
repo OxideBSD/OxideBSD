@@ -155,13 +155,15 @@ pub fn unix_epoch_now_precise() -> (i64, i64) {
 /// `unix_epoch_now_precise()` reads back `(sec, nsec)` immediately (real `clock_gettime`
 /// round-trips). Closes the Open POSIX Test Suite pilot's `clock_settime/1-1.c` et al.
 ///
-/// Nothing else needs an explicit nudge when this runs: `process::timers::do_clock_nanosleep`
-/// recomputes its own absolute `CLOCK_REALTIME` deadline fresh on every loop pass (see that
-/// function's own doc comment for why a stale deadline there just means one extra, harmless
-/// wake-recheck cycle rather than a bug), and `PosixTimer::realtime_target` makes
-/// `interrupts::timer_interrupt_handler`'s own per-tick scan compare against a live wall-clock
-/// reading instead of a tick count baked in at arm time -- both real, live re-derivations rather
-/// than a cached value this function would otherwise have to hunt down and shift.
+/// `PosixTimer::realtime_target` makes `interrupts::timer_interrupt_handler`'s own per-tick scan
+/// compare against a live wall-clock reading instead of a tick count baked in at arm time -- a
+/// real, live re-derivation rather than a cached value this function would otherwise have to hunt
+/// down and shift. `process::timers::do_clock_nanosleep` is *not* similarly self-sufficient,
+/// though it looks like it should be: its own recompute only runs after a blocked process already
+/// wakes, which never happens on its own if this call moves the target *into the past* (nothing
+/// here touches `ticks()`). The caller (`sys_clock_settime`) is responsible for the active nudge
+/// that case needs -- see `process::timers::wake_realtime_sleepers_after_clock_change`'s own doc
+/// comment.
 pub fn set_unix_epoch(sec: i64, nsec: i64) {
     let hz = crate::cpu::pit::TIMER_HZ as i64;
     let now_ticks = crate::cpu::interrupts::ticks() as i64;
