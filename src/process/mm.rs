@@ -1161,7 +1161,7 @@ fn range_fully_mapped(caller_pid: Pid, addr: u64, len: u64) -> bool {
 
 /// `SYS_MLOCK`/`SYS_MUNLOCK`'s real logic — real Linux values `509`/`510` (moved off the real
 /// `149`/`150` slots, which collide with this ABI's own live `SYS_SOCKETPAIR`/`SYS_SET_TID_ADDRESS`
-/// — see `docs/MISSING_POSIX_SYSCALLS.md`'s own collision table). Deliberately a no-op success
+/// — see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own collision table). Deliberately a no-op success
 /// beyond the range check below: this kernel never pages anything out (no swap, no reclaim of any
 /// kind anywhere), so "lock this page so it can't be swapped" is a no-op by construction, not a
 /// missing capability — same honesty tier `do_mprotect` above already establishes. Still performs

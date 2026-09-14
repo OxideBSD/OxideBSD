@@ -126,7 +126,7 @@ const SYS_PWRITEV2: u64 = 328;
 const SYS_MPROTECT: u64 = 492;
 const SYS_MSYNC: u64 = 26;
 /// Already reserved since "Real threading phase 1" (`third_party/musl/src/thread/x86_64/clone.s`'s
-/// own hardcoded `mov $555,%eax` -- see `docs/MISSING_POSIX_SYSCALLS.md`) -- this is the real
+/// own hardcoded `mov $555,%eax` -- see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`) -- this is the real
 /// handler registration that number was always waiting for, not a fresh pick.
 const SYS_CLONE: u64 = 555;
 /// Real POSIX/Linux `exit_group(2)` -- genuinely distinct from `SYS_EXIT` above (real `exit()`/

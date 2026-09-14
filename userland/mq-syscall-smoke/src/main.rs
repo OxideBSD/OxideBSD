@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_MQ_OPEN = 536` through `SYS_MQ_GETSETATTR = 541`
 //! (`modules/posix_compat`'s `handle_mq_*` -> `src/syscall/ffi.rs`'s `sys_mq_*` ->
-//! `src/fs/mqueue.rs`'s `do_mq_*`) -- items 11-16 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `src/fs/mqueue.rs`'s `do_mq_*`) -- items 11-16 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! 28-syscall pre-reserved batch, the real POSIX message-queue sub-batch.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust

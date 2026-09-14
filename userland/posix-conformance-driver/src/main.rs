@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` driver for the POSIX conformance pilot (see
-//! `docs/POSIX_COMPLIANCE_CHECKLIST.md`'s own "Verification" section and
+//! `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own "Verification" section and
 //! `modules/oxfs/src/posix_conformance.sh`'s own doc comment for the full design).
 //!
 //! `sh` (BusyBox hush) is normally pid 1 and interactive -- fine for a human at a real keyboard,

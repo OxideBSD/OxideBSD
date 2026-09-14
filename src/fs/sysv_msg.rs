@@ -1,5 +1,5 @@
 //! Real SysV message queues (`msgget`/`msgsnd`/`msgrcv`/`msgctl` -- items 25-28, the last
-//! sub-batch of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+//! sub-batch of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 //! implementation" batch, `SYS_MSGGET = 550` through `SYS_MSGCTL = 553`). No live caller anywhere
 //! in the current roster (confirmed by that doc -- `ipcrm`/`ipcs` were already cut from the
 //! BusyBox roster before v0.1 specifically because this didn't exist yet).

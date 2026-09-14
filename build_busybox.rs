@@ -72,7 +72,7 @@
     // no sense on this kernel (networking, mount, `/proc`-reading, uid/passwd-db tools) still
     // compile and link cleanly -- they just fail cleanly at runtime (usually `ENOSYS` from an
     // unregistered syscall). They're kept anyway (build success is the bar this pass used), but
-    // every one is tagged with exactly what it's still missing in `docs/BUSYBOX_APPLETS.md`, along
+    // every one is tagged with exactly what it's still missing in `OxideBSD-doc/BUSYBOX_APPLETS.md`, along
     // with the full list -- and reasons -- for every candidate that didn't even build. Load
     // addresses use smaller (`0x40000`, not `0x100000`) steps than the original 24, purely to fit
     // this much larger roster comfortably below `module::MODULE_VA_BASE` (`0x20000000`) -- every
@@ -111,7 +111,7 @@
         ("KILL", "kill", 0x9800000),
     ];
 
-    /// The second pass itself -- see `docs/BUSYBOX_APPLETS.md` for what every one of these
+    /// The second pass itself -- see `OxideBSD-doc/BUSYBOX_APPLETS.md` for what every one of these
     /// actually needs at runtime (most need *something* OxideBSD doesn't implement yet; the
     /// doc tags each one) and for the full list of candidates that didn't even build.
     const BUSYBOX_APPLETS_PASS2: &[(&str, &str, u64)] = &[

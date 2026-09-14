@@ -5,7 +5,7 @@
 #   1. Build stage: `cargo build` cross-builds the entire workspace, including every applet in
 #      build.rs's BUSYBOX_APPLETS/BUSYBOX_APPLETS_PASS2 roster. build_busybox_applet fails the
 #      whole build if a listed applet stops compiling, so a clean build already proves the roster
-#      (currently ~300 applets, see docs/BUSYBOX_APPLETS.md) is intact.
+#      (currently ~300 applets, see OxideBSD-doc/BUSYBOX_APPLETS.md) is intact.
 #   2. Boot stage: boots the resulting image headlessly under QEMU for a fixed timeout and checks
 #      the serial log for a panic/fault-free boot that actually spawns hush (BusyBox sh) as pid 1
 #      and reaches the scheduler, with the freshly built roster embedded in oxfs.
@@ -133,6 +133,6 @@ echo "'cargo run' and try them by hand, e.g.:"
 echo "  ls /bin | wc -l      # confirm the full roster is present"
 echo "  echo hello | cat"
 echo "  which <applet-name>"
-echo "See docs/BUSYBOX_APPLETS.md for the full roster and what each applet still needs."
+echo "See OxideBSD-doc/BUSYBOX_APPLETS.md for the full roster and what each applet still needs."
 echo
 echo "Full boot log saved at: $LOG_FILE"

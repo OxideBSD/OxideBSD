@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_SYSINFO = 527` (`modules/posix_compat`'s `handle_sysinfo`
 //! -> `src/syscall/ffi.rs`'s `sys_sysinfo`/`RawSysinfo`) -- item 2 of
-//! `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
+//! `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- the same class of bug the musl-port section of

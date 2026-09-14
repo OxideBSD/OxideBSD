@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SA_SIGINFO` handler invocation (`src/syscall/mod.rs`'s
 //! `deliver_pending_signal`, `RawSiginfo`/`RawUcontext`/`RawMcontext`) and for `SYS_TKILL = 200`/
-//! `SYS_SIGPENDING = 494` (both landed the same pass, see `docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `SYS_SIGPENDING = 494` (both landed the same pass, see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! "Implemented this session" section).
 //!
 //! No existing test exercised a real handler-invocation round trip at all before this one --
@@ -41,7 +41,7 @@ const SYS_SIGACTION: u64 = 117;
 /// rather than going through a shared macro.
 const SYS_SIGRETURN: u64 = 119;
 /// Real `rt_sigpending`'s own wire slot, redirected here off its earlier accidental `SYS_STAT`
-/// collision -- see `docs/MISSING_POSIX_SYSCALLS.md`'s own collision-sweep table.
+/// collision -- see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own collision-sweep table.
 const SYS_SIGPENDING: u64 = 494;
 /// Real, unclaimed Linux `__NR_tkill` -- see `src/syscall/ffi.rs`'s `sys_tkill` doc comment.
 const SYS_TKILL: u64 = 200;

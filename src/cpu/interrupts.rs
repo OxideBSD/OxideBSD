@@ -493,7 +493,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
             }
 
             // `SYS_TIMER_CREATE`'s own per-timer expiry (`Process::posix_timers`, batch items
-            // 6-10 of `docs/MISSING_POSIX_SYSCALLS.md`) -- same simple pending-bit-only delivery
+            // 6-10 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`) -- same simple pending-bit-only delivery
             // as `real_timer_deadline` just above (no forced cross-process wake here either, same
             // reasoning), plus a real `timer_getoverrun` count: an expiry whose signal is *still*
             // pending from a previous, undelivered expiry increments `overrun` instead of getting

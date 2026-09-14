@@ -486,7 +486,7 @@ pub(crate) fn sys_sigprocmask(
 }
 
 /// `SYS_SIGPENDING` (real `rt_sigpending`'s own wire slot, `494` after the collision sweep in
-/// `docs/MISSING_POSIX_SYSCALLS.md` redirected it off its previous accidental home at `SYS_STAT =
+/// `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md` redirected it off its previous accidental home at `SYS_STAT =
 /// 127`) — matches real `sigpending(2)`'s exact `(set_ptr, sigsetsize)` wire format, same
 /// "sigsetsize read but not otherwise validated" story `sys_sigaction`/`sys_sigprocmask` already
 /// have. Delegates to `process::do_sigpending`.
@@ -495,7 +495,7 @@ pub(crate) fn sys_sigpending(set_ptr: u64, sigsetsize: u64) -> Result<u64, u64> 
     crate::process::do_sigpending(crate::process::scheduler::current_pid(), set_ptr)
 }
 
-/// `SYS_SIGALTSTACK` (`528`, item 3 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+/// `SYS_SIGALTSTACK` (`528`, item 3 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 /// pre-reserved batch) — matches real `sigaltstack(2)`'s exact `(ss_ptr, old_ptr)` wire format
 /// (`third_party/musl/src/signal/sigaltstack.c` is a bare 2-argument `syscall`, no call-site patch
 /// needed beyond the number remap already sitting in `bits/syscall.h.in`). Delegates straight to
@@ -505,7 +505,7 @@ pub(crate) fn sys_sigaltstack(ss_ptr: u64, old_ptr: u64) -> Result<u64, u64> {
     crate::process::do_sigaltstack(crate::process::scheduler::current_pid(), ss_ptr, old_ptr)
 }
 
-/// `SYS_PAUSE` (`529`, item 4 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved
+/// `SYS_PAUSE` (`529`, item 4 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved
 /// batch) — matches real `pause(2)`'s exact zero-argument wire format
 /// (`third_party/musl/src/internal/syscall.h`'s `__sys_pause_cp` is a bare `__syscall_cp(SYS_pause)`,
 /// no call-site patch needed beyond the number remap already sitting in `bits/syscall.h.in`).
@@ -515,7 +515,7 @@ pub(crate) fn sys_pause() -> Result<u64, u64> {
     crate::process::do_pause(crate::process::scheduler::current_pid())
 }
 
-/// `SYS_SIGSUSPEND` (`530`, item 5 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+/// `SYS_SIGSUSPEND` (`530`, item 5 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 /// pre-reserved batch) — matches real `sigsuspend(2)`'s exact `(mask_ptr, sigsetsize)` wire format
 /// (`third_party/musl/src/signal/sigsuspend.c` is a bare `syscall_cp(SYS_rt_sigsuspend, mask,
 /// _NSIG/8)`, no call-site patch needed beyond the number remap already sitting in
@@ -630,7 +630,7 @@ pub(crate) fn sys_setgid(gid: u64) -> Result<u64, u64> {
     crate::process::do_setgid(crate::process::scheduler::current_pid(), gid as u32)
 }
 
-/// `SYS_SETRESUID` (`499` — real, unclaimed `__NR_setresuid`, see `docs/MISSING_POSIX_SYSCALLS.md`'s
+/// `SYS_SETRESUID` (`499` — real, unclaimed `__NR_setresuid`, see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s
 /// numeric-collision sweep for why it isn't at its original real value `117`) — real `(ruid, euid,
 /// suid)` wire format, each a `uid_t` cast through `int`/`long` so a real `-1` ("leave unchanged")
 /// arrives sign-extended and reads back correctly as `i64`. See `process::do_setresuid`'s own doc
@@ -1140,7 +1140,7 @@ struct RawTms {
 const _: () = assert!(core::mem::size_of::<RawTms>() == 32);
 
 /// `SYS_TIMES` (real `times`'s own wire slot, `493` after the collision sweep in
-/// `docs/MISSING_POSIX_SYSCALLS.md` redirected it off its previous accidental home at
+/// `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md` redirected it off its previous accidental home at
 /// `SYS_MMAP = 100`) -- matches real `times(2)`'s exact `(tms_ptr)` wire format
 /// (`third_party/musl/src/time/times.c` is a bare `__syscall(SYS_times, tms)`, no call-site patch
 /// needed). The return value (real `times(2)`'s "clock ticks since an arbitrary point in the
@@ -1191,7 +1191,7 @@ const GRND_NONBLOCK: u64 = 0x0001;
 const GRND_RANDOM: u64 = 0x0002;
 
 /// `SYS_GETRANDOM` (`526`, pre-reserved ahead of implementation in
-/// `docs/MISSING_POSIX_SYSCALLS.md` -- item 1 of that doc's own 28-syscall planned-
+/// `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md` -- item 1 of that doc's own 28-syscall planned-
 /// implementation-order batch) -- real `getrandom(2)`'s exact `(buf_ptr, buflen, flags)` wire
 /// format (`third_party/musl/src/linux/getrandom.c` is a bare 3-argument `syscall_cp`, no
 /// call-site patch needed beyond the number remap already in `bits/syscall.h.in`). Only reachable
@@ -1242,12 +1242,12 @@ struct RawSysinfo {
 
 const _: () = assert!(core::mem::size_of::<RawSysinfo>() == 368);
 
-/// `SYS_SYSINFO` (`527`, item 2 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved
+/// `SYS_SYSINFO` (`527`, item 2 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved
 /// batch) -- real `sysinfo(2)`'s exact `(info_ptr)` wire format (`third_party/musl/src/linux/
 /// sysinfo.c` is a bare 1-argument `syscall(SYS_sysinfo, info)`, no call-site patch needed beyond
 /// the number remap already in `bits/syscall.h.in`). Not a POSIX interface at all (Linux-specific),
 /// but the confirmed live blocker for `free`/`uptime`'s primary numbers (`procps/{free,uptime}.c`)
-/// -- see `docs/BUSYBOX_APPLETS.md`'s own `NEEDS_PROC` entries for those two applets.
+/// -- see `OxideBSD-doc/BUSYBOX_APPLETS.md`'s own `NEEDS_PROC` entries for those two applets.
 ///
 /// Same honesty tier as `RawRusage`/`RawTms` above: real fields where this kernel actually tracks
 /// the concept, an honest placeholder (not a fabricated number) everywhere it doesn't.
@@ -1894,7 +1894,7 @@ pub(crate) extern "C" fn oxidebsd_sys_getitimer(which: u64, old_ptr: u64) -> i64
 
 /// `SYS_TIMER_CREATE = 531`/`SYS_TIMER_SETTIME = 532`/`SYS_TIMER_GETTIME = 533`/
 /// `SYS_TIMER_GETOVERRUN = 534`/`SYS_TIMER_DELETE = 535` (registered by `modules/clock`, items
-/// 6-10 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real POSIX
+/// 6-10 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real POSIX
 /// per-process timers, a natural extension of the already-implemented `setitimer`/`getitimer`
 /// (`ITIMER_REAL`-only) infrastructure just above, now that per-timer-id tracking exists
 /// (`process::PosixTimer`/`Process::posix_timers`). See `process::do_timer_create`'s own doc
@@ -1946,7 +1946,7 @@ pub(crate) extern "C" fn oxidebsd_sys_timer_delete(timerid: u64) -> i64 {
 }
 
 /// `SYS_MQ_OPEN = 536` through `SYS_MQ_GETSETATTR = 541` (registered by `modules/posix_compat`,
-/// items 11-16 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real
+/// items 11-16 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real
 /// POSIX message queues, built on `crate::fs::mqueue`. See that module's own doc comment for the
 /// full wire-format/blocking/notify design.
 pub(crate) fn sys_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) -> Result<u64, u64> {
@@ -2023,7 +2023,7 @@ pub(crate) extern "C" fn oxidebsd_sys_mq_getsetattr(mqd: u64, new_ptr: u64, old_
 }
 
 /// `SYS_MSGGET = 550` through `SYS_MSGCTL = 553` (registered by `modules/posix_compat`, items
-/// 25-28 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch -- the last
+/// 25-28 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch -- the last
 /// sub-batch) -- real SysV message queues, built on `crate::fs::sysv_msg`. See that module's own
 /// doc comment for the full wire-format/permission/blocking design, and how it differs from
 /// `crate::fs::mqueue`'s POSIX message queues.
@@ -2065,7 +2065,7 @@ pub(crate) extern "C" fn oxidebsd_sys_msgctl(q: u64, cmd: u64, buf_ptr: u64, _a3
 }
 
 /// `SYS_SEMGET = 546` through `SYS_SEMTIMEDOP = 549` (registered by `modules/posix_compat`, items
-/// 21-24 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real SysV
+/// 21-24 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch) -- real SysV
 /// semaphores, built on `crate::fs::sysv_sem`. See that module's own doc comment for the full
 /// wire-format/permission/blocking/`SEM_UNDO` design.
 pub(crate) fn sys_semget(key: u64, nsems: u64, flag: u64) -> Result<u64, u64> {
@@ -2106,7 +2106,7 @@ pub(crate) extern "C" fn oxidebsd_sys_semtimedop(
 }
 
 /// `SYS_SHMGET = 542` through `SYS_SHMDT = 545` (registered by `modules/posix_compat`, items
-/// 17-20 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, the last
+/// 17-20 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, the last
 /// sub-batch, closing the whole thing out) -- real SysV shared memory, built on `crate::fs::
 /// sysv_shm`. See that module's own doc comment for the full wire-format/permission/real-mapping
 /// design.

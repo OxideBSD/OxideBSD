@@ -97,7 +97,7 @@
 //! "become yourself" allowance for non-root), doesn't touch the actual list at all since there's
 //! still no supplementary-group concept to store it in.
 //!
-//! `SYS_GETRANDOM = 526` is item 1 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+//! `SYS_GETRANDOM = 526` is item 1 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 //! "pre-reserved ahead of implementation" batch — the first one actually implemented. Matches real
 //! `getrandom(2)`'s exact `(buf_ptr, buflen, flags)` wire format, no argument-convention patch
 //! needed beyond the number remap already in `bits/syscall.h.in`. Real logic (`src/syscall/
@@ -223,7 +223,7 @@ const SYS_GETEGID: u64 = 161;
 const SYS_SETUID: u64 = 162;
 const SYS_SETGID: u64 = 163;
 /// Real, unclaimed `__NR_setresuid` -- moved here from its original real value `117` by the
-/// numeric-collision sweep (see `docs/MISSING_POSIX_SYSCALLS.md`'s own table: `117` collided with
+/// numeric-collision sweep (see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own table: `117` collided with
 /// this ABI's own `SYS_SIGACTION`). Also backs `seteuid()` -- see `process::do_setresuid`'s own
 /// doc comment.
 const SYS_SETRESUID: u64 = 499;
@@ -323,11 +323,11 @@ const SYS_UMASK: u64 = 487;
 /// `src/syscall.rs`'s own `sys_getrusage`/`RawRusage` for the real (honestly all-zero) logic.
 const SYS_GETRUSAGE: u64 = 491;
 /// Real `times`'s own wire slot -- redirected here off its previous accidental collision with
-/// `SYS_MMAP = 100` by the full header sweep in `docs/MISSING_POSIX_SYSCALLS.md`. Same
+/// `SYS_MMAP = 100` by the full header sweep in `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`. Same
 /// process-resource-adjacent placement as `SYS_GETRUSAGE` just above (`src/syscall/ffi.rs`'s
 /// `sys_times`/`RawTms` for the real, honestly all-zero logic).
 const SYS_TIMES: u64 = 493;
-/// Item 1 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+/// Item 1 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- a permanent OxideBSD-invented number claimed before this handler
 /// existed (see that doc's own numbering-discipline note for why: this ABI doesn't want its own
 /// planned syscalls sitting at borrowed real-Linux numbers just because the slot happened to be
@@ -335,7 +335,7 @@ const SYS_TIMES: u64 = 493;
 /// existing generator) is kernel-resident, same reasoning as everything else this module only
 /// ever calls through to.
 const SYS_GETRANDOM: u64 = 526;
-/// Item 2 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+/// Item 2 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- same pre-claimed-before-the-handler-existed reasoning as
 /// `SYS_GETRANDOM` just above. Real logic (`src/syscall/ffi.rs`'s `sys_sysinfo`/`RawSysinfo`) is
 /// kernel-resident; this module only ever calls through to it.
@@ -358,7 +358,7 @@ const SYS_MSGGET: u64 = 550;
 const SYS_MSGSND: u64 = 551;
 const SYS_MSGRCV: u64 = 552;
 const SYS_MSGCTL: u64 = 553;
-/// Items 21-24 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch. See
+/// Items 21-24 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch. See
 /// `src/fs/sysv_sem.rs`'s own doc comment for the full design.
 const SYS_SEMGET: u64 = 546;
 const SYS_SEMOP: u64 = 547;

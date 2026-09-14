@@ -2,7 +2,7 @@
 //! `src/process/signals.rs`'s `record_pending`/`take_deliverable_signal`/`do_sigtimedwait` RT
 //! branches, and the extended `do_kill`/`do_sigqueue`/`sys_sigaction` range checks. Closes the
 //! Open POSIX Test Suite pilot's own `sigqueue/1-1,5-1,6-1,7-1.c` + `sigwait/2-1.c` UNRESOLVED
-//! cluster (see `docs/POSIX_COMPLIANCE_CHECKLIST.md`'s own "Real-time signal queuing" blocker) --
+//! cluster (see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own "Real-time signal queuing" blocker) --
 //! those all fail before their real assertion is ever reached, since every real signal number
 //! they use (`SIGRTMIN`) used to be flatly rejected by this ABI's `1..=31`-only range checks.
 //! `sigqueue/4-1.c`/`8-1.c` needed a second, separate fix on top (real signal-stack chaining --

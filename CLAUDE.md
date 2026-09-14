@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project
 
-OxideBSD is a 100% Rust-based BSD-like OS, x86_64 only (see `ROADMAP.md` for phase history).
+OxideBSD is a 100% Rust-based BSD-like OS, x86_64 only (see `OxideBSD-doc/ROADMAP.md` for phase history).
 Current state:
 
 - Boots via `bootloader` v0.9 + `bootimage`/QEMU. GDT/TSS/IDT with a dedicated double-fault
@@ -312,8 +312,8 @@ inode table by `modules/oxfs`'s `module_init` (data-driven from `build.rs`'s app
 new applet needs one manual `seed_file` call). Roster grew 24 → 290 (287 from an exhaustive
 per-applet build probe — **"builds" is a much weaker bar than "works"**), then curated down to 232
 (256 total) before v0.1 by dropping 58 applets structurally incapable of working under this
-kernel's architecture (see `docs/BUSYBOX_APPLETS.md`'s "Removed before v0.1"; a few later
-unblocked — `chroot`/`mknod`/`link` — were fixed forward instead). `docs/BUSYBOX_APPLETS.md` is the
+kernel's architecture (see `OxideBSD-doc/BUSYBOX_APPLETS.md`'s "Removed before v0.1"; a few later
+unblocked — `chroot`/`mknod`/`link` — were fixed forward instead). `OxideBSD-doc/BUSYBOX_APPLETS.md` is the
 full roster with per-applet needs (`NEEDS_NETWORK`/`NEEDS_PROC`/`NEEDS_CLOCK`/`NEEDS_UID`/`WORKS`).
 `modules/oxfs/src/test_busybox.sh` (seeded at `/test_busybox.sh`) is ~95 real applet/control-flow
 checks with a `PASS`/`FAIL` tally — the tool that found several bugs below.
@@ -899,7 +899,7 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
 ## Real getrandom/sysinfo/sigaltstack/pause/sigsuspend/POSIX timers/POSIX message queues/SysV IPC (`modules/posix_compat`, `modules/signal`, `modules/clock`, `src/fs/{mqueue,sysv_msg,sysv_sem,sysv_shm,sysv_ipc}.rs`)
 
 A 28-syscall batch (`526`-`553`) pre-reserved with permanent invented numbers ahead of having real
-handlers (see `docs/MISSING_POSIX_SYSCALLS.md`'s "Pre-reserved" section for why). All 28 now have
+handlers (see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s "Pre-reserved" section for why). All 28 now have
 real handlers, landed roughly in POSIX/SysV order except SysV IPC landed message queues before
 semaphores before shared memory (each needed progressively more novel machinery).
 
@@ -950,7 +950,7 @@ semaphores before shared memory (each needed progressively more novel machinery)
   freshly-copied private frames regardless, since fork here is eager-copy not COW) — starts empty
   in a child, same precedent `sysv_sem_undo` established.
 
-Closes the whole 28-item batch — see `docs/MISSING_POSIX_SYSCALLS.md`'s own per-item write-up for
+Closes the whole 28-item batch — see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own per-item write-up for
 detail this section only summarizes.
 
 ## Real preemptive scheduling (`src/process/scheduler.rs`, `src/cpu/interrupts.rs`, `src/cpu/fpu.rs`)
@@ -1770,7 +1770,7 @@ running when the shared frame pool finally ran dry.
 
 Almost everything left needs one of a handful of missing kernel capabilities, each unlocking a
 cluster of applets at once. New syscall numbers should continue from the highest currently
-assigned. `docs/BUSYBOX_APPLETS.md` is the authoritative per-applet detail behind this summary
+assigned. `OxideBSD-doc/BUSYBOX_APPLETS.md` is the authoritative per-applet detail behind this summary
 table (counts are out of the 287 applets that built at all; a pre-v0.1 pass cut 58 of those 287
 entirely — structurally incapable of working here, not "not started yet" — see that doc's own
 "Removed before v0.1" section). 229 remain seeded.
@@ -1795,7 +1795,7 @@ entirely — structurally incapable of working here, not "not started yet" — s
 **83 more candidate applets didn't even build**: 54 need real Linux kernel uapi headers musl
 doesn't vendor, 25 need a companion Kconfig option a single-symbol flip didn't resolve, 3 were
 docs/example files mismatched by candidate-extraction, 1 (`lzopcat`) is a genuine link error. See
-`docs/BUSYBOX_APPLETS.md` for the full breakdown.
+`OxideBSD-doc/BUSYBOX_APPLETS.md` for the full breakdown.
 
 ## Closing two `pthread_cond_timedwait` hangs: a `terminate_thread_group` leader-ordering bug and real `FUTEX_REQUEUE` (`src/process/lifecycle.rs`, `src/process/limits.rs`, `third_party/musl`, `build.rs`)
 

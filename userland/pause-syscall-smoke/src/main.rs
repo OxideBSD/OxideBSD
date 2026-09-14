@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_PAUSE = 529` (`modules/signal`'s `handle_pause` ->
 //! `src/syscall/ffi.rs`'s `sys_pause` -> `src/process/signals.rs`'s `do_pause`) -- item 4 of
-//! `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, and the first item in
+//! `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, and the first item in
 //! that batch to need a genuine new block/wake-on-signal primitive
 //! (`BlockReason::WaitingForSignal`), not just a state field.
 //!

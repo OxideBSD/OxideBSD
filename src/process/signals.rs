@@ -708,7 +708,7 @@ pub(crate) fn notify_parent_sigchld(
     wake_if_futex_waiting(parent_pid, parent, SIGCHLD);
 }
 
-/// `SYS_PAUSE`'s real logic (`529`, item 4 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+/// `SYS_PAUSE`'s real logic (`529`, item 4 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 /// pre-reserved batch). Real POSIX semantics: blocks until a signal is delivered that either
 /// terminates the process (in which case this never returns at all) or invokes a caught handler
 /// -- always returns `EINTR` otherwise (`pause(2)` has no successful return). An ignored signal,
@@ -748,7 +748,7 @@ pub fn do_pause(pid: Pid) -> Result<u64, u64> {
     }
 }
 
-/// `SYS_SIGSUSPEND`'s real logic (`530`, item 5 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+/// `SYS_SIGSUSPEND`'s real logic (`530`, item 5 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 /// 28-syscall pre-reserved batch). Real POSIX semantics: atomically replaces `blocked_signals`
 /// with `*mask_ptr` for the duration of a single wait, blocks until a signal is delivered that
 /// either terminates the process (never returns) or invokes a caught handler, then restores the
@@ -885,7 +885,7 @@ pub fn do_sigaction(pid: Pid, sig: u64, act_ptr: u64, oldact_ptr: u64) -> Result
     Ok(0)
 }
 
-/// `SYS_SIGALTSTACK`'s real logic (`528`, item 3 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+/// `SYS_SIGALTSTACK`'s real logic (`528`, item 3 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 /// 28-syscall pre-reserved batch). Reads/writes a real musl `struct sigaltstack`/`stack_t`
 /// (`ss_sp`, `ss_flags`, `ss_size` — see `AltStack`'s own doc comment for the "bookkeeping only,
 /// never actually switched to" scope). Both `ss_ptr`/`old_ptr` are optional (either may be `0`),
@@ -1239,7 +1239,7 @@ fn resolve_relative_deadline(ts_ptr: u64) -> Result<u64, u64> {
 /// `SYS_SIGTIMEDWAIT = 495` -- backs real `sigtimedwait(2)`/`sigwaitinfo(2)`/`sigwait(3)`, all
 /// three musl library entry points route through this one real syscall (`sigwaitinfo` passes a
 /// null `ts`; `sigwait` passes its own stack `siginfo_t` and discards everything but `si_signo`) --
-/// one of the two real, confirmed-live-caller gaps `docs/MISSING_POSIX_SYSCALLS.md`'s own "Missing,
+/// one of the two real, confirmed-live-caller gaps `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own "Missing,
 /// live caller confirmed" table tracked (`src/signal/sigtimedwait.c:19,22`). Real `(mask_ptr,
 /// info_ptr, ts_ptr, sigsetsize)` wire format already fits this ABI's 4 real register args --
 /// confirmed directly against that file's own call site: no `SYS_rt_sigtimedwait_time64` sibling is
@@ -1320,7 +1320,7 @@ pub fn do_sigtimedwait(pid: Pid, mask_ptr: u64, info_ptr: u64, ts_ptr: u64) -> R
 }
 
 /// `SYS_SIGQUEUE = 496` -- backs real `sigqueue(3)`, the other of the two real, confirmed-live-
-/// caller gaps `docs/MISSING_POSIX_SYSCALLS.md`'s own "Missing, live caller confirmed" table
+/// caller gaps `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own "Missing, live caller confirmed" table
 /// tracked (`src/signal/sigqueue.c:19`). Real `(pid, sig, siginfo_ptr)` wire format
 /// (`third_party/musl/src/signal/sigqueue.c`'s own `syscall(SYS_rt_sigqueueinfo, pid, sig, &si)`),
 /// no musl call-site patch needed. Unlike `kill(2)`, real `sigqueue(2)` only ever targets a single

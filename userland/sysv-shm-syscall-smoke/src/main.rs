@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_SHMGET = 542` through `SYS_SHMDT = 545`
 //! (`modules/posix_compat`'s `handle_shm*` -> `src/syscall/ffi.rs`'s `sys_shm*` ->
-//! `src/fs/sysv_shm.rs`'s `do_shm*`) -- items 17-20 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `src/fs/sysv_shm.rs`'s `do_shm*`) -- items 17-20 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! 28-syscall pre-reserved batch: real SysV shared memory, the last sub-batch, closing the whole
 //! batch out.
 //!

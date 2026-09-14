@@ -16,7 +16,7 @@
 //! `interrupts::timer_interrupt_handler`'s own `ITIMER_REAL` expiry check.
 //!
 //! `SYS_TIMER_CREATE = 531`/`SYS_TIMER_SETTIME = 532`/`SYS_TIMER_GETTIME = 533`/
-//! `SYS_TIMER_GETOVERRUN = 534`/`SYS_TIMER_DELETE = 535` (`docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `SYS_TIMER_GETOVERRUN = 534`/`SYS_TIMER_DELETE = 535` (`OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! 28-syscall pre-reserved batch, items 6-10): real POSIX per-process timers, a natural extension
 //! of the `setitimer`/`getitimer` machinery just above now that per-timer-id tracking exists
 //! (`process::PosixTimer`/`Process::posix_timers`) — see `process::do_timer_create`'s own doc

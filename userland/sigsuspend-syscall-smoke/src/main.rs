@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_SIGSUSPEND = 530` (`modules/signal`'s `handle_sigsuspend` ->
 //! `src/syscall/ffi.rs`'s `sys_sigsuspend` -> `src/process/signals.rs`'s `do_sigsuspend`) -- item 5
-//! of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, and the second item in
+//! of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch, and the second item in
 //! that batch (after `pause`) to exercise the `BlockReason::WaitingForSignal` primitive, this time
 //! with a real temporary mask swap around it.
 //!
@@ -55,7 +55,7 @@ const SYS_SIGPROCMASK: u64 = 118;
 /// rather than going through a shared macro.
 const SYS_SIGRETURN: u64 = 119;
 /// Real, unremapped Linux value redirected here off its previous accidental collision with
-/// `SYS_STAT = 127` -- see `docs/MISSING_POSIX_SYSCALLS.md`'s own collision table.
+/// `SYS_STAT = 127` -- see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own collision table.
 const SYS_SIGPENDING: u64 = 494;
 const SYS_SIGSUSPEND: u64 = 530;
 /// Not a real syscall number anything else in this codebase registers -- `tests/

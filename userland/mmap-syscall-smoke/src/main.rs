@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` smoke test for two mmap-related fixes made while chasing the Open POSIX Test
-//! Suite pilot's own `mmap/11-2.c`/`11-3.c`/`12-1.c` FAILs (see `docs/POSIX_COMPLIANCE_CHECKLIST.md`
+//! Suite pilot's own `mmap/11-2.c`/`11-3.c`/`12-1.c` FAILs (see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`
 //! and `src/process/mm.rs`/`src/cpu/interrupts.rs`/`src/process/fault_trampoline.rs` for the real
 //! implementation this exercises):
 //!

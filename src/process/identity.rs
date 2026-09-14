@@ -163,7 +163,7 @@ pub fn do_setgid(caller_pid: Pid, gid: u32) -> Result<u64, u64> {
 /// conformance test `sem_open/3-1.c` (Open POSIX Test Suite) needs to drop root privilege via
 /// `seteuid()` before it can exercise its own real assertion, and reported a misleading
 /// `PTS_UNTESTED` instead — not because `sem_open` itself doesn't exist here (that's a separate,
-/// much bigger, already-tracked gap, see `docs/POSIX_COMPLIANCE_CHECKLIST.md`), but because
+/// much bigger, already-tracked gap, see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`), but because
 /// `seteuid()` itself was an `[boot] unrecognized syscall number 499` the whole time.
 ///
 /// **Real `-1`-means-"leave unchanged" semantics** (each argument arrives sign-extended from a

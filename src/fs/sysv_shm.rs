@@ -1,5 +1,5 @@
 //! Real SysV shared memory (`shmget`/`shmat`/`shmctl`/`shmdt` -- items 17-20 of
-//! `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of implementation"
+//! `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of implementation"
 //! batch, `SYS_SHMGET = 542` through `SYS_SHMDT = 545`). No live caller anywhere in the current
 //! roster (`ipcrm`/`ipcs` were already cut from the BusyBox roster before v0.1 specifically
 //! because this didn't exist) -- the last sub-batch, closing the whole 28-syscall batch out.

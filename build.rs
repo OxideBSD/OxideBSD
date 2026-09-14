@@ -278,7 +278,7 @@ fn main() {
     let doom1_wad_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
 
-    // A real POSIX conformance baseline: see `docs/POSIX_COMPLIANCE_CHECKLIST.md`'s own
+    // A real POSIX conformance baseline: see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
     // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment. Source-only
     // (compiled on-target by `tcc`, not cross-compiled here) -- see `write_posix_test_manifest`'s
     // own doc comment for why.

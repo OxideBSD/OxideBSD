@@ -4,8 +4,8 @@
 # Usage, at the hush prompt:
 #   sh /posix_conformance.sh
 #
-# See docs/POSIX_COMPLIANCE_CHECKLIST.md's own "Verification" section for why this exists: every
-# other doc in this tree (docs/MISSING_POSIX_SYSCALLS.md, that checklist itself) is
+# See OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md's own "Verification" section for why this exists: every
+# other doc in this tree (OxideBSD-doc/MISSING_POSIX_SYSCALLS.md, that checklist itself) is
 # self-assessment against a hand-written list. This is a real, independent conformance suite (the
 # Open POSIX Test Suite, vendored at third_party/posixtestsuite) actually run against this kernel.
 #

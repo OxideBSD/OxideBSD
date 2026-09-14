@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_SIGALTSTACK = 528` (`modules/signal`'s `handle_sigaltstack`
 //! -> `src/syscall/ffi.rs`'s `sys_sigaltstack` -> `src/process/signals.rs`'s `do_sigaltstack`/
-//! `AltStack`) -- item 3 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
+//! `AltStack`) -- item 3 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- the same class of bug the musl-port section of

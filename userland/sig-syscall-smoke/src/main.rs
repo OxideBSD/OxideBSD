@@ -1,7 +1,7 @@
 //! Real-`SYSCALL` smoke test for `SYS_SIGTIMEDWAIT = 495`/`SYS_SIGQUEUE = 496`
 //! (`modules/signal`'s `handle_sigtimedwait`/`handle_sigqueue` -> `src/syscall/ffi.rs`'s
 //! `sys_sigtimedwait`/`sys_sigqueue` -> `src/process/signals.rs`'s `do_sigtimedwait`/
-//! `do_sigqueue`) -- the two real, confirmed-live-caller gaps `docs/MISSING_POSIX_SYSCALLS.md`'s
+//! `do_sigqueue`) -- the two real, confirmed-live-caller gaps `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s
 //! own "Missing, live caller confirmed" table tracked, closing both out.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust

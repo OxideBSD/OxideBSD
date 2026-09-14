@@ -1,5 +1,5 @@
 //! Real SysV semaphores (`semget`/`semop`/`semctl`/`semtimedop` -- items 21-24 of
-//! `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of implementation"
+//! `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of implementation"
 //! batch, `SYS_SEMGET = 546` through `SYS_SEMTIMEDOP = 549`). No live caller anywhere in the
 //! current roster (confirmed by that doc -- `ipcrm`/`ipcs` were already cut from the BusyBox
 //! roster before v0.1 specifically because this didn't exist yet) -- built anyway, in real POSIX/

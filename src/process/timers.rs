@@ -386,7 +386,7 @@ pub(crate) fn abstime_to_ticks(clockid: u64, sec: i64, nsec: i64) -> u64 {
     }
 }
 
-/// `SYS_TIMER_CREATE` (`531`, item 6 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+/// `SYS_TIMER_CREATE` (`531`, item 6 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 /// pre-reserved batch) -- matches real `timer_create(2)`'s exact `(clockid, evp_ptr, timerid_ptr)`
 /// wire format (musl's own `timer_create()` translates its `struct sigevent` argument into the
 /// smaller `struct ksigevent` -- `RawKSigevent` above -- before issuing the raw syscall for every

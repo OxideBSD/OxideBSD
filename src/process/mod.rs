@@ -389,7 +389,7 @@ const _: () = assert!(core::mem::size_of::<RawSiginfo>() == 128);
 /// Real `sigaltstack(2)` flag bits (`third_party/musl/include/signal.h`). `SS_ONSTACK` is a
 /// read-only status bit a caller can observe but never set (musl's own `sigaltstack()` wrapper
 /// already rejects `ss_flags & SS_ONSTACK` client-side before ever issuing the syscall — see
-/// `docs/MISSING_POSIX_SYSCALLS.md`'s own note on this being "only reachable via `sigaltstack()`"
+/// `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own note on this being "only reachable via `sigaltstack()`"
 /// the same way `getrandom` is only reachable via `getentropy()`).
 pub const SS_ONSTACK: i32 = 1;
 pub const SS_DISABLE: i32 = 2;
@@ -494,7 +494,7 @@ pub struct PosixTimer {
     /// `pending_signals` delivery model, not real Linux's own siginfo-attached per-expiry
     /// accounting. **Known, accepted gap**: two timers sharing the same `signo` can't be told
     /// apart by this bookkeeping, since both would observe the same process-wide pending bit --
-    /// no live caller to exercise this today (see `docs/MISSING_POSIX_SYSCALLS.md`).
+    /// no live caller to exercise this today (see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`).
     pub overrun: u32,
 }
 
@@ -749,7 +749,7 @@ pub struct Process {
     pub pid: Pid,
     /// The real POSIX thread-group id: `getpid()` returns this, not `pid` directly. Equal to
     /// `pid` for every process today — this kernel has no real thread creation yet (`CLONE_THREAD`
-    /// is unimplemented, see `docs/MISSING_POSIX_SYSCALLS.md`'s `pthread_create` row), so every
+    /// is unimplemented, see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s `pthread_create` row), so every
     /// schedulable entity is still its own thread group of one. `spawn`/`fork` both set this to the
     /// process's own freshly allocated `pid` (a forked child is a real POSIX *process*, not a
     /// thread — it gets its own tgid, never inherits the parent's); `execve` leaves it untouched
@@ -937,7 +937,7 @@ pub struct Process {
     /// the expiry handler clears `real_timer_deadline` instead of rearming it. Meaningless while
     /// `real_timer_deadline` is `None`.
     pub real_timer_interval_ticks: u64,
-    /// `SYS_TIMER_CREATE`-allocated slots (batch items 6-10, `docs/MISSING_POSIX_SYSCALLS.md`) —
+    /// `SYS_TIMER_CREATE`-allocated slots (batch items 6-10, `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`) —
     /// `None` = free slot; see `PosixTimer`'s own doc comment. Checked by
     /// `interrupts::timer_interrupt_handler` alongside the `real_timer_deadline` scan just above.
     /// **Not inherited by `fork`, disarmed and deleted by `execve`** — real POSIX semantics

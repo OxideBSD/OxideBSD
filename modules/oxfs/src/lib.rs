@@ -235,7 +235,7 @@ const SYS_UTIMENSAT: u64 = 167;
 /// of them into the mount table instead. Landed on 174-176 instead (real Linux
 /// `create_module`/`init_module`/`delete_module` -- long-obsolete even on real Linux, and `insmod`/
 /// `rmmod`/`modprobe` never became build candidates in this port at all, see
-/// `docs/BUSYBOX_APPLETS.md`'s own note on `lsmod`), matching the musl-side patch's own explanation
+/// `OxideBSD-doc/BUSYBOX_APPLETS.md`'s own note on `lsmod`), matching the musl-side patch's own explanation
 /// (`third_party/musl/arch/x86_64/bits/syscall.h.in`).
 const SYS_MOUNT_BIND: u64 = 174;
 const SYS_MOUNT_TMPFS: u64 = 175;
@@ -438,7 +438,7 @@ const BLOCK_SIZE: usize = 4096;
 /// loads (see `Cargo.toml`'s `[package.metadata.bootimage]` `-m` bump, made at the same time as
 /// this).
 /// Raised again, 8192 -> 16384, once the Open POSIX Test Suite pilot (see CLAUDE.md's "POSIX
-/// conformance pilot" sections and `docs/POSIX_COMPLIANCE_CHECKLIST.md`) grew from its original
+/// conformance pilot" sections and `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`) grew from its original
 /// 68-file curated subset to several hundred files, adding real content on the order of the
 /// existing BusyBox applet roster's own footprint -- the ~14 MiB of headroom left at 8192 blocks
 /// (32 MiB total, minus BusyBox's own ~18 MiB) wasn't enough. 16384 blocks (64 MiB) leaves real
@@ -4850,7 +4850,7 @@ extern "C" fn oxfs_fchmod(fd: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
 /// Registered for `SYS_FCHDIR` at real Linux's own `__NR_fchdir = 81` -- same "still completely
 /// unassigned in this ABI's own registry, no invented number or musl-side remap needed" story as
 /// `SYS_FCHMOD` above (checked against every `SYS_*` constant in `src/`/`modules/` first). Found
-/// live via `docs/MISSING_POSIX_SYSCALLS.md`'s own POSIX-vs-musl sweep -- `third_party/musl/src/
+/// live via `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own POSIX-vs-musl sweep -- `third_party/musl/src/
 /// unistd/fchdir.c` calls this directly, though no BusyBox-roster applet was confirmed to call it
 /// yet; cheap enough to close anyway.
 ///
@@ -6108,7 +6108,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"kill", include_bytes!(env!("OXFS_KILL_ELF_PATH")));
 
     // Second pass: every applet build.rs's own second-pass probe found buildable against this
-    // musl port (see build.rs's own BUSYBOX_APPLETS_PASS2 comment and docs/BUSYBOX_APPLETS.md for
+    // musl port (see build.rs's own BUSYBOX_APPLETS_PASS2 comment and OxideBSD-doc/BUSYBOX_APPLETS.md for
     // what each one actually needs at runtime -- most need something OxideBSD doesn't implement
     // yet; "builds" was the bar this pass used, not "works"). One-liner form (not the multi-line
     // seed_file(...) call the first 24 applets above use) purely because there are ~300 of these --
@@ -6748,7 +6748,7 @@ fn format_fresh_filesystem() -> bool {
     let usr_lib_tcc = ensure_dir(usr_lib, b"tcc");
     ok &= seed_tree(usr_lib_tcc, TCC_RUNTIME_FILES);
 
-    // A real POSIX conformance baseline (see `docs/POSIX_COMPLIANCE_CHECKLIST.md`'s own
+    // A real POSIX conformance baseline (see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
     // "Verification" section): a curated pilot subset of `third_party/posixtestsuite`'s own
     // assertion files, each cross-compiled host-side with musl-gcc into a real ELF under
     // `/posix-tests/bin`, its real `t0` timeout-wrapper (also pre-built) at `/posix-tests/t0`, and

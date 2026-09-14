@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_MSGGET = 550` through `SYS_MSGCTL = 553`
 //! (`modules/posix_compat`'s `handle_msg*` -> `src/syscall/ffi.rs`'s `sys_msg*` ->
-//! `src/fs/sysv_msg.rs`'s `do_msg*`) -- items 25-28 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `src/fs/sysv_msg.rs`'s `do_msg*`) -- items 25-28 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! 28-syscall pre-reserved batch, the last sub-batch: real SysV message queues.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust

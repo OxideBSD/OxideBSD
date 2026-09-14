@@ -1,5 +1,5 @@
 //! Real POSIX message queues (`mq_open`/`mq_unlink`/`mq_timedsend`/`mq_timedreceive`/`mq_notify`/
-//! `mq_getsetattr` -- items 11-16 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+//! `mq_getsetattr` -- items 11-16 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 //! "pre-reserved ahead of implementation" batch, `SYS_MQ_OPEN = 536` through
 //! `SYS_MQ_GETSETATTR = 541`). No live caller anywhere in the current roster (confirmed by that
 //! doc) -- built anyway, in real POSIX implementation order, continuing straight on from the
@@ -52,7 +52,7 @@
 //! (`third_party/musl/src/mq/mq_notify.c`) never even issues the raw syscall for that case (it's
 //! handled entirely in userspace over a netlink socket this port doesn't have). `si_value`
 //! (`sigev_value`) is read but never delivered -- same already-documented gap `sigqueue`'s own
-//! "Missing, live caller confirmed" entry in `docs/MISSING_POSIX_SYSCALLS.md` has: `pending_signals`
+//! "Missing, live caller confirmed" entry in `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md` has: `pending_signals`
 //! is a plain bitmask with nowhere to stash a payload.
 
 use alloc::collections::BTreeMap;

@@ -22,7 +22,7 @@
 //! here at all — see `src/syscall.rs`'s `syscall_dispatch`, which intercepts that number directly,
 //! before ever reaching this module's table.
 //!
-//! `SYS_SIGALTSTACK = 528` is item 3 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
+//! `SYS_SIGALTSTACK = 528` is item 3 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 //! "pre-reserved ahead of implementation" batch. Real logic (`src/process/signals.rs`'s
 //! `do_sigaltstack`/`AltStack`) is kernel-resident, same pattern as everything else this module
 //! only ever calls through to — bookkeeping only, no signal is ever actually delivered on the alt
@@ -39,7 +39,7 @@
 //! module's own `handle_sigsuspend` is, same as everything else here, a thin wrapper.
 //!
 //! `SYS_SIGTIMEDWAIT = 495`/`SYS_SIGQUEUE = 496` (real, unclaimed `__NR_rt_sigtimedwait`/
-//! `__NR_rt_sigqueueinfo`, confirmed collision-free by `docs/MISSING_POSIX_SYSCALLS.md`'s own full
+//! `__NR_rt_sigqueueinfo`, confirmed collision-free by `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own full
 //! header sweep) back real `sigtimedwait(2)`/`sigwaitinfo(2)`/`sigwait(3)` and `sigqueue(2)` — the
 //! two real, confirmed-live-caller gaps that doc's own "Missing, live caller confirmed" table
 //! tracked. Real logic (`src/process/signals.rs`'s `do_sigtimedwait`/`do_sigqueue`) is
@@ -70,25 +70,25 @@ const SYS_KILL: u64 = 116;
 const SYS_SIGACTION: u64 = 117;
 const SYS_SIGPROCMASK: u64 = 118;
 /// Real, unremapped Linux value -- redirected here off its previous accidental collision with
-/// `SYS_STAT = 127` by the full header sweep in `docs/MISSING_POSIX_SYSCALLS.md`. See that doc's
+/// `SYS_STAT = 127` by the full header sweep in `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`. See that doc's
 /// own collision table for why 127 was unsafe and 494 isn't.
 const SYS_SIGPENDING: u64 = 494;
 /// Real, unclaimed Linux `__NR_tkill` value -- used directly, no musl-side remap needed. See
 /// `src/syscall/ffi.rs`'s `sys_tkill` doc comment for why this is just `kill` under another name
 /// on a single-threaded kernel.
 const SYS_TKILL: u64 = 200;
-/// Item 3 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+/// Item 3 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- a permanent OxideBSD-invented number claimed before this handler
 /// existed, same reasoning `modules/posix_compat`'s `SYS_GETRANDOM`/`SYS_SYSINFO` already have.
 const SYS_SIGALTSTACK: u64 = 528;
-/// Item 4 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+/// Item 4 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- same reasoning `SYS_SIGALTSTACK` just above already has.
 const SYS_PAUSE: u64 = 529;
-/// Item 5 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
+/// Item 5 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- same reasoning `SYS_PAUSE` just above already has.
 const SYS_SIGSUSPEND: u64 = 530;
 /// Real, unclaimed Linux `__NR_rt_sigtimedwait` value -- used directly, no invented number or
-/// musl-side remap needed (already confirmed collision-free by `docs/MISSING_POSIX_SYSCALLS.md`'s
+/// musl-side remap needed (already confirmed collision-free by `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s
 /// own full header sweep). Backs `sigtimedwait(2)`/`sigwaitinfo(2)`/`sigwait(3)`.
 const SYS_SIGTIMEDWAIT: u64 = 495;
 /// Real, unclaimed Linux `__NR_rt_sigqueueinfo` value -- same story as `SYS_SIGTIMEDWAIT` above.

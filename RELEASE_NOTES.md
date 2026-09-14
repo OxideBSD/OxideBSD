@@ -3,7 +3,7 @@
 First tagged snapshot of OxideBSD, a 100% Rust, x86_64-only, BSD-like operating system built from
 scratch (bootloader, kernel, syscall ABI, filesystem, and a real ported libc/userland). This is a
 `0.x` release: a real, usable snapshot of current progress, not a promise of API/ABI stability
-between minors. See `ROADMAP.md`/`CLAUDE.md` for the full three-phase plan this project is working
+between minors. See `OxideBSD-doc/ROADMAP.md`/`CLAUDE.md` for the full three-phase plan this project is working
 toward; `1.0.0` is reserved for the day OxideBSD can rebuild itself from source with no host OS
 involved (see "Not in this release," below).
 
@@ -19,7 +19,7 @@ involved (see "Not in this release," below).
   more, all musl's own real code running against this kernel's real syscalls.
 - **A real shell and userland.** BusyBox's `hush` as pid 1, real shell control flow (`if`/`for`/
   `while`/`case`/functions), 256 BusyBox applets built and running as standalone binaries
-  (curated down from an original 314-applet build probe — see `docs/BUSYBOX_APPLETS.md`'s
+  (curated down from an original 314-applet build probe — see `OxideBSD-doc/BUSYBOX_APPLETS.md`'s
   "Removed before v0.1" section for what was cut and why).
 - **A real filesystem.** `oxfs`, an in-memory-by-default Unix-shaped inode/block filesystem with
   real multi-component paths, per-process cwd, hard links, symlinks, device nodes, permissions —

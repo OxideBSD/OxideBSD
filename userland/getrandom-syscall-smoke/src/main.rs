@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_GETRANDOM = 526` (`modules/posix_compat`'s
 //! `handle_getrandom` -> `src/syscall/ffi.rs`'s `sys_getrandom` -> `src/random.rs`'s existing
-//! generator) -- item 1 of `docs/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
+//! generator) -- item 1 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall pre-reserved batch.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- `tests/random_smoke.rs` already covers

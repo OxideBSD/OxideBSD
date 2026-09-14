@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for `SYS_SEMGET = 546` through `SYS_SEMTIMEDOP = 549`
 //! (`modules/posix_compat`'s `handle_sem*` -> `src/syscall/ffi.rs`'s `sys_sem*` ->
-//! `src/fs/sysv_sem.rs`'s `do_sem*`) -- items 21-24 of `docs/MISSING_POSIX_SYSCALLS.md`'s own
+//! `src/fs/sysv_sem.rs`'s `do_sem*`) -- items 21-24 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own
 //! 28-syscall pre-reserved batch: real SysV semaphores.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
