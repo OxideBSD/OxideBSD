@@ -37,7 +37,8 @@
 //!    unblocks `SIGUSR1` and confirms a plain self-`kill(SIGUSR1)` *does* still run it immediately
 //!    (real POSIX ordering, same "handler already ran before the interrupted call returns"
 //!    property `pause-syscall-smoke` already proved).
-//! 7. Real `EINVAL` validation: `sigqueue` against pid `0`/negative, against signal `32`, and
+//! 7. Real `EINVAL` validation: `sigqueue` against pid `0`/negative, against signal `65` (past
+//!    `SIGRTMAX`), and
 //!    confirms `sig == 0` (the real POSIX null-signal existence-check convention) now *succeeds*
 //!    against self rather than `EINVAL`ing.
 //! 8. Real `ESRCH`/`EPERM` enforcement for `kill`/`sigqueue`'s `sig == 0` path: a nonexistent pid
@@ -441,7 +442,14 @@ pub extern "C" fn _start() -> ! {
     // kill(pid, 0) already has) -- a self-targeted one always succeeds, matches sigqueue/2-1.c's
     // own assertion in the Open POSIX Test Suite pilot.
     check!(sigqueue(pid, 0, 0) == Ok(0), "self sigqueue with sig=0 didn't succeed");
-    check!(sigqueue(pid, 32, 0) == Err(EINVAL), "sigqueue with sig=32 wasn't EINVAL");
+    // sig=32 used to be the boundary case here, but a later session's real fix for real
+    // pthread_cancel(3)/SIGCANCEL=33 support deliberately widened the valid range to 1..=34 (see
+    // CLAUDE.md's "times/SIGCANCEL/shared sigactions fixed" section) -- 32 is genuinely valid now,
+    // and self-sigqueue'ing it here (never blocked, no handler installed) resolved its real
+    // default disposition (Terminate) immediately, silently killing this pid-1 test process mid
+    // part 7 with no PASS/FAIL ever reported. The real invalid boundary is now one past
+    // SIGRTMAX (64), not 32.
+    check!(sigqueue(pid, 65, 0) == Err(EINVAL), "sigqueue with sig=65 (past SIGRTMAX) wasn't EINVAL");
     write_bytes(b"sig-syscall-smoke: part 7 (EINVAL validation) OK\n");
 
     // --- Part 8: real ESRCH/EPERM enforcement (kill/sigqueue's sig=0 existence+permission path)
