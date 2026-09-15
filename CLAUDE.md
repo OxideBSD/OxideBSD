@@ -889,12 +889,17 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
 - `do_execve` loads the interpreter alongside the main binary when a `PT_INTERP` segment is
   present, both sharing the same fresh address space; the real jump target becomes the
   interpreter's entry point.
-- **A permissive `SYS_MPROTECT=492` stub** — `ld.so`'s RELRO step calls real `mprotect`, so it
-  needed to stop `ENOSYS`ing, but enforces nothing yet (no W^X anywhere in this kernel).
+- **`SYS_MPROTECT=492`** — `ld.so`'s RELRO step calls real `mprotect`, so it needed to stop
+  `ENOSYS`ing at the time this landed; **since gained real, scoped enforcement** (see "Real
+  anonymous `PROT_NONE` + scoped real `mprotect(2)`" below) — RELRO's own call target (a `PT_LOAD`
+  ELF segment) falls outside that scope and stays the original permissive no-op, confirmed
+  unaffected.
 - Verified end-to-end via `tests/dynlink_syscall_smoke.rs` — real self-relocation, real symbol
   resolution against `libc.so`, a real libc call, all round-trip correctly.
 - **Milestone 2, not started**: `dlopen`/`dlsym`/`dlclose`/`dlerror` — blocked on `mmap`/`mprotect`
-  actually enforcing real placement/protection (both still permissive no-ops/bump-allocators).
+  actually enforcing real placement/protection outside the narrow anonymous-mmap-window scope that
+  now exists (still permissive no-ops/bump-allocators everywhere else, including real file-backed
+  segment protection and `MAP_FIXED` placement guarantees a real dynamic loader would need).
 
 ## Real getrandom/sysinfo/sigaltstack/pause/sigsuspend/POSIX timers/POSIX message queues/SysV IPC (`modules/posix_compat`, `modules/signal`, `modules/clock`, `src/fs/{mqueue,sysv_msg,sysv_sem,sysv_shm,sysv_ipc}.rs`)
 
@@ -2304,6 +2309,59 @@ full ~1687-file supervised run confirms it: clean on the first iteration, zero e
 regression dropped it to 86.6% excl-untested). Every remaining FAIL/CRASH/TIMEOUT matches an
 already-documented, accepted gap elsewhere in this file (musl's stale-tid UAF class, `strftime/
 2-1.c`'s known upstream bug, `shm_open/39-2.c`'s `ENAMETOOLONG` gap, etc.) — nothing new.
+
+## Real anonymous `PROT_NONE` + scoped real `mprotect(2)`, closing pthread guard-page enforcement (`src/process/mm.rs`, `src/syscall/ffi.rs`, `userland/mmap-syscall-smoke`)
+
+`SYS_MPROTECT` had been a total no-op since it was first registered (see the syscall-ABI section's
+old note); `do_mmap_anon` also always mapped every anonymous page `PRESENT | WRITABLE` regardless
+of `prot`. Real musl's own `pthread_create()` builds a guard page exactly by `mmap(size, PROT_NONE,
+MAP_ANON, ...)` then `mprotect(usable tail, PROT_READ|WRITE)` — with both stubbed, no pthread stack
+ever had a real guard.
+
+- **Real `PROT_NONE` anonymous mmap leaves the region genuinely unmapped** (reusing
+  `do_mmap_file_backed`'s own precedent) rather than present-but-inaccessible — load-bearing, not
+  just tidy: `AddressSpace::teardown`'s `free_table_level` treats a clear `USER_ACCESSIBLE` bit
+  *anywhere* as an absolute "nothing user-owned here" guarantee and skips freeing unconditionally;
+  a present-but-restricted leaf would permanently leak one frame per guard page ever created.
+- **Real, deliberately scoped `mprotect(2)`**: only enforces inside the mmap-managed VA window
+  (`MMAP_REGION_BASE..MMAP_REGION_CEILING`, where every `mmap()` — anon or file-backed — already
+  lives); outside it (a `PT_LOAD` ELF segment, the heap, a fixed-VA stack — notably real `ld.so`'s
+  own RELRO step) stays the exact permissive no-op it always was. Not just scope discipline: the
+  module/kernel region's page-table structures are the *same physical frames* referenced from every
+  process's own L4 table, so enforcing there from an ordinary unprivileged call would leak a
+  kernel-owned mapping process-wide.
+- **A not-yet-backed page inside the window demand-allocates on `mprotect`** (a still-`PROT_NONE`
+  guard sub-range being widened for the first time) instead of `ENOMEM`ing — matching musl's own
+  guard-then-widen sequence exactly. Both `do_mmap_anon` and this demand-map path use
+  `Mapper::map_to_with_table_flags` with intermediate P2/P3/P4 flags always pinned fully open,
+  never derived from the leaf's own restricted flags — found live: the convenience `map_to` derives
+  parent-table flags from the leaf, so a `PROT_NONE`-then-widened region's own intermediate tables
+  would stay permanently non-accessible even after the leaf was corrected (real x86 ANDs U/S and
+  R/W down through every paging level; `update_flags` only ever touches the leaf).
+- **Verified two ways**: a new, direct `userland/mmap-syscall-smoke` part 14 (`mmap(PROT_NONE)` +
+  `mprotect(widen)` + touch both the widened part and the untouched guard, expecting a real
+  `SIGSEGV` on the latter) confirms the mechanism itself is correct. `pthread_create/1-5.c`/`3-2.c`
+  (Open POSIX Test Suite: real pthread guard-page and stack-size-immutability-after-creation
+  checks) still `FAIL` — confirmed via direct host comparison (real glibc passes cleanly, 5/5) that
+  this is **not** the same bug: this musl port's own TLS/TSD carve-out leaves more slack between
+  where a fresh thread's stack pointer starts and the real guard boundary than
+  `_SC_THREAD_STACK_MIN` alone accounts for, so the tests' own self-bounded recursion depth stops
+  short of ever touching the guard on this specific build, regardless of whether the guard itself
+  works. Not chased further — tuning musl's own internal accounting to make one test's numeric
+  margin happen to line up isn't a real conformance fix.
+- **`pthread_create/1-6.c`**: a real, permanent `TIMEOUT`, unrelated to the fix above — the test
+  hardcodes `NCPU=4` real busy-loop threads expected to run in true hardware parallel while a fifth
+  thread times a 500ms window; on this single-core kernel they serialize instead, and 16 such
+  scenarios in sequence blow past `t0`'s 40s bound. Real `SCHED_FIFO`/`SCHED_RR` priority semantics
+  are correctly enforced (confirmed live) — a real-SMP prerequisite (ROADMAP.md's v0.5.0), not a
+  bug. `pthread_create/14-1.c` (a real, heavy alternating-`SIGUSR1`/`SIGUSR2` storm during
+  concurrent thread creation — the same shape as the still-open
+  `pthread_mutex_lock/3-1.c` RBP-corruption finding) was checked too and is clean `PASS`, not
+  affected.
+- **Verified no regression**: `mmap_syscall_smoke` (14 parts), `dynlink_syscall_smoke` (real `ld.so`
+  RELRO `mprotect` untouched), `pthread_syscall_smoke`, and the full 171-file
+  `POSIX_PILOT_CANARY_ONLY` standing suite (125P/4F/1U/13US/23UT/2TO/3CR) all clean — every non-PASS
+  result there matches an already-documented accepted category, nothing new.
 
 ## Dependency notes
 

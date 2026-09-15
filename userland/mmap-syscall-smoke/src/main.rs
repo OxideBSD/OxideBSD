@@ -64,6 +64,7 @@ const SYS_MUNLOCKALL: u64 = 512;
 const SYS_FSTAT: u64 = 126;
 const SYS_MSYNC: u64 = 26;
 const SYS_NANOSLEEP: u64 = 139;
+const SYS_MPROTECT: u64 = 492;
 /// Not a real syscall number anything else in this codebase registers -- `tests/
 /// mmap_syscall_smoke.rs` registers this one directly against a test-only handler, same convention
 /// every other real-`SYSCALL` smoke test in this codebase uses.
@@ -87,6 +88,8 @@ const SIGSEGV: u64 = 11;
 const MAP_SHARED: u64 = 0x01;
 const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
+const MAP_ANON: u64 = 0x20;
+const PROT_NONE: u64 = 0x0;
 const EBADF: u64 = 9;
 const EINVAL: u64 = 22;
 const EAGAIN: u64 = 11;
@@ -241,6 +244,18 @@ fn mmap_shared(fd: u64, len: u64) -> Result<u64, u64> {
     mmap_call(0, fd, len, MAP_SHARED)
 }
 
+/// A real anonymous mapping with an explicit `prot`, unlike `mmap_call`/`mmap_shared` above (both
+/// hardcode `PROT_READ_WRITE`) -- needed for part 14's real `PROT_NONE` guard-region exercise.
+fn mmap_anon_prot(len: u64, prot: u64) -> Result<u64, u64> {
+    let packed_prot = (prot & 0xff) | ((MAP_PRIVATE | MAP_ANON) << 8);
+    let packed = 0xffff_ffffu64; // fd = -1
+    unsafe { syscall4(SYS_MMAP, 0, len, packed_prot, packed) }
+}
+
+fn mprotect_call(addr: u64, len: u64, prot: u64) -> Result<u64, u64> {
+    unsafe { syscall(SYS_MPROTECT, addr, len, prot) }
+}
+
 fn fstat(fd: u64) -> Result<RawStat, u64> {
     // SAFETY: RawStat is a plain-integer #[repr(C)] struct -- an all-zero bit pattern is valid for
     // every field, and oxfs_fstat immediately overwrites the whole thing via write_unaligned.
@@ -393,6 +408,52 @@ fn part4_child() -> ! {
     unsafe {
         core::ptr::write_volatile(0x0000_0000_0800_0000u64 as *mut u8, 0xEF);
     }
+    unsafe {
+        let _ = syscall(SYS_EXIT, 1, 0, 0);
+    }
+    loop {
+        spin_loop();
+    }
+}
+
+/// Part 14: a real anonymous `PROT_NONE` guard region, exactly matching musl's own real
+/// `pthread_create()` guard-page shape (`mmap(size, PROT_NONE, ...)` then `mprotect(usable tail,
+/// PROT_READ|WRITE)`) -- see `process::mm::do_mmap_anon`/`do_mprotect`'s own doc comments. Maps 3
+/// pages `PROT_NONE`, widens pages 1-2 to real read/write via `mprotect`, confirms the widened
+/// part is genuinely writable, then touches page 0 (still `PROT_NONE`, never touched by the
+/// `mprotect` call) -- real default disposition `SIGSEGV`, proving the untouched guard page
+/// genuinely faults rather than silently inheriting access from its now-writable neighbor.
+fn part14_child() -> ! {
+    let base = match mmap_anon_prot(3 * 4096, PROT_NONE) {
+        Ok(base) => base,
+        Err(_) => unsafe {
+            let _ = syscall(SYS_EXIT, 2, 0, 0);
+            loop {
+                spin_loop();
+            }
+        },
+    };
+    if mprotect_call(base + 4096, 2 * 4096, PROT_READ_WRITE).is_err() {
+        unsafe {
+            let _ = syscall(SYS_EXIT, 3, 0, 0);
+        }
+        loop {
+            spin_loop();
+        }
+    }
+    unsafe {
+        // The widened part must genuinely work.
+        core::ptr::write_volatile((base + 4096) as *mut u8, 0x5a);
+        if core::ptr::read_volatile((base + 4096) as *const u8) != 0x5a {
+            let _ = syscall(SYS_EXIT, 4, 0, 0);
+            loop {
+                spin_loop();
+            }
+        }
+        // The untouched guard page (page 0) must still fault.
+        core::ptr::write_volatile(base as *mut u8, 0x5a);
+    }
+    // Only reached if the guard page never faulted at all.
     unsafe {
         let _ = syscall(SYS_EXIT, 1, 0, 0);
     }
@@ -734,6 +795,13 @@ pub extern "C" fn _start() -> ! {
         "part 13: expected EOVERFLOW for an off/len combination exceeding the real off_t range"
     );
     write_bytes(b"mmap-syscall-smoke: part 13 (EOVERFLOW on off/len overflow) OK\n");
+
+    // --- Part 14: real anonymous PROT_NONE guard region + mprotect widening ---
+    run_child_and_check(
+        part14_child,
+        "mmap-syscall-smoke: part 14 (anon PROT_NONE guard page)",
+        |status| wtermsig(status) == Some(SIGSEGV as i32),
+    );
 
     write_bytes(b"mmap-syscall-smoke: all parts passed\n");
     test_exit(true);

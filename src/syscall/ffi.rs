@@ -2254,7 +2254,12 @@ pub(crate) extern "C" fn oxidebsd_sys_brk(addr: u64) -> i64 {
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
-    result_to_ffi(crate::process::do_mprotect(addr, len, prot))
+    result_to_ffi(crate::process::do_mprotect(
+        crate::process::scheduler::current_pid(),
+        addr,
+        len,
+        prot,
+    ))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_msync(addr: u64, len: u64, flags: u64) -> i64 {

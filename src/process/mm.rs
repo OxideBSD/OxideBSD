@@ -41,15 +41,18 @@ static NEXT_MMAP_PAGE: Mutex<u64> = Mutex::new(MMAP_REGION_BASE);
 /// caller in this kernel's own call graph exercises the anonymous case at this scale.
 const MAX_MMAP_FILE_REGIONS: usize = 65530;
 
-/// Real `PROT_READ`/`PROT_WRITE` (match every real Unix's values). `do_mmap_anon` still maps every
-/// anonymous page unconditionally `PRESENT | WRITABLE` regardless of either bit (`do_mprotect`'s
-/// own doc comment documents this kernel's total lack of real page protection enforcement for the
-/// anonymous case) — these two bits are only ever consulted by `do_mmap_file_backed`: `PROT_WRITE`
-/// decides whether a real fd-backed mapping's frames get write-back on `munmap`/exit *and* whether
-/// the page table entry itself is `WRITABLE`; `PROT_READ`/`PROT_WRITE` together (real `PROT_NONE`
-/// when neither is set) decide whether a file-backed mapping's covered pages get a page-table entry
-/// at all — see that function's own doc comment for why leaving them unmapped is enough to produce
-/// a real `SIGSEGV` with no new machinery (`mmap/6-2.c`).
+/// Real `PROT_READ`/`PROT_WRITE` (match every real Unix's values). `do_mmap_anon` maps every
+/// anonymous page `PRESENT` unconditionally (this kernel eager-allocates every anon page
+/// regardless of protection, matching its established no-demand-paging precedent everywhere else),
+/// but only grants `WRITABLE`/`USER_ACCESSIBLE` per these bits — real `PROT_NONE` (neither set)
+/// leaves a page present-but-ring3-inaccessible, faulting exactly like an unmapped page would (see
+/// `do_mprotect`'s own doc comment for why this specific shape — present, not absent — is what
+/// makes a later `mprotect()` able to grant access back with no new bookkeeping). `PROT_WRITE`
+/// additionally decides whether a real fd-backed mapping's frames get write-back on `munmap`/exit;
+/// `PROT_READ`/`PROT_WRITE` together (real `PROT_NONE` when neither is set) decide whether a
+/// file-backed mapping's covered pages get a page-table entry at all — see that function's own doc
+/// comment for why leaving them unmapped is enough to produce a real `SIGSEGV` with no new
+/// machinery (`mmap/6-2.c`).
 const PROT_READ: u64 = 0x1;
 const PROT_WRITE: u64 = 0x2;
 
@@ -285,7 +288,7 @@ pub fn do_mmap(
             fixed_base,
         )
     } else {
-        do_mmap_anon(caller_pid, fixed_base, region_len)
+        do_mmap_anon(caller_pid, fixed_base, region_len, prot)
     };
 
     if auto_lock && result.is_ok() {
@@ -303,7 +306,23 @@ pub fn do_mmap(
 /// `do_mmap_file_backed` without duplicating it in each. `fixed_base`, when set, is a real
 /// `MAP_FIXED` address (already alignment/canonical-validated, and already had `do_mmap`'s own
 /// `do_munmap` pre-clear run against it); otherwise a fresh VA is bump-allocated as before.
-fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64) -> Result<u64, u64> {
+///
+/// **Real `PROT_NONE` (neither `PROT_READ` nor `PROT_WRITE`) skips mapping the region at all** --
+/// reusing `do_mmap_file_backed`'s own precedent (see that function's doc comment) rather than
+/// mapping present-but-inaccessible pages. This isn't just consistency: `AddressSpace::teardown`'s
+/// own frame-freeing walk (`free_table_level`) treats a clear `USER_ACCESSIBLE` bit *anywhere* as
+/// an absolute guarantee that nothing user-owned lives beneath it, and skips freeing there
+/// unconditionally (see that function's own doc comment) -- a present-but-`USER_ACCESSIBLE`-clear
+/// leaf would be a real, permanent per-guard-page frame leak on every address-space teardown, not
+/// just formally inconsistent. Leaving the region genuinely unmapped costs nothing here (no
+/// pre-existing content to preserve) and reuses the exact same "unmapped access -> real `SIGSEGV`"
+/// path `do_mmap_file_backed`'s own `PROT_NONE` case already established.
+///
+/// `do_mprotect` is what actually reifies a `PROT_NONE` sub-range later widened to real access --
+/// see that function's own doc comment for the demand-mapping half of this design (musl's own
+/// `pthread_create()` `mmap()`s the whole guard+usable region `PROT_NONE` in one call, then
+/// `mprotect()`s just the usable tail back to `PROT_READ|PROT_WRITE`).
+fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64, prot: u64) -> Result<u64, u64> {
     let base = match fixed_base {
         Some(base) => base,
         None => {
@@ -318,6 +337,14 @@ fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64) -> Re
         }
     };
 
+    let prot_accessible = prot & (PROT_READ | PROT_WRITE) != 0;
+    if !prot_accessible {
+        // Real PROT_NONE: reserve the VA (already done above) but map nothing -- see this
+        // function's own doc comment.
+        return Ok(base);
+    }
+    let writable = prot & PROT_WRITE != 0;
+
     let phys_offset = memory::phys_mem_offset();
     let mut table = PROCESS_TABLE.lock();
     let me = table
@@ -328,6 +355,18 @@ fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64) -> Re
     // reason AddressSpace::fork's own doc comment already establishes for this "active table" case.
     let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
 
+    let mut leaf_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if writable {
+        leaf_flags |= PageTableFlags::WRITABLE;
+    }
+    // Always fully open, regardless of this call's own leaf flags -- see `do_mprotect`'s own doc
+    // comment: a later `mprotect()` widening just the leaf (e.g. a real `PROT_READ`-only region
+    // upgraded to add `PROT_WRITE`) must not find an intermediate P2/P3/P4 entry this same region
+    // created non-writable/non-accessible, since real x86 ANDs those bits down through every
+    // paging level and `update_flags` only ever touches the leaf.
+    let parent_table_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + region_len - 1));
     with_frame_allocator(|fa| -> Result<(), u64> {
@@ -337,14 +376,7 @@ fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64) -> Re
             // and page falls in this process's own, freshly bump-allocated mmap region.
             unsafe {
                 mapper
-                    .map_to(
-                        page,
-                        frame,
-                        PageTableFlags::PRESENT
-                            | PageTableFlags::WRITABLE
-                            | PageTableFlags::USER_ACCESSIBLE,
-                        fa,
-                    )
+                    .map_to_with_table_flags(page, frame, leaf_flags, parent_table_flags, fa)
                     .map_err(|_| ENOMEM)?
                     .flush();
             }
@@ -1120,16 +1152,111 @@ pub fn has_live_phys_mapping(pid: Pid) -> bool {
         .is_some_and(|p| !p.shared.lock().mmap_phys_regions.is_empty())
 }
 
-/// `SYS_MPROTECT`'s real logic — a permissive no-op success stub, exactly like `do_munmap` above.
-/// This kernel doesn't enforce page protection anywhere yet (`do_mmap` already ignores its own
-/// `prot` argument and unconditionally grants `WRITABLE`; `NO_EXECUTE`/`EFER.NXE` isn't plumbed at
-/// all) — so a caller that successfully changed nothing is an honest, not a regressive, answer,
-/// same tier as `getrusage`'s all-zero-but-correctly-shaped struct. Registered mainly so a real
-/// dynamic linker's own RELRO-protection step (`mprotect`ing its relocated `PT_GNU_RELRO` segment
-/// read-only after relocation) doesn't surface as an unrecognized-syscall `ENOSYS` — real
-/// enforcement is future work, once something actually depends on W^X being real.
-pub fn do_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, u64> {
-    let _ = (addr, len, prot);
+/// `SYS_MPROTECT`'s real logic — scoped real enforcement, not the total no-op this used to be.
+/// `NO_EXECUTE`/`EFER.NXE` still isn't plumbed anywhere in this kernel, so `PROT_EXEC` is silently
+/// ignored same as before; `PROT_READ`/`PROT_WRITE` now genuinely toggle `USER_ACCESSIBLE`/
+/// `WRITABLE` on the caller's own existing page-table entries -- **but only for an address range
+/// entirely inside the mmap-managed VA window** (`MMAP_REGION_BASE..MMAP_REGION_CEILING`, where
+/// every `mmap()`'d region -- anonymous or file-backed -- already lives, see `NEXT_MMAP_PAGE`).
+/// Anything outside it (a `PT_LOAD` ELF segment, the heap, a thread's own fixed-VA stack, ...)
+/// stays the exact permissive no-op this function has always been, unconditionally `Ok(0)` --
+/// real, unmodified `ld.so`'s own RELRO step (`mprotect`ing its relocated `PT_GNU_RELRO` segment
+/// read-only, far outside this window) must keep working exactly as it did before this landed.
+///
+/// This isn't just scope discipline, it's a real safety requirement: this window is the only VA
+/// range guaranteed to hold nothing but *this exact process's own* freshly-allocated page-table
+/// structures. The module/kernel region's lower page-table levels are the same physical frames
+/// referenced from every process's own L4 table (`AddressSpace::new`'s own doc comment) --
+/// blindly granting `USER_ACCESSIBLE` there from an ordinary unprivileged `mprotect()` call would
+/// leak a kernel-owned mapping to every process on the system, not just the caller.
+///
+/// Real `EINVAL` for a misaligned `addr`, checked only once already inside the window (so it can
+/// never newly reject a call this function used to silently accept outside it). **No
+/// `range_fully_mapped`/`ENOMEM` precondition** -- unlike `do_mlock`/`do_munlock`'s identical-
+/// looking check, a page inside this window can legitimately be currently *unmapped*: a real
+/// `PROT_NONE` guard region (`do_mmap_anon`'s own doc comment) is reserved VA with no page-table
+/// entry at all, and widening it back to real access is exactly the scenario this function has to
+/// handle -- a not-yet-`Mapped` page here demand-allocates a fresh, zeroed frame and maps it with
+/// fully-open intermediate flags (identical reasoning to `do_mmap_anon`'s own `parent_table_flags`)
+/// rather than erroring; an already-`Mapped` page just has its existing leaf's `WRITABLE`/
+/// `USER_ACCESSIBLE` bits toggled via `update_flags`, preserving every other bit (`SHARED_LEAF`
+/// included).
+pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u64, u64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let Some(end_inclusive) = addr.checked_add(len).and_then(|e| e.checked_sub(1)) else {
+        return Ok(0);
+    };
+    if addr < MMAP_REGION_BASE || end_inclusive >= MMAP_REGION_CEILING {
+        return Ok(0);
+    }
+    if !addr.is_multiple_of(4096) {
+        return Err(EINVAL);
+    }
+
+    let prot_accessible = prot & (PROT_READ | PROT_WRITE) != 0;
+    let writable = prot & PROT_WRITE != 0;
+    let mut leaf_flags = PageTableFlags::PRESENT;
+    if prot_accessible {
+        leaf_flags |= PageTableFlags::USER_ACCESSIBLE;
+    }
+    if writable {
+        leaf_flags |= PageTableFlags::WRITABLE;
+    }
+    // Always fully open -- see do_mmap_anon's identical reasoning.
+    let parent_table_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+    let phys_offset = memory::phys_mem_offset();
+    let table = PROCESS_TABLE.lock();
+    let me = table
+        .get(&caller_pid)
+        .expect("mprotect: current process missing from table");
+    // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
+    // address space.
+    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+    let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_inclusive));
+    with_frame_allocator(|fa| -> Result<(), u64> {
+        for page in Page::range_inclusive(start_page, end_page) {
+            match mapper.translate(page.start_address()) {
+                TranslateResult::Mapped { flags: old_flags, .. } => {
+                    let mut new_flags =
+                        old_flags & !(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                    new_flags |= leaf_flags & (PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                    // SAFETY: only ever narrows/widens WRITABLE/USER_ACCESSIBLE on a page this
+                    // exact process already owns inside its own private mmap window (or, for a
+                    // real CLONE_VM/CLONE_THREAD sibling, the whole shared address space --
+                    // matching real POSIX: mprotect changes the entire process's protections,
+                    // visible to every thread sharing it). A real flush, not `.ignore()`: unlike a
+                    // freshly-mapped page with no prior TLB entry, this can be *narrowing* an
+                    // already-cached mapping's permissions, which must take effect immediately.
+                    unsafe {
+                        mapper.update_flags(page, new_flags).map_err(|_| ENOMEM)?.flush();
+                    }
+                }
+                _ => {
+                    // Not yet backed -- a still-PROT_NONE guard sub-range being widened for the
+                    // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill
+                    // convention for every other anonymous page.
+                    let frame = fa.allocate_frame().ok_or(ENOMEM)?;
+                    let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+                    unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+                    // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's
+                    // contract); page is confirmed not-Mapped above, and falls inside this
+                    // process's own mmap window.
+                    unsafe {
+                        mapper
+                            .map_to_with_table_flags(page, frame, leaf_flags, parent_table_flags, fa)
+                            .map_err(|_| ENOMEM)?
+                            .flush();
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
     Ok(0)
 }
 
