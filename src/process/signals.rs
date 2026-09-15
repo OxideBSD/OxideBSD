@@ -557,6 +557,49 @@ fn record_pending(
     Ok(())
 }
 
+/// Real POSIX wake condition for `pause(2)`/`sigsuspend(2)`/`nanosleep(2)`/`clock_nanosleep(2)`/
+/// `mq_receive(3)`/`mq_send(3)`/`select(2)`/a blocking `FUTEX_WAIT` -- every one of those contracts
+/// (see their own doc comments) is worded around "a signal is delivered whose action is to invoke
+/// a signal-catching function or to terminate the process", not merely "a signal became pending".
+/// A plain `pending_signals & !blocked_signals != 0` check -- what every one of these call sites
+/// used before this function existed -- is wrong for a signal whose *resolved* disposition is
+/// default-`Ignore` (`SIG_IGN`, or `SIG_DFL` against a signal `default_disposition` maps to
+/// `Ignore`): a real Unix's signal-delivery machinery silently discards a signal like that and
+/// transparently resumes the interrupted syscall, never surfacing `EINTR` to userspace at all.
+///
+/// Found live via `timer_gettime/1-4.c`: it deliberately arms its `timer_create()` notification
+/// against `SIGCONT` specifically *because* `SIGCONT`'s default disposition doesn't interrupt
+/// `sleep()` on a real system (the test's own comment says as much) -- this kernel's
+/// `do_nanosleep` returned `EINTR` on the raw pending-bit check regardless, so `sleep(3)` (no
+/// retry loop in musl's own implementation) returned early with unslept time remaining, and the
+/// test's own `if (sleep(SLEEPSEC) != 0)` check bailed `PTS_UNRESOLVED` before ever reaching its
+/// real assertion. The exact same bug shape existed at every other site listed above -- each one's
+/// own doc comment already *claimed* this exact "will invoke a caught handler" semantics without
+/// actually implementing it.
+///
+/// Mirrors `take_deliverable_signal`'s own per-signal disposition resolution (`SIG_IGN`/default-
+/// `Ignore` continue past; anything else -- a caught handler, or a default `Terminate`/`Stop` --
+/// counts) without consuming anything: this is a pure readiness check, called before a syscall
+/// commits to blocking (or re-checked after waking), never a substitute for the real delivery that
+/// still happens at `deliver_pending_signal` once the caller's own `Err(EINTR)` unwinds there.
+pub(crate) fn has_interrupting_signal(proc: &Process) -> bool {
+    let mut pending = proc.pending_signals & !proc.blocked_signals;
+    if pending == 0 {
+        return false;
+    }
+    let shared = proc.shared.lock();
+    while pending != 0 {
+        let signum = pending.trailing_zeros() as u64 + 1;
+        pending &= !(1 << (signum - 1));
+        match shared.sigactions[signum as usize].handler {
+            1 => {} // SIG_IGN
+            0 if default_disposition(signum) == DefaultDisposition::Ignore => {} // SIG_DFL, ignored
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// Wakes `pid` if it's blocked in `do_sigtimedwait` and `sig` is a member of the set it's waiting
 /// on -- shared by every `Action::SetPending` arm (`do_kill`/`signal_foreground_group`/
 /// `do_sigqueue`), the same shape `wake_if_paused` below already establishes for `do_pause`/
@@ -711,20 +754,22 @@ pub(crate) fn notify_parent_sigchld(
 /// `SYS_PAUSE`'s real logic (`529`, item 4 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall
 /// pre-reserved batch). Real POSIX semantics: blocks until a signal is delivered that either
 /// terminates the process (in which case this never returns at all) or invokes a caught handler
-/// -- always returns `EINTR` otherwise (`pause(2)` has no successful return). An ignored signal,
-/// a default-`Terminate`/`Stop` signal is handled by its own existing immediate path (`do_kill`'s
-/// `Action::Terminate`/`Action::Stop`, unaffected by this process's `ProcState`), and a signal
-/// blocked via `sigprocmask` don't wake this loop at all -- it just keeps blocking, matching real
-/// semantics.
+/// -- always returns `EINTR` otherwise (`pause(2)` has no successful return). A signal blocked via
+/// `sigprocmask` doesn't wake this loop at all -- it just keeps blocking, matching real semantics;
+/// a signal that's merely pending but resolves to default-`Ignore` (`has_interrupting_signal`
+/// below) doesn't either, matching real Unix silently discarding it and transparently resuming
+/// the blocked call instead of surfacing `EINTR`.
 ///
-/// Checks the real wake condition (`pending_signals & !blocked_signals != 0`) *before* ever
-/// blocking, same "avoid a lost wakeup" reasoning every other blocking primitive in this codebase
-/// already follows -- a signal could already be pending-but-deferred from before this call (e.g.
-/// delivery deferred while blocked, since unblocked). Loops and re-checks after every wake, same
-/// established pattern this codebase already audits for (`ScheduleWakeup`-worthy: any cross-
-/// process force-wake mechanism needs every `scheduler::schedule()` call site to loop-and-recheck,
-/// not trust "state == Ready now" to mean "my specific event happened" -- see
-/// `ProcState::Stopped`'s own doc comment for the identical reasoning).
+/// Checks the real wake condition (`has_interrupting_signal`, not a plain
+/// `pending_signals & !blocked_signals != 0` -- see that function's own doc comment for why the
+/// latter is wrong) *before* ever blocking, same "avoid a lost wakeup" reasoning every other
+/// blocking primitive in this codebase already follows -- a signal could already be
+/// pending-but-deferred from before this call (e.g. delivery deferred while blocked, since
+/// unblocked). Loops and re-checks after every wake, same established pattern this codebase
+/// already audits for (`ScheduleWakeup`-worthy: any cross-process force-wake mechanism needs every
+/// `scheduler::schedule()` call site to loop-and-recheck, not trust "state == Ready now" to mean
+/// "my specific event happened" -- see `ProcState::Stopped`'s own doc comment for the identical
+/// reasoning).
 ///
 /// Once a deliverable signal exists, this returns `Err(EINTR)` and control resumes normally at
 /// this exact syscall's own dispatch tail (`src/syscall/mod.rs`'s `deliver_pending_signal`, called
@@ -739,7 +784,7 @@ pub fn do_pause(pid: Pid) -> Result<u64, u64> {
             let proc = table
                 .get_mut(&pid)
                 .expect("pause: current process missing from table");
-            if proc.pending_signals & !proc.blocked_signals != 0 {
+            if has_interrupting_signal(proc) {
                 return Err(EINTR);
             }
             proc.state = ProcState::Blocked(BlockReason::WaitingForSignal);
@@ -794,7 +839,7 @@ pub fn do_sigsuspend(pid: Pid, mask_ptr: u64) -> Result<u64, u64> {
             let proc = table
                 .get_mut(&pid)
                 .expect("sigsuspend: current process missing from table");
-            if proc.pending_signals & !proc.blocked_signals != 0 {
+            if has_interrupting_signal(proc) {
                 proc.sigsuspend_restore_mask = Some(original_mask);
                 return Err(EINTR);
             }

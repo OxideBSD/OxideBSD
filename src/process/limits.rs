@@ -606,7 +606,7 @@ pub fn do_futex(pid: Pid, addr: u64, op: u64, val: u64, to: u64) -> Result<u64, 
         {
             let mut table = PROCESS_TABLE.lock();
             let proc = table.get_mut(&pid).unwrap();
-            if proc.pending_signals & !proc.blocked_signals != 0 {
+            if signals::has_interrupting_signal(proc) {
                 return Err(EINTR);
             }
             proc.state = ProcState::Blocked(BlockReason::WaitingForFutex(scope, key, deadline));
@@ -615,7 +615,7 @@ pub fn do_futex(pid: Pid, addr: u64, op: u64, val: u64, to: u64) -> Result<u64, 
 
         let table = PROCESS_TABLE.lock();
         let proc = table.get(&pid).unwrap();
-        if proc.pending_signals & !proc.blocked_signals != 0 {
+        if signals::has_interrupting_signal(proc) {
             return Err(EINTR);
         }
         if crate::cpu::interrupts::ticks() >= deadline {

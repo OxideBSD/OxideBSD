@@ -79,7 +79,7 @@ pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
                 // `syscall_dispatch`) resolves what really happens next (handler invocation, or a
                 // self-signaled default-Terminate) -- this function's only job is to stop waiting
                 // and hand control back.
-                if proc.pending_signals & !proc.blocked_signals != 0 {
+                if crate::process::signals::has_interrupting_signal(proc) {
                     let now = crate::cpu::interrupts::ticks();
                     let remaining = deadline.saturating_sub(now);
                     drop(table);
@@ -698,7 +698,7 @@ pub fn do_clock_nanosleep(
             // Real POSIX: a signal that will invoke a caught handler interrupts the sleep early --
             // same "avoid a lost wakeup" reasoning `do_nanosleep`'s own identical check already
             // establishes.
-            if proc.pending_signals & !proc.blocked_signals != 0 {
+            if crate::process::signals::has_interrupting_signal(proc) {
                 let now = crate::cpu::interrupts::ticks();
                 let remaining = deadline.saturating_sub(now);
                 drop(table);

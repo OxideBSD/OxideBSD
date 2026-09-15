@@ -208,8 +208,9 @@ fn fd_set_write_back(ptr: u64, words: &[u64; FD_SET_WORDS]) {
 /// `EBADF` -- no caller in this port's own corpus needs that distinction.
 ///
 /// **Real signal-interrupt support `oxidebsd_sys_poll` itself doesn't have**: checked once per
-/// spin pass, same `pending_signals & !blocked_signals` check every other blocking primitive in
-/// this codebase already uses -- found live via three Open POSIX Test Suite pilot files
+/// spin pass via `process::signals::has_interrupting_signal`, same real-delivery-aware check
+/// every other blocking primitive in this codebase uses -- found live via three Open POSIX Test
+/// Suite pilot files
 /// (`sigaction/10-1,11-1,17-1.c`) that use `select(0, NULL, NULL, NULL, &tv)` purely as a
 /// "block until this timeout elapses or a signal arrives" idiom, no fd involved at all; that
 /// shape falls out of this same general implementation for free (the `0..n` readiness scan is
@@ -290,7 +291,7 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
         let signal_pending = crate::process::table()
             .lock()
             .get(&caller_pid)
-            .is_some_and(|proc| proc.pending_signals & !proc.blocked_signals != 0);
+            .is_some_and(|proc| crate::process::signals::has_interrupting_signal(proc));
         if signal_pending {
             return -(EINTR as i64);
         }

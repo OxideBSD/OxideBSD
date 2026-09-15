@@ -449,7 +449,7 @@ pub(crate) fn do_mq_timedsend(
                 // Real POSIX: a signal that will invoke a caught handler interrupts a blocking
                 // mq_send() early -- same reasoning do_mq_timedreceive's own identical check above
                 // already establishes.
-                if proc.pending_signals & !proc.blocked_signals != 0 {
+                if process::signals::has_interrupting_signal(proc) {
                     drop(table);
                     drop(queues);
                     return Err(EINTR);
@@ -533,7 +533,7 @@ pub(crate) fn do_mq_timedreceive(
                 // reasoning do_pause's/do_nanosleep's own identical check already establishes. See
                 // signals::wake_if_mq_waiting's own doc comment for why this hook is real,
                 // load-bearing plumbing here, not just a nicety.
-                if proc.pending_signals & !proc.blocked_signals != 0 {
+                if process::signals::has_interrupting_signal(proc) {
                     drop(table);
                     drop(queues);
                     return Err(EINTR);
