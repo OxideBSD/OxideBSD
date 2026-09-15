@@ -2363,6 +2363,17 @@ ever had a real guard.
   `POSIX_PILOT_CANARY_ONLY` standing suite (125P/4F/1U/13US/23UT/2TO/3CR) all clean — every non-PASS
   result there matches an already-documented accepted category, nothing new.
 
+## `mlockall/3-7.c`: a missing test fixture, not a kernel bug (`build.rs`, `modules/oxfs/`)
+
+The real `MCL_CURRENT`/`msync(MS_INVALIDATE)` → `EBUSY` mechanism (`MmapFileRegion::locked`) was
+already correct, landed alongside `mlockall/3-6.c`'s own fix well before this file was ever
+triaged. The actual gap: this is the only file in the whole corpus that `open()`s its own source by
+a relative path (`conformance/interfaces/mlockall/3-7.c`) — nothing ever seeded that path, so the
+real assertion was never reached (`ENOENT`). Fixed with a second `POSIX_TEST_EXTRA_FILES` entry
+(`build.rs`) seeding the literal source text at that exact path, the same convention
+`sigaltstack/9-1.c`'s own fixture already established. Verified: isolated canary `PASS`, added to
+the standing 172-file `POSIX_PILOT_CANARY_ONLY` suite, zero regressions.
+
 ## Dependency notes
 
 - `x86_64` crate: `default-features = false, features = ["instructions", "abi_x86_interrupt"]` —

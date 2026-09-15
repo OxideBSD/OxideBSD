@@ -2092,6 +2092,17 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // -- `it_value`/remaining time still has to be genuinely tick-derived (no "exact"
             // value to store), only the fixed interval itself benefits from this.
             "timer_gettime/1-4.c",
+            // `mlockall/3-7.c`: the real `mprotect(2)`-adjacent `MCL_CURRENT`/`msync(MS_INVALIDATE)`
+            // -> `EBUSY` mechanism (`MmapFileRegion::locked`, landed alongside `mlockall/3-6.c`'s
+            // own fix well before this entry) was already correct -- the real, actual gap was that
+            // this is the *only* file in the whole corpus that `open()`s its own source by a
+            // relative path (`conformance/interfaces/mlockall/3-7.c`), and nothing ever seeded that
+            // path, so the test's own `open()` failed `ENOENT` before ever reaching its real
+            // assertion. Fixed by adding a second `POSIX_TEST_EXTRA_FILES` entry (see that array's
+            // own generation comment above) seeding the literal source text at the exact path pid
+            // 1's own root cwd resolves it against, the same convention `sigaltstack/9-1.c`'s own
+            // fixture already established.
+            "mlockall/3-7.c",
         ];
         out.retain(|rel| CANARY.contains(&rel.as_str()));
         out.sort();
@@ -2425,9 +2436,20 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     if !status.success() {
         panic!("building sigaltstack/9-buildonly.c failed: {status}");
     }
+    // `mlockall/3-7.c`'s own real assertion `open()`s its *own source file* by the identical
+    // upstream-relative-path convention as `sigaltstack/9-1.c` just above (the suite's own build
+    // tree assumes the whole `conformance/` source tree is present alongside the compiled
+    // binaries) -- resolved against the same pid-1 root cwd (`/`) the pilot script runs from, so
+    // it needs the literal source text (not a compiled binary -- the test only ever reads it as
+    // opaque bytes to mmap, never executes it) seeded at that exact path. No other file in the
+    // whole corpus does this (`grep -rl 'open("conformance/interfaces'` confirms it), so one more
+    // `POSIX_TEST_EXTRA_FILES` entry is simpler than generalizing this into its own mechanism.
+    let mlockall_3_7_c = interfaces_dir.join("mlockall/3-7.c");
+    println!("cargo:rerun-if-changed={}", mlockall_3_7_c.display());
     src.push_str(&format!(
-        "pub static POSIX_TEST_EXTRA_FILES: &[(&str, &[u8])] = &[\n    (\"conformance/interfaces/sigaltstack/9-buildonly.test\", include_bytes!({:?})),\n];\n",
-        sigaltstack_9_buildonly_out.display()
+        "pub static POSIX_TEST_EXTRA_FILES: &[(&str, &[u8])] = &[\n    (\"conformance/interfaces/sigaltstack/9-buildonly.test\", include_bytes!({:?})),\n    (\"conformance/interfaces/mlockall/3-7.c\", include_bytes!({:?})),\n];\n",
+        sigaltstack_9_buildonly_out.display(),
+        mlockall_3_7_c.display()
     ));
 
     std::fs::write(&out_path, src)
