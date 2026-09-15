@@ -392,19 +392,31 @@ pub extern "C" fn _start() -> ! {
     );
     write_bytes(b"rt-signal-syscall-smoke: part 4 (partial-drain pending-bit semantics) OK\n");
 
-    // --- Part 5: real EINVAL boundary validation -- the permanently-unclaimed 32..=34 gap, and
-    // one past SIGRTMAX, are still rejected; SIGRTMIN/SIGRTMAX themselves are accepted. ---
-    check!(sigaction(32, rt_handler as u64, SA_SIGINFO) == Err(EINVAL), "sigaction(32) wasn't EINVAL");
-    check!(sigaction(33, rt_handler as u64, SA_SIGINFO) == Err(EINVAL), "sigaction(33) wasn't EINVAL");
-    check!(sigaction(34, rt_handler as u64, SA_SIGINFO) == Err(EINVAL), "sigaction(34) wasn't EINVAL");
+    // --- Part 5: real EINVAL boundary validation -- only one past SIGRTMAX is rejected. The
+    // 32..=34 range (SIGTIMER/SIGCANCEL/SIGSYNCCALL, permanently unclaimed only as a *libc-level*
+    // convention for internal NPTL-style machinery) is real, valid, kernel-accepted signal-number
+    // space -- widened from an earlier, wrongly-restrictive EINVAL to unblock real
+    // `pthread_cancel(3)`'s own genuine `sigaction(SIGCANCEL, ...)`/`pthread_kill(t, SIGCANCEL)`
+    // calls (see CLAUDE.md's own history of this fix). SIGRTMIN/SIGRTMAX themselves are accepted. ---
+    check!(
+        sigaction(32, rt_handler as u64, SA_SIGINFO).is_ok(),
+        "sigaction(32) wasn't accepted"
+    );
+    check!(
+        sigaction(33, rt_handler as u64, SA_SIGINFO).is_ok(),
+        "sigaction(33) wasn't accepted"
+    );
+    check!(
+        sigaction(34, rt_handler as u64, SA_SIGINFO).is_ok(),
+        "sigaction(34) wasn't accepted"
+    );
     check!(
         sigaction(SIGRTMAX + 1, rt_handler as u64, SA_SIGINFO) == Err(EINVAL),
         "sigaction(SIGRTMAX + 1) wasn't EINVAL"
     );
-    check!(
-        unsafe { syscall(SYS_KILL, pid, 32, 0) } == Err(EINVAL),
-        "kill(pid, 32) wasn't EINVAL"
-    );
+    // No `kill(pid, 32)`-is-EINVAL check here any more: 32 is real, valid, deliverable signal
+    // space (see the comment above) -- exercising it via `kill` would actually invoke `rt_handler`
+    // synchronously, an untested, unrelated behavior change this file isn't set up to assert on.
     check!(
         sigqueue(pid, SIGRTMAX + 1, 0) == Err(EINVAL),
         "sigqueue(SIGRTMAX + 1) wasn't EINVAL"

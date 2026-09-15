@@ -75,12 +75,12 @@ use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
 use crate::cpu::gdt;
-use crate::serial_println;
 /// musl's own `siginfo_t` on x86_64, real sender-identity/payload-populated now -- lives in
 /// `crate::process` (`RawSiginfo`) since `process::signals`'s own `do_sigtimedwait`/`do_sigqueue`
 /// need the exact same wire layout; re-imported here under its original name rather than every
 /// call site in this file growing a `crate::process::` prefix.
 use crate::process::RawSiginfo;
+use crate::serial_println;
 
 /// Standard, POSIX-heritage errno values. `EBADF`/`EINVAL`/`ECHILD`/`ENOEXEC`/`EPIPE` happen to be
 /// identical on Linux and the BSDs; `ENOSYS` is not (see module doc comment) — unlike this group's
@@ -498,18 +498,43 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
         // `user_rsp` right now describe the *trampoline's* own internal `syscall` instruction, not
         // the real point execution should continue from once `deliver_pending_signal` is done
         // (whether that's "no handler, just resume" or "handler installed, resume here after
-        // `sigreturn`"). Overwrite them with the real stashed values first, so everything below
-        // this point -- entirely unaware of *why* it was invoked -- treats this exactly like an
-        // ordinary syscall genuinely issued from that real point. A `None` here (the ordinary
-        // page-fault case) leaves the frame exactly as the trampoline set it, unchanged.
+        // `sigreturn`"). A `None` here (the ordinary page-fault case) leaves the frame exactly as
+        // the trampoline set it, unchanged.
         if let Some((rip, rsp, rflags)) = crate::process::table()
             .lock()
             .get_mut(&crate::process::scheduler::current_pid())
             .and_then(|p| p.preempted_resume.take())
         {
-            frame.rcx = rip;
+            // **Not** `frame.rcx = rip; frame.r11 = rflags;` -- see `fault_trampoline::
+            // RCX_SCRATCH_OFFSET`'s own doc comment for the real bug this replaced: `SYSRETQ`'s
+            // `RIP := RCX` hardware coupling means the resumed code always finds `RCX == RIP`,
+            // permanently destroying whatever real, live value (e.g. a computed pointer) `RCX`
+            // held at the moment of this async redirect, with no chance to recover it. Instead,
+            // point the eventual resume at the trampoline's own restore stub (which finishes the
+            // real job -- true `rcx`/`r11`/`rflags` back into place, then a bare indirect `jmp` to
+            // `rip` that never goes through `RCX` at all) and stash what it needs to do that. If
+            // `deliver_pending_signal` below installs a real handler instead, it overwrites
+            // `frame.rcx`/`r11` with the handler's own entry point/flags regardless -- a fresh
+            // function call has no expectation about prior `RCX` content either way, so this
+            // stashed state simply survives untouched (nothing else ever reads it) until whatever
+            // handler chain finishes and a genuine resume is actually due.
+            // SAFETY: same reasoning as the `RAX_SCRATCH_OFFSET` read below -- this address is
+            // mapped `PRESENT | WRITABLE` in this exact process's own currently-active address
+            // space.
+            unsafe {
+                ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+                    + crate::process::fault_trampoline::TRUE_RESUME_RIP_OFFSET)
+                    as *mut u64)
+                    .write(rip);
+                ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+                    + crate::process::fault_trampoline::TRUE_RFLAGS_OFFSET)
+                    as *mut u64)
+                    .write(rflags);
+            }
+            frame.rcx = crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+                + crate::process::fault_trampoline::STUB_OFFSET;
             frame.user_rsp = rsp;
-            frame.r11 = rflags;
+            frame.r11 = crate::process::usermode::USER_RFLAGS;
             // Real, live-found bug: the trampoline's own `mov eax, SYS_FAULT_PUMP` unavoidably
             // clobbers the interrupted code's real `RAX` before this frame was even captured --
             // harmless for the ordinary page-fault redirect (nothing meaningful ever resumes a

@@ -592,12 +592,22 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
     // the sibling's own value. See `fault_trampoline::RAX_SCRATCH_OFFSET`'s own doc comment for the
     // real bug this closes (`pthread_mutex_trylock/4-3.c`, a genuine `CRASH(139)` this caused).
     // Deferring for one tick is enough: by the next tick the thread has long since finished this
-    // 19-byte, few-cycle sequence and is safe to preempt/redirect normally again.
+    // few-cycle sequence and is safe to preempt/redirect normally again. Also covers the restore
+    // stub at `STUB_OFFSET` -- it reads/consumes the same shared scratch cells (now also
+    // `RCX_SCRATCH_OFFSET`/`R11_SCRATCH_OFFSET`/`TRUE_RFLAGS_OFFSET`/`TRUE_RESUME_RIP_OFFSET`, not
+    // just `RAX_SCRATCH_OFFSET`) and is exposed to the identical interleaving risk.
+    let ip = stack_frame.instruction_pointer.as_u64();
     let mid_fault_trampoline = interrupted_ring3
-        && (crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+        && ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
             ..crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
                 + crate::process::fault_trampoline::CODE_LEN)
-            .contains(&stack_frame.instruction_pointer.as_u64());
+            .contains(&ip)
+            || (crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+                + crate::process::fault_trampoline::STUB_OFFSET
+                ..crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
+                    + crate::process::fault_trampoline::STUB_OFFSET
+                    + crate::process::fault_trampoline::STUB_LEN)
+                .contains(&ip));
     if interrupted_ring3 && !mid_fault_trampoline {
         // Real `SCHED_FIFO`/`SCHED_RR` priority preemption: checked on *every* tick, not gated on
         // the quantum below -- a higher-`sched_priority` process becoming Ready must preempt within
