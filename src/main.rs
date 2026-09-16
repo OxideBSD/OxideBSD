@@ -67,6 +67,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // a USB keyboard is live before `hush` is spawned.
     oxidebsd::drivers::usb::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
+    // A real ACPI HPET, if present -- a second, high-resolution *duration* clock layered on top
+    // of the 100Hz PIT scheduler tick (unchanged), used only for real sub-tick `clock_getres`
+    // resolution reporting and real POSIX interval-timer overrun accounting. See
+    // `oxidebsd::cpu::hpet`'s own module doc comment for the full design (deliberately never an
+    // interrupt source). Not fatal either way, same precedent as `usb::init` just above.
+    oxidebsd::cpu::hpet::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
+
     const HELLO_MOD: &[u8] = include_bytes!(env!("HELLO_MOD_PATH"));
     const HELLO_PANIC_SYMBOL: &str = env!("HELLO_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

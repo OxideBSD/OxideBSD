@@ -2103,6 +2103,26 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // 1's own root cwd resolves it against, the same convention `sigaltstack/9-1.c`'s own
             // fixture already established.
             "mlockall/3-7.c",
+            // `timer_getoverrun/2-2.c`: needed real sub-10ms timer resolution -- this kernel's
+            // fixed `TIMER_HZ=100` (10ms) tick rounded a requested sub-tick interval *up* to a
+            // whole tick, and `clock_getres` always reported the coarse 10ms value regardless of
+            // `clockid`. Closed by a real ACPI HPET overlay (`cpu::hpet`, counter-only, never an
+            // interrupt source -- see that module's own doc comment) backing `clock_getres`'s
+            // real resolution report and `PosixTimer::deadline_ns`'s own exact elapsed-nanosecond
+            // overrun catch-up math (`interrupts.rs`'s posix_timers expiry loop) for a relative-
+            // mode `CLOCK_REALTIME`/`CLOCK_MONOTONIC` timer, plus a real HPET top-off in
+            // `do_nanosleep` itself (PIT-tick-counted sleep duration can measurably lag a directly
+            // -read HPET counter by a few ms over one short sleep -- real KVM virtual-PIT
+            // imprecision, not a logic bug). **`timer_getoverrun/2-3.c` deliberately excluded from
+            // this list, not fixed**: passes reliably in isolation, but reliably (not flakily)
+            // FAILs once it's ~170 files into one long, continuously-running QEMU boot -- PIT
+            // `ticks()` and HPET's own counter are two independently-clocked sources with no
+            // cross-calibration, and their relative *rates* measurably diverge over several
+            // minutes of sustained guest uptime under KVM (a known category of virtual-PIT timing
+            // imprecision, not something a per-call top-off can close). Matches this project's own
+            // existing precedent for real-time tests sensitive to host/VM timing variance
+            // (`timer_settime/2-1.c`, `pthread_cond_init/4-2.c`) -- not chased further.
+            "timer_getoverrun/2-2.c",
         ];
         out.retain(|rel| CANARY.contains(&rel.as_str()));
         out.sort();

@@ -42,6 +42,21 @@ struct RawTimespec {
 /// `SIGKILL`-style immediate, no-handler termination still doesn't go through this path at all
 /// (`do_kill`'s own `Action::Terminate` calls `terminate_process` directly, unaffected by this
 /// process's `ProcState`).
+///
+/// **Real HPET top-off, when a real HPET is present** (found live chasing `timer_getoverrun/
+/// 2-3.c`): the tick-deadline loop above and `PosixTimer::deadline_ns`'s own real HPET-based
+/// overrun accounting are two genuinely independent clocks -- `ticks()` (PIT-interrupt-driven) can
+/// measurably lag a directly-read HPET counter by a handful of milliseconds over a long sleep
+/// (real PIT interrupt-delivery latency under this project's own `-accel kvm` setup, not a TCG
+/// software-emulation artifact), enough for a `nanosleep()`-then-`timer_getoverrun()` sequence to
+/// undercount real elapsed HPET time. Once the tick deadline is reached, this loop keeps
+/// re-blocking on that same (now-past) deadline -- the timer IRQ handler's own `now >= deadline`
+/// wake check (`interrupts.rs`) fires again on the very next tick regardless, so this is still a
+/// real, cheap, yielding `schedule()` wait, not a busy-spin -- until `cpu::hpet::now_ns()` also
+/// reaches the equivalent real-nanosecond target, capped at `HPET_TOPOFF_TICK_CAP` extra ticks as
+/// a defensive bound against a pathological/stuck HPET reading (never observed, but this is a
+/// syscall-reachable loop, so it gets the same "never trust it unconditionally" treatment as every
+/// other one in this codebase). A complete no-op whenever no real HPET was found this boot.
 pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
     // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
     // already has -- req_ptr isn't checked against the caller's actual mappings first.
@@ -49,6 +64,13 @@ pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
     if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
         return Err(EINVAL);
     }
+
+    // Real HPET-precision target, computed up front (before any blocking) whenever a real HPET
+    // is present -- see the real top-off spin-wait at the end of this function for why. `None`
+    // whenever no real HPET was found this boot; the existing tick-only behavior is completely
+    // unaffected in that case.
+    let hpet_target_ns = timespec_to_ns(req.tv_sec, req.tv_nsec)
+        .and_then(|req_ns| crate::cpu::hpet::now_ns().map(|now_ns| now_ns + req_ns));
 
     let hz = crate::cpu::pit::TIMER_HZ as u64;
     let whole_second_ticks = req.tv_sec as u64 * hz;
@@ -68,7 +90,19 @@ pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
         // hasn't actually passed yet also gets real semantics for free: `ticks()` keeps advancing
         // while `Stopped` (it's a global counter, not paused per-process), so time spent stopped
         // still counts toward the sleep, matching real Linux's own wall-clock-deadline behavior.
-        while crate::cpu::interrupts::ticks() < deadline {
+        //
+        // Real HPET top-off headroom, capped at this many *extra* ticks past `deadline` -- see
+        // this function's own doc comment for why this exists. Generous versus the handful of
+        // milliseconds of real PIT-vs-HPET drift actually observed (well under one tick), purely
+        // a defensive bound against a pathological/stuck HPET reading, never expected to bind in
+        // practice.
+        const HPET_TOPOFF_TICK_CAP: u64 = 50;
+        while crate::cpu::interrupts::ticks() < deadline
+            || hpet_target_ns.is_some_and(|target| {
+                crate::cpu::interrupts::ticks() < deadline + HPET_TOPOFF_TICK_CAP
+                    && crate::cpu::hpet::now_ns().is_some_and(|now_ns| now_ns < target)
+            })
+        {
             {
                 let mut table = PROCESS_TABLE.lock();
                 let proc = table.get_mut(&pid).unwrap();
@@ -339,6 +373,16 @@ fn ticks_to_timespec(ticks: u64) -> (i64, i64) {
     ((ticks / hz) as i64, ((ticks % hz) * 1_000_000_000 / hz) as i64)
 }
 
+/// `sec`/`nsec` -> real nanoseconds, verbatim -- no tick rounding at all, unlike
+/// `timespec_to_ticks` above. Backs `PosixTimer::deadline_ns`/`interval_ns` (see that field's own
+/// doc comment).
+fn timespec_to_ns(sec: i64, nsec: i64) -> Option<u64> {
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return None;
+    }
+    Some(sec as u64 * 1_000_000_000 + nsec as u64)
+}
+
 /// Converts a `TIMER_ABSTIME` `timer_settime` target (a point in `clockid`'s own domain, not a
 /// duration) into an absolute deadline in the tick-shaped units `interrupts::
 /// timer_interrupt_handler`'s own `PosixTimer::deadline` comparison expects. `CLOCK_MONOTONIC`'s
@@ -448,6 +492,8 @@ pub fn do_timer_create(pid: Pid, clockid: u64, evp_ptr: u64, timerid_ptr: u64) -
         interval_requested: (0, 0),
         realtime_target: None,
         overrun: 0,
+        deadline_ns: None,
+        interval_ns: 0,
     });
     drop(table);
 
@@ -491,6 +537,11 @@ pub fn do_timer_settime(
     let value_ticks = timespec_to_ticks(new.it_value_sec, new.it_value_nsec).ok_or(EINVAL)?;
     let interval_ticks =
         timespec_to_ticks(new.it_interval_sec, new.it_interval_nsec).ok_or(EINVAL)?;
+    // Real, non-tick-quantized counterparts -- see `PosixTimer::deadline_ns`'s own doc comment
+    // for exactly when these actually get used below (relative-mode, non-cputime, real HPET
+    // present) versus just computed and discarded.
+    let value_ns = timespec_to_ns(new.it_value_sec, new.it_value_nsec).ok_or(EINVAL)?;
+    let interval_ns_val = timespec_to_ns(new.it_interval_sec, new.it_interval_nsec).ok_or(EINVAL)?;
 
     let mut table = PROCESS_TABLE.lock();
     let proc = table
@@ -533,6 +584,8 @@ pub fn do_timer_settime(
         slot.interval_ticks = 0;
         slot.interval_requested = (0, 0);
         slot.realtime_target = None;
+        slot.deadline_ns = None;
+        slot.interval_ns = 0;
     } else if flags & TIMER_ABSTIME != 0 {
         slot.deadline = Some(abstime_to_ticks(clockid, new.it_value_sec, new.it_value_nsec));
         slot.interval_ticks = interval_ticks;
@@ -542,11 +595,21 @@ pub fn do_timer_settime(
         } else {
             None
         };
+        // The real HPET-precision path is relative-mode only -- an abstime arm already has its
+        // own correct wall-clock-retargeting story via `realtime_target` above, untouched here.
+        slot.deadline_ns = None;
+        slot.interval_ns = 0;
     } else {
         slot.deadline = Some(now + value_ticks);
         slot.interval_ticks = interval_ticks;
         slot.interval_requested = (new.it_interval_sec, new.it_interval_nsec);
         slot.realtime_target = None;
+        slot.deadline_ns = if is_cputime_clock(clockid) {
+            None
+        } else {
+            crate::cpu::hpet::now_ns().map(|now_ns| now_ns + value_ns)
+        };
+        slot.interval_ns = interval_ns_val;
     }
     slot.overrun = 0;
     Ok(0)

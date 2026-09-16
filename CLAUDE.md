@@ -2374,6 +2374,68 @@ real assertion was never reached (`ENOENT`). Fixed with a second `POSIX_TEST_EXT
 `sigaltstack/9-1.c`'s own fixture already established. Verified: isolated canary `PASS`, added to
 the standing 172-file `POSIX_PILOT_CANARY_ONLY` suite, zero regressions.
 
+## Real ACPI HPET: a sub-tick timer-precision overlay, not a PIT replacement (`src/cpu/hpet.rs`, `src/boot.rs`, `src/process/timers.rs`, `src/syscall/ffi.rs`, `src/cpu/interrupts.rs`)
+
+Closes `timer_getoverrun/2-2.c` — previously on the "large effort" list (`TIMER_HZ=100`'s 10ms
+tick can't represent a 5ms interval, and `clock_getres` always reported the coarse 10ms value
+regardless of `clockid`, so a periodic `timer_create` timer's real overrun count was badly wrong at
+sub-tick intervals). Deliberately scoped as an **overlay**, not a PIT-replacement: the 100Hz PIT
+stays the scheduler's own tick (`PREEMPT_QUANTUM_TICKS`, `Process::cpu_ticks`, every existing
+`ticks()`-based deadline) completely untouched.
+
+- **`src/cpu/hpet.rs` is a counter-only driver — never an interrupt source.** This kernel has no
+  IOAPIC/MSI support (see the USB section above), so a real interrupt-driven HPET comparator would
+  mean either legacy-replacement routing (stealing IRQ0 from the PIT — exactly the scope rejected
+  here) or new IOAPIC plumbing. A POSIX timer's overrun count doesn't actually need one real
+  interrupt per interval — it's a pure counting problem, solved by exact `elapsed_ns / interval_ns`
+  arithmetic (the same "catch-up" technique real Linux's own `hrtimer_forward()` uses), computed at
+  whatever cadence something already polls (the existing 100Hz tick). `GENERAL_CONFIG` is written
+  with only `ENABLE_CNF` set; `LEG_RT_CNF` is deliberately never touched.
+- **Real ACPI discovery, no manual BIOS/EBDA scanning**: Limine hands back a real RSDP address
+  directly (`boot::rsdp_address`, a new `RsdpRequest`) — already a virtual pointer at this
+  project's base revision (confirmed via the vendored `limine` crate's own doc comment: physical
+  only at base revision 3, virtual at every other revision including this project's own `6`).
+  RSDP → XSDT (or RSDT on ACPI 1.0) → the `"HPET"` table → its Generic Address Structure's real
+  MMIO base — every pointer *inside* those tables is a genuine ACPI physical address, unlike the
+  RSDP pointer itself, dereferenced via `boot::hhdm_offset()`. Real per-table checksum validation
+  before trusting anything. MMIO mapped `NO_CACHE` via a helper adapted directly from
+  `drivers::usb::xhci`'s own `map_bar_pages`. Absence at any step (no RSDP, no `"HPET"` table, bad
+  checksum) is logged, never fatal — every caller already has an honest tick-based fallback.
+- **`sys_clock_getres`** reports `cpu::hpet::resolution_ns()` for `CLOCK_REALTIME`/
+  `CLOCK_MONOTONIC` when present, else the original `1_000_000_000 / TIMER_HZ`. Cputime clocks keep
+  the tick-based value unconditionally — `Process::cpu_ticks` is still genuinely tick-quantized, so
+  claiming finer resolution there would be dishonest.
+- **`PosixTimer` gains `deadline_ns`/`interval_ns`**, populated only for a *relative*-mode (not
+  `TIMER_ABSTIME`) `CLOCK_REALTIME`/`CLOCK_MONOTONIC` timer when HPET is present — every other case
+  (cputime clocks, `TIMER_ABSTIME` arms, no HPET) falls back to the existing tick-based
+  `deadline`/`interval_ticks` path unchanged, including `TIMER_ABSTIME`'s own separate
+  `realtime_target` wall-clock-retargeting mechanism (`clock_settime/4-1.c`), left untouched.
+  `interrupts.rs`'s posix_timers expiry loop checks `deadline_ns` first (mutually exclusive with
+  the tick-based branches by construction) and does the real catch-up computation there.
+- **`do_nanosleep` gained a real HPET top-off**, found live chasing `timer_getoverrun/2-3.c`: the
+  tick-deadline sleep and the HPET-based overrun accounting are two genuinely independent clocks —
+  PIT-driven `ticks()` can measurably lag a directly-read HPET counter by a few ms over one short
+  sleep (real KVM virtual-PIT interrupt-delivery latency under this project's own `-accel kvm`
+  setup, not TCG software-emulation jitter). Once the tick deadline is reached, `do_nanosleep` keeps
+  re-blocking on that same (now-past) deadline — the timer IRQ handler's own `now >= deadline` wake
+  check fires again on the very next tick regardless, so this is a real, cheap, yielding
+  `schedule()` wait, not a busy-spin — until `hpet::now_ns()` also reaches the equivalent target,
+  capped at `HPET_TOPOFF_TICK_CAP` (50 ticks/500ms) as a defensive bound. Fixes `2-2.c` and,
+  reliably, `2-3.c` in isolation.
+- **`timer_getoverrun/2-3.c` deliberately not added to the standing canary suite**: passes reliably
+  alone, but reliably (not flakily) FAILs once it's ~170 files into one long, continuously-running
+  QEMU boot. Root cause, confirmed by direct measurement (a temporary debug `cat` of the test's own
+  stdout): PIT `ticks()` and HPET's counter are independently-clocked with no cross-calibration, and
+  their relative *rates* measurably diverge over several minutes of sustained guest uptime under
+  KVM — a known category of virtual-PIT timing imprecision a per-call top-off can't close (would
+  need periodic PIT/HPET recalibration, out of scope here). Matches this project's own existing
+  precedent for real-time tests sensitive to host/VM timing variance (`timer_settime/2-1.c`,
+  `pthread_cond_init/4-2.c`) — not chased further.
+- **Verified**: `clock_syscall_smoke`, `itimer_syscall_smoke`, `posix_timer_syscall_smoke` (all
+  three, including the overrun-accounting part) clean; `timer_getoverrun/2-2.c` added to the
+  standing 173-file `POSIX_PILOT_CANARY_ONLY` suite, zero regressions; `clock_getres/1-1,3-1,6-1,
+  6-2,7-1,8-1.c` and `clock_getcpuclockid/1-1,2-1.c` re-verified unaffected.
+
 ## Dependency notes
 
 - `x86_64` crate: `default-features = false, features = ["instructions", "abi_x86_interrupt"]` —

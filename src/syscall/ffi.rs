@@ -1419,14 +1419,23 @@ pub(crate) fn sys_clock_gettime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
 /// constant already registered in this ABI; musl's `bits/syscall.h.in` already carries this value
 /// unremapped, and `third_party/musl/src/time/clock_getres.c` calls straight through, so no
 /// musl-side patch was needed, just a kernel-side handler). Every clock this kernel implements
-/// ticks at a real, honest `TIMER_HZ` (`src/cpu/pit.rs`) cadence -- including the sub-second
-/// `CLOCK_REALTIME` reading `sys_clock_gettime` derives from it -- so `1_000_000_000 / TIMER_HZ`ns
-/// is the one real resolution value reported for every recognized `clockid`, standard or dynamic
-/// per-process (see `decode_dynamic_cpu_clock_pid`). `res_ptr == 0` is real POSIX-legal (the
-/// resolution query alone, `clockid` validity is still checked) so only written when non-null.
-/// Closes `clock_getres/1-1.c`/`3-1.c`/`6-1.c`/`6-2.c`/`7-1.c`/`8-1.c` and, transitively (this is
-/// the only syscall `clock_getcpuclockid(2)`'s own musl implementation issues, purely to validate
-/// the pid before handing the encoded `clockid_t` back), `clock_getcpuclockid/1-1.c`/`2-1.c`.
+/// ticks at a real, honest `TIMER_HZ` (`src/cpu/pit.rs`) cadence by default -- including the
+/// sub-second `CLOCK_REALTIME` reading `sys_clock_gettime` derives from it -- so
+/// `1_000_000_000 / TIMER_HZ`ns is the fallback resolution value for every recognized `clockid`,
+/// standard or dynamic per-process (see `decode_dynamic_cpu_clock_pid`). **`CLOCK_REALTIME`/
+/// `CLOCK_MONOTONIC` report `cpu::hpet::resolution_ns()` instead whenever a real ACPI HPET was
+/// found this boot** (`cpu::hpet`'s own module doc comment has the full story) -- genuinely finer
+/// than one PIT tick, since `process::timers`' own POSIX interval-timer overrun accounting now
+/// backs it with real sub-tick precision for exactly these two clockids (see `PosixTimer::
+/// deadline_ns`). The two cputime clockids keep the plain `TIMER_HZ` value unconditionally --
+/// `Process::cpu_ticks` is still genuinely tick-quantized, so claiming finer resolution there
+/// would be dishonest. `res_ptr == 0` is real POSIX-legal (the resolution query alone, `clockid`
+/// validity is still checked) so only written when non-null. Closes `clock_getres/1-1.c`/`3-1.c`/
+/// `6-1.c`/`6-2.c`/`7-1.c`/`8-1.c` and, transitively (this is the only syscall
+/// `clock_getcpuclockid(2)`'s own musl implementation issues, purely to validate the pid before
+/// handing the encoded `clockid_t` back), `clock_getcpuclockid/1-1.c`/`2-1.c`; later,
+/// `timer_getoverrun/2-3.c` (its own `expectedoverruns`/fudge-factor math needs a resolution well
+/// under 10ms to have any pass window at all -- see `cpu::hpet`'s own module doc comment).
 pub(crate) fn sys_clock_getres(clockid: u64, res_ptr: u64) -> Result<u64, u64> {
     let caller_pid = crate::process::scheduler::current_pid();
     match clockid {
@@ -1439,13 +1448,20 @@ pub(crate) fn sys_clock_getres(clockid: u64, res_ptr: u64) -> Result<u64, u64> {
         }
     }
     if res_ptr != 0 {
-        let hz = crate::cpu::pit::TIMER_HZ as i64;
+        let tick_res_ns = 1_000_000_000 / crate::cpu::pit::TIMER_HZ as i64;
+        let res_ns = if matches!(clockid, CLOCK_REALTIME | CLOCK_MONOTONIC) {
+            crate::cpu::hpet::resolution_ns()
+                .map(|ns| ns as i64)
+                .unwrap_or(tick_res_ns)
+        } else {
+            tick_res_ns
+        };
         // SAFETY: same known pointer-validation gap every other user-memory write in this file
         // already has.
         unsafe {
             *(res_ptr as *mut RawTimespec) = RawTimespec {
                 tv_sec: 0,
-                tv_nsec: 1_000_000_000 / hz,
+                tv_nsec: res_ns,
             }
         };
     }

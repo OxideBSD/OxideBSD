@@ -56,6 +56,11 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
+    // Real ACPI HPET, if QEMU exposes one -- exercises the real sub-tick `clock_getres`/POSIX
+    // interval-timer overrun path (`timer_getoverrun/2-2,2-3.c`), not just its tick-based
+    // fallback. Not fatal either way, same precedent `main.rs`'s own boot sequence establishes.
+    oxidebsd::cpu::hpet::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
+
     const NATIVE_ABI_MOD: &[u8] = include_bytes!(env!("NATIVE_ABI_MOD_PATH"));
     const NATIVE_ABI_PANIC_SYMBOL: &str = env!("NATIVE_ABI_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

@@ -496,6 +496,21 @@ pub struct PosixTimer {
     /// apart by this bookkeeping, since both would observe the same process-wide pending bit --
     /// no live caller to exercise this today (see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`).
     pub overrun: u32,
+    /// Real, non-tick-quantized nanosecond deadline -- populated **only** for a *relative*-mode
+    /// (`flags == 0`, not `TIMER_ABSTIME`) `CLOCK_REALTIME`/`CLOCK_MONOTONIC` timer when a real
+    /// ACPI HPET was found this boot (`cpu::hpet::now_ns()` returns `Some`); `None` in every other
+    /// case (a cputime clockid, a `TIMER_ABSTIME` arm -- `realtime_target` above already owns that
+    /// case's own correct `clock_settime`-retargeting story, deliberately untouched -- or no real
+    /// HPET present), which all fall back to the existing tick-based `deadline`/`interval_ticks`
+    /// pair exactly as before. `interrupts::timer_interrupt_handler` checks this field first, and
+    /// when `Some`, computes real elapsed-nanosecond `overrun` counts by exact division/catch-up
+    /// (real Linux's own `hrtimer_forward()` technique) rather than needing one real interrupt per
+    /// interval -- see `cpu::hpet`'s own module doc comment for why this kernel never wires HPET
+    /// up as an interrupt source at all. Closes `timer_getoverrun/2-2,2-3.c`.
+    pub deadline_ns: Option<u64>,
+    /// The real `it_interval` in nanoseconds, verbatim (no tick rounding) -- paired with
+    /// `deadline_ns` above, `0` meaning one-shot (same convention `interval_ticks` already uses).
+    pub interval_ns: u64,
 }
 
 /// `SA_NODEFER` -- the one `sa_flags` bit `deliver_pending_signal`'s own mask computation

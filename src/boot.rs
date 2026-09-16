@@ -13,7 +13,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use limine::framebuffer::Framebuffer;
 use limine::memmap::Entry;
-use limine::request::{ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest};
+use limine::request::{
+    ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest, RsdpRequest,
+};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
@@ -34,6 +36,9 @@ static CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new
 
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end")]
@@ -92,6 +97,22 @@ pub fn primary_framebuffer() -> Option<&'static Framebuffer> {
     FRAMEBUFFER_REQUEST
         .response()
         .and_then(|r| r.framebuffers().first().copied())
+}
+
+/// The real ACPI RSDP (Root System Description Pointer)'s address, if Limine found one -- the
+/// entry point `cpu::hpet::init` walks (RSDP -> RSDT/XSDT -> the `"HPET"` table) to find the real
+/// HPET hardware, if any. **Already a directly dereferenceable virtual pointer, not a physical
+/// one** -- unlike everything the RSDP itself then points to (RSDT/XSDT and every subsequent ACPI
+/// table address are real physical addresses, needing `hhdm_offset()` like any other raw physical
+/// access in this codebase). Confirmed via the vendored `limine` crate's own doc comment: its
+/// `RsdpRequest`/`RsdpResponse` say the returned address is physical **only** at base revision 3
+/// specifically -- every other revision, including this project's own `BaseRevision::
+/// MAX_SUPPORTED` (`6`, see `BASE_REVISION` above), gets a virtual one, same as
+/// `primary_framebuffer`'s own address above. `None` if Limine's own ACPI/firmware probe found no
+/// RSDP at all (not expected on any real or QEMU x86_64 target, but handled the same "absence
+/// logged, not fatal" way every other optional hardware probe in this codebase already is).
+pub fn rsdp_address() -> Option<u64> {
+    RSDP_REQUEST.response().map(|r| r.address as u64)
 }
 
 /// Whether the kernel was booted with `no-ata` on its Limine command line (`limine.conf`'s

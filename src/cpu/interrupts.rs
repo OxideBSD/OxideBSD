@@ -523,7 +523,33 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
                 } else {
                     now
                 };
-                let fired = if let Some(target) = slot.realtime_target {
+                // Real, non-tick-quantized expiry+overrun path -- see `PosixTimer::deadline_ns`'s
+                // own doc comment for exactly when `do_timer_settime` populates this (a relative-
+                // mode `CLOCK_REALTIME`/`CLOCK_MONOTONIC` timer, real HPET present). Checked
+                // first: mutually exclusive with `realtime_target`/tick `deadline` below by
+                // construction (`deadline_ns` is only ever `Some` when both of those are meant to
+                // be ignored). `elapsed`/`ns_overrun_extra` fold in however many whole intervals
+                // have really elapsed since `deadline_ns` in one shot -- real, exact
+                // `elapsed_ns / interval_ns` arithmetic, the same "catch-up" technique real
+                // Linux's own `hrtimer_forward()` uses, since this kernel checks at the existing
+                // 100Hz tick cadence rather than firing one real interrupt per interval (`cpu::
+                // hpet`'s own module doc comment has the full story on why that's deliberate).
+                let mut ns_overrun_extra: u32 = 0;
+                let fired = if let Some(deadline_ns) = slot.deadline_ns {
+                    match crate::cpu::hpet::now_ns() {
+                        Some(now_ns) if now_ns >= deadline_ns => {
+                            if slot.interval_ns > 0 {
+                                let elapsed = (now_ns - deadline_ns) / slot.interval_ns + 1;
+                                slot.deadline_ns = Some(deadline_ns + elapsed * slot.interval_ns);
+                                ns_overrun_extra = (elapsed - 1) as u32;
+                            } else {
+                                slot.deadline_ns = None;
+                            }
+                            true
+                        }
+                        _ => false,
+                    }
+                } else if let Some(target) = slot.realtime_target {
                     crate::cpu::rtc::unix_epoch_now_precise() >= target
                 } else if let Some(deadline) = slot.deadline {
                     timer_now >= deadline
@@ -534,9 +560,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
                     if slot.signo != 0 {
                         let bit = 1 << (slot.signo - 1);
                         if proc.pending_signals & bit != 0 {
-                            slot.overrun = slot.overrun.saturating_add(1);
+                            slot.overrun = slot.overrun.saturating_add(1 + ns_overrun_extra);
                         } else {
-                            slot.overrun = 0;
+                            slot.overrun = ns_overrun_extra;
                             proc.pending_signals |= bit;
                             newly_signaled = Some(slot.signo);
                         }
