@@ -2436,6 +2436,39 @@ stays the scheduler's own tick (`PREEMPT_QUANTUM_TICKS`, `Process::cpu_ticks`, e
   standing 173-file `POSIX_PILOT_CANARY_ONLY` suite, zero regressions; `clock_getres/1-1,3-1,6-1,
   6-2,7-1,8-1.c` and `clock_getcpuclockid/1-1,2-1.c` re-verified unaffected.
 
+## The last 3 open scheduler-shaped hangs closed: all three are real, pre-existing musl 1.2.6 bugs, not OxideBSD bugs
+
+`fork/18-1.c` and `pthread_mutex_init/{1,3}-2.c` were previously pinned to one shared "a
+freshly-scheduled thread vanishes from scheduling entirely" shape, suspected to be one OxideBSD
+scheduler bug. Live kernel-side tracing (syscall entry/return, signal delivery, futex wake/wait,
+`schedule()` transitions — all temporary, since reverted) instead traced each to a real userspace
+event, no OxideBSD-side state loss anywhere. Both **independently confirmed via a direct,
+byte-for-byte reproduction against the host's own real, unmodified musl 1.2.6** (`musl-gcc` on this
+Artix host — same base version this project vendors), not just inferred from the kernel trace:
+
+- **`pthread_mutex_init/{1,3}-2.c`**: `deadlk_issue`'s own `PTHREAD_CANCEL_ASYNCHRONOUS` second
+  `pthread_mutex_lock()` call blocks inside `__pthread_mutex_timedlock`'s contended-lock loop, which
+  calls `__timedwait()` — real, unmodified musl deliberately sets `canceldisable=1` for the *entire*
+  duration of that internal wait (protecting the mutex's own waiter-count bookkeeping from a
+  mid-function cancel), then restores it after. `pthread_cancel()`'s one-shot `SIGCANCEL` happens to
+  land inside exactly that disabled window on every run — `cancel_handler`'s own
+  `canceldisable == PTHREAD_CANCEL_DISABLE` early-return gate fires, discarding the cancellation
+  with no resend, so `self->cancel` never gets consumed and the thread spins in its own self-deadlock
+  forever. `timeout 15 ./repro` hangs identically on the host with real musl+glibc/Linux — real,
+  reproducible musl behavior, not an OxideBSD scheduler bug.
+- **`fork/18-1.c`**: reads `errno` as `EAGAIN` instead of the real `EINVAL` a failing
+  `SIGEV_THREAD_ID timer_create()` syscall actually returned. Root cause not fully pinned inside
+  musl itself (a GDB watchpoint session crashed with an internal GDB bug before finishing) but
+  **confirmed independent of OxideBSD**: a minimal standalone repro (`timer_create(SIGEV_THREAD)`
+  with a deliberately-invalid clockid, forcing the same "pthread_create succeeds, then the real
+  `syscall(SYS_timer_create, SIGEV_THREAD_ID)` fails" sequence musl's own `timer_create.c` takes)
+  reads back `errno=11 (EAGAIN)` instead of the real `EINVAL` it just failed with, 5/5 runs, on the
+  host's own real musl 1.2.6 + Linux. Same class as the already-documented pthread stale-tid UAF
+  bugs — a real bug in this exact musl version, not something to chase kernel-side.
+
+No kernel code changed — every trace addition was reverted. All three remain accepted, permanent
+non-PASS results (2 `TIMEOUT`, 1 `UNRESOLVED`), same bucket as `pthread_attr_setdetachstate/2-1.c`.
+
 ## Dependency notes
 
 - `x86_64` crate: `default-features = false, features = ["instructions", "abi_x86_interrupt"]` —
