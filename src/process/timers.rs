@@ -383,6 +383,12 @@ fn timespec_to_ns(sec: i64, nsec: i64) -> Option<u64> {
     Some(sec as u64 * 1_000_000_000 + nsec as u64)
 }
 
+/// Inverse of `timespec_to_ns` -- exact, no tick rounding, unlike `ticks_to_timespec` above. Backs
+/// `do_timer_gettime`'s real HPET-precision remaining-time path (see its own doc comment).
+fn ns_to_timespec(ns: u64) -> (i64, i64) {
+    ((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as i64)
+}
+
 /// Converts a `TIMER_ABSTIME` `timer_settime` target (a point in `clockid`'s own domain, not a
 /// duration) into an absolute deadline in the tick-shaped units `interrupts::
 /// timer_interrupt_handler`'s own `PosixTimer::deadline` comparison expects. `CLOCK_MONOTONIC`'s
@@ -618,6 +624,18 @@ pub fn do_timer_settime(
 /// `SYS_TIMER_GETTIME` (`533`, item 8) -- matches real `timer_gettime(2)`'s exact
 /// `(timerid, val_ptr)` wire format. Same `ok_or(EINVAL)` invalid-id handling as
 /// `do_timer_settime`.
+///
+/// **Real HPET-precision remaining time, when available** (found live chasing
+/// `timer_gettime/1-3.c`): the plain tick-based path below is only accurate to `TIMER_HZ`'s 10ms
+/// granularity, but `do_nanosleep`'s own real HPET top-off (see that function's doc comment) can
+/// deliberately let a sleep run up to one extra tick of real elapsed *tick count* to match HPET's
+/// more precise clock -- from a pure-tick view that extra tick looks like genuinely elapsed time,
+/// undercounting this timer's own remaining `it_value` by the same amount `timer_gettime/1-3.c`
+/// caught (30ms reported instead of ~40ms). `slot.deadline_ns` (already populated by
+/// `do_timer_settime` for exactly this clockid/mode combination -- see that field's own doc
+/// comment) is the same real nanosecond-precision target `do_nanosleep`'s top-off and the expiry/
+/// overrun accounting in `interrupts::timer_interrupt_handler` already measure against, so
+/// preferring it here keeps all three consistent instead of only two of the three agreeing.
 pub fn do_timer_gettime(pid: Pid, timerid: u64, val_ptr: u64) -> Result<u64, u64> {
     if val_ptr == 0 {
         return Err(EINVAL);
@@ -633,9 +651,15 @@ pub fn do_timer_gettime(pid: Pid, timerid: u64, val_ptr: u64) -> Result<u64, u64
         .and_then(|s| s.as_ref())
         .ok_or(EINVAL)?;
 
-    let (value_sec, value_nsec) = match slot.deadline {
-        Some(deadline) => ticks_to_timespec(deadline.saturating_sub(timer_now(proc, slot.clockid))),
-        None => (0, 0),
+    let (value_sec, value_nsec) = match (slot.deadline_ns, slot.deadline) {
+        (Some(deadline_ns), _) => {
+            let now_ns = crate::cpu::hpet::now_ns().unwrap_or(deadline_ns);
+            ns_to_timespec(deadline_ns.saturating_sub(now_ns))
+        }
+        (None, Some(deadline)) => {
+            ticks_to_timespec(deadline.saturating_sub(timer_now(proc, slot.clockid)))
+        }
+        (None, None) => (0, 0),
     };
     let (interval_sec, interval_nsec) = slot.interval_requested;
     // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
