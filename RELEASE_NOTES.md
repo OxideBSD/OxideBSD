@@ -38,6 +38,14 @@ here rather than left to bit-rot in an unmaintained tag.
   since this branch's BIOS/`bootloader`-crate boot path appears to inherit IRQ2 already unmasked
   from firmware — included anyway so the function is correct on its own merits.
 
+---
+
+# OxideBSD 0.1.2
+
+A bugfix-only release on top of 0.1.1 — no new capabilities, same `v0.1.x` policy as always.
+
+## Fixed since 0.1.1
+
 - **Ctrl+C/Ctrl+D silently did nothing once BusyBox's own line editor was driving the interactive
   prompt** (which is effectively always) — found first on `master` while validating unrelated
   work, then confirmed to affect this branch too. Root cause: the default `struct termios`
