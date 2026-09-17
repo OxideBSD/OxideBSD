@@ -132,6 +132,9 @@ pub unsafe fn unmask_irq(irq: u8) {
     }
 }
 
+/// # Safety
+/// Must be called from within a real interrupt handler for the vector being acknowledged --
+/// sending a spurious EOI confuses the PIC's own interrupt-priority state for every IRQ after it.
 pub unsafe fn notify_end_of_interrupt(vector: u8) {
     let mut pic1_command: Port<u8> = Port::new(PIC1_COMMAND);
     let mut pic2_command: Port<u8> = Port::new(PIC2_COMMAND);

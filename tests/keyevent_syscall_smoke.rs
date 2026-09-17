@@ -78,7 +78,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
     );
 
-    const KEYEVENT_SYSCALL_SMOKE_ELF: &[u8] = include_bytes!(env!("KEYEVENT_SYSCALL_SMOKE_ELF_PATH"));
+    const KEYEVENT_SYSCALL_SMOKE_ELF: &[u8] =
+        include_bytes!(env!("KEYEVENT_SYSCALL_SMOKE_ELF_PATH"));
     serial_println!(
         "keyevent_syscall_smoke: spawning keyevent-syscall-smoke as pid 1 ({} byte ELF)",
         KEYEVENT_SYSCALL_SMOKE_ELF.len()

@@ -468,6 +468,8 @@ fn redraw_target() -> Option<RedrawTarget> {
 /// this function's only real caller). No-op if Limine reported no usable framebuffer at all, or
 /// if a userland process currently holds a real `/dev/fb0` mmap (see `FB_OWNED_BY_USERSPACE`'s
 /// own doc comment).
+#[allow(clippy::deref_addrof)] // false positive: `&raw mut` + deref avoids a deny-by-default
+// direct `&mut` to (part of) a mutable static (edition 2024 `static_mut_refs`)
 pub fn redraw() {
     if FB_OWNED_BY_USERSPACE.load(Ordering::Relaxed) {
         return;
@@ -487,7 +489,9 @@ pub fn redraw() {
 
     crate::console::vga::for_each_cell(|row, col, cell| {
         let key = (cell.ascii, cell.fg, cell.bg);
-        // SAFETY: see above.
+        // SAFETY: see above. `&raw mut` + deref, not a direct `&mut PREV_CELLS[...]`, is required
+        // -- taking a `&mut` to (any part of) a mutable static directly is `deny`-by-default under
+        // edition 2024 (`static_mut_refs`).
         let slot = unsafe { &mut *(&raw mut PREV_CELLS[row][col]) };
         // A cell at the cursor's old or new position needs a real repaint even when its own
         // content is unchanged -- the cursor mark overlays real pixels `PREV_CELLS` alone has no

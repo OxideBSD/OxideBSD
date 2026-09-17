@@ -275,9 +275,9 @@ fn discover_hpet_mmio_base(hhdm_offset: u64) -> Option<u64> {
     const MAX_TABLES: usize = 64;
     let mut table_phys = [0u64; MAX_TABLES];
     let n = (entry_count as usize).min(MAX_TABLES);
-    for i in 0..n {
+    for (i, slot) in table_phys.iter_mut().enumerate().take(n) {
         let entry_addr = root_virt + sdt_header_size as u64 + (i as u64) * entry_size;
-        table_phys[i] = if entry_size == 8 {
+        *slot = if entry_size == 8 {
             unsafe { core::ptr::read_unaligned(entry_addr.as_ptr::<u64>()) }
         } else {
             unsafe { core::ptr::read_unaligned(entry_addr.as_ptr::<u32>()) as u64 }

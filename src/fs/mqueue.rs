@@ -61,8 +61,8 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 
-use crate::process::{self, BlockReason, Pid, ProcState};
 use crate::process::scheduler;
+use crate::process::{self, BlockReason, Pid, ProcState};
 use crate::syscall::{
     EAGAIN, EBADF, EBUSY, EEXIST, EINTR, EINVAL, EMSGSIZE, ENAMETOOLONG, ENOENT, ETIMEDOUT,
 };
@@ -454,7 +454,8 @@ pub(crate) fn do_mq_timedsend(
                     drop(queues);
                     return Err(EINTR);
                 }
-                proc.state = ProcState::Blocked(BlockReason::WaitingForMqSpace(end.mq_id, deadline));
+                proc.state =
+                    ProcState::Blocked(BlockReason::WaitingForMqSpace(end.mq_id, deadline));
                 drop(table);
                 drop(queues);
                 scheduler::schedule();

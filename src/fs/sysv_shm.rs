@@ -47,7 +47,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use x86_64::VirtAddr;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
+};
 
 use crate::fs::sysv_ipc::{IPC_64, IPC_RMID, IPC_SET, IPC_STAT, RawIpcPerm};
 use crate::memory::{self, with_frame_allocator};
@@ -301,7 +303,12 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
     // SAFETY: me.address_space is the currently active address space -- shmat runs synchronously
     // on the caller's own kernel stack mid-syscall, with its own CR3 still live -- sound for the
     // same reason crate::process::mm::do_mmap's own identical comment already establishes.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
 
     // SHARED_LEAF: this segment's own `frames` are owned by `SEGMENTS`, not by any one attaching
     // process's address space -- marks every leaf mapped from them so a real address-space teardown
@@ -362,7 +369,12 @@ pub(crate) fn do_shmdt(shmaddr: u64) -> Result<u64, u64> {
 
     // SAFETY: see do_shmat's identical reasoning -- me.address_space is the currently active
     // address space.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(shmaddr));
     let end_page =
         Page::<Size4KiB>::containing_address(VirtAddr::new(shmaddr + page_count * 4096 - 1));

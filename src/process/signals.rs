@@ -2,9 +2,8 @@
 
 use alloc::vec::Vec;
 
-
-use crate::syscall::{EAGAIN, EINTR, EINVAL, EPERM, ESRCH, SyscallFrame};
 use super::*;
+use crate::syscall::{EAGAIN, EINTR, EINVAL, EPERM, ESRCH, SyscallFrame};
 
 /// Real POSIX `kill(2)`/`sigqueue(2)` permission rule: the sender must either be root, or its own
 /// uid must match the target's -- "the real or effective user ID of the sending process shall
@@ -73,7 +72,11 @@ pub(crate) fn force_fault_signal(pid: Pid, sig: u64) {
 /// this function existed). Returns `None` only if `pid` names no process at all, or every member
 /// of its group is a reaped/zombied dead end -- callers already have their own `ESRCH`/`Ok(0)`
 /// handling for that, unchanged.
-fn resolve_signal_recipient(table: &BTreeMap<Pid, Box<Process>>, pid: Pid, sig: u64) -> Option<Pid> {
+fn resolve_signal_recipient(
+    table: &BTreeMap<Pid, Box<Process>>,
+    pid: Pid,
+    sig: u64,
+) -> Option<Pid> {
     let tgid = table.get(&pid)?.tgid;
     let mut fallback = None;
     // Real, live-found bug (via a per-process-state diagnostic dump, not static reading):
@@ -592,7 +595,7 @@ pub(crate) fn has_interrupting_signal(proc: &Process) -> bool {
         let signum = pending.trailing_zeros() as u64 + 1;
         pending &= !(1 << (signum - 1));
         match shared.sigactions[signum as usize].handler {
-            1 => {} // SIG_IGN
+            1 => {}                                                              // SIG_IGN
             0 if default_disposition(signum) == DefaultDisposition::Ignore => {} // SIG_DFL, ignored
             _ => return true,
         }
@@ -740,7 +743,9 @@ pub(crate) fn notify_parent_sigchld(
     let Some(parent) = table.get_mut(&parent_pid) else {
         return;
     };
-    if code == CLD_STOPPED && parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDSTOP != 0 {
+    if code == CLD_STOPPED
+        && parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDSTOP != 0
+    {
         return;
     }
     let _ = record_pending(parent, SIGCHLD, code, child_pid, child_uid, status);
@@ -1358,7 +1363,8 @@ pub fn do_sigtimedwait(pid: Pid, mask_ptr: u64, info_ptr: u64, ts_ptr: u64) -> R
             if crate::cpu::interrupts::ticks() >= deadline {
                 return Err(EAGAIN);
             }
-            proc.state = ProcState::Blocked(BlockReason::WaitingForSpecificSignal(wait_set, deadline));
+            proc.state =
+                ProcState::Blocked(BlockReason::WaitingForSpecificSignal(wait_set, deadline));
         }
         scheduler::schedule();
     }
@@ -1399,8 +1405,14 @@ pub fn do_sigtimedwait(pid: Pid, mask_ptr: u64, info_ptr: u64, ts_ptr: u64) -> R
 /// queued, `Err(EPERM)`/`Err(ESRCH)` via `has_signal_permission`/table lookup exactly mirrors
 /// `do_kill`'s own `sig == 0` branch. Range extended to `1..=34` for the same real reason
 /// `do_kill`'s own doc comment explains -- `32..=34` are real, valid signal numbers, not a gap.
-pub fn do_sigqueue(caller_pid: Pid, target_pid: i64, sig: i64, siginfo_ptr: u64) -> Result<u64, u64> {
-    if sig != 0 && !((1..=34).contains(&sig) || (SIGRTMIN as i64..=SIGRTMAX as i64).contains(&sig)) {
+pub fn do_sigqueue(
+    caller_pid: Pid,
+    target_pid: i64,
+    sig: i64,
+    siginfo_ptr: u64,
+) -> Result<u64, u64> {
+    if sig != 0 && !((1..=34).contains(&sig) || (SIGRTMIN as i64..=SIGRTMAX as i64).contains(&sig))
+    {
         return Err(EINVAL);
     }
     if target_pid <= 0 {

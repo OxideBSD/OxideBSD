@@ -1,13 +1,11 @@
 //! rlimit/priority/sched-policy syscalls -- split out of the original process.rs.
 
-
-
 use x86_64::VirtAddr;
 use x86_64::structures::paging::Translate;
 
+use super::*;
 use crate::memory;
 use crate::syscall::{EAGAIN, EFAULT, EINTR, EINVAL, EPERM, ETIMEDOUT};
-use super::*;
 
 /// musl's own `struct timespec` on x86_64 -- see `src/syscall/ffi.rs`'s/`src/process/timers.rs`'s
 /// own `RawTimespec` (duplicated here rather than shared, same "no shared crate across this
@@ -205,7 +203,10 @@ fn sched_priority_raise_permitted(
 /// is a real `EINVAL` from `sched_setscheduler`/`sched_get_priority_max`/`_min`, not silently
 /// treated as some other policy's own range.
 fn is_known_sched_policy(policy: i32) -> bool {
-    matches!(policy, SCHED_OTHER | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE)
+    matches!(
+        policy,
+        SCHED_OTHER | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE
+    )
 }
 
 /// `SYS_SCHED_SETSCHEDULER`'s real logic. Real permission checking
@@ -296,8 +297,12 @@ pub fn do_sched_setscheduler(
     if !(min..=max).contains(&param.sched_priority) {
         return Err(EINVAL);
     }
-    if !sched_priority_raise_permitted(caller_uid, policy, param.sched_priority, proc.sched_priority)
-    {
+    if !sched_priority_raise_permitted(
+        caller_uid,
+        policy,
+        param.sched_priority,
+        proc.sched_priority,
+    ) {
         return Err(EPERM);
     }
     proc.sched_policy = policy;

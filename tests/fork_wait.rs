@@ -1,6 +1,6 @@
 //! Boots the full kernel (modules included) and spawns `userland/fork-exec-smoke/` as pid 1 in
-//! place of `stsh`, exercising a real ring-3 `fork`/`wait4`/`exit` round trip end to end without
-//! needing interactive keyboard input the way driving the real shell would.
+//! place of the real interactive shell, exercising a real ring-3 `fork`/`wait4`/`exit` round trip
+//! end to end without needing interactive keyboard input the way driving the real shell would.
 //!
 //! `scheduler::start`/`process::do_exit` never return control to this file's own `main` (see
 //! CLAUDE.md's process/scheduler section) -- there's no way to `exit_qemu` after `start` the way

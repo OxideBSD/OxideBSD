@@ -371,12 +371,19 @@ fn free_table_level(
         // A non-leaf USER_ACCESSIBLE entry: always this address space's own private table
         // structure (see AddressSpace::teardown's own doc comment -- SHARED_LEAF only ever marks
         // an actual leaf, never an intermediate table), so always safe to recurse into and free.
-        let frame = entry.frame().expect("present non-leaf entry must have a frame");
+        let frame = entry
+            .frame()
+            .expect("present non-leaf entry must have a frame");
         // SAFETY: physical_memory_offset is the bootloader's phys-memory mapping; frame is a real,
         // live next-level table -- and, per AddressSpace::teardown's own safety contract, this
         // whole address space is no longer the active one, so no concurrent view of it exists.
         let child_table = unsafe { frame_to_page_table(frame, physical_memory_offset) };
-        free_table_level(child_table, level - 1, physical_memory_offset, frame_allocator);
+        free_table_level(
+            child_table,
+            level - 1,
+            physical_memory_offset,
+            frame_allocator,
+        );
         // SAFETY: this now-emptied table structure frame is exclusively this address space's own.
         unsafe { frame_allocator.deallocate_frame(frame) };
     }

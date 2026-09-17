@@ -268,7 +268,14 @@ pub(crate) extern "C" fn oxidebsd_register_fd_ops(
     write: FdReadWrite,
     close: FdClose,
 ) -> i32 {
-    register(scheduler::current_tgid(), fd, read, write, close, no_content_id);
+    register(
+        scheduler::current_tgid(),
+        fd,
+        read,
+        write,
+        close,
+        no_content_id,
+    );
     0
 }
 
@@ -283,7 +290,14 @@ pub(crate) extern "C" fn oxidebsd_register_fd_ops_with_content_id(
     close: FdClose,
     content_id: FdContentId,
 ) -> i32 {
-    register(scheduler::current_tgid(), fd, read, write, close, content_id);
+    register(
+        scheduler::current_tgid(),
+        fd,
+        read,
+        write,
+        close,
+        content_id,
+    );
     0
 }
 
@@ -619,7 +633,10 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
         pitch: 0,
         bpp: 0,
     };
-    let ok = (ops.fb_geometry)(ops.real_fd, &mut geom as *mut crate::drivers::fbdev::FbGeometry as u64);
+    let ok = (ops.fb_geometry)(
+        ops.real_fd,
+        &mut geom as *mut crate::drivers::fbdev::FbGeometry as u64,
+    );
     if ok == 0 { Some(geom) } else { None }
 }
 

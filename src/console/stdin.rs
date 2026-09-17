@@ -41,8 +41,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
-use crate::process::{self, BlockReason, ProcState};
 use crate::process::scheduler;
+use crate::process::{self, BlockReason, ProcState};
 
 const CAPACITY: usize = 256;
 

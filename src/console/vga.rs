@@ -907,6 +907,8 @@ fn real_grid_size() -> (usize, usize) {
     }
 }
 
+#[allow(clippy::deref_addrof)] // false positive: `&raw mut` + deref avoids a deny-by-default
+// direct `&mut` to a mutable static (edition 2024 `static_mut_refs`), see the field's own comment
 static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
     let (width, height) = real_grid_size();
     let writer = Writer {
@@ -931,7 +933,9 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
         saved_cursor: None,
         alt_screen_saved: None,
         // See `SHADOW_BUFFER`'s own doc comment for why this points here instead of real VRAM.
-        // This Writer is the only thing that ever accesses it.
+        // This Writer is the only thing that ever accesses it. `&raw mut` + deref, not a direct
+        // `&mut SHADOW_BUFFER`, is required here -- taking a `&mut` to a mutable static directly
+        // is `deny`-by-default under edition 2024 (`static_mut_refs`).
         buffer: unsafe { &mut *(&raw mut SHADOW_BUFFER) },
     };
     // Establish a known cursor shape/position at boot -- the BIOS's own leftover cursor state is

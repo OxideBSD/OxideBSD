@@ -28,7 +28,7 @@ limine_entry_point!(main);
 const SYS_TEST_EXIT: u64 = 9999;
 /// The real ABI number -- see `tests/socketpair_syscall_smoke.rs`'s own precedent for why this is
 /// registered directly here (delegating straight to `oxidebsd_close_fd`, the same real logic
-/// `modules/oxfs`/`modules/fat32` register it against at real boot) instead of loading all of
+/// `modules/oxfs` registers it against at real boot) instead of loading all of
 /// `oxfs` just to exercise the one generic close path this test's final part needs (`mq_close`
 /// isn't its own syscall -- see `src/fs/mqueue.rs`'s own doc comment).
 const SYS_CLOSE: u64 = 6;

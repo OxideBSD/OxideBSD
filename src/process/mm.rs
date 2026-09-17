@@ -5,14 +5,14 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 use x86_64::VirtAddr;
+use x86_64::structures::paging::mapper::TranslateResult;
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
-use x86_64::structures::paging::mapper::TranslateResult;
 
+use super::*;
 use crate::memory::{self, with_frame_allocator};
 use crate::syscall::{EACCES, EAGAIN, EBADF, EBUSY, EINVAL, ENODEV, ENOMEM, ENXIO, EOVERFLOW};
-use super::*;
 
 /// Fixed VA window for anonymous `SYS_MMAP` allocations — a fresh region, not reused from
 /// `module::MODULE_VA_BASE` (that one's kernel-mapped and shared across every address space; an
@@ -322,7 +322,12 @@ pub fn do_mmap(
 /// see that function's own doc comment for the demand-mapping half of this design (musl's own
 /// `pthread_create()` `mmap()`s the whole guard+usable region `PROT_NONE` in one call, then
 /// `mprotect()`s just the usable tail back to `PROT_READ|PROT_WRITE`).
-fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64, prot: u64) -> Result<u64, u64> {
+fn do_mmap_anon(
+    caller_pid: Pid,
+    fixed_base: Option<u64>,
+    region_len: u64,
+    prot: u64,
+) -> Result<u64, u64> {
     let base = match fixed_base {
         Some(base) => base,
         None => {
@@ -353,7 +358,12 @@ fn do_mmap_anon(caller_pid: Pid, fixed_base: Option<u64>, region_len: u64, prot:
     // SAFETY: me.address_space is the currently active address space -- mmap runs synchronously on
     // the caller's own kernel stack mid-syscall, with its own CR3 still live -- sound for the same
     // reason AddressSpace::fork's own doc comment already establishes for this "active table" case.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
 
     let mut leaf_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
@@ -627,7 +637,9 @@ fn do_mmap_file_backed(
                 for (i, chunk) in staging.chunks(4096).enumerate() {
                     let frame_ptr =
                         (phys_offset + new_frames[i].start_address().as_u64()).as_mut_ptr::<u8>();
-                    unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), frame_ptr, chunk.len()) };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(chunk.as_ptr(), frame_ptr, chunk.len())
+                    };
                 }
             }
         }
@@ -678,8 +690,8 @@ fn do_mmap_file_backed(
                 if n > 0 {
                     staging.truncate(n as usize);
                     for (i, chunk) in staging.chunks(4096).enumerate() {
-                        let frame_ptr =
-                            (phys_offset + new_frames[i].start_address().as_u64()).as_mut_ptr::<u8>();
+                        let frame_ptr = (phys_offset + new_frames[i].start_address().as_u64())
+                            .as_mut_ptr::<u8>();
                         unsafe {
                             core::ptr::copy_nonoverlapping(chunk.as_ptr(), frame_ptr, chunk.len())
                         };
@@ -740,7 +752,12 @@ fn do_mmap_file_backed(
         .expect("mmap: current process missing from table");
     // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
     // address space.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
     // Real `PROT_NONE` (`mmap/6-2.c`): neither `PROT_READ` nor `PROT_WRITE` set. Skipping the
     // mapping loop entirely reuses `signal_for_user_fault`'s own existing default with zero new
     // machinery -- that function already reports `SIGBUS` only for an address in a region's
@@ -935,7 +952,12 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
 
     // SAFETY: me.address_space is the currently active address space -- same reasoning do_mmap's
     // own identical comment already establishes.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_addr_inclusive));
 
@@ -1215,16 +1237,24 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
         .expect("mprotect: current process missing from table");
     // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
     // address space.
-    let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mut mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_inclusive));
     with_frame_allocator(|fa| -> Result<(), u64> {
         for page in Page::range_inclusive(start_page, end_page) {
             match mapper.translate(page.start_address()) {
-                TranslateResult::Mapped { flags: old_flags, .. } => {
+                TranslateResult::Mapped {
+                    flags: old_flags, ..
+                } => {
                     let mut new_flags =
                         old_flags & !(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
-                    new_flags |= leaf_flags & (PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                    new_flags |=
+                        leaf_flags & (PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
                     // SAFETY: only ever narrows/widens WRITABLE/USER_ACCESSIBLE on a page this
                     // exact process already owns inside its own private mmap window (or, for a
                     // real CLONE_VM/CLONE_THREAD sibling, the whole shared address space --
@@ -1233,7 +1263,10 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                     // freshly-mapped page with no prior TLB entry, this can be *narrowing* an
                     // already-cached mapping's permissions, which must take effect immediately.
                     unsafe {
-                        mapper.update_flags(page, new_flags).map_err(|_| ENOMEM)?.flush();
+                        mapper
+                            .update_flags(page, new_flags)
+                            .map_err(|_| ENOMEM)?
+                            .flush();
                     }
                 }
                 _ => {
@@ -1241,14 +1274,21 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                     // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill
                     // convention for every other anonymous page.
                     let frame = fa.allocate_frame().ok_or(ENOMEM)?;
-                    let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+                    let frame_ptr =
+                        (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
                     unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
                     // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's
                     // contract); page is confirmed not-Mapped above, and falls inside this
                     // process's own mmap window.
                     unsafe {
                         mapper
-                            .map_to_with_table_flags(page, frame, leaf_flags, parent_table_flags, fa)
+                            .map_to_with_table_flags(
+                                page,
+                                frame,
+                                leaf_flags,
+                                parent_table_flags,
+                                fa,
+                            )
                             .map_err(|_| ENOMEM)?
                             .flush();
                     }
@@ -1279,11 +1319,20 @@ fn range_fully_mapped(caller_pid: Pid, addr: u64, len: u64) -> bool {
     };
     // SAFETY: me.address_space is the currently active address space -- same reasoning do_mmap's
     // own identical comment already establishes; read-only here, no mutation.
-    let mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+    let mapper = unsafe {
+        me.address_space
+            .as_ref()
+            .expect("mm: caller has no address space")
+            .mapper(phys_offset)
+    };
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_inclusive));
-    Page::range_inclusive(start_page, end_page)
-        .all(|page| matches!(mapper.translate(page.start_address()), TranslateResult::Mapped { .. }))
+    Page::range_inclusive(start_page, end_page).all(|page| {
+        matches!(
+            mapper.translate(page.start_address()),
+            TranslateResult::Mapped { .. }
+        )
+    })
 }
 
 /// `SYS_MLOCK`/`SYS_MUNLOCK`'s real logic — real Linux values `509`/`510` (moved off the real
@@ -1399,7 +1448,12 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
     if new_top > map_start {
         // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
         // address space.
-        let mut mapper = unsafe { me.address_space.as_ref().expect("mm: caller has no address space").mapper(phys_offset) };
+        let mut mapper = unsafe {
+            me.address_space
+                .as_ref()
+                .expect("mm: caller has no address space")
+                .mapper(phys_offset)
+        };
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(map_start));
         let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(new_top - 1));
         with_frame_allocator(|fa| -> Result<(), u64> {

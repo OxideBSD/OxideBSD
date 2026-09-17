@@ -42,7 +42,7 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
     oxidebsd::hlt_loop();
 }
 
-/// `SYS_CLOSE`'s real handler (registered by `modules/oxfs`/`modules/fat32` at real boot) is pure
+/// `SYS_CLOSE`'s real handler (registered by `modules/oxfs` at real boot) is pure
 /// filesystem-agnostic delegation to this same function -- see this test's own module doc comment
 /// for why loading all of `oxfs` isn't worth it just for this one generic close path.
 extern "C" fn test_close_handler(fd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

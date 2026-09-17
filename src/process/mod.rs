@@ -1194,12 +1194,12 @@ pub enum SpawnError {
     Elf(elf::ElfError),
 }
 
-pub use lifecycle::*;
-pub use signals::*;
 pub use identity::*;
+pub use lifecycle::*;
 pub use limits::*;
-pub use timers::*;
 pub use mm::*;
+pub use signals::*;
+pub use timers::*;
 // `pub(crate) use`, not `pub use`: every item in `procfs` is itself `pub(crate)` (its
 // `oxidebsd_proc_*` functions are resolved as `crate::process::oxidebsd_proc_*` by
 // `src/module.rs`'s FFI table, which is in-crate but not `procfs`'s own module) -- matching that

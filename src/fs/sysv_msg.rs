@@ -60,8 +60,8 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::sysv_ipc::{IPC_64, IPC_RMID, IPC_SET, IPC_STAT, RawIpcPerm};
-use crate::process::{self, BlockReason, Pid, ProcState};
 use crate::process::scheduler;
+use crate::process::{self, BlockReason, Pid, ProcState};
 use crate::syscall::{E2BIG, EACCES, EAGAIN, EIDRM, EINVAL, ENOENT, ENOMSG};
 
 const IPC_PRIVATE: i32 = 0;
@@ -195,7 +195,9 @@ pub(crate) fn do_msgget(key: u64, flag: u64) -> Result<u64, u64> {
                 return Err(crate::syscall::EEXIST);
             }
             let queues = QUEUES.lock();
-            let q = queues.get(&msqid).expect("KEYS entry with no matching QUEUES entry");
+            let q = queues
+                .get(&msqid)
+                .expect("KEYS entry with no matching QUEUES entry");
             if !check_access(q, uid, gid, false) {
                 return Err(EACCES);
             }
@@ -276,10 +278,9 @@ pub(crate) fn do_msgsnd(q: u64, m: u64, len: u64, flag: u64) -> Result<u64, u64>
             if qref.cbytes() + len <= qref.qbytes {
                 // SAFETY: same known pointer-validation gap every other user-memory read in this
                 // codebase already has.
-                let data = unsafe {
-                    core::slice::from_raw_parts((m + 8) as *const u8, len as usize)
-                }
-                .to_vec();
+                let data =
+                    unsafe { core::slice::from_raw_parts((m + 8) as *const u8, len as usize) }
+                        .to_vec();
                 qref.messages.push(SysvMessage { mtype, data });
                 qref.lspid = caller;
                 qref.stime = crate::cpu::rtc::unix_epoch_seconds();
@@ -336,11 +337,7 @@ pub(crate) fn do_msgrcv(q_and_flag: u64, m: u64, len: u64, msgtyp: u64) -> Resul
                 // this codebase already has.
                 unsafe {
                     (m as *mut i64).write_unaligned(msg.mtype);
-                    core::ptr::copy_nonoverlapping(
-                        msg.data.as_ptr(),
-                        (m + 8) as *mut u8,
-                        copy_len,
-                    );
+                    core::ptr::copy_nonoverlapping(msg.data.as_ptr(), (m + 8) as *mut u8, copy_len);
                 }
                 wake_blocked_senders(msqid);
                 return Ok(copy_len as u64);
@@ -374,7 +371,11 @@ fn find_matching_index(messages: &[SysvMessage], msgtyp: i64, except: bool) -> O
         };
     }
     let limit = -msgtyp;
-    let min_type = messages.iter().filter(|m| m.mtype <= limit).map(|m| m.mtype).min()?;
+    let min_type = messages
+        .iter()
+        .filter(|m| m.mtype <= limit)
+        .map(|m| m.mtype)
+        .min()?;
     messages.iter().position(|m| m.mtype == min_type)
 }
 

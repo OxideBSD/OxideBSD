@@ -2,7 +2,6 @@
 
 use alloc::vec::Vec;
 
-
 use super::*;
 
 /// Appends `value`'s decimal representation (no leading zeros; `0` prints as `"0"`) -- kernel-side

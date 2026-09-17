@@ -48,7 +48,9 @@
 //! second real use of that primitive in this codebase, not a new pattern.
 
 use x86_64::structures::paging::mapper::MapToError;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
+};
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::cpu::tsc;
@@ -391,7 +393,11 @@ impl Xhci {
         let op_extent = caplength as u64 + OP_PORTSC_BASE + (max_ports as u64) * OP_PORTSC_STRIDE;
         let db_extent = (dboff & !0x3) as u64 + (max_slots as u64 + 1) * 4;
         let rt_extent = (rtsoff & !0x1F) as u64 + 0x20 + 0x20;
-        let needed_pages = op_extent.max(db_extent).max(rt_extent).div_ceil(4096).max(1);
+        let needed_pages = op_extent
+            .max(db_extent)
+            .max(rt_extent)
+            .div_ceil(4096)
+            .max(1);
         map_bar_pages(mapper, frame_allocator, cap_base, bar0_phys, needed_pages);
 
         serial_println!(
@@ -646,6 +652,7 @@ impl Xhci {
     /// driver never issues an OUT-with-data control transfer (every real request it makes is
     /// either a `GET_DESCRIPTOR`-style IN or a zero-length class/standard request), so that
     /// direction isn't implemented.
+    #[allow(clippy::too_many_arguments)] // real xHCI control-transfer shape, not arbitrary
     pub(crate) fn control_transfer_in(
         &mut self,
         ep0_ring: &mut TrbRing,

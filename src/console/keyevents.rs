@@ -21,7 +21,7 @@
 //! come. `pop_event` returns `None` immediately on an empty buffer -- no `BlockReason`, no
 //! `scheduler::schedule()` involved anywhere in this module.
 
-use pc_keyboard::{KeyCode, KeyState, KeyEvent};
+use pc_keyboard::{KeyCode, KeyEvent, KeyState};
 use spin::Mutex;
 
 const CAPACITY: usize = 64;

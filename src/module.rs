@@ -767,9 +767,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_set_fd_access_mode" => {
             Some(crate::fs::fd::oxidebsd_set_fd_access_mode as *const () as u64)
         }
-        "oxidebsd_set_fd_append" => {
-            Some(crate::fs::fd::oxidebsd_set_fd_append as *const () as u64)
-        }
+        "oxidebsd_set_fd_append" => Some(crate::fs::fd::oxidebsd_set_fd_append as *const () as u64),
         "oxidebsd_set_fd_fb_geometry" => {
             Some(crate::fs::fd::oxidebsd_set_fd_fb_geometry as *const () as u64)
         }
@@ -814,7 +812,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_fcntl" => Some(crate::syscall::oxidebsd_sys_fcntl as *const () as u64),
         "oxidebsd_sys_shutdown" => Some(crate::syscall::oxidebsd_sys_shutdown as *const () as u64),
         "oxidebsd_random_bytes" => Some(crate::random::oxidebsd_random_bytes as *const () as u64),
-        "oxidebsd_fb_geometry" => Some(crate::drivers::fbdev::oxidebsd_fb_geometry as *const () as u64),
+        "oxidebsd_fb_geometry" => {
+            Some(crate::drivers::fbdev::oxidebsd_fb_geometry as *const () as u64)
+        }
         "oxidebsd_sys_clock_gettime" => {
             Some(crate::syscall::oxidebsd_sys_clock_gettime as *const () as u64)
         }

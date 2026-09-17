@@ -42,8 +42,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 
 use spin::Mutex;
 
-use crate::process::{self, BlockReason, ProcState};
 use crate::process::scheduler;
+use crate::process::{self, BlockReason, ProcState};
 use crate::syscall::{EAGAIN, ENOTSOCK, EPIPE};
 
 struct PipeBuffer {

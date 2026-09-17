@@ -10,12 +10,12 @@ use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
 };
 
+use super::*;
 use crate::memory::address_space::AddressSpace;
-use crate::process::elf::{self, Elf};
 use crate::memory::{self, with_frame_allocator};
+use crate::process::elf::{self, Elf};
 use crate::process::scheduler;
 use crate::syscall::{self, ECHILD, EINVAL, ELOOP, ENOEXEC, ENOMEM, SyscallFrame};
-use super::*;
 
 // Real FreeBSD syscall numbers, duplicated here rather than imported — same "no shared crate
 // across this internal ABI boundary" convention `modules/fat32`/`modules/native_abi` already use
@@ -101,8 +101,7 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
     let cmdline = build_cmdline(&[b"(init)"]);
     // Boot-time only: no syscall caller to report a real ENOMEM to, and no recovery from pid 1
     // itself failing to start -- see KernelStack::new's own doc comment.
-    let kernel_stack =
-        KernelStack::new().expect("out of memory allocating a kernel stack");
+    let kernel_stack = KernelStack::new().expect("out of memory allocating a kernel stack");
     let kernel_stack_top = kernel_stack.top();
     let rsp = crate::process::context_switch::seed_spawn_frame(kernel_stack_top);
 
@@ -411,7 +410,8 @@ pub fn do_fork_from_current() -> Result<u64, u64> {
     let kernel_stack_top = kernel_stack.top();
     // SAFETY: parent_frame is the caller's own live SyscallFrame, valid for the duration of this
     // call (we're still inside sys_fork's own handling of it).
-    let rsp = unsafe { crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame) };
+    let rsp =
+        unsafe { crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame) };
 
     let child = Process {
         pid: child_pid,
@@ -661,7 +661,9 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
     // SAFETY: parent_frame is valid per the same reasoning as the frame_tls read above; newsp is
     // the caller's own real clone(2) argument, already validated to be a real user-space stack
     // pointer by musl's own __clone asm before this syscall is ever issued.
-    let rsp = unsafe { crate::process::context_switch::seed_clone_frame(kernel_stack_top, parent_frame, newsp) };
+    let rsp = unsafe {
+        crate::process::context_switch::seed_clone_frame(kernel_stack_top, parent_frame, newsp)
+    };
 
     let child = Process {
         pid: child_pid,
@@ -982,8 +984,9 @@ pub fn do_execve(
     // calling process's own, already-populated one (execve runs mid-syscall, on the caller's own
     // kernel stack, with its own CR3 still live) -- AddressSpace::new would shallow-copy that
     // process's *user* mappings too, aliasing them into what's supposed to be a fresh image.
-    let new_address_space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
-        .map_err(|_| ENOMEM)?;
+    let new_address_space =
+        with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
+            .map_err(|_| ENOMEM)?;
     // SAFETY: phys_offset is the bootloader's phys-memory mapping; this is the only live view of
     // new_address_space's own (not-yet-active) level 4 table right now.
     let mut mapper = unsafe { new_address_space.mapper(phys_offset) };
@@ -1226,13 +1229,14 @@ pub fn do_wait4(
                 return Err(ECHILD);
             }
 
-            let zombie = children
-                .iter()
-                .copied()
-                .find_map(|c| match table.get(&c).map(|p| p.state) {
-                    Some(ProcState::Zombie(code)) => Some((c, code)),
-                    _ => None,
-                });
+            let zombie =
+                children
+                    .iter()
+                    .copied()
+                    .find_map(|c| match table.get(&c).map(|p| p.state) {
+                        Some(ProcState::Zombie(code)) => Some((c, code)),
+                        _ => None,
+                    });
 
             if let Some((child_pid, code)) = zombie {
                 let removed = table
@@ -1470,7 +1474,10 @@ fn reparent_orphans(pid: Pid) {
         return;
     }
     let mut table = PROCESS_TABLE.lock();
-    let Some(children) = table.get_mut(&pid).map(|me| core::mem::take(&mut me.children)) else {
+    let Some(children) = table
+        .get_mut(&pid)
+        .map(|me| core::mem::take(&mut me.children))
+    else {
         return;
     };
     if children.is_empty() {
@@ -1645,7 +1652,9 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
             .get(&pid)
             .and_then(|me| me.parent)
             .and_then(|parent_pid| table.get(&parent_pid))
-            .is_some_and(|parent| parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDWAIT != 0);
+            .is_some_and(|parent| {
+                parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDWAIT != 0
+            });
     if auto_reap {
         let parent_pid = table.get(&pid).unwrap().parent;
         if let Some(parent_pid) = parent_pid

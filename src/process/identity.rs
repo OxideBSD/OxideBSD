@@ -1,10 +1,8 @@
 //! uid/gid/pgid/sid syscalls -- split out of the original process.rs.
 
-
-
+use super::*;
 use crate::process::scheduler;
 use crate::syscall::{EINVAL, EPERM, ESRCH};
-use super::*;
 
 /// Real `getpid()` returns the caller's **thread-group id**, not its raw schedulable pid — see
 /// `Process::tgid`'s own doc comment. Identical today (no real thread creation exists yet), but

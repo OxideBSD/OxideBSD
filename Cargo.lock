@@ -134,10 +134,6 @@ name = "dynlink-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
-name = "fat32"
-version = "0.1.0"
-
-[[package]]
 name = "fb-mmap-syscall-smoke"
 version = "0.1.0"
 
@@ -394,10 +390,6 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
-
-[[package]]
-name = "stsh"
-version = "0.1.0"
 
 [[package]]
 name = "sysinfo-syscall-smoke"

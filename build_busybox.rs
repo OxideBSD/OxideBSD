@@ -21,11 +21,11 @@
     // BusyBox applets ported to OxideBSD -- see CLAUDE.md's BusyBox section. Each is its own
     // genuinely standalone, single-applet static binary (not a multi-call `busybox` binary
     // dispatching on argv[0], which this codebase's execve doesn't support -- see
-    // build_busybox_applet's own doc comment), embedded into the FAT32 image below as
-    // <NAME>.ELF the same way SMOKE.ELF/MUSL.ELF already are. Data-driven (a plain list, not one
+    // build_busybox_applet's own doc comment), embedded into oxfs's inode table by build.rs's own
+    // oxfs-seeding code further down (originally the FAT32 image, back when FAT32 was still the
+    // live filesystem -- see CLAUDE.md's oxfs section). Data-driven (a plain list, not one
     // hand-duplicated block of variables per applet like the original TRUE/ECHO-only version of
-    // this function) specifically so adding the next applet is a one-line addition here, not a
-    // matching set of edits scattered across this function and generate_fat32_image below. Load
+    // this function) specifically so adding the next applet is a one-line addition here. Load
     // addresses continue the existing `0x<b|c|d...>00000` sequence every prior userland/BusyBox
     // binary in this codebase already claimed one of (see CLAUDE.md's "User-mode execution"
     // section) -- each must stay clear of every other one already in use.
@@ -427,10 +427,10 @@ fn build_busybox_applet(
         .and_then(|m| m.modified())
         .unwrap_or(std::time::SystemTime::now());
     let freshness_floor = busybox_source_mtime.max(build_rs_mtime).max(musl_mtime);
-    if let Ok(modified) = std::fs::metadata(&binary_path).and_then(|m| m.modified()) {
-        if modified >= freshness_floor {
-            return binary_path;
-        }
+    if let Ok(modified) = std::fs::metadata(&binary_path).and_then(|m| m.modified())
+        && modified >= freshness_floor
+    {
+        return binary_path;
     }
 
     // A real, previously-undiscovered bug found live: this staleness check correctly notices

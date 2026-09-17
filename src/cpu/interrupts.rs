@@ -538,8 +538,10 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
                 let fired = if let Some(deadline_ns) = slot.deadline_ns {
                     match crate::cpu::hpet::now_ns() {
                         Some(now_ns) if now_ns >= deadline_ns => {
-                            if slot.interval_ns > 0 {
-                                let elapsed = (now_ns - deadline_ns) / slot.interval_ns + 1;
+                            if let Some(periods) =
+                                (now_ns - deadline_ns).checked_div(slot.interval_ns)
+                            {
+                                let elapsed = periods + 1;
                                 slot.deadline_ns = Some(deadline_ns + elapsed * slot.interval_ns);
                                 ns_overrun_extra = (elapsed - 1) as u32;
                             } else {

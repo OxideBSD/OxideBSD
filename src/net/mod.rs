@@ -80,8 +80,8 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
     // could never actually elapse. Confirmed live: `tests/poll_syscall_smoke.rs`'s real `SYSCALL`
     // path hung solid on exactly this before `crate::tsc` existed -- see that module's own doc
     // comment. RDTSC keeps advancing regardless of the interrupt-enable state.
-    let deadline =
-        (timeout_ms >= 0).then(|| crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(timeout_ms as u64));
+    let deadline = (timeout_ms >= 0)
+        .then(|| crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(timeout_ms as u64));
 
     loop {
         if nfds > 0 {

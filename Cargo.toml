@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "userland/ring3-smoke",
-  "userland/stsh",
   "userland/fork-exec-smoke",
   "userland/socketpair-syscall-smoke",
   "userland/ping-syscall-smoke",
@@ -50,7 +49,6 @@ members = [
   "modules/posix_compat",
   "modules/signal",
   "modules/clock",
-  "modules/fat32",
   "modules/oxfs",
   "modules/net",
 ]

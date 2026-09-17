@@ -48,9 +48,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 
+use crate::cpu::gdt;
 use crate::process::context_switch::switch_context;
 use crate::process::{self, Pid, ProcState};
-use crate::cpu::gdt;
 use crate::serial_println;
 
 /// `0` is never a valid `Pid` (`process::alloc_pid` starts at 1) — used as "no current process,"

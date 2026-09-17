@@ -24,20 +24,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 }
 
 /// Non-test builds boot, load the kernel modules that populate the native syscall ABI's dispatch
-/// table and filesystem support, spawn the first real process (`stsh`, pid 1), and hand off to the
-/// scheduler — see `oxidebsd::process::spawn` and `oxidebsd::scheduler::start` for why this never
-/// returns here (the same one-way shape `usermode::jump_to_usermode` always had, just reached
-/// through the scheduler's own first-run trampoline now instead of a direct call).
+/// table and filesystem support, spawn the first real process (BusyBox's `hush`, pid 1), and hand
+/// off to the scheduler — see `oxidebsd::process::spawn` and `oxidebsd::scheduler::start` for why
+/// this never returns here (the same one-way shape `usermode::jump_to_usermode` always had, just
+/// reached through the scheduler's own first-run trampoline now instead of a direct call).
 ///
-/// `stsh` (see `userland/stsh/`) is a genuinely interactive shell over OxideBSD's own native,
-/// BSD-style `SYSCALL`/`SYSRETQ` ABI (`src/syscall.rs`), and — now that `fork`/`execve`/`wait4` are
-/// real — can `fork`+`execve`+`wait` other programs instead of only running shell built-ins.
-/// `ring3-smoke` (`userland/ring3-smoke/`) isn't spawned directly at boot; it's instead embedded
-/// into the FAT32 image (see `build.rs`) so `stsh` can `execve` it as a real file.
+/// `hush` runs over OxideBSD's own native, BSD-style `SYSCALL`/`SYSRETQ` ABI (`src/syscall/`),
+/// with real `fork`/`execve`/`wait4` to run BusyBox's other applets and any other ELF on the real
+/// filesystem (`oxfs`, see `CLAUDE.md`'s oxfs/BusyBox sections) — not just shell built-ins.
 ///
 /// Before that, loads the `hello` kernel module (`modules/hello/`) via `oxidebsd::module::load`
 /// — see `CLAUDE.md`'s module-loading section. This is the first, deliberately minimal proof that
-/// dynamic module loading works end to end; later modules (the native syscall ABI, FAT32) load
+/// dynamic module loading works end to end; later modules (the native syscall ABI, oxfs, ...) load
 /// the same way.
 #[cfg(not(test))]
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
@@ -87,7 +85,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     .unwrap_or_else(|e| panic!("failed to load the hello module: {e:?}"));
 
     // Populates src/syscall.rs's dispatch table (SYS_EXIT/SYS_READ/SYS_WRITE/SYS_FORK/SYS_WAIT4/
-    // SYS_EXECVE/SYS_GETPID) -- must load before stsh, below, is spawned, since stsh's syscalls
+    // SYS_EXECVE/SYS_GETPID) -- must load before pid 1, below, is spawned, since its syscalls
     // resolve through that table.
     const NATIVE_ABI_MOD: &[u8] = include_bytes!(env!("NATIVE_ABI_MOD_PATH"));
     const NATIVE_ABI_PANIC_SYMBOL: &str = env!("NATIVE_ABI_MOD_PANIC_SYMBOL");
@@ -102,10 +100,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
 
     // The home for whatever POSIX/libc-surface syscalls BusyBox's applets need beyond what
-    // native_abi/fat32 already provide -- see CLAUDE.md's BusyBox section and
-    // modules/posix_compat/src/lib.rs's own doc comment. Empty (registers nothing) at this point;
-    // must still load before stsh is spawned, same as native_abi, since anything it later
-    // registers needs to be in place before a program calling it can run.
+    // native_abi already provides -- see CLAUDE.md's BusyBox section and
+    // modules/posix_compat/src/lib.rs's own doc comment. Must load before pid 1 is spawned, same
+    // as native_abi, since anything it registers needs to be in place before a program calling it
+    // can run.
     const POSIX_COMPAT_MOD: &[u8] = include_bytes!(env!("POSIX_COMPAT_MOD_PATH"));
     const POSIX_COMPAT_PANIC_SYMBOL: &str = env!("POSIX_COMPAT_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
@@ -163,9 +161,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         oxidebsd::drivers::ata::init();
     }
 
-    // The live filesystem (see CLAUDE.md's oxfs section) -- modules/fat32 is kept in the workspace
-    // (still built and self-checked by build.rs on every `cargo build`) but deliberately not
-    // loaded here anymore.
+    // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
+    // since removed (superseded, no longer buildable or loaded).
     //
     // `fatal_on_panic = true`: unlike every other module here, a filesystem module's state *is*
     // the entire in-memory filesystem (plus, now, whatever's mid-flight to its real backing disk
@@ -175,7 +172,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // panic mid-mount or mid-format risks leaving a torn superblock/inode-table write behind,
     // which is worse to resume past than a purely in-memory panic ever was. So a panic anywhere in
     // oxfs reboots the whole system instead (see `module_panic_trampoline` in `src/module.rs`).
-    // The same reasoning will apply to fat32/ext4/xfs/... once any of them load at boot again.
+    // The same reasoning will apply to ext4/xfs/... should any real disk filesystem load at boot.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
@@ -216,11 +213,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     oxidebsd::fs::fd::init();
 
-    // BusyBox's `hush` (see CLAUDE.md's BusyBox/oxfs sections) replaces `stsh` as pid 1 -- a real
-    // shell over a real filesystem, not a purpose-built demo. `stsh` (`userland/stsh/`) stays in
-    // the workspace, still built by build.rs, but is no longer spawned here; unlike
-    // `modules/fat32`, it isn't even embedded into oxfs's filesystem (nothing execve's it, so
-    // there's no reason to). `hush` prints no prompt of its own (`CONFIG_HUSH_INTERACTIVE` is off
+    // BusyBox's `hush` (see CLAUDE.md's BusyBox/oxfs sections) is pid 1 -- a real shell over a
+    // real filesystem. It superseded `stsh`, the original hand-written shell, which has since been
+    // removed entirely (see CLAUDE.md's "Interactive shell" section for what remains relevant of
+    // its design). `hush` prints no prompt of its own (`CONFIG_HUSH_INTERACTIVE` is off
     // -- see CLAUDE.md's BusyBox section) -- it silently blocks reading the first line, which is
     // correct, not stuck (confirmed via QEMU + injected keystrokes: ordinary commands, `cd`/`pwd`,
     // and piping all work).

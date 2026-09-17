@@ -1,9 +1,7 @@
 //! nanosleep/itimer syscalls -- split out of the original process.rs.
 
-
-
-use crate::syscall::{EAGAIN, EINTR, EINVAL};
 use super::*;
+use crate::syscall::{EAGAIN, EINTR, EINVAL};
 
 /// musl's own `struct timespec` on x86_64 -- see `src/syscall.rs`'s `RawTimespec` (duplicated
 /// here rather than shared, same "no shared crate across this internal ABI boundary" convention
@@ -221,7 +219,9 @@ pub fn do_setitimer(pid: Pid, which: u64, new_ptr: u64, old_ptr: u64) -> Result<
 
     if old_ptr != 0 {
         let (value_sec, value_usec) = match proc.real_timer_deadline {
-            Some(deadline) => ticks_to_timeval(deadline.saturating_sub(crate::cpu::interrupts::ticks())),
+            Some(deadline) => {
+                ticks_to_timeval(deadline.saturating_sub(crate::cpu::interrupts::ticks()))
+            }
             None => (0, 0),
         };
         let (interval_sec, interval_usec) = ticks_to_timeval(proc.real_timer_interval_ticks);
@@ -261,7 +261,9 @@ pub fn do_getitimer(pid: Pid, which: u64, old_ptr: u64) -> Result<u64, u64> {
         .expect("getitimer: current process missing from table");
 
     let (value_sec, value_usec) = match proc.real_timer_deadline {
-        Some(deadline) => ticks_to_timeval(deadline.saturating_sub(crate::cpu::interrupts::ticks())),
+        Some(deadline) => {
+            ticks_to_timeval(deadline.saturating_sub(crate::cpu::interrupts::ticks()))
+        }
         None => (0, 0),
     };
     let (interval_sec, interval_usec) = ticks_to_timeval(proc.real_timer_interval_ticks);
@@ -370,7 +372,10 @@ fn timespec_to_ticks(sec: i64, nsec: i64) -> Option<u64> {
 /// is" reasoning `ticks_to_timeval` above already established.
 fn ticks_to_timespec(ticks: u64) -> (i64, i64) {
     let hz = crate::cpu::pit::TIMER_HZ as u64;
-    ((ticks / hz) as i64, ((ticks % hz) * 1_000_000_000 / hz) as i64)
+    (
+        (ticks / hz) as i64,
+        ((ticks % hz) * 1_000_000_000 / hz) as i64,
+    )
 }
 
 /// `sec`/`nsec` -> real nanoseconds, verbatim -- no tick rounding at all, unlike
@@ -426,8 +431,8 @@ pub(crate) fn abstime_to_ticks(clockid: u64, sec: i64, nsec: i64) -> u64 {
         sec.max(0) as u64 * hz + frac_ticks
     } else {
         let (now_wall_sec, now_wall_nsec) = crate::cpu::rtc::unix_epoch_now_precise();
-        let delta_ticks = (sec - now_wall_sec) * hz as i64
-            + (nsec - now_wall_nsec) * hz as i64 / 1_000_000_000;
+        let delta_ticks =
+            (sec - now_wall_sec) * hz as i64 + (nsec - now_wall_nsec) * hz as i64 / 1_000_000_000;
         if delta_ticks <= 0 {
             now_ticks
         } else {
@@ -547,7 +552,8 @@ pub fn do_timer_settime(
     // for exactly when these actually get used below (relative-mode, non-cputime, real HPET
     // present) versus just computed and discarded.
     let value_ns = timespec_to_ns(new.it_value_sec, new.it_value_nsec).ok_or(EINVAL)?;
-    let interval_ns_val = timespec_to_ns(new.it_interval_sec, new.it_interval_nsec).ok_or(EINVAL)?;
+    let interval_ns_val =
+        timespec_to_ns(new.it_interval_sec, new.it_interval_nsec).ok_or(EINVAL)?;
 
     let mut table = PROCESS_TABLE.lock();
     let proc = table
@@ -593,7 +599,11 @@ pub fn do_timer_settime(
         slot.deadline_ns = None;
         slot.interval_ns = 0;
     } else if flags & TIMER_ABSTIME != 0 {
-        slot.deadline = Some(abstime_to_ticks(clockid, new.it_value_sec, new.it_value_nsec));
+        slot.deadline = Some(abstime_to_ticks(
+            clockid,
+            new.it_value_sec,
+            new.it_value_nsec,
+        ));
         slot.interval_ticks = interval_ticks;
         slot.interval_requested = (new.it_interval_sec, new.it_interval_nsec);
         slot.realtime_target = if clockid == CLOCK_REALTIME {

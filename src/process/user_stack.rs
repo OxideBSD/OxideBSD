@@ -49,6 +49,7 @@ const PAGE_SIZE: u64 = 4096;
 /// Panics if the built image doesn't fit within `[stack_bottom, stack_top)` — indicates a binary
 /// this codebase's loader doesn't claim to support (see `elf.rs`'s own "narrow slice of the
 /// format" framing), not a runtime condition legitimate callers should ever hit.
+#[allow(clippy::too_many_arguments)] // real System V argv/envp/auxv stack shape, not arbitrary
 pub fn build(
     elf: &Elf,
     argv: &[&[u8]],

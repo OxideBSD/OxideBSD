@@ -777,7 +777,8 @@ pub extern "C" fn oxidebsd_sys_connect(fd: u64, addr_ptr: u64, len: u64) -> i64 
     // gives up" for a peer that never completes the handshake. Confirmed live by the identical
     // bug in `net::oxidebsd_sys_poll` (see `crate::tsc`'s own doc comment) -- fixed here for the
     // same reason. `CONNECT_TIMEOUT_TICKS` is still the budget, just converted to `tsc` cycles.
-    let deadline = crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(CONNECT_TIMEOUT_TICKS * 10);
+    let deadline =
+        crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(CONNECT_TIMEOUT_TICKS * 10);
     loop {
         super::poll();
         let outcome = {

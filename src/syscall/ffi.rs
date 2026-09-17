@@ -437,7 +437,11 @@ pub(crate) fn sys_set_fs_base(base: u64) -> Result<u64, u64> {
 /// existence-check convention, no signal actually sent -- no `EINTR` for a signal that arrives
 /// while the target is already blocked on something else).
 pub(crate) fn sys_kill(pid: u64, sig: u64) -> Result<u64, u64> {
-    crate::process::do_kill(crate::process::scheduler::current_pid(), pid as i64, sig as i64)
+    crate::process::do_kill(
+        crate::process::scheduler::current_pid(),
+        pid as i64,
+        sig as i64,
+    )
 }
 
 /// `SYS_SIGACTION` (`117`) — matches real `rt_sigaction(2)`'s exact
@@ -470,7 +474,12 @@ pub(crate) fn sys_sigaction(
     if !in_range || sig == crate::process::SIGKILL || sig == crate::process::SIGSTOP {
         return Err(EINVAL);
     }
-    crate::process::do_sigaction(crate::process::scheduler::current_pid(), sig, act_ptr, oldact_ptr)
+    crate::process::do_sigaction(
+        crate::process::scheduler::current_pid(),
+        sig,
+        act_ptr,
+        oldact_ptr,
+    )
 }
 
 /// `SYS_SIGPROCMASK` (`118`) — matches real `rt_sigprocmask(2)`'s exact
@@ -482,7 +491,12 @@ pub(crate) fn sys_sigprocmask(
     sigsetsize: u64,
 ) -> Result<u64, u64> {
     let _ = sigsetsize;
-    crate::process::do_sigprocmask(crate::process::scheduler::current_pid(), how, set_ptr, oldset_ptr)
+    crate::process::do_sigprocmask(
+        crate::process::scheduler::current_pid(),
+        how,
+        set_ptr,
+        oldset_ptr,
+    )
 }
 
 /// `SYS_SIGPENDING` (real `rt_sigpending`'s own wire slot, `494` after the collision sweep in
@@ -533,9 +547,19 @@ pub(crate) fn sys_sigsuspend(mask_ptr: u64, sigsetsize: u64) -> Result<u64, u64>
 /// call-site patch needed. Delegates straight to `process::signals::do_sigtimedwait` — see that
 /// function's own doc comment for the real signal-consuming (not handler-invoking) semantics this
 /// needed, and why it's a genuinely different primitive from `do_pause`/`do_sigsuspend`.
-pub(crate) fn sys_sigtimedwait(mask_ptr: u64, info_ptr: u64, ts_ptr: u64, sigsetsize: u64) -> Result<u64, u64> {
+pub(crate) fn sys_sigtimedwait(
+    mask_ptr: u64,
+    info_ptr: u64,
+    ts_ptr: u64,
+    sigsetsize: u64,
+) -> Result<u64, u64> {
     let _ = sigsetsize;
-    crate::process::do_sigtimedwait(crate::process::scheduler::current_pid(), mask_ptr, info_ptr, ts_ptr)
+    crate::process::do_sigtimedwait(
+        crate::process::scheduler::current_pid(),
+        mask_ptr,
+        info_ptr,
+        ts_ptr,
+    )
 }
 
 /// `SYS_SIGQUEUE` (`496`, real, unclaimed `__NR_rt_sigqueueinfo`) — matches real `sigqueue(2)`'s
@@ -561,7 +585,11 @@ pub(crate) fn sys_sigqueue(pid: u64, sig: u64, siginfo_ptr: u64) -> Result<u64, 
 /// single-threaded kernel, `tkill(tid, sig)` is exactly `kill(tid, sig)` — a thin wrapper over the
 /// existing `do_kill`, not a new primitive.
 pub(crate) fn sys_tkill(tid: u64, sig: u64) -> Result<u64, u64> {
-    crate::process::do_kill(crate::process::scheduler::current_pid(), tid as i64, sig as i64)
+    crate::process::do_kill(
+        crate::process::scheduler::current_pid(),
+        tid as i64,
+        sig as i64,
+    )
 }
 
 /// `SYS_SETPGID` (`120`) — matches real `setpgid(2)`'s exact `(pid, pgid)` wire format, same
@@ -570,7 +598,11 @@ pub(crate) fn sys_tkill(tid: u64, sig: u64) -> Result<u64, u64> {
 /// real, documented simplification (no permission/session checks — this kernel has no uid model at
 /// all yet).
 pub(crate) fn sys_setpgid(pid: u64, pgid: u64) -> Result<u64, u64> {
-    crate::process::do_setpgid(crate::process::scheduler::current_pid(), pid as i64, pgid as i64)
+    crate::process::do_setpgid(
+        crate::process::scheduler::current_pid(),
+        pid as i64,
+        pgid as i64,
+    )
 }
 
 /// `SYS_GETPGID` (`121`) — matches real `getpgid(2)`'s exact `(pid)` wire format.
@@ -649,7 +681,11 @@ pub(crate) fn sys_setresuid(ruid: u64, euid: u64, suid: u64) -> Result<u64, u64>
 /// See `process::do_getgroups`'s own doc comment for why the caller's own `gid` is the complete,
 /// correct answer on a kernel with no supplementary-group concept.
 pub(crate) fn sys_getgroups(size: u64, list_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_getgroups(crate::process::scheduler::current_pid(), size as i64, list_ptr)
+    crate::process::do_getgroups(
+        crate::process::scheduler::current_pid(),
+        size as i64,
+        list_ptr,
+    )
 }
 
 /// `SYS_SETGROUPS` (`178` — an *invented* number, not real Linux's own `__NR_setgroups` (`116`):
@@ -718,7 +754,11 @@ pub(crate) fn sys_sched_setscheduler(pid: u64, policy: u64, param_ptr: u64) -> R
 /// See `process::do_sched_setparam`'s own doc comment for why this was missing until now (musl's
 /// own wrapper was permanently stubbed to `ENOSYS`, so no caller ever reached a kernel handler).
 pub(crate) fn sys_sched_setparam(pid: u64, param_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_sched_setparam(crate::process::scheduler::current_pid(), pid as i64, param_ptr)
+    crate::process::do_sched_setparam(
+        crate::process::scheduler::current_pid(),
+        pid as i64,
+        param_ptr,
+    )
 }
 
 /// `SYS_SCHED_GETSCHEDULER` (`482`) — real `sched_getscheduler(2)`'s exact `(pid)` wire format.
@@ -728,7 +768,11 @@ pub(crate) fn sys_sched_getscheduler(pid: u64) -> Result<u64, u64> {
 
 /// `SYS_SCHED_GETPARAM` (`483`) — real `sched_getparam(2)`'s exact `(pid, param_ptr)` wire format.
 pub(crate) fn sys_sched_getparam(pid: u64, param_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_sched_getparam(crate::process::scheduler::current_pid(), pid as i64, param_ptr)
+    crate::process::do_sched_getparam(
+        crate::process::scheduler::current_pid(),
+        pid as i64,
+        param_ptr,
+    )
 }
 
 /// `SYS_SCHED_GETAFFINITY` — real Linux's own `__NR_sched_getaffinity = 204`, used directly (see
@@ -758,7 +802,11 @@ pub(crate) fn sys_sched_get_priority_min(policy: u64) -> Result<u64, u64> {
 /// `bits/syscall.h.in` — real `sched_rr_get_interval(2)`'s exact `(pid, ts_ptr)` wire format. See
 /// `process::do_sched_rr_get_interval`'s own doc comment for the real logic.
 pub(crate) fn sys_sched_rr_get_interval(pid: u64, ts_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_sched_rr_get_interval(crate::process::scheduler::current_pid(), pid as i64, ts_ptr)
+    crate::process::do_sched_rr_get_interval(
+        crate::process::scheduler::current_pid(),
+        pid as i64,
+        ts_ptr,
+    )
 }
 
 /// `SYS_SCHED_YIELD` — real Linux's own unclaimed `24`, unremapped (musl's own `sched_yield()`
@@ -1324,7 +1372,10 @@ const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 /// Returns `None` for a non-negative (real standard) `clockid`, letting every caller's own `match`
 /// fall through to its ordinary `_ => Err(EINVAL)` arm for a genuinely unrecognized positive value
 /// (`clock_getres/6-1.c`/`6-2.c`, `clock_settime/17-1.c`).
-fn decode_dynamic_cpu_clock_pid(caller_pid: crate::process::Pid, clockid: u64) -> Option<crate::process::Pid> {
+fn decode_dynamic_cpu_clock_pid(
+    caller_pid: crate::process::Pid,
+    clockid: u64,
+) -> Option<crate::process::Pid> {
     let raw = clockid as i64;
     if raw >= 0 {
         return None;
@@ -1498,9 +1549,11 @@ pub(crate) fn sys_clock_settime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
             Ok(0)
         }
         CLOCK_MONOTONIC => Err(EINVAL),
-        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            set_cpu_ticks(crate::process::scheduler::current_pid(), ts.tv_sec, ts.tv_nsec)
-        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => set_cpu_ticks(
+            crate::process::scheduler::current_pid(),
+            ts.tv_sec,
+            ts.tv_nsec,
+        ),
         _ => {
             let caller_pid = crate::process::scheduler::current_pid();
             let target_pid = decode_dynamic_cpu_clock_pid(caller_pid, clockid).ok_or(EINVAL)?;
@@ -1594,7 +1647,12 @@ pub(crate) extern "C" fn oxidebsd_sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64)
     result_to_ffi(sys_writev(fd, iov_ptr, iovcnt))
 }
 
-pub(crate) extern "C" fn oxidebsd_sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> i64 {
+pub(crate) extern "C" fn oxidebsd_sys_pwritev2(
+    fd: u64,
+    iov_ptr: u64,
+    iovcnt: u64,
+    ofs: u64,
+) -> i64 {
     result_to_ffi(sys_pwritev2(fd, iov_ptr, iovcnt, ofs))
 }
 
@@ -1698,7 +1756,12 @@ pub(crate) extern "C" fn oxidebsd_sys_sigtimedwait(
     result_to_ffi(sys_sigtimedwait(mask_ptr, info_ptr, ts_ptr, sigsetsize))
 }
 
-pub(crate) extern "C" fn oxidebsd_sys_sigqueue(pid: u64, sig: u64, siginfo_ptr: u64, _a3: u64) -> i64 {
+pub(crate) extern "C" fn oxidebsd_sys_sigqueue(
+    pid: u64,
+    sig: u64,
+    siginfo_ptr: u64,
+    _a3: u64,
+) -> i64 {
     result_to_ffi(sys_sigqueue(pid, sig, siginfo_ptr))
 }
 
@@ -1915,7 +1978,11 @@ pub(crate) extern "C" fn oxidebsd_sys_getitimer(which: u64, old_ptr: u64) -> i64
 /// (`ITIMER_REAL`-only) infrastructure just above, now that per-timer-id tracking exists
 /// (`process::PosixTimer`/`Process::posix_timers`). See `process::do_timer_create`'s own doc
 /// comment for the real wire format/semantics of the whole sub-batch.
-pub(crate) extern "C" fn oxidebsd_sys_timer_create(clockid: u64, evp_ptr: u64, timerid_ptr: u64) -> i64 {
+pub(crate) extern "C" fn oxidebsd_sys_timer_create(
+    clockid: u64,
+    evp_ptr: u64,
+    timerid_ptr: u64,
+) -> i64 {
     result_to_ffi(crate::process::do_timer_create(
         crate::process::scheduler::current_pid(),
         clockid,

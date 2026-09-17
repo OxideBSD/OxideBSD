@@ -1,17 +1,15 @@
 //! `oxfs`: a small, real Unix-shaped filesystem (inodes with direct + single-indirect block
 //! pointers, directories as ordinary inodes holding fixed-size records, real multi-component path
-//! resolution, real per-process current-working-directory) -- replacing `modules/fat32` as the
-//! filesystem `stsh`/BusyBox actually run on. See `CLAUDE.md`'s oxfs section for the full design
-//! rationale; `modules/fat32` is kept in the workspace, still building and self-checking on every
-//! `cargo build`, but is no longer loaded at boot.
+//! resolution, real per-process current-working-directory) -- replaced an earlier FAT32 module
+//! (since removed) as the live filesystem BusyBox actually runs on. See `CLAUDE.md`'s oxfs section
+//! for the full design rationale.
 //!
-//! Like `modules/fat32`, this is in-memory only -- no real block device exists yet, so nothing
-//! persists across reboot. Unlike FAT32, there's no on-disk *format* to invent or generate at
-//! build time at all: `module_init` below populates the inode table directly via ordinary function
-//! calls, using content `build.rs` hands this crate's own `include_bytes!(env!(...))` calls (each
-//! already-built userland/BusyBox ELF gets its own env var, the same `extra_env` mechanism
-//! `FAT32_IMAGE_PATH` already used) or, for the two small text files, a literal and the same
-//! `b'A' + i % 26` formula `modules/fat32`'s own self-check already used.
+//! There's no on-disk *format* to invent or generate at build time: `module_init` below populates
+//! the inode table directly via ordinary function calls, using content `build.rs` hands this
+//! crate's own `include_bytes!(env!(...))` calls (each already-built userland/BusyBox ELF gets its
+//! own env var, the same `extra_env` mechanism `build_module_crate`'s own doc comment describes)
+//! or, for the two small text files, a literal and the same `b'A' + i % 26` formula the old FAT32
+//! module's own self-check used.
 //!
 //! **What this fixes relative to FAT32** (see CLAUDE.md's FAT32 section for the full list of
 //! limitations this replaces): 8.3 short names -> real names up to `NAME_MAX` bytes; one path

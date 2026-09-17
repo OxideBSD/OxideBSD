@@ -130,7 +130,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build_busybox.rs");
     build_limine_deploy_tool();
     let ring3_smoke_elf_path = build_userland_crate("ring3-smoke", "RING3_SMOKE_ELF_PATH");
-    build_userland_crate("stsh", "STSH_ELF_PATH");
     build_userland_crate("fork-exec-smoke", "FORK_EXEC_SMOKE_ELF_PATH");
     // Real-SYSCALL counterparts to the direct-call network smoke tests -- see CLAUDE.md's "Real
     // networking" section for the blind spot these close (every prior network test called kernel
@@ -227,19 +226,13 @@ fn main() {
     build_module_crate("clock", "CLOCK", &[]);
     build_module_crate("net", "NET", &[]);
 
-    // ring3-smoke is embedded into the FAT32 image below (as SMOKE.ELF) so stsh's fork+execve+wait
-    // path has a real, already-working target it can run as an actual file, not just another
-    // include_bytes!'d demo -- see CLAUDE.md's process/scheduler section.
-    let ring3_smoke_elf = std::fs::read(&ring3_smoke_elf_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", ring3_smoke_elf_path.display()));
-
-    // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section --
-    // embedded into the FAT32 image below (as MUSL.ELF) the same way ring3-smoke is, so stsh's
-    // existing fork+execve+wait path can run it as a real file with no separate boot-time wiring.
+    // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
+    // process/scheduler section. Also embedded into oxfs below.
     let musl_sysroot = build_musl_sysroot();
+
+    // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section.
+    // Also embedded into oxfs below.
     let musl_smoke_elf_path = build_musl_smoke(&musl_sysroot);
-    let musl_smoke_elf = std::fs::read(&musl_smoke_elf_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", musl_smoke_elf_path.display()));
 
     // Derisk check for the fbdoom/doomgeneric port -- see userland/float-smoke/main.c's own doc
     // comment.
@@ -275,8 +268,7 @@ fn main() {
     // for the backend. `doom1.wad` (the freely-redistributable shareware IWAD) is vendored
     // directly, not built.
     let doom_elf_path = build_doomgeneric(&musl_sysroot);
-    let doom1_wad_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
+    let doom1_wad_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
 
     // A real POSIX conformance baseline: see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
     // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment. Source-only
@@ -337,27 +329,10 @@ fn main() {
         }
     });
 
-    // modules/fat32 is kept in the workspace but no longer loaded at boot (see CLAUDE.md's oxfs
-    // section) -- still built here unmodified so it keeps compiling and self-checking on every
-    // `cargo build`, a still-working format-correctness proof, just not the live filesystem.
-    // Deliberately passed an empty applet slice, not `&busybox_applet_elfs`: `BUSYBOX_APPLETS` grew
-    // to ~300 entries once this build script started probing/embedding every applet that happens to
-    // build (see CLAUDE.md's BusyBox section) -- `busybox_short_name`'s 8.3-short-name format can't
-    // hold names over 8 characters at all (a real `assert!`, not a soft limit) and the image's own
-    // fixed `FAT32_TOTAL_SECTORS` budget was sized for a much smaller roster. FAT32 not being the
-    // live filesystem means neither limit is worth designing around just to keep embedding
-    // applets nothing ever loads from this image.
-    let fat32_image_path = write_fat32_image(&ring3_smoke_elf, &musl_smoke_elf, &[]);
-    build_module_crate(
-        "fat32",
-        "FAT32",
-        &[("FAT32_IMAGE_PATH", fat32_image_path.to_str().unwrap())],
-    );
-
-    // oxfs: the real, live filesystem now (see CLAUDE.md's oxfs section). Unlike FAT32, there's no
+    // oxfs: the real, live filesystem (see CLAUDE.md's oxfs section). There's no
     // on-disk image format to generate -- oxfs's own module_init populates its inode table directly
     // via ordinary function calls, using each already-built ELF's path passed straight through as
-    // its own env var (the same extra_env mechanism FAT32_IMAGE_PATH above already uses). Built
+    // its own env var (see `build_module_crate`'s own doc comment for the `extra_env` mechanism). Built
     // from BUSYBOX_APPLETS itself (not one hand-written `let ..._elf_path = ...` line per applet)
     // so the next applet added there doesn't need a matching edit here too -- `oxfs_env_var_name`
     // derives each one's `OXFS_<NAME>_ELF_PATH` env var straight from its own `out_name`, with one
@@ -599,16 +574,87 @@ fn build_musl_smoke(sysroot: &Path) -> PathBuf {
 /// compile against this musl fork's sysroot, which vendors no `<linux/fb.h>`), **plus** this
 /// port's own `doomgeneric_oxidebsd`/`i_video_oxidebsd` (see those two files' own doc comments).
 const DOOMGENERIC_SOURCES: &[&str] = &[
-    "dummy", "am_map", "doomdef", "doomstat", "dstrings", "d_event", "d_items", "d_iwad", "d_loop",
-    "d_main", "d_mode", "d_net", "f_finale", "f_wipe", "g_game", "hu_lib", "hu_stuff", "info",
-    "i_cdmus", "i_endoom", "i_joystick", "i_scale", "i_sound", "i_system", "i_timer", "memio",
-    "m_argv", "m_bbox", "m_cheat", "m_config", "m_controls", "m_fixed", "m_menu", "m_misc",
-    "m_random", "p_ceilng", "p_doors", "p_enemy", "p_floor", "p_inter", "p_lights", "p_map",
-    "p_maputl", "p_mobj", "p_plats", "p_pspr", "p_saveg", "p_setup", "p_sight", "p_spec",
-    "p_switch", "p_telept", "p_tick", "p_user", "r_bsp", "r_data", "r_draw", "r_main", "r_plane",
-    "r_segs", "r_sky", "r_things", "sha1", "sounds", "statdump", "st_lib", "st_stuff", "s_sound",
-    "tables", "v_video", "wi_stuff", "w_checksum", "w_file", "w_main", "w_wad", "z_zone",
-    "w_file_stdc", "mus2mid", "doomgeneric", "doomgeneric_oxidebsd", "i_video_oxidebsd",
+    "dummy",
+    "am_map",
+    "doomdef",
+    "doomstat",
+    "dstrings",
+    "d_event",
+    "d_items",
+    "d_iwad",
+    "d_loop",
+    "d_main",
+    "d_mode",
+    "d_net",
+    "f_finale",
+    "f_wipe",
+    "g_game",
+    "hu_lib",
+    "hu_stuff",
+    "info",
+    "i_cdmus",
+    "i_endoom",
+    "i_joystick",
+    "i_scale",
+    "i_sound",
+    "i_system",
+    "i_timer",
+    "memio",
+    "m_argv",
+    "m_bbox",
+    "m_cheat",
+    "m_config",
+    "m_controls",
+    "m_fixed",
+    "m_menu",
+    "m_misc",
+    "m_random",
+    "p_ceilng",
+    "p_doors",
+    "p_enemy",
+    "p_floor",
+    "p_inter",
+    "p_lights",
+    "p_map",
+    "p_maputl",
+    "p_mobj",
+    "p_plats",
+    "p_pspr",
+    "p_saveg",
+    "p_setup",
+    "p_sight",
+    "p_spec",
+    "p_switch",
+    "p_telept",
+    "p_tick",
+    "p_user",
+    "r_bsp",
+    "r_data",
+    "r_draw",
+    "r_main",
+    "r_plane",
+    "r_segs",
+    "r_sky",
+    "r_things",
+    "sha1",
+    "sounds",
+    "statdump",
+    "st_lib",
+    "st_stuff",
+    "s_sound",
+    "tables",
+    "v_video",
+    "wi_stuff",
+    "w_checksum",
+    "w_file",
+    "w_main",
+    "w_wad",
+    "z_zone",
+    "w_file_stdc",
+    "mus2mid",
+    "doomgeneric",
+    "doomgeneric_oxidebsd",
+    "i_video_oxidebsd",
 ];
 
 /// Same three-way staleness-check shape `build_tinycc` established (`build.rs`'s own mtime,
@@ -2575,9 +2621,9 @@ fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
 ///   its exact mangled name is toolchain-dependent) unresolved.
 ///
 /// `extra_env` is passed straight through to the nested `cargo rustc` invocation -- used by the
-/// `fat32` module to receive its generated disk image's path (`FAT32_IMAGE_PATH`) for its own
-/// `include_bytes!(env!("FAT32_IMAGE_PATH"))`, since that module has no `build.rs` of its own
-/// (modules never do -- there's no linker script to pass, they're never linked at all).
+/// `oxfs` module to receive each seeded ELF's own build path (`OXFS_<NAME>_ELF_PATH`) for its own
+/// `include_bytes!(env!(...))` calls, since modules have no `build.rs` of their own (there's no
+/// linker script to pass, they're never linked at all).
 fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)]) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let module_dir = Path::new(manifest_dir).join("modules").join(crate_name);
@@ -2910,30 +2956,6 @@ fn discover_panic_symbol(llvm_bin: &Path, object: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Generates a small, deliberately non-spec-minimum-sized but structurally correct FAT32 disk
-/// image (own code, not `mkfs.fat` -- see `CLAUDE.md`'s module-loading/FAT32 section for why:
-/// hermeticity, and a real `mkfs.fat`-produced FAT32 volume needs to be tens of megabytes to meet
-/// Microsoft's minimum-cluster-count heuristic, impractical to embed), writes it to
-/// `target/modules/fat32.img`, and returns that path for `build_module_crate`'s `extra_env` to
-/// pass through as `FAT32_IMAGE_PATH`. Real BPB/FSInfo, 2 FAT copies, 32-bit FAT entries, and the
-/// root directory as a proper cluster chain (not FAT16's fixed region) -- only this kernel's own
-/// hand-rolled parser (`modules/fat32/`) ever needs to read it, so the "real minimum size" rule is
-/// safe to deliberately violate.
-fn write_fat32_image(
-    smoke_elf_bytes: &[u8],
-    musl_elf_bytes: &[u8],
-    busybox_applet_elfs: &[(&str, Vec<u8>)],
-) -> PathBuf {
-    let image = generate_fat32_image(smoke_elf_bytes, musl_elf_bytes, busybox_applet_elfs);
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let target_dir = Path::new(manifest_dir).join("target/modules");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/modules");
-    let path = target_dir.join("fat32.img");
-    std::fs::write(&path, &image)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
-    path
-}
-
 /// Mirrors `modules/oxfs/src/lib.rs`'s own on-disk block-layout constants (see that file's "Real
 /// disk persistence" section) -- duplicated here, not imported, since a `build.rs` can't depend on
 /// a `#![no_std]` module crate. Must be kept in sync by hand if oxfs's own constants ever change --
@@ -3052,370 +3074,6 @@ fn write_data_disk_images() {
     let test_disk_path = target_dir.join("oxfs_test_disk.img");
     std::fs::write(&test_disk_path, &zeroed)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", test_disk_path.display()));
-}
-
-const FAT32_BYTES_PER_SECTOR: usize = 512;
-const FAT32_SECTORS_PER_CLUSTER: u8 = 1;
-const FAT32_RESERVED_SECTORS: u32 = 32;
-const FAT32_NUM_FATS: u32 = 2;
-/// 8 MiB total (raised from 2 MiB once `BUSYBOX_APPLETS` grew past its original four entries --
-/// this image still embeds every one of them, even applets never actually loaded/used at boot,
-/// see this constant's own module-level context) -- still far below the ~65525-cluster count real
-/// FAT32 volumes are conventionally expected to have, deliberately (see this function's caller's
-/// doc comment).
-const FAT32_TOTAL_SECTORS: u32 = 16384;
-
-const FAT32_ROOT_CLUSTER: u32 = 2;
-const FAT32_HELLO_CLUSTER: u32 = 3;
-const FAT32_BIG_FIRST_CLUSTER: u32 = 4;
-const FAT32_BIG_CLUSTER_COUNT: u32 = 3;
-/// SMOKE.ELF's cluster count isn't a fixed constant like BIG.TXT's -- it depends on the built
-/// `ring3-smoke` ELF's actual size, computed at image-generation time from `smoke_elf_bytes.len()`.
-const FAT32_SMOKE_FIRST_CLUSTER: u32 = FAT32_BIG_FIRST_CLUSTER + FAT32_BIG_CLUSTER_COUNT;
-/// MUSL.ELF's own first cluster isn't a fixed constant either -- it starts right after however
-/// many clusters SMOKE.ELF ends up needing, computed at image-generation time just like
-/// `FAT32_SMOKE_FIRST_CLUSTER`'s own runtime-computed cluster count is chained onto BIG.TXT's.
-const FAT32_EOC: u32 = 0x0FFF_FFFF;
-
-const FAT32_HELLO_CONTENTS: &[u8] = b"Hello from FAT32!\n";
-/// Deliberately a formula-derived pattern (`b'A' + index % 26`), not a literal, so
-/// `modules/fat32`'s own self-check can independently recompute the expected bytes rather than
-/// needing a second copy of a large literal kept in sync by hand.
-const FAT32_BIG_FILE_LEN: usize = 1224;
-
-fn fat32_big_file_byte(index: usize) -> u8 {
-    b'A' + (index % 26) as u8
-}
-
-/// One BusyBox applet's placement in the image, computed by `generate_fat32_image` by folding
-/// over `busybox_applet_elfs` in order -- each applet's first cluster starts right after the
-/// previous one's chain ends, the same "chain on after whatever came before" pattern MUSL.ELF
-/// itself already uses to chain on after SMOKE.ELF.
-struct PlacedApplet<'a> {
-    short_name: [u8; 11],
-    bytes: &'a [u8],
-    first_cluster: u32,
-    cluster_count: u32,
-}
-
-/// Builds a FAT 8.3 short name (`"NAME    ELF"`) from an applet's lowercase `out_name` (e.g.
-/// `"true"`) -- uppercased, space-padded to 8 characters, `ELF` extension. Panics if `out_name` is
-/// too long for an 8.3 basename; every applet name this codebase embeds is short enough that this
-/// is a real assertion, not defensive dead code.
-fn busybox_short_name(out_name: &str) -> [u8; 11] {
-    assert!(
-        out_name.len() <= 8 && out_name.is_ascii(),
-        "BusyBox applet name {out_name:?} doesn't fit an 8.3 short name"
-    );
-    let mut name = [b' '; 11];
-    for (i, b) in out_name.bytes().enumerate() {
-        name[i] = b.to_ascii_uppercase();
-    }
-    name[8..11].copy_from_slice(b"ELF");
-    name
-}
-
-fn generate_fat32_image(
-    smoke_elf_bytes: &[u8],
-    musl_elf_bytes: &[u8],
-    busybox_applet_elfs: &[(&str, Vec<u8>)],
-) -> Vec<u8> {
-    let smoke_cluster_count =
-        (smoke_elf_bytes.len().div_ceil(FAT32_BYTES_PER_SECTOR) as u32).max(1);
-    let musl_first_cluster = FAT32_SMOKE_FIRST_CLUSTER + smoke_cluster_count;
-    let musl_cluster_count = (musl_elf_bytes.len().div_ceil(FAT32_BYTES_PER_SECTOR) as u32).max(1);
-
-    // Each BusyBox applet (see CLAUDE.md's BusyBox section) chains on after the previous one --
-    // MUSL.ELF for the first applet, the previous applet for every one after that.
-    let mut placed_applets: Vec<PlacedApplet> = Vec::new();
-    let mut next_free_cluster = musl_first_cluster + musl_cluster_count;
-    for (out_name, elf_bytes) in busybox_applet_elfs {
-        let cluster_count = (elf_bytes.len().div_ceil(FAT32_BYTES_PER_SECTOR) as u32).max(1);
-        placed_applets.push(PlacedApplet {
-            short_name: busybox_short_name(out_name),
-            bytes: elf_bytes,
-            first_cluster: next_free_cluster,
-            cluster_count,
-        });
-        next_free_cluster += cluster_count;
-    }
-
-    // Solve for the FAT size (in sectors) that exactly covers the clusters left over once that
-    // same FAT size is reserved -- a small fixed-point iteration, since the FAT's own size is
-    // tiny relative to the volume and converges in only a couple of passes.
-    let mut fat_size_sectors: u32 = 1;
-    for _ in 0..8 {
-        let data_sectors =
-            FAT32_TOTAL_SECTORS - FAT32_RESERVED_SECTORS - FAT32_NUM_FATS * fat_size_sectors;
-        let total_clusters = data_sectors / FAT32_SECTORS_PER_CLUSTER as u32;
-        let fat_bytes_needed = (total_clusters + 2) * 4;
-        fat_size_sectors = fat_bytes_needed.div_ceil(FAT32_BYTES_PER_SECTOR as u32);
-    }
-    let data_start_sector = FAT32_RESERVED_SECTORS + FAT32_NUM_FATS * fat_size_sectors;
-
-    let highest_cluster_used = next_free_cluster - 1;
-    let data_clusters =
-        (FAT32_TOTAL_SECTORS - data_start_sector) / FAT32_SECTORS_PER_CLUSTER as u32;
-    assert!(
-        highest_cluster_used < 2 + data_clusters,
-        "ring3-smoke ({} bytes) + musl-smoke ({} bytes) + {} BusyBox applet(s) ({} bytes total) \
-         no longer fit in the embedded FAT32 image ({} total bytes) -- raise FAT32_TOTAL_SECTORS",
-        smoke_elf_bytes.len(),
-        musl_elf_bytes.len(),
-        placed_applets.len(),
-        placed_applets.iter().map(|a| a.bytes.len()).sum::<usize>(),
-        FAT32_TOTAL_SECTORS as usize * FAT32_BYTES_PER_SECTOR
-    );
-
-    let mut image = vec![0u8; FAT32_TOTAL_SECTORS as usize * FAT32_BYTES_PER_SECTOR];
-
-    // --- Boot sector / BPB (sector 0) ---
-    {
-        let bs = &mut image[0..FAT32_BYTES_PER_SECTOR];
-        bs[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]); // BS_jmpBoot
-        bs[3..11].copy_from_slice(b"OXIDEBSD"); // BS_OEMName
-        bs[11..13].copy_from_slice(&(FAT32_BYTES_PER_SECTOR as u16).to_le_bytes()); // BPB_BytsPerSec
-        bs[13] = FAT32_SECTORS_PER_CLUSTER; // BPB_SecPerClus
-        bs[14..16].copy_from_slice(&(FAT32_RESERVED_SECTORS as u16).to_le_bytes()); // BPB_RsvdSecCnt
-        bs[16] = FAT32_NUM_FATS as u8; // BPB_NumFATs
-        // BPB_RootEntCnt (17..19) and BPB_TotSec16 (19..21) are 0 for FAT32.
-        bs[21] = 0xF8; // BPB_Media (fixed disk)
-        // BPB_FATSz16 (22..24) is 0 for FAT32 -- BPB_FATSz32 below is authoritative.
-        bs[24..26].copy_from_slice(&32u16.to_le_bytes()); // BPB_SecPerTrk (dummy geometry)
-        bs[26..28].copy_from_slice(&64u16.to_le_bytes()); // BPB_NumHeads (dummy geometry)
-        bs[32..36].copy_from_slice(&FAT32_TOTAL_SECTORS.to_le_bytes()); // BPB_TotSec32
-        bs[36..40].copy_from_slice(&fat_size_sectors.to_le_bytes()); // BPB_FATSz32
-        bs[44..48].copy_from_slice(&FAT32_ROOT_CLUSTER.to_le_bytes()); // BPB_RootClus
-        bs[48..50].copy_from_slice(&1u16.to_le_bytes()); // BPB_FSInfo (sector 1)
-        bs[50..52].copy_from_slice(&6u16.to_le_bytes()); // BPB_BkBootSec (sector 6)
-        bs[64] = 0x80; // BS_DrvNum
-        bs[66] = 0x29; // BS_BootSig (marks VolID/VolLab/FilSysType below as valid)
-        bs[67..71].copy_from_slice(&0x0BAD_F32Fu32.to_le_bytes()); // BS_VolID
-        bs[71..82].copy_from_slice(b"OXIDEBSD FS"); // BS_VolLab (11 bytes)
-        bs[82..90].copy_from_slice(b"FAT32   "); // BS_FilSysType (informational only)
-        bs[510] = 0x55;
-        bs[511] = 0xAA;
-    }
-
-    // --- FSInfo sector (sector 1) --- structural authenticity only: modules/fat32's own parser
-    // never reads this (real FAT32 drivers treat it as a non-authoritative performance hint), so
-    // its free-cluster fields are left "unknown" rather than computed precisely.
-    {
-        let fs = &mut image[FAT32_BYTES_PER_SECTOR..2 * FAT32_BYTES_PER_SECTOR];
-        fs[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes()); // LeadSig
-        fs[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes()); // StrucSig
-        fs[488..492].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // Free_Count (unknown)
-        fs[492..496].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // Next_Free (unknown)
-        fs[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes()); // TrailSig
-    }
-
-    // --- Backup boot sector (sector 6, per BPB_BkBootSec) ---
-    {
-        let (before, after) = image.split_at_mut(6 * FAT32_BYTES_PER_SECTOR);
-        after[0..FAT32_BYTES_PER_SECTOR].copy_from_slice(&before[0..FAT32_BYTES_PER_SECTOR]);
-    }
-
-    // --- FAT tables (both copies kept identical) ---
-    for fat_index in 0..FAT32_NUM_FATS {
-        write_fat_entry(&mut image, fat_index, fat_size_sectors, 0, 0x0FFF_FFF8);
-        write_fat_entry(&mut image, fat_index, fat_size_sectors, 1, 0x0FFF_FFFF);
-        write_fat_entry(
-            &mut image,
-            fat_index,
-            fat_size_sectors,
-            FAT32_ROOT_CLUSTER,
-            FAT32_EOC,
-        );
-        write_fat_entry(
-            &mut image,
-            fat_index,
-            fat_size_sectors,
-            FAT32_HELLO_CLUSTER,
-            FAT32_EOC,
-        );
-        for i in 0..FAT32_BIG_CLUSTER_COUNT {
-            let cluster = FAT32_BIG_FIRST_CLUSTER + i;
-            let value = if i + 1 == FAT32_BIG_CLUSTER_COUNT {
-                FAT32_EOC
-            } else {
-                cluster + 1
-            };
-            write_fat_entry(&mut image, fat_index, fat_size_sectors, cluster, value);
-        }
-        for i in 0..smoke_cluster_count {
-            let cluster = FAT32_SMOKE_FIRST_CLUSTER + i;
-            let value = if i + 1 == smoke_cluster_count {
-                FAT32_EOC
-            } else {
-                cluster + 1
-            };
-            write_fat_entry(&mut image, fat_index, fat_size_sectors, cluster, value);
-        }
-        for i in 0..musl_cluster_count {
-            let cluster = musl_first_cluster + i;
-            let value = if i + 1 == musl_cluster_count {
-                FAT32_EOC
-            } else {
-                cluster + 1
-            };
-            write_fat_entry(&mut image, fat_index, fat_size_sectors, cluster, value);
-        }
-        for applet in &placed_applets {
-            for i in 0..applet.cluster_count {
-                let cluster = applet.first_cluster + i;
-                let value = if i + 1 == applet.cluster_count {
-                    FAT32_EOC
-                } else {
-                    cluster + 1
-                };
-                write_fat_entry(&mut image, fat_index, fat_size_sectors, cluster, value);
-            }
-        }
-    }
-
-    let cluster_offset = |cluster: u32| -> usize {
-        (data_start_sector as usize + (cluster as usize - 2) * FAT32_SECTORS_PER_CLUSTER as usize)
-            * FAT32_BYTES_PER_SECTOR
-    };
-
-    // --- Root directory (cluster 2): volume label + three file entries ---
-    {
-        let root_offset = cluster_offset(FAT32_ROOT_CLUSTER);
-        let mut entry_offset = root_offset;
-        write_dir_entry(&mut image, entry_offset, b"OXIDEBSD FS", 0x08, 0, 0);
-        entry_offset += 32;
-        write_dir_entry(
-            &mut image,
-            entry_offset,
-            b"HELLO   TXT",
-            0x20,
-            FAT32_HELLO_CLUSTER,
-            FAT32_HELLO_CONTENTS.len() as u32,
-        );
-        entry_offset += 32;
-        write_dir_entry(
-            &mut image,
-            entry_offset,
-            b"BIG     TXT",
-            0x20,
-            FAT32_BIG_FIRST_CLUSTER,
-            FAT32_BIG_FILE_LEN as u32,
-        );
-        entry_offset += 32;
-        write_dir_entry(
-            &mut image,
-            entry_offset,
-            b"SMOKE   ELF",
-            0x20,
-            FAT32_SMOKE_FIRST_CLUSTER,
-            smoke_elf_bytes.len() as u32,
-        );
-        entry_offset += 32;
-        write_dir_entry(
-            &mut image,
-            entry_offset,
-            b"MUSL    ELF",
-            0x20,
-            musl_first_cluster,
-            musl_elf_bytes.len() as u32,
-        );
-        for applet in &placed_applets {
-            entry_offset += 32;
-            write_dir_entry(
-                &mut image,
-                entry_offset,
-                &applet.short_name,
-                0x20,
-                applet.first_cluster,
-                applet.bytes.len() as u32,
-            );
-        }
-        // No further entries -- the byte after this one is already 0 (image starts zeroed),
-        // which is the FAT directory end-of-listing marker.
-    }
-
-    // --- HELLO.TXT contents ---
-    {
-        let offset = cluster_offset(FAT32_HELLO_CLUSTER);
-        image[offset..offset + FAT32_HELLO_CONTENTS.len()].copy_from_slice(FAT32_HELLO_CONTENTS);
-    }
-
-    // --- BIG.TXT contents (spans multiple clusters, exercising chain-following) ---
-    {
-        let mut remaining = FAT32_BIG_FILE_LEN;
-        let mut written = 0usize;
-        for i in 0..FAT32_BIG_CLUSTER_COUNT {
-            let cluster = FAT32_BIG_FIRST_CLUSTER + i;
-            let offset = cluster_offset(cluster);
-            let chunk_len = remaining.min(FAT32_BYTES_PER_SECTOR);
-            for j in 0..chunk_len {
-                image[offset + j] = fat32_big_file_byte(written + j);
-            }
-            written += chunk_len;
-            remaining -= chunk_len;
-        }
-    }
-
-    // --- SMOKE.ELF contents (the built ring3-smoke binary, chunked across smoke_cluster_count
-    // clusters exactly like BIG.TXT's chain above, generalized for an arbitrary byte length) ---
-    {
-        for (i, chunk) in smoke_elf_bytes.chunks(FAT32_BYTES_PER_SECTOR).enumerate() {
-            let cluster = FAT32_SMOKE_FIRST_CLUSTER + i as u32;
-            let offset = cluster_offset(cluster);
-            image[offset..offset + chunk.len()].copy_from_slice(chunk);
-        }
-    }
-
-    // --- MUSL.ELF contents (the built musl-smoke binary -- see CLAUDE.md's musl section --
-    // chunked the same way SMOKE.ELF's own bytes are above) ---
-    {
-        for (i, chunk) in musl_elf_bytes.chunks(FAT32_BYTES_PER_SECTOR).enumerate() {
-            let cluster = musl_first_cluster + i as u32;
-            let offset = cluster_offset(cluster);
-            image[offset..offset + chunk.len()].copy_from_slice(chunk);
-        }
-    }
-
-    // --- BusyBox applet contents (see CLAUDE.md's BusyBox section -- chunked the same way
-    // SMOKE.ELF/MUSL.ELF's own bytes are above) ---
-    for applet in &placed_applets {
-        for (i, chunk) in applet.bytes.chunks(FAT32_BYTES_PER_SECTOR).enumerate() {
-            let cluster = applet.first_cluster + i as u32;
-            let offset = cluster_offset(cluster);
-            image[offset..offset + chunk.len()].copy_from_slice(chunk);
-        }
-    }
-
-    image
-}
-
-fn write_fat_entry(
-    image: &mut [u8],
-    fat_index: u32,
-    fat_size_sectors: u32,
-    cluster: u32,
-    value: u32,
-) {
-    let fat_start =
-        (FAT32_RESERVED_SECTORS + fat_index * fat_size_sectors) as usize * FAT32_BYTES_PER_SECTOR;
-    let offset = fat_start + cluster as usize * 4;
-    image[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn write_dir_entry(
-    image: &mut [u8],
-    offset: usize,
-    name_11: &[u8; 11],
-    attr: u8,
-    first_cluster: u32,
-    size: u32,
-) {
-    let entry = &mut image[offset..offset + 32];
-    entry[0..11].copy_from_slice(name_11);
-    entry[11] = attr;
-    entry[20..22].copy_from_slice(&((first_cluster >> 16) as u16).to_le_bytes());
-    entry[26..28].copy_from_slice(&(first_cluster as u16).to_le_bytes());
-    entry[28..32].copy_from_slice(&size.to_le_bytes());
 }
 
 /// Finds the file matching `<prefix>*<suffix>` most recently modified in `dir` -- filenames under
