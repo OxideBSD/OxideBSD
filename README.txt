@@ -20,7 +20,7 @@ To build it, use `cargo build`.
 
 Documentation:
 Design docs, the project roadmap, and POSIX compliance tracking live in a separate repo,
-matching how other BSDs split base/doc/ports: https://github.com/Pomsky2011/OxideBSD-doc
+matching how other BSDs split base/doc/ports: https://github.com/OxideBSD/OxideBSD-doc
 
 Versions:
 Each major release will have extended support for a year after the release of its successor - i.e. if v1.x comes out in 2027, and v2.x comes out in 2029, v1.x will be discontinued in 2030.
