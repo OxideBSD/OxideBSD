@@ -274,7 +274,15 @@ pub fn write_sectors(
     unsafe {
         Port::<u8>::new(p.io_base + REG_STATUS_COMMAND).write(CMD_CACHE_FLUSH);
     }
-    wait_while_busy(p.io_base)?;
+    // `wait_while_busy` only waits for BSY to clear -- it doesn't check ERR/DF (unlike
+    // `wait_for_data`, which does), so a real flush failure the drive reports once BSY clears
+    // used to be silently treated as success: this write-through persistence path (and everything
+    // above it, up through oxfs's own commit logic) would believe a block reached stable storage
+    // when the hardware actually reported otherwise.
+    let status = wait_while_busy(p.io_base)?;
+    if status & (STATUS_ERR | STATUS_DF) != 0 {
+        return Err(AtaError::DeviceError(status));
+    }
     Ok(())
 }
 
