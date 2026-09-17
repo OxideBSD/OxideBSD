@@ -1,8 +1,42 @@
-# OxideBSD 0.1.2
+# OxideBSD 0.1.3
 
-A bugfix-only release on top of 0.1.1 — no new capabilities, same `v0.1.x` policy as always.
+A bugfix-only release on top of 0.1.2 — no new capabilities, same `v0.1.x` policy as always. This
+is planned as the final `v0.1.x` release: all three fixes below were found on `master`'s own
+ongoing pre-`0.2.0` bug-hunting pass, then confirmed to affect this branch too, and backported
+here rather than left to bit-rot in an unmaintained tag.
 
-## Fixed since 0.1.1
+## Fixed since 0.1.2
+
+- **A real OOB-read/memory-disclosure bug in the rtl8139 NIC driver**: `poll_recv` sized a heap
+  allocation and a raw memory copy directly off the hardware-reported RX frame length (a `u16`,
+  trusted up to its full range) — since this kernel's HHDM maps all of physical memory, an
+  oversized value from a corrupted or adversarial inbound frame wouldn't fault, it would silently
+  read unrelated physical memory into a packet handed up to the network stack. The existing
+  malformed-packet check was also decorative: it logged a warning but still processed and returned
+  the untrusted payload regardless. Fixed: a bad status or an out-of-range length now gets the
+  frame dropped outright, with the ring's own read cursor advanced by a bounded amount instead of
+  the same untrusted length, so a single corrupted header can't desync it from the card's real
+  write pointer either.
+- **`rmdir` on an active mount silently orphaned it**: the mount-table (`mount --bind`/
+  `mount -t tmpfs`) redirect only ever applied automatically to an *intermediate* path component,
+  not the final one being removed — the exact same bypass already fixed once for `open()` on a
+  mountpoint path, recurring here in a second handler. `rmdir` on a non-empty mount used to see
+  straight through to the real, always-empty attachment-point directory underneath it, delete that
+  directory's name, and leave the mount's actual content permanently unreachable (not even
+  `umount2`-able afterward). Now a real `EBUSY`, matching real Unix's own refusal to `rmdir` a busy
+  mountpoint.
+- **A real ATA write-persistence bug**: the post-write `CACHE FLUSH` command's own completion check
+  only ever waited for the drive to stop being busy — it never checked whether the drive's status
+  register actually reported an error once it did. A real flush failure was silently treated as a
+  success all the way up through `oxfs`'s own write-through persistence path, meaning the kernel
+  could believe a block had reached stable storage when the hardware had actually reported
+  otherwise. Fixed: the status byte the busy-wait already had in hand is now checked for a real
+  error before reporting success.
+- Also applied a defensive PIC IRQ2-cascade fix to `unmask_irq()` (any IRQ8-15 line, including the
+  rtl8139's, physically cascades into the CPU through PIC1's own IRQ2 input, which this function
+  never touched). Live and load-bearing on `master`'s Limine-based boot path; likely inert here,
+  since this branch's BIOS/`bootloader`-crate boot path appears to inherit IRQ2 already unmasked
+  from firmware — included anyway so the function is correct on its own merits.
 
 - **Ctrl+C/Ctrl+D silently did nothing once BusyBox's own line editor was driving the interactive
   prompt** (which is effectively always) — found first on `master` while validating unrelated
