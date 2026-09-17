@@ -98,6 +98,20 @@ pub unsafe fn unmask_irq(irq: u8) {
     unsafe {
         let mask = port.read();
         port.write(mask & !(1 << bit));
+        // Any IRQ8-15 line physically cascades into the CPU through PIC1's own IRQ2 input --
+        // PIC2's INTR output pin *is* PIC1's IRQ2 line. Real BIOS/legacy boot typically leaves
+        // IRQ2 unmasked already (this driver's own `init()` preserves whatever mask was inherited,
+        // never touching it explicitly), so this defensive fix is likely inert on this boot path
+        // in practice -- ported from the Limine-era master branch fix, where it *was* live: there,
+        // Limine masks everything at boot and nothing ever unmasked IRQ2, so no PIC2-line
+        // interrupt (rtl8139's included) could ever reach the CPU regardless of that line's own
+        // mask state. Fixed here too so this function is correct on its own, not merely "correct
+        // by accident of inherited firmware state."
+        if irq >= 8 {
+            let mut pic1_data: Port<u8> = Port::new(PIC1_DATA);
+            let mask1 = pic1_data.read();
+            pic1_data.write(mask1 & !(1 << 2));
+        }
     }
 }
 
