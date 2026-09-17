@@ -6053,6 +6053,11 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
     ok &= seed_file(
         bin,
+        b"std-hello",
+        include_bytes!(env!("OXFS_STD_HELLO_ELF_PATH")),
+    );
+    ok &= seed_file(
+        bin,
         b"float-smoke",
         include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
     );

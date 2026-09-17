@@ -1,0 +1,18 @@
+# Deliberately separate from the root `.cargo/config.toml` (which targets `x86_64-oxidebsd.json`
+# with `-Z build-std=core,alloc,compiler_builtins` for the kernel's own no_std build) -- crates
+# under `userland-std/` use the real, prebuilt, Tier-1 `std` for `x86_64-unknown-linux-musl`
+# instead, so this directory tree must never inherit the root config's `[unstable] build-std` or
+# default target. See `build.rs`'s `build_std_userland_crate` for the linker/panic-strategy flags
+# supplied per-invocation via `RUSTFLAGS` (kept out of this file since they reference an absolute,
+# build-time-computed path to `target/musl-sysroot`, not something to hardcode here).
+[build]
+target = "x86_64-unknown-linux-musl"
+
+# Explicitly clears the root `.cargo/config.toml`'s `[unstable] build-std = ["core", "alloc",
+# "compiler_builtins"]` -- confirmed live that a scalar key (`[build] target` above) overrides
+# cleanly across a closer config, but this array key does NOT get cleared just by omission; cargo
+# still walks up past this file to the repo root's config and merges it in, rebuilding
+# core/alloc/compiler_builtins from `rust-src` against `x86_64-unknown-linux-musl` instead of
+# using the real prebuilt ones this target already ships. An explicit empty array is required.
+[unstable]
+build-std = []

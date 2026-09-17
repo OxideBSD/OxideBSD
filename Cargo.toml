@@ -44,6 +44,7 @@ members = [
   "userland/keyevent-syscall-smoke",
   "userland/posix-conformance-driver",
   "userland/lsoxmod",
+  "userland/std-hello-syscall-smoke",
   "modules/hello",
   "modules/native_abi",
   "modules/posix_compat",
@@ -278,6 +279,10 @@ harness = false
 
 [[test]]
 name = "keyevent_syscall_smoke"
+harness = false
+
+[[test]]
+name = "std_hello_syscall_smoke"
 harness = false
 
 # QEMU run/test args (accel/serial/RAM size/NIC/the real ATA data-disk attachment) used to live
