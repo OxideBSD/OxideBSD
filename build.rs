@@ -664,6 +664,15 @@ const DOOMGENERIC_SOURCES: &[&str] = &[
 fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let doomgeneric_dir = Path::new(manifest_dir).join("third_party/doomgeneric/doomgeneric");
+    // Found live fixing the Space-doesn't-open-doors bug: this function's own `already_fresh`
+    // mtime check is dead code without this -- cargo only reruns build.rs at all for paths it's
+    // explicitly told to watch (once any `cargo:rerun-if-changed` is emitted anywhere, cargo's
+    // default "watch the whole package" behavior is disabled), and nothing registered this
+    // directory. A source-only edit here silently never rebuilt `doom` until something unrelated
+    // (e.g. editing `build.rs` itself) happened to invalidate the build-script cache too. Same
+    // whole-directory registration precedent `busybox_dir`/`musl_dir` already use elsewhere in
+    // this file.
+    println!("cargo:rerun-if-changed={}", doomgeneric_dir.display());
     let target_dir = Path::new(manifest_dir).join("target/doomgeneric");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/doomgeneric");
     let out = target_dir.join("doom");
