@@ -46,14 +46,34 @@ rebuild itself from source with no host OS involved (see "Not in this release," 
 - **A much larger, more accurate POSIX conformance baseline.** The Open POSIX Test Suite pilot grew
   from a curated 488-file subset to the full ~1687-file corpus (`pthread_*`/`aio_*`/`lio_listio*`
   included now that real threading exists), with a supervised runner and a host-comparison script
-  for an apples-to-apples baseline. Last measured: **90.3% raw pass rate / 94.6% excluding
-  UNTESTED** — see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md` for the current number and full
-  detail; most of the remaining gap is either genuinely-unimplemented optional features or
-  confirmed, pre-existing bugs in this project's own vendored musl 1.2.6 (reproduced against
-  unmodified host musl, not OxideBSD bugs).
+  for an apples-to-apples baseline. Measured fresh for this release, a clean single-iteration run
+  with zero exclusions needed: **90.3% raw pass rate / 94.7% excluding UNTESTED** (1524/1687 and
+  1524/1610 respectively) — see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md` for full detail; most
+  of the remaining gap is either genuinely-unimplemented optional features or confirmed,
+  pre-existing bugs in this project's own vendored musl 1.2.6 (reproduced against unmodified host
+  musl, not OxideBSD bugs).
 - **Cleanup**: the original hand-written `stsh` shell and the FAT32 filesystem module — both
   superseded early on (by BusyBox's `hush` and `oxfs` respectively) and kept around only for their
   own build/self-check — have been removed entirely.
+- **A pre-release audit pass found and fixed six real bugs**, none of which the POSIX pilot corpus
+  happens to exercise directly, so they're not reflected in the number above:
+  - A real OOB-read/memory-disclosure bug in the rtl8139 NIC driver — an unchecked
+    hardware-reported RX frame length sized a heap allocation and a raw memory copy straight out
+    of the ring, letting a corrupted or adversarial inbound frame read unrelated physical memory.
+  - The PIC's IRQ2 cascade line was never unmasked for any IRQ8-15 device, silently breaking any
+    interrupt-driven driver on that range under Limine's own "everything masked at boot" default —
+    root cause of the rtl8139 IRQ never actually firing.
+  - `rmdir` on an active `mount --bind`/`mount -t tmpfs` mountpoint checked emptiness against the
+    wrong (real, always-empty) inode, silently deleting the mountpoint's name and permanently
+    orphaning its content instead of the correct `EBUSY`.
+  - A forked child's writes through an inherited `MAP_SHARED` file-backed `mmap` were silently
+    lost — never written back to the file, since the child's own bookkeeping for that mapping
+    started empty.
+  - `timer_create()` incorrectly rejected a real-time signal as `sigev_signo`; fixing the deeper
+    reason it was rejected (the timer-expiry delivery path could otherwise have crashed the kernel
+    on its first real-time firing) closed a real POSIX conformance gap in the same pass.
+  - A real ATA write-persistence bug: a drive-reported `CACHE FLUSH` failure was silently treated
+    as success, all the way up through `oxfs`'s own write-through persistence.
 
 ## Not in this release
 
