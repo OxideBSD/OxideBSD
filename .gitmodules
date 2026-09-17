@@ -20,3 +20,7 @@
 	path = third_party/doomgeneric
 	url = https://github.com/Pomsky2011/doomgeneric-oxidebsd.git
 	branch = oxidebsd
+[submodule "third_party/rust"]
+	path = third_party/rust
+	url = https://github.com/OxideBSD/rust-oxidebsd.git
+	branch = oxidebsd
