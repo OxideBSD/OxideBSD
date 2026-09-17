@@ -45,6 +45,7 @@ use core::panic::PanicInfo;
 
 const SYS_EXIT: u64 = 1;
 const SYS_FORK: u64 = 2;
+const SYS_READ: u64 = 3;
 const SYS_WRITE: u64 = 4;
 const SYS_OPEN: u64 = 5;
 const SYS_CLOSE: u64 = 6;
@@ -802,6 +803,73 @@ pub extern "C" fn _start() -> ! {
         "mmap-syscall-smoke: part 14 (anon PROT_NONE guard page)",
         |status| wtermsig(status) == Some(SIGSEGV as i32),
     );
+
+    // --- Part 15: real fork() + MAP_SHARED writeback (this session's own bug fix) -- a forked
+    // child inherits a fd-backed MAP_SHARED mapping's real frame aliasing (`AddressSpace::fork`'s
+    // own SHARED_LEAF handling), but until `inherit_mmap_file_regions_for_fork` existed, the
+    // child's own `mmap_file_regions` bookkeeping started empty -- so nothing it did with its
+    // share of the mapping ever wrote back to the file. Verified via a completely fresh `open()`
+    // + real `read()` after the child exits, not a re-mmap (which could still see the same
+    // MMAP_FILE_CACHE frame regardless of whether real writeback ever happened).
+    let path_fork_shared = b"/tmp/mmap-smoke-fork-shared\0";
+    let fd_fork_shared = open_create(path_fork_shared).expect("part 15: open failed");
+    let buf_orig15 = [b'x'; 64];
+    unsafe {
+        syscall(
+            SYS_WRITE,
+            fd_fork_shared,
+            buf_orig15.as_ptr() as u64,
+            buf_orig15.len() as u64,
+        )
+        .expect("part 15: write failed");
+    }
+    let pa15 = mmap_shared(fd_fork_shared, 64).expect("part 15: mmap failed");
+    let child_pid15 = unsafe { syscall(SYS_FORK, 0, 0, 0) }.expect("part 15: fork failed");
+    if child_pid15 == 0 {
+        // Child: write new content through the *inherited* mapping, then exit -- correct
+        // MAP_SHARED/fork semantics means this must reach the real file, not be silently
+        // discarded because it's a different process than the one that called mmap().
+        unsafe {
+            core::ptr::write_bytes(pa15 as *mut u8, b'y', 64);
+        }
+        unsafe {
+            syscall(SYS_EXIT, 0, 0, 0).ok();
+        }
+        loop {
+            spin_loop();
+        }
+    }
+    let (_, status15) = wait4(child_pid15).expect("part 15: wait4 failed");
+    check!(wexitstatus(status15) == 0, "part 15: child didn't exit cleanly");
+    check!(
+        unsafe { syscall(SYS_MUNMAP, pa15, 64, 0) }.is_ok(),
+        "part 15: munmap failed"
+    );
+    let fd_fork_shared_ro = unsafe {
+        syscall(
+            SYS_OPEN,
+            path_fork_shared.as_ptr() as u64,
+            path_fork_shared.len() as u64,
+            O_RDWR,
+        )
+    }
+    .expect("part 15: re-open failed");
+    let mut readback15 = [0u8; 64];
+    unsafe {
+        syscall(
+            SYS_READ,
+            fd_fork_shared_ro,
+            readback15.as_mut_ptr() as u64,
+            readback15.len() as u64,
+        )
+        .expect("part 15: read failed");
+    }
+    check!(
+        readback15 == [b'y'; 64],
+        "part 15: child's MAP_SHARED write through a forked-inherited mapping never reached the \
+         file"
+    );
+    write_bytes(b"mmap-syscall-smoke: part 15 (fork() + MAP_SHARED writeback) OK\n");
 
     write_bytes(b"mmap-syscall-smoke: all parts passed\n");
     test_exit(true);

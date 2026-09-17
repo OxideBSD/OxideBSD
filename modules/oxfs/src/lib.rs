@@ -360,6 +360,7 @@ const DT_BLK: u8 = 6;
 
 const EBADF: i64 = 9;
 const ENOENT: i64 = 2;
+const EBUSY: i64 = 16;
 const EEXIST: i64 = 17;
 const ENOTDIR: i64 = 20;
 const EISDIR: i64 = 21;
@@ -4480,13 +4481,23 @@ extern "C" fn oxfs_rmdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
-    let Some(target) = dir_lookup(parent, leaf) else {
+    let Some(raw_target) = dir_lookup(parent, leaf) else {
         return -ENOENT;
     };
-    if read_inode(target).kind != InodeKind::Dir {
+    if read_inode(raw_target).kind != InodeKind::Dir {
         return -ENOTDIR;
     }
-    if dir_entry_count(target) > 2 {
+    // `dir_lookup` is a bare lookup -- doesn't apply the mount redirect `resolve_path_impl`'s own
+    // loop does for intermediate components. `leaf` here is the thing actually being removed, so
+    // if it's itself an active mountpoint, emptiness must be checked against the *mounted* root,
+    // not the real, shadowed attachment-point directory underneath it (which is always trivially
+    // empty) -- otherwise `rmdir` on a non-empty mount silently deletes the mountpoint's name,
+    // orphaning its content permanently (unreachable by path, no longer even `umount2`-able).
+    // Same fix shape as `oxfs_open`'s existing mount-redirect handling above.
+    if active_mount_for(raw_target).is_some() {
+        return -EBUSY;
+    }
+    if dir_entry_count(raw_target) > 2 {
         return -ENOTEMPTY;
     }
     match dir_remove(parent, leaf) {

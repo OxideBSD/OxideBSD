@@ -14,10 +14,11 @@
 use core::panic::PanicInfo;
 
 use oxidebsd::boot::BootInfo;
+use oxidebsd::cpu::interrupts;
 use oxidebsd::limine_entry_point;
 use oxidebsd::net::{icmp, ipv4, nic, rtl8139};
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
-use oxidebsd::{interrupts, serial_println};
+use oxidebsd::serial_println;
 
 limine_entry_point!(main);
 

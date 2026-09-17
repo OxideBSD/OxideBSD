@@ -120,15 +120,63 @@ fn release_mmap_file_ref(content_id: u64) {
     }
 }
 
+/// Real `fork()` semantics for a fd-backed `MAP_SHARED` mapping the child inherits by virtue of
+/// the whole address space being duplicated. `AddressSpace::fork`'s own `SHARED_LEAF` handling
+/// already makes the child's page table alias the exact same real frames the parent's does for
+/// every `shared` `MmapFileRegion` -- what was missing was the accounting: `do_munmap`/`do_msync`/
+/// `cleanup_mmap_file_regions_for_exit` all key writeback exclusively off the *calling* process's
+/// own `mmap_file_regions` list, so with the child's list left empty (the original, unconditional
+/// behavior), nothing the child did with its share of the mapping ever wrote those bytes back to
+/// the file -- see `MmapFileRegion`'s own doc comment for the concrete failure case this fixes.
+/// Called from `do_fork_from_current` right after the child's table entry exists, same convention
+/// `fs::sysv_shm::inherit_attachments_for_fork` already established for the identical underlying
+/// gap. `MAP_PRIVATE` regions are deliberately skipped -- see `MmapFileRegion::shared`'s own doc
+/// comment for why fork already gives those a genuinely private, independent frame with nothing
+/// left for this list to track.
+pub(crate) fn inherit_mmap_file_regions_for_fork(parent_pid: Pid, child_pid: Pid) {
+    let regions: Vec<MmapFileRegion> = {
+        let table = PROCESS_TABLE.lock();
+        let Some(parent) = table.get(&parent_pid) else {
+            return;
+        };
+        parent
+            .shared
+            .lock()
+            .mmap_file_regions
+            .iter()
+            .filter(|r| r.shared)
+            .copied()
+            .collect()
+    };
+    if regions.is_empty() {
+        return;
+    }
+    {
+        let mut refs = MMAP_FILE_REFCOUNT.lock();
+        for r in &regions {
+            *refs.entry(r.content_id).or_insert(0) += 1;
+        }
+    }
+    let table = PROCESS_TABLE.lock();
+    if let Some(child) = table.get(&child_pid) {
+        child.shared.lock().mmap_file_regions.extend(regions);
+    }
+}
+
 /// One real fd-backed `MAP_SHARED` mapping still live in a process's own address space — enough
 /// state for `do_munmap` (or exit/`execve` cleanup) to write real content back to the underlying
 /// file (via `crate::fs::fd::content_write`, keyed by `content_id` alone — no fd/`real_fd`
-/// involved at all, see that function's own doc comment for why). Not inherited by `fork`
-/// (`Process::mmap_file_regions` starts empty in a forked child) — same documented simplification
-/// `Process::sysv_shm_attach` already established, for the identical underlying reason: this
-/// kernel's `fork` is a full eager address-space copy, not real copy-on-write, so a child's own
-/// page-table entries at these VAs already point at freshly-copied *private* frames regardless of
-/// what this list remembers.
+/// involved at all, see that function's own doc comment for why). A `shared` (`MAP_SHARED`) entry
+/// *is* now inherited across `fork` -- see `inherit_mmap_file_regions_for_fork`'s own doc comment
+/// for why: `AddressSpace::fork`'s `SHARED_LEAF` handling already makes the child's page table
+/// alias the exact same real frames the parent's does, so leaving the child's own list empty (the
+/// original behavior, matching `Process::sysv_shm_attach`'s now-fixed precedent) meant nothing the
+/// child did with its share -- write through it, `munmap` it, exit -- ever wrote those bytes back
+/// to the file, a real, silent data-loss bug. A `MAP_PRIVATE` entry stays uninherited: `do_mmap_
+/// file_backed` never marks a private mapping's frames `SHARED_LEAF`, so `AddressSpace::fork`
+/// already gives the child a genuinely private, eagerly-copied frame there -- correct fork
+/// semantics on its own, nothing for this list to additionally track.
+#[derive(Clone, Copy)]
 pub struct MmapFileRegion {
     va_start: u64,
     npages: u64,

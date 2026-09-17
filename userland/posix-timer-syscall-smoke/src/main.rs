@@ -14,7 +14,7 @@
 //! `syscall()` helper and its own minimal `sigreturn_trampoline` (same convention
 //! `userland/pause-syscall-smoke/` already established).
 //!
-//! Eight parts, all through `tests/posix_timer_syscall_smoke.rs` spawning this binary as pid 1:
+//! Nine parts, all through `tests/posix_timer_syscall_smoke.rs` spawning this binary as pid 1:
 //! 1. `timer_create` with an invalid `clockid` is a real `EINVAL`.
 //! 2. `evp_ptr == 0` defaults to `SIGEV_SIGNAL`/`SIGALRM` (real POSIX default) -- a relative
 //!    one-shot timer fires exactly once, and reads back fully disarmed afterward.
@@ -30,6 +30,9 @@
 //! 7. `EAGAIN` once all `MAX_POSIX_TIMERS` slots are in use, and slot reuse after `timer_delete`.
 //! 8. `EINVAL` for an out-of-range or already-deleted `timerid` across every one of
 //!    `timer_settime`/`timer_gettime`/`timer_getoverrun`/`timer_delete`.
+//! 9. A periodic timer with `sigev_signo = SIGRTMIN` fires repeatedly through the real-time
+//!    signal path (`Process::rt_queue`), not just standard signals -- previously rejected
+//!    `EINVAL` unconditionally.
 #![no_std]
 #![no_main]
 
@@ -62,6 +65,8 @@ const STDOUT: u64 = 1;
 
 const SIGALRM: u64 = 14;
 const SIGUSR1: u64 = 10;
+/// Matches `src/process/mod.rs`'s own `SIGRTMIN` -- no shared crate across this ABI boundary.
+const SIGRTMIN: u64 = 35;
 
 const CLOCK_REALTIME: u64 = 0;
 const CLOCK_MONOTONIC: u64 = 1;
@@ -189,6 +194,7 @@ unsafe extern "C" {
 
 static SIGALRM_COUNT: AtomicU32 = AtomicU32::new(0);
 static SIGUSR1_COUNT: AtomicU32 = AtomicU32::new(0);
+static SIGRTMIN_COUNT: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn sigalrm_handler(_signum: i64) {
     SIGALRM_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -196,6 +202,10 @@ extern "C" fn sigalrm_handler(_signum: i64) {
 
 extern "C" fn sigusr1_handler(_signum: i64) {
     SIGUSR1_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+extern "C" fn sigrtmin_handler(_signum: i64) {
+    SIGRTMIN_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
 fn install_handler(sig: u64, handler: extern "C" fn(i64)) -> bool {
@@ -331,7 +341,10 @@ fn is_zero_itimerspec(spec: &RawItimerspec) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"posix-timer-syscall-smoke: starting\n");
 
-    if !install_handler(SIGALRM, sigalrm_handler) || !install_handler(SIGUSR1, sigusr1_handler) {
+    if !install_handler(SIGALRM, sigalrm_handler)
+        || !install_handler(SIGUSR1, sigusr1_handler)
+        || !install_handler(SIGRTMIN, sigrtmin_handler)
+    {
         write_bytes(b"posix-timer-syscall-smoke: installing handlers failed\n");
         test_exit(false);
     }
@@ -577,6 +590,39 @@ pub extern "C" fn _start() -> ! {
     for &id in ids.iter().skip(2) {
         let _ = timer_delete(id);
     }
+
+    // Part 9: `sigev_signo` may be a real-time signal (`SIGRTMIN`) -- real POSIX explicitly
+    // allows this, and it used to be rejected `EINVAL` unconditionally (see `do_timer_create`'s
+    // own doc comment). Exercises the fix directly: a periodic RT-signaled timer must actually
+    // deliver more than once through the kernel's `rt_queue`-backed path, not just avoid a panic
+    // on the first firing.
+    let evp_rtmin = RawKSigevent {
+        sigev_value: 0,
+        sigev_signo: SIGRTMIN as i32,
+        sigev_notify: SIGEV_SIGNAL,
+        sigev_tid: 0,
+    };
+    let id_rt = match timer_create(CLOCK_MONOTONIC, Some(&evp_rtmin)) {
+        Ok(id) => id,
+        Err(_) => {
+            write_bytes(b"posix-timer-syscall-smoke: RT-signal timer_create failed\n");
+            test_exit(false);
+        }
+    };
+    let arm_rt = relative_ms(60, 60);
+    if timer_settime(id_rt, 0, &arm_rt, None) != Ok(0) {
+        write_bytes(b"posix-timer-syscall-smoke: RT-signal timer_settime failed\n");
+        test_exit(false);
+    }
+    if !wait_until(5000, || SIGRTMIN_COUNT.load(Ordering::SeqCst) >= 3) {
+        write_bytes(b"posix-timer-syscall-smoke: RT-signal timer didn't fire 3+ times\n");
+        test_exit(false);
+    }
+    if timer_delete(id_rt) != Ok(0) {
+        write_bytes(b"posix-timer-syscall-smoke: deleting the RT-signal timer failed\n");
+        test_exit(false);
+    }
+    write_bytes(b"posix-timer-syscall-smoke: part 9 (periodic SIGRTMIN timer) OK\n");
 
     write_bytes(b"posix-timer-syscall-smoke: PASS\n");
     test_exit(true);

@@ -478,7 +478,14 @@ pub fn do_timer_create(pid: Pid, clockid: u64, evp_ptr: u64, timerid_ptr: u64) -
             SIGEV_NONE => 0,
             SIGEV_SIGNAL => {
                 let sig = evp.sigev_signo as u64;
-                if !(1..=31).contains(&sig) {
+                // Real POSIX `timer_create()` explicitly allows `sigev_signo` to be a real-time
+                // signal (`SIGRTMIN..=SIGRTMAX`) -- a primary real-world use of RT signals is
+                // precise, distinguishable timer notifications. Safe to accept now that
+                // `interrupts::timer_interrupt_handler`'s own expiry path pushes a real
+                // `rt_queue` entry for one instead of only setting the flat pending bit (see its
+                // own doc comment) -- previously this restriction to `1..=31` was the only thing
+                // standing between that gap and a kernel panic.
+                if !(1..=31).contains(&sig) && !(SIGRTMIN..=SIGRTMAX).contains(&sig) {
                     return Err(EINVAL);
                 }
                 sig

@@ -560,13 +560,37 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
                 };
                 if fired {
                     if slot.signo != 0 {
-                        let bit = 1 << (slot.signo - 1);
-                        if proc.pending_signals & bit != 0 {
+                        let sig = slot.signo;
+                        // A real-time signal's "already pending" state is its own `rt_queue`
+                        // entry, not the flat `pending_signals` bit -- `take_deliverable_signal`
+                        // unconditionally pops from `rt_queue` for any `sig >= SIGRTMIN` found
+                        // set in `pending_signals`, so setting the bit here without also pushing
+                        // a real queue entry would panic the kernel on an empty-Vec pop the next
+                        // time this signal is delivered (found via audit, not live -- currently
+                        // unreachable only because `do_timer_create` rejects RT `sigev_signo`;
+                        // this fix removes that dependency so either side can change safely).
+                        let already_pending = if sig >= crate::process::SIGRTMIN {
+                            !proc.rt_queue[(sig - crate::process::SIGRTMIN) as usize].is_empty()
+                        } else {
+                            proc.pending_signals & (1 << (sig - 1)) != 0
+                        };
+                        if already_pending {
                             slot.overrun = slot.overrun.saturating_add(1 + ns_overrun_extra);
                         } else {
                             slot.overrun = ns_overrun_extra;
-                            proc.pending_signals |= bit;
-                            newly_signaled = Some(slot.signo);
+                            let info = crate::process::QueuedSigInfo {
+                                code: crate::process::SI_TIMER,
+                                pid: 0,
+                                uid: 0,
+                                value: 0,
+                            };
+                            if sig >= crate::process::SIGRTMIN {
+                                proc.rt_queue[(sig - crate::process::SIGRTMIN) as usize].push(info);
+                            } else {
+                                proc.pending_siginfo[sig as usize] = info;
+                            }
+                            proc.pending_signals |= 1 << (sig - 1);
+                            newly_signaled = Some(sig);
                         }
                     }
                     // Only the *first* expiry of an abstime-armed `CLOCK_REALTIME` timer needs

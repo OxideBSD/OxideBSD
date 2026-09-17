@@ -53,6 +53,13 @@ const RX_RING_FRAMES: usize = 3;
 const NUM_TX_SLOTS: usize = 4;
 const TX_SLOT_LEN: usize = 4096;
 const ETHERNET_MIN_FRAME: usize = 60;
+/// Real upper bound on any legitimate RX frame this hardware can report: standard Ethernet MTU
+/// (1500) + 14-byte header + a 4-byte 802.1Q tag, rounded up. `poll_recv`'s `length` header field
+/// comes straight from the NIC and is otherwise trusted as-is to size an allocation and a
+/// `copy_nonoverlapping` read out of the RX ring -- since the HHDM maps all of physical memory, an
+/// oversized value doesn't page-fault, it silently reads unrelated physical memory (a real
+/// memory-disclosure/corruption bug, triggerable by a corrupted or adversarial inbound frame).
+const ETHERNET_MAX_FRAME: usize = 1522;
 
 /// Set by `probe_and_init` once the driver's I/O base is known, read by `rtl8139_irq_handler` --
 /// a plain global rather than routing the IRQ handler through the `nic::NIC` mutex, since a
@@ -277,52 +284,83 @@ impl NicDriver for Rtl8139 {
     }
 
     fn poll_recv(&mut self) -> Option<Vec<u8>> {
-        unsafe {
-            if Port::<u8>::new(self.io_base + REG_CR).read() & CR_BUFFER_EMPTY != 0 {
-                return None;
+        // Loops past a dropped bad frame rather than returning `None` for it -- `None` here means
+        // specifically "ring empty," which `net::poll()`'s own drain loop relies on to know
+        // whether more frames are still queued behind the one it just got back.
+        loop {
+            unsafe {
+                if Port::<u8>::new(self.io_base + REG_CR).read() & CR_BUFFER_EMPTY != 0 {
+                    return None;
+                }
+            }
+
+            // Each queued packet starts with a 4-byte header: 2 bytes status, 2 bytes length (the
+            // received frame's length *including* its trailing 4-byte CRC, but not counting this
+            // header itself).
+            let header_ptr = (self.rx_ring_virt + self.rx_read_offset as u64).as_ptr::<u16>();
+            let status = unsafe { header_ptr.read_volatile() };
+            let length = unsafe { header_ptr.add(1).read_volatile() };
+
+            let data_len = (length as usize).saturating_sub(4); // drop the trailing CRC
+            let bad_length = length < 4 || data_len > ETHERNET_MAX_FRAME;
+            // Reject a bad `status` or an out-of-range `length` before either drives an OOB
+            // read/allocation -- previously the ISR_ROK check was decorative (logged, but still
+            // read and returned the untrusted payload) and `length` was trusted up to the full
+            // u16 range.
+            let frame = if status & ISR_ROK == 0 {
+                serial_println!(
+                    "[net] rtl8139: dropping RX error frame, status {:#06x}",
+                    status
+                );
+                None
+            } else if bad_length {
+                serial_println!(
+                    "[net] rtl8139: dropping RX frame with bad length {}",
+                    length
+                );
+                None
+            } else {
+                let data_offset = self.rx_read_offset as u64 + 4;
+                let mut frame = alloc::vec![0u8; data_len];
+                let data_ptr = (self.rx_ring_virt + data_offset).as_ptr::<u8>();
+                unsafe {
+                    core::ptr::copy_nonoverlapping(data_ptr, frame.as_mut_ptr(), data_len);
+                }
+                Some(frame)
+            };
+
+            // Advance past this packet's header + payload + CRC, rounded up to the 4-byte
+            // boundary the card always starts the next packet on, then wrap within the
+            // 8192-byte ring proper (the extra WRAP padding past that is never a valid
+            // packet-start offset). A `length` too large to be a real frame is equally
+            // untrustworthy here -- clamp the step to one frame's worth so a single corrupted
+            // header can't push `rx_read_offset`/CAPR arbitrarily far out of sync with the
+            // card's own write pointer.
+            let advance_len = if bad_length {
+                ETHERNET_MAX_FRAME as u32 + 4
+            } else {
+                length as u32
+            };
+            let next = (self.rx_read_offset as u32 + advance_len + 4 + 3) & !3;
+            self.rx_read_offset = if next >= RX_RING_SIZE {
+                (next - RX_RING_SIZE) as u16
+            } else {
+                next as u16
+            };
+
+            unsafe {
+                // Hardware quirk: CAPR must be programmed 16 bytes *before* the actual next-read
+                // offset, not the offset itself -- see the RTL8139 datasheet / OSDev wiki. Relies
+                // on u16 wraparound when `rx_read_offset < 16`, matching what real drivers get
+                // from the equivalent unsigned-underflow-then-truncate in C.
+                Port::<u16>::new(self.io_base + REG_CAPR)
+                    .write(self.rx_read_offset.wrapping_sub(16));
+            }
+
+            if frame.is_some() {
+                return frame;
             }
         }
-
-        // Each queued packet starts with a 4-byte header: 2 bytes status, 2 bytes length (the
-        // received frame's length *including* its trailing 4-byte CRC, but not counting this
-        // header itself).
-        let header_ptr = (self.rx_ring_virt + self.rx_read_offset as u64).as_ptr::<u16>();
-        let status = unsafe { header_ptr.read_volatile() };
-        let length = unsafe { header_ptr.add(1).read_volatile() };
-
-        if status & ISR_ROK == 0 {
-            // Malformed packet -- still advance past it the same way a good one would, rather
-            // than getting stuck re-reading the same header forever.
-            serial_println!("[net] rtl8139: RX error, status {:#06x}", status);
-        }
-
-        let data_offset = self.rx_read_offset as u64 + 4;
-        let data_len = (length as usize).saturating_sub(4); // drop the trailing CRC
-        let mut frame = alloc::vec![0u8; data_len];
-        let data_ptr = (self.rx_ring_virt + data_offset).as_ptr::<u8>();
-        unsafe {
-            core::ptr::copy_nonoverlapping(data_ptr, frame.as_mut_ptr(), data_len);
-        }
-
-        // Advance past this packet's header + payload + CRC, rounded up to the 4-byte boundary
-        // the card always starts the next packet on, then wrap within the 8192-byte ring proper
-        // (the extra WRAP padding past that is never a valid packet-start offset).
-        let next = (self.rx_read_offset as u32 + length as u32 + 4 + 3) & !3;
-        self.rx_read_offset = if next >= RX_RING_SIZE {
-            (next - RX_RING_SIZE) as u16
-        } else {
-            next as u16
-        };
-
-        unsafe {
-            // Hardware quirk: CAPR must be programmed 16 bytes *before* the actual next-read
-            // offset, not the offset itself -- see the RTL8139 datasheet / OSDev wiki. Relies on
-            // u16 wraparound when `rx_read_offset < 16`, matching what real drivers get from the
-            // equivalent unsigned-underflow-then-truncate in C.
-            Port::<u16>::new(self.io_base + REG_CAPR).write(self.rx_read_offset.wrapping_sub(16));
-        }
-
-        Some(frame)
     }
 
     fn mac_address(&self) -> [u8; 6] {

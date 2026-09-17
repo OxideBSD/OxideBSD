@@ -306,6 +306,13 @@ impl SigAction {
 /// all funnel through the same `pending_signals` bitmask, a real, documented simplification).
 pub(crate) const SI_USER: i32 = 0;
 pub(crate) const SI_QUEUE: i32 = -1;
+/// Real `si_code` for a `Process::posix_timers` expiry (`third_party/musl/include/bits/
+/// siginfo.h`'s own `SI_TIMER = -2`) -- used by `interrupts::timer_interrupt_handler` so a
+/// `SA_SIGINFO` handler catching a timer-generated signal sees the real cause instead of whatever
+/// stale `QueuedSigInfo` happened to be sitting in `pending_siginfo`/`rt_queue` from an unrelated
+/// earlier signal (this path used to bypass `pending_siginfo` entirely, setting only the raw
+/// `pending_signals` bit).
+pub(crate) const SI_TIMER: i32 = -2;
 
 /// Real `si_code` values for `SIGCHLD` specifically (`third_party/musl/include/signal.h`'s own
 /// `CLD_*` set) -- distinct from `SI_USER`/`SI_QUEUE` above, which cover every *other* signal this
