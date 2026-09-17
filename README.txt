@@ -13,8 +13,7 @@ Dependencies:
 A C compiler (clang or gcc) with musl support
 GNU make (for BusyBox)
 Cargo nightly
-bootimage (`cargo install bootimage`)
-QEMU (for testing in a VM)
+QEMU (for testing in a VM), plus OVMF firmware for the default UEFI boot path
 
 Building:
 To build it, use `cargo build`.
