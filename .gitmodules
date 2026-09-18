@@ -24,3 +24,7 @@
 	path = third_party/rust
 	url = https://github.com/OxideBSD/rust-oxidebsd.git
 	branch = oxidebsd
+[submodule "third_party/llvm-project"]
+	path = third_party/llvm-project
+	url = https://github.com/OxideBSD/llvm-project-oxidebsd.git
+	branch = oxidebsd
