@@ -65,6 +65,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clang-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "clock"
 version = "0.1.0"
 

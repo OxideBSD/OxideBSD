@@ -194,6 +194,11 @@ extern "x86-interrupt" fn invalid_opcode_handler(mut stack_frame: InterruptStack
     if interrupted_ring3 {
         let pid = crate::process::scheduler::current_pid();
         if pid != 0 {
+            serial_println!(
+                "DEBUG ring3 invalid opcode: pid={} rip={:?}",
+                pid,
+                stack_frame.instruction_pointer
+            );
             // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
             // comment for why a plain `do_kill` self-signal isn't safe here.
             crate::process::signals::force_fault_signal(pid, crate::process::SIGILL);
@@ -232,6 +237,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     if interrupted_ring3 {
         let pid = crate::process::scheduler::current_pid();
         if pid != 0 {
+            serial_println!(
+                "DEBUG ring3 GPF: pid={} rip={:?} error_code={:#x}",
+                pid,
+                stack_frame.instruction_pointer,
+                error_code
+            );
             // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
             // comment for why a plain `do_kill` self-signal (which respects the target's own
             // blocked-signal mask, correct for an ordinary async `kill()`) isn't safe here: this
@@ -288,6 +299,13 @@ extern "x86-interrupt" fn page_fault_handler(
     if interrupted_ring3 && let Ok(fault_addr) = Cr2::read() {
         let pid = crate::process::scheduler::current_pid();
         if pid != 0 {
+            serial_println!(
+                "DEBUG ring3 page fault: pid={} fault_addr={:?} rip={:?} error_code={:?}",
+                pid,
+                fault_addr,
+                stack_frame.instruction_pointer,
+                error_code
+            );
             let sig = crate::process::signal_for_user_fault(pid, fault_addr.as_u64());
             // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
             // comment for why a plain `do_kill` self-signal (which respects the target's own

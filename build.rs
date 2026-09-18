@@ -156,6 +156,7 @@ fn main() {
     build_userland_crate("needs-syscall-smoke", "NEEDS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("needs-syscall2-smoke", "NEEDS_SYSCALL2_SMOKE_ELF_PATH");
     build_userland_crate("tcc-syscall-smoke", "TCC_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("clang-syscall-smoke", "CLANG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "std-hello-syscall-smoke",
         "STD_HELLO_SYSCALL_SMOKE_ELF_PATH",
@@ -311,6 +312,20 @@ fn main() {
     let tcc_elf_path = build_tinycc(&musl_sysroot);
     let tcc_runtime_manifest_path = write_tcc_runtime_manifest(&musl_sysroot, &tinycc_dir);
 
+    // Clang/LLVM: OxideBSD's second real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM
+    // port section). A two-stage cross-compile: a host-executable cross compiler
+    // (`build_llvm_host_toolchain`) builds the target's own C++ runtime
+    // (`build_llvm_target_runtimes`) and then the real, on-target-executable clang+lld
+    // (`build_llvm_target_toolchain`) using that same cross compiler. Genuinely slow on a clean
+    // checkout (multi-hour) -- staleness-gated the same way `build_tinycc` is.
+    vendor_linux_uapi_headers(&musl_sysroot);
+    let llvm_host_build = build_llvm_host_toolchain();
+    build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
+    let llvm_target_build = build_llvm_target_toolchain(&llvm_host_build, &musl_sysroot);
+    let clang_elf_path = llvm_target_build.join("bin/clang-23");
+    let lld_elf_path = llvm_target_build.join("bin/lld");
+    let clang_runtime_manifest_path = write_clang_runtime_manifest(&llvm_target_build);
+
     // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
     // comment for the source list, and `third_party/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
     // for the backend. `doom1.wad` (the freely-redistributable shareware IWAD) is vendored
@@ -442,11 +457,17 @@ fn main() {
         ),
         ("OXFS_LSOXMOD_ELF_PATH", lsoxmod_elf_path.to_str().unwrap()),
         ("OXFS_TCC_ELF_PATH", tcc_elf_path.to_str().unwrap()),
+        ("OXFS_CLANG_ELF_PATH", clang_elf_path.to_str().unwrap()),
+        ("OXFS_LLD_ELF_PATH", lld_elf_path.to_str().unwrap()),
         ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
         ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
             "TCC_RUNTIME_MANIFEST_PATH",
             tcc_runtime_manifest_path.to_str().unwrap(),
+        ),
+        (
+            "CLANG_RUNTIME_MANIFEST_PATH",
+            clang_runtime_manifest_path.to_str().unwrap(),
         ),
         (
             "POSIX_TEST_MANIFEST_PATH",
@@ -1817,6 +1838,462 @@ fn write_tcc_runtime_manifest(musl_sysroot: &Path, tinycc_dir: &Path) -> PathBuf
             .map(|(rel, abs)| (format!("include/{rel}"), abs)),
     );
     write_array(&mut src, "TCC_RUNTIME_FILES", &tcc_runtime_files);
+
+    std::fs::write(&out_path, src)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    out_path
+}
+
+/// The triple this project's real on-target Clang/LLVM port builds for -- genuine `Triple::
+/// OxideBSD` OS identity (see `third_party/llvm-project`'s `oxidebsd` branch), `musl` environment
+/// so LLVM/Clang's existing `Triple::isMusl()`-gated behavior (dynamic-linker naming, static/PIE
+/// defaults, CRT object selection in `Gnu.cpp`) applies for free, matching real musl-linux
+/// conventions the project's musl fork already provides on disk.
+const CLANG_TARGET_TRIPLE: &str = "x86_64-unknown-oxidebsd-musl";
+
+/// Recursively copies `src` into `dest`, creating directories as needed. Only used by
+/// `vendor_linux_uapi_headers` below, which needs a plain directory copy from a location outside
+/// this repo (the host's own `/usr/include`) -- `collect_dir_files` isn't a fit since that returns
+/// `include_bytes!`-ready paths for a generated Rust source, not a real filesystem copy.
+fn copy_dir_recursive(src: &Path, dest: &Path) {
+    std::fs::create_dir_all(dest).unwrap_or_else(|e| panic!("failed to create {}: {e}", dest.display()));
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path);
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dest_path)
+                .unwrap_or_else(|e| panic!("failed to copy {}: {e}", entry.path().display()));
+        }
+    }
+}
+
+/// Idempotently vendors a handful of real Linux kernel uapi headers (`linux/`, `asm/`,
+/// `asm-generic/`) from the *host's* own `/usr/include` into the musl sysroot. Needed only by
+/// libc++'s own `src/atomic.cpp` (`#ifdef __linux__ #include <linux/futex.h>`, unconditional in
+/// this LLVM version) -- neither musl nor tcc need any of this. Safe to vendor verbatim:
+/// `linux/futex.h`'s `FUTEX_WAIT=0`/`FUTEX_WAKE=1`/`FUTEX_PRIVATE=128` are confirmed to exactly
+/// match this kernel's own real `do_futex` opcode numbering (`src/process/limits.rs`), and the
+/// whole directory is GPL-2.0-with-Linux-syscall-note licensed specifically to permit this exact
+/// kind of userspace consumption (same exception real libc's like musl/glibc themselves rely on).
+/// A one-time copy (checked via `linux/futex.h`'s own presence) -- these never change once copied.
+fn vendor_linux_uapi_headers(musl_sysroot: &Path) {
+    if musl_sysroot.join("include/linux/futex.h").exists() {
+        return;
+    }
+    for name in ["linux", "asm", "asm-generic"] {
+        let src = Path::new("/usr/include").join(name);
+        if src.exists() {
+            copy_dir_recursive(&src, &musl_sysroot.join("include").join(name));
+        }
+    }
+}
+
+/// Builds a *host-executable* Clang+LLD cross compiler (`--target=x86_64-unknown-oxidebsd-musl`)
+/// from `third_party/llvm-project` -- see CLAUDE.md's Clang/LLVM port section. First stage of a
+/// two-stage bootstrap: this compiler runs on the build host but targets OxideBSD, and exists only
+/// to build the target's own C++ runtime (`build_llvm_target_runtimes`) and the *real*,
+/// on-target-executable clang+lld (`build_llvm_target_toolchain`) below.
+///
+/// X86-only, clang+lld only (no clang-tools-extra/lldb/mlir/polly), no tests/docs/examples --
+/// this is a build tool, not a product install. `LLVM_ENABLE_EH`/`RTTI=OFF` matches LLVM's own
+/// upstream default. Real, multi-hour-on-a-clean-checkout cost -- staleness-gated the same way
+/// `build_tinycc` is, but **not** a full recursive walk of `third_party/llvm-project` (600+MB,
+/// tens of thousands of files): `cargo:rerun-if-changed` is scoped to just the directories this
+/// project actually patches, matching `build_musl_sysroot`'s own directory-level (not per-file)
+/// scoping.
+fn build_llvm_host_toolchain() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let llvm_root = Path::new(manifest_dir).join("third_party/llvm-project");
+    let build_dir = Path::new(manifest_dir).join("target/llvm-host-build");
+    let clang_bin = build_dir.join("bin/clang-23");
+    let lld_bin = build_dir.join("bin/lld");
+
+    for dir in [
+        "clang/lib/Driver",
+        "clang/lib/Basic",
+        "llvm/include/llvm/TargetParser",
+    ] {
+        println!("cargo:rerun-if-changed={}", llvm_root.join(dir).display());
+    }
+
+    let build_rs_mtime = std::fs::metadata(Path::new(manifest_dir).join("build.rs"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let freshness_floor = build_rs_mtime.max(latest_mtime(&llvm_root.join("clang/lib/Driver")));
+    let already_fresh = [&clang_bin, &lld_bin].into_iter().all(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(|m| m >= freshness_floor)
+            .unwrap_or(false)
+    });
+    if already_fresh {
+        return build_dir;
+    }
+
+    if !build_dir.join("build.ninja").exists() {
+        std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-host-build");
+        let status = Command::new("cmake")
+            .args(["-G", "Ninja", "-S"])
+            .arg(llvm_root.join("llvm"))
+            .arg("-B")
+            .arg(&build_dir)
+            .args([
+                "-DLLVM_ENABLE_PROJECTS=clang;lld",
+                "-DLLVM_TARGETS_TO_BUILD=X86",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DLLVM_ENABLE_EH=OFF",
+                "-DLLVM_ENABLE_RTTI=OFF",
+                "-DLLVM_INCLUDE_TESTS=OFF",
+                "-DLLVM_INCLUDE_EXAMPLES=OFF",
+                "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+                "-DLLVM_INCLUDE_DOCS=OFF",
+                "-DLLVM_BUILD_TOOLS=ON",
+                "-DCLANG_INCLUDE_TESTS=OFF",
+                "-DCLANG_ENABLE_ARCMT=OFF",
+                "-DCLANG_ENABLE_STATIC_ANALYZER=OFF",
+                "-DCLANG_BUILD_TOOLS=ON",
+                "-DLLVM_ENABLE_ZLIB=OFF",
+                "-DLLVM_ENABLE_ZSTD=OFF",
+                "-DLLVM_ENABLE_LIBXML2=OFF",
+                "-DLLVM_ENABLE_TERMINFO=OFF",
+                "-DLLVM_ENABLE_LIBPFM=OFF",
+                "-DLLVM_ENABLE_LIBEDIT=OFF",
+                "-DLLVM_CCACHE_BUILD=ON",
+                "-DLLVM_PARALLEL_LINK_JOBS=2",
+            ])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run cmake for llvm-host-build: {e}"));
+        if !status.success() {
+            panic!("cmake configure for llvm-host-build failed: {status}");
+        }
+    }
+
+    let status = Command::new("ninja")
+        .current_dir(&build_dir)
+        .args(["clang", "lld"])
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run ninja for llvm-host-build: {e}"));
+    if !status.success() {
+        panic!("building llvm-host-build (host clang+lld) failed: {status}");
+    }
+
+    build_dir
+}
+
+/// Builds the target's fully statically self-contained C++ runtime (libc++/libc++abi/libunwind)
+/// and compiler-rt's builtins library, both using `build_llvm_host_toolchain`'s cross compiler --
+/// LLVM/Clang's own source is C++ and needs a real *target* C++ standard library to compile
+/// against, so this must happen before `build_llvm_target_toolchain` below, not after.
+///
+/// **Both `LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY` and its libunwind-side counterpart
+/// (`LIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY`) are real, independent, non-cascading
+/// flags** -- found live: setting only `LIBCXX_ENABLE_STATIC_ABI_LIBRARY` (whose doc text implies
+/// it controls this) merges libc++abi's own symbols into `libc++.a` but leaves libunwind's
+/// (`_Unwind_Resume`, etc.) undefined at final link time. Without both, a real link against
+/// `libc++.a` alone (as OxideBSD's own Clang driver does -- see `OxideBSD::AddCXXStdlibLibArgs`)
+/// fails with undefined `__cxa_throw`/`_Unwind_Resume`/exception-class vtable symbols.
+fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let llvm_root = Path::new(manifest_dir).join("third_party/llvm-project");
+    let libcxx_out = host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a"));
+    let compiler_rt_build = Path::new(manifest_dir).join("target/compiler-rt-target-build");
+    let builtins_dest = host_build.join(format!(
+        "lib/clang/23/lib/{CLANG_TARGET_TRIPLE}/libclang_rt.builtins.a"
+    ));
+
+    let freshness_floor = std::fs::metadata(host_build.join("bin/clang-23"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let already_fresh = [&libcxx_out, &builtins_dest].into_iter().all(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(|m| m >= freshness_floor)
+            .unwrap_or(false)
+    });
+    if already_fresh {
+        return;
+    }
+
+    // compiler-rt builtins: a standalone, bare-metal-style configure with no OS-specific detection
+    // at all -- these are freestanding numeric helpers, the same role `libtcc1.a` plays for tcc.
+    if !compiler_rt_build.join("build.ninja").exists() {
+        std::fs::create_dir_all(&compiler_rt_build)
+            .expect("failed to create target/compiler-rt-target-build");
+        let host_clang = host_build.join("bin/clang");
+        let status = Command::new("cmake")
+            .args(["-G", "Ninja", "-S"])
+            .arg(llvm_root.join("compiler-rt"))
+            .arg("-B")
+            .arg(&compiler_rt_build)
+            .arg(format!(
+                "-DLLVM_CMAKE_DIR={}",
+                host_build.join("lib/cmake/llvm").display()
+            ))
+            .arg(format!("-DCMAKE_C_COMPILER={}", host_clang.display()))
+            .arg(format!("-DCMAKE_ASM_COMPILER={}", host_clang.display()))
+            .arg(format!("-DCMAKE_C_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
+            .arg(format!("-DCMAKE_ASM_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
+            .arg(format!("-DCMAKE_SYSROOT={}", musl_sysroot.display()))
+            .args([
+                "-DCMAKE_C_FLAGS=-static",
+                "-DCOMPILER_RT_BUILD_BUILTINS=ON",
+                "-DCOMPILER_RT_BUILD_SANITIZERS=OFF",
+                "-DCOMPILER_RT_BUILD_XRAY=OFF",
+                "-DCOMPILER_RT_BUILD_LIBFUZZER=OFF",
+                "-DCOMPILER_RT_BUILD_PROFILE=OFF",
+                "-DCOMPILER_RT_BUILD_MEMPROF=OFF",
+                "-DCOMPILER_RT_BUILD_ORC=OFF",
+                "-DCOMPILER_RT_BUILD_CTX_PROFILE=OFF",
+                "-DCOMPILER_RT_BAREMETAL_BUILD=ON",
+                "-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON",
+                "-DCMAKE_SYSTEM_NAME=Generic",
+                "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
+            ])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run cmake for compiler-rt-target-build: {e}"));
+        if !status.success() {
+            panic!("cmake configure for compiler-rt-target-build failed: {status}");
+        }
+    }
+    let status = Command::new("ninja")
+        .current_dir(&compiler_rt_build)
+        .arg("clang_rt.builtins-x86_64")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to build compiler-rt builtins: {e}"));
+    if !status.success() {
+        panic!("building compiler-rt builtins failed: {status}");
+    }
+    std::fs::create_dir_all(builtins_dest.parent().unwrap())
+        .expect("failed to create compiler-rt builtins install dir");
+    std::fs::copy(
+        compiler_rt_build.join("lib/generic/libclang_rt.builtins-x86_64.a"),
+        &builtins_dest,
+    )
+    .unwrap_or_else(|e| panic!("failed to install compiler-rt builtins: {e}"));
+
+    // libc++/libc++abi/libunwind: reconfigures host_build in place to add LLVM's multi-target
+    // "runtimes" mechanism -- the officially supported way to build these three interdependent
+    // runtimes against a fresh Clang for an arbitrary target. `RUNTIMES_<target>_FOO` cache
+    // variables are forwarded generically as `-DFOO=...` to the nested configure (`llvm/runtimes/
+    // CMakeLists.txt`'s `append_passthrough_options`) -- not a fixed allowlist, so every flag
+    // needed for full static self-containment can be set directly on this first configure.
+    let p = format!("RUNTIMES_{CLANG_TARGET_TRIPLE}_");
+    let status = Command::new("cmake")
+        .current_dir(host_build)
+        .arg("-DLLVM_ENABLE_RUNTIMES=libcxx;libcxxabi;libunwind")
+        .arg(format!("-DLLVM_RUNTIME_TARGETS={CLANG_TARGET_TRIPLE}"))
+        .arg(format!("-D{p}CMAKE_SYSROOT={}", musl_sysroot.display()))
+        .arg(format!("-D{p}CMAKE_BUILD_TYPE=MinSizeRel"))
+        .arg(format!("-D{p}CMAKE_C_FLAGS=-static"))
+        .arg(format!("-D{p}CMAKE_CXX_FLAGS=-static"))
+        .arg(format!("-D{p}LIBCXX_ENABLE_SHARED=OFF"))
+        .arg(format!("-D{p}LIBCXX_ENABLE_STATIC=ON"))
+        .arg(format!("-D{p}LIBCXX_ENABLE_FILESYSTEM=ON"))
+        .arg(format!("-D{p}LIBCXX_ENABLE_THREADS=ON"))
+        .arg(format!("-D{p}LIBCXX_HAS_MUSL_LIBC=ON"))
+        .arg(format!("-D{p}LIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON"))
+        .arg(format!("-D{p}LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=ON"))
+        .arg(format!("-D{p}LIBCXXABI_ENABLE_SHARED=OFF"))
+        .arg(format!("-D{p}LIBCXXABI_ENABLE_STATIC=ON"))
+        .arg(format!("-D{p}LIBCXXABI_USE_LLVM_UNWINDER=ON"))
+        .arg(format!("-D{p}LIBCXXABI_ENABLE_STATIC_UNWINDER=ON"))
+        .arg(format!(
+            "-D{p}LIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY=ON"
+        ))
+        .arg(format!("-D{p}LIBUNWIND_ENABLE_SHARED=OFF"))
+        .arg(format!("-D{p}LIBUNWIND_ENABLE_STATIC=ON"))
+        .arg(".")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to reconfigure llvm-host-build for runtimes: {e}"));
+    if !status.success() {
+        panic!("cmake reconfigure for target runtimes failed: {status}");
+    }
+    let status = Command::new("ninja")
+        .current_dir(host_build)
+        .arg(format!("runtimes-{CLANG_TARGET_TRIPLE}"))
+        .status()
+        .unwrap_or_else(|e| panic!("failed to build target runtimes: {e}"));
+    if !status.success() {
+        panic!("building target runtimes (libc++/libc++abi/libunwind) failed: {status}");
+    }
+}
+
+/// Builds the real, on-target-executable clang+lld (this port's actual deliverable) using
+/// `build_llvm_host_toolchain`'s cross compiler as `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` --
+/// build=host, host=target=OxideBSD (an ordinary two-stage cross-compile, not a true three-system
+/// "Canadian Cross" -- see CLAUDE.md's Clang/LLVM port section). Reuses the host build's own
+/// already-built `llvm-tblgen`/`clang-tblgen` via `LLVM_NATIVE_BUILD`/`CLANG_NATIVE_BUILD` (target
+/// binaries can't run on this host during a `cmake`/`try_compile` step). `CMAKE_FIND_ROOT_PATH*`
+/// is load-bearing, not boilerplate: without it, CMake's own `find_package(Backtrace)` (and
+/// similar) search the *host's* `/usr/include` and incorrectly find host-only glibc headers musl
+/// doesn't provide (`execinfo.h` is the real one that broke this live). `-DCLANG_DEFAULT_SYSROOT=
+/// /usr` bakes in oxfs's real on-target musl layout (`/usr/include`, `/usr/lib` -- see
+/// `format_fresh_filesystem`'s own tcc seeding) so on-target invocations need no extra
+/// `--sysroot` flag, matching tcc's own `--prefix=/usr` convenience.
+fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let llvm_src = Path::new(manifest_dir).join("third_party/llvm-project/llvm");
+    let build_dir = Path::new(manifest_dir).join("target/llvm-target-build");
+    let clang_bin = build_dir.join("bin/clang-23");
+    let lld_bin = build_dir.join("bin/lld");
+
+    let freshness_floor = std::fs::metadata(host_build.join(format!(
+        "lib/{CLANG_TARGET_TRIPLE}/libc++.a"
+    )))
+    .and_then(|m| m.modified())
+    .unwrap_or(std::time::SystemTime::now());
+    let already_fresh = [&clang_bin, &lld_bin].into_iter().all(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(|m| m >= freshness_floor)
+            .unwrap_or(false)
+    });
+    if already_fresh {
+        return build_dir;
+    }
+
+    if !build_dir.join("build.ninja").exists() {
+        std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-target-build");
+        let host_clang = host_build.join("bin/clang");
+        let host_clangxx = host_build.join("bin/clang++");
+        let status = Command::new("cmake")
+            .args(["-G", "Ninja", "-S"])
+            .arg(&llvm_src)
+            .arg("-B")
+            .arg(&build_dir)
+            .arg("-DCMAKE_SYSTEM_NAME=Linux")
+            .arg("-DCMAKE_SYSTEM_PROCESSOR=x86_64")
+            .arg(format!("-DCMAKE_C_COMPILER={}", host_clang.display()))
+            .arg(format!("-DCMAKE_CXX_COMPILER={}", host_clangxx.display()))
+            .arg(format!("-DCMAKE_ASM_COMPILER={}", host_clang.display()))
+            .arg(format!("-DCMAKE_C_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
+            .arg(format!("-DCMAKE_CXX_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
+            .arg(format!("-DCMAKE_ASM_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
+            .arg(format!("-DCMAKE_SYSROOT={}", musl_sysroot.display()))
+            .arg("-DCMAKE_C_FLAGS=-static -fuse-ld=lld")
+            .arg("-DCMAKE_CXX_FLAGS=-static -fuse-ld=lld")
+            .arg("-DCMAKE_EXE_LINKER_FLAGS=-static -fuse-ld=lld")
+            .arg("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")
+            .arg("-DCMAKE_CROSSCOMPILING=TRUE")
+            .arg(format!(
+                "-DCMAKE_FIND_ROOT_PATH={}",
+                musl_sysroot.display()
+            ))
+            .args([
+                "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
+                "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+                "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+                "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+            ])
+            .arg(format!("-DLLVM_NATIVE_BUILD={}", host_build.display()))
+            .arg(format!("-DCLANG_NATIVE_BUILD={}", host_build.display()))
+            .args([
+                "-DLLVM_ENABLE_PROJECTS=clang;lld",
+                "-DLLVM_TARGETS_TO_BUILD=X86",
+                "-DCMAKE_BUILD_TYPE=MinSizeRel",
+                "-DLLVM_ENABLE_EH=OFF",
+                "-DLLVM_ENABLE_RTTI=OFF",
+                "-DLLVM_ENABLE_THREADS=OFF",
+                "-DLLVM_INCLUDE_TESTS=OFF",
+                "-DLLVM_INCLUDE_EXAMPLES=OFF",
+                "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+                "-DLLVM_INCLUDE_DOCS=OFF",
+                "-DLLVM_BUILD_TOOLS=ON",
+                "-DCLANG_INCLUDE_TESTS=OFF",
+                "-DCLANG_ENABLE_ARCMT=OFF",
+                "-DCLANG_ENABLE_STATIC_ANALYZER=OFF",
+                "-DCLANG_BUILD_TOOLS=ON",
+                "-DCLANG_DEFAULT_SYSROOT=/usr",
+                "-DLLVM_ENABLE_ZLIB=OFF",
+                "-DLLVM_ENABLE_ZSTD=OFF",
+                "-DLLVM_ENABLE_LIBXML2=OFF",
+                "-DLLVM_ENABLE_TERMINFO=OFF",
+                "-DLLVM_ENABLE_LIBPFM=OFF",
+                "-DLLVM_ENABLE_LIBEDIT=OFF",
+                "-DLLVM_CCACHE_BUILD=ON",
+                "-DLLVM_PARALLEL_LINK_JOBS=2",
+            ])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run cmake for llvm-target-build: {e}"));
+        if !status.success() {
+            panic!("cmake configure for llvm-target-build failed: {status}");
+        }
+    }
+
+    let status = Command::new("ninja")
+        .current_dir(&build_dir)
+        .args(["clang", "lld"])
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run ninja for llvm-target-build: {e}"));
+    if !status.success() {
+        panic!("building llvm-target-build (on-target clang+lld) failed: {status}");
+    }
+
+    // This build's own resource dir needs the compiler-rt builtins archive too, not just the
+    // host build's (`build_llvm_target_runtimes` only installed it into `host_build`'s resource
+    // dir, used by the *host* cross compiler during bootstrap) -- `write_clang_runtime_manifest`
+    // below embeds whatever's actually present here, and the on-target clang's own binary-
+    // relative resource-dir lookup needs to find it at this exact path. Found live: a real,
+    // on-target `ld.lld` invocation failed with a silent exit 1 (see this port's own diagnostic
+    // history) tracing back to a raw `open("/lib/clang/23/lib/.../libclang_rt.builtins.a")`
+    // returning `ENOENT` -- every *other* runtime file opened fine.
+    let target_builtins_dest = build_dir.join(format!(
+        "lib/clang/23/lib/{CLANG_TARGET_TRIPLE}/libclang_rt.builtins.a"
+    ));
+    std::fs::create_dir_all(target_builtins_dest.parent().unwrap())
+        .expect("failed to create target build's own compiler-rt builtins install dir");
+    std::fs::copy(
+        host_build.join(format!(
+            "lib/clang/23/lib/{CLANG_TARGET_TRIPLE}/libclang_rt.builtins.a"
+        )),
+        &target_builtins_dest,
+    )
+    .expect("failed to install compiler-rt builtins into the target build's own resource dir");
+
+    // Strip before embedding -- real ~30% size reduction, pure symbol/debug-info removal.
+    for bin in [&clang_bin, &lld_bin] {
+        let status = Command::new(host_build.join("bin/llvm-strip"))
+            .arg(bin)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to strip {}: {e}", bin.display()));
+        if !status.success() {
+            panic!("stripping {} failed: {status}", bin.display());
+        }
+    }
+
+    build_dir
+}
+
+/// Generates `CLANG_RESOURCE_FILES` (mirrors `write_tcc_runtime_manifest`'s own pattern): clang's
+/// own resource-dir intrinsic headers (`stddef.h`/`stdarg.h`/x86 intrinsics/...) plus the
+/// compiler-rt builtins archive `build_llvm_target_runtimes` installs, seeded on-target under
+/// `/lib/clang/23` -- clang's own binary-relative default resource-dir location (`<bindir>/../lib/
+/// clang/<ver>`), distinct from `--sysroot`/`CLANG_DEFAULT_SYSROOT` (which only governs
+/// `/usr/include`+`/usr/lib`).
+fn write_clang_runtime_manifest(target_build: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let out_path = out_dir.join("clang_runtime_manifest.rs");
+
+    let mut files = collect_dir_files(&target_build.join("lib/clang/23"));
+    files.sort();
+
+    let mut src = String::from("pub static CLANG_RESOURCE_FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, abs) in &files {
+        src.push_str(&format!(
+            "    ({rel:?}, include_bytes!({:?})),\n",
+            abs.display()
+        ));
+    }
+    src.push_str("];\n");
 
     std::fs::write(&out_path, src)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));

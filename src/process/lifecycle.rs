@@ -792,9 +792,12 @@ struct RawArgvEntry {
 }
 
 /// Bounded as a sanity cap against a runaway/garbage `argv_ptr`/`envp_ptr`, not a deliberate
-/// argument/environment-count limit -- `stsh`'s own 128-byte line buffer can't produce anywhere
-/// near this many words anyway, and no `envp` this codebase builds today comes close either.
-const MAX_PTR_LEN_ENTRIES: usize = 32;
+/// argument/environment-count limit. Raised 32 -> 256 for the real on-target Clang/LLVM port (see
+/// CLAUDE.md's Clang/LLVM port section): a real `clang -cc1` invocation for even a trivial `hello.c`
+/// already carries ~25 tokens (resource-dir/sysroot/isystem flags alone), and `ld.lld`'s own
+/// internal invocation adds more per extra object file/library -- 32 was already close to
+/// insufficient for the simplest real case.
+const MAX_PTR_LEN_ENTRIES: usize = 256;
 
 /// Reads the `RawArgvEntry` array `ptr` describes, if any -- shared by `argv_ptr` (argv[1..]) and
 /// `envp_ptr` (envp[]), which use the exact same wire format (see `RawArgvEntry`'s own doc
