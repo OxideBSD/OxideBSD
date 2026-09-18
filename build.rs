@@ -818,8 +818,11 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 /// build-std=std,core,alloc,panic_abort` (~40s observed) -- there is no prebuilt `std` for a
 /// brand-new custom target the way there is for a real Tier-1/2 one. `crate_name` must name a
 /// real crate directory under `userland-std/` with its own empty `[workspace]` table (see
-/// `userland-std/std-hello-oxidebsd/Cargo.toml`) and `#![feature(restricted_std)]` in its
-/// `main.rs` (required for any `-Z build-std` target `std` doesn't recognize as fully supported).
+/// `userland-std/std-hello-oxidebsd/Cargo.toml`). No `#![feature(restricted_std)]` needed --
+/// `library/std/build.rs` lists `target_os = "oxidebsd"` in its supported-platform allowlist, and
+/// `library/Cargo.toml`'s `[patch.crates-io]` routes `libc` at our own `libc-crate-oxidebsd` fork
+/// (its `oxidebsd` branch reuses the real `linux`/musl cfg-gated code paths throughout, since our
+/// musl fork's public C ABI is unchanged from stock).
 fn build_std_oxidebsd_userland_crate(crate_name: &str, env_var: &str, musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crate_dir = Path::new(manifest_dir)
