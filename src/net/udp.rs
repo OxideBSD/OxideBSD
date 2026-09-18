@@ -298,6 +298,34 @@ pub extern "C" fn oxidebsd_sys_bind(fd: u64, addr_ptr: u64, len: u64) -> i64 {
     0
 }
 
+/// Real `getsockname(2)` -- same not-mine-vs-mine fallback chain `oxidebsd_sys_bind` above uses.
+/// Not wired for raw ICMP sockets (`super::icmp`) -- no real consumer needs it yet; `ENOTSOCK`
+/// there is a known, narrow gap, not a correctness claim about raw sockets in general.
+pub extern "C" fn oxidebsd_sys_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64 {
+    let Some(real_fd) = resolve(fd) else {
+        return -(EBADF as i64);
+    };
+
+    let local_port = {
+        let state = STATE.lock();
+        state.sockets.get(&real_fd).map(|s| s.local_port)
+    };
+    if let Some(port) = local_port {
+        write_sockaddr(addr_out_ptr, ipv4::GUEST_IP, port.unwrap_or(0));
+        if addrlen_ptr != 0 {
+            unsafe {
+                *(addrlen_ptr as *mut u32) = 16;
+            }
+        }
+        return 0;
+    }
+
+    match super::tcp::getsockname(real_fd, addr_out_ptr, addrlen_ptr) {
+        Some(result) => result,
+        None => -ENOTSOCK,
+    }
+}
+
 pub extern "C" fn oxidebsd_sys_sendto(fd: u64, buf_ptr: u64, buf_len: u64, addr_ptr: u64) -> i64 {
     let Some(real_fd) = resolve(fd) else {
         return -(EBADF as i64);

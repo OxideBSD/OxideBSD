@@ -711,6 +711,34 @@ pub fn bind(real_fd: u64, addr_ptr: u64) -> Option<i64> {
     Some(0)
 }
 
+/// Same not-mine-vs-mine `Option` convention as `bind` above. Real `getsockname(2)` semantics --
+/// succeeds even on a never-`bind`-ed socket, reporting port `0` (real Linux does the same; this
+/// must not have the side effect of allocating an ephemeral port the way an explicit `bind`/
+/// implicit-bind-on-send does).
+pub fn getsockname(real_fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> Option<i64> {
+    let state = STATE.lock();
+    let local_port = match state.sockets.get(&real_fd)? {
+        TcpSocket::Unbound { local_port } => local_port.unwrap_or(0),
+        // A `Listener`'s own port isn't stored on itself -- reverse-look it up from
+        // `TcpState::listeners`, the only place a listening socket's port lives.
+        TcpSocket::Listener(_) => state
+            .listeners
+            .iter()
+            .find(|&(_, &fd)| fd == real_fd)
+            .map(|(&port, _)| port)
+            .unwrap_or(0),
+        TcpSocket::Connection(conn) => conn.local_port,
+    };
+    drop(state);
+    super::udp::write_sockaddr(addr_out_ptr, super::ipv4::GUEST_IP, local_port);
+    if addrlen_ptr != 0 {
+        unsafe {
+            *(addrlen_ptr as *mut u32) = 16;
+        }
+    }
+    Some(0)
+}
+
 /// Same not-mine-vs-mine `Option` convention as `bind` above.
 pub fn setsockopt(real_fd: u64) -> Option<i64> {
     STATE.lock().sockets.get(&real_fd).map(|_| 0)

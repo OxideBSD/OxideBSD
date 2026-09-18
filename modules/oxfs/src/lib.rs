@@ -6068,6 +6068,11 @@ fn format_fresh_filesystem() -> bool {
     );
     ok &= seed_file(
         bin,
+        b"std-thread-net-signal-oxidebsd",
+        include_bytes!(env!("OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH")),
+    );
+    ok &= seed_file(
+        bin,
         b"float-smoke",
         include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
     );

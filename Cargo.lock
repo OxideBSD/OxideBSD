@@ -404,6 +404,10 @@ name = "std-process-fs-oxidebsd-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "std-thread-net-signal-oxidebsd-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "sysinfo-syscall-smoke"
 version = "0.1.0"
 

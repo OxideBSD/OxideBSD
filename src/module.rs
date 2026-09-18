@@ -861,6 +861,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_connect" => Some(crate::net::tcp::oxidebsd_sys_connect as *const () as u64),
         "oxidebsd_sys_listen" => Some(crate::net::tcp::oxidebsd_sys_listen as *const () as u64),
         "oxidebsd_sys_accept" => Some(crate::net::tcp::oxidebsd_sys_accept as *const () as u64),
+        "oxidebsd_sys_getsockname" => {
+            Some(crate::net::udp::oxidebsd_sys_getsockname as *const () as u64)
+        }
         "oxidebsd_sys_poll" => Some(crate::net::oxidebsd_sys_poll as *const () as u64),
         "oxidebsd_sys_getuid" => Some(crate::syscall::oxidebsd_sys_getuid as *const () as u64),
         "oxidebsd_sys_geteuid" => Some(crate::syscall::oxidebsd_sys_geteuid as *const () as u64),

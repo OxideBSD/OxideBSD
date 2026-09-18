@@ -168,6 +168,10 @@ fn main() {
         "std-process-fs-oxidebsd-syscall-smoke",
         "STD_PROCESS_FS_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
     );
+    build_userland_crate(
+        "std-thread-net-signal-oxidebsd-syscall-smoke",
+        "STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
+    );
     build_userland_crate("access-syscall-smoke", "ACCESS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pipe-backpressure-syscall-smoke",
@@ -267,6 +271,14 @@ fn main() {
     let std_process_fs_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "std-process-fs-oxidebsd",
         "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
+        &musl_sysroot,
+    );
+
+    // Extends the real std consumer proof into std::thread, signals, and std::net -- see
+    // userland-std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
+    let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
+        "std-thread-net-signal-oxidebsd",
+        "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
 
@@ -403,6 +415,10 @@ fn main() {
         (
             "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
             std_process_fs_oxidebsd_elf_path.to_str().unwrap(),
+        ),
+        (
+            "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
+            std_thread_net_signal_oxidebsd_elf_path.to_str().unwrap(),
         ),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",

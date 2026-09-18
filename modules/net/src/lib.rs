@@ -27,6 +27,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_connect(fd: u64, addr_ptr: u64, len: u64) -> i64;
     fn oxidebsd_sys_listen(fd: u64, backlog: u64) -> i64;
     fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
+    fn oxidebsd_sys_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
     fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) -> i64;
     fn oxidebsd_sys_select(req_ptr: u64) -> i64;
 }
@@ -47,6 +48,11 @@ const SYS_POLL: u64 = 148;
 /// Real Linux's own unclaimed legacy `select(2)` number -- see `crate::net::oxidebsd_sys_select`'s
 /// own doc comment for the real logic.
 const SYS_SELECT: u64 = 23;
+/// OxideBSD's own invention (`559`, continuing right past `SYS_GET_KEYEVENT=558`, the current
+/// highest assigned number as of this addition). Real `getsockname(2)` -- needed the moment any
+/// real `std::net` consumer calls `local_addr()` (see `src/net/udp.rs`'s
+/// `oxidebsd_sys_getsockname`/`src/net/tcp.rs`'s `getsockname`).
+const SYS_GETSOCKNAME: u64 = 559;
 
 extern "C" fn handle_socket(domain: u64, ty: u64, protocol: u64, _r10: u64) -> i64 {
     unsafe { oxidebsd_sys_socket(domain, ty, protocol) }
@@ -80,6 +86,10 @@ extern "C" fn handle_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64, _r10: 
     unsafe { oxidebsd_sys_accept(fd, addr_out_ptr, addrlen_ptr) }
 }
 
+extern "C" fn handle_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64, _r10: u64) -> i64 {
+    unsafe { oxidebsd_sys_getsockname(fd, addr_out_ptr, addrlen_ptr) }
+}
+
 extern "C" fn handle_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _r10: u64) -> i64 {
     unsafe { oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms) }
 }
@@ -99,12 +109,14 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_CONNECT, handle_connect);
         oxidebsd_register_syscall(SYS_LISTEN, handle_listen);
         oxidebsd_register_syscall(SYS_ACCEPT, handle_accept);
+        oxidebsd_register_syscall(SYS_GETSOCKNAME, handle_getsockname);
         oxidebsd_register_syscall(SYS_POLL, handle_poll);
         oxidebsd_register_syscall(SYS_SELECT, handle_select);
     }
     log(
         "[module] net: module_init running (registered SYS_SOCKET/SYS_BIND/SYS_SENDTO/\
-         SYS_RECVFROM/SYS_SETSOCKOPT/SYS_CONNECT/SYS_LISTEN/SYS_ACCEPT/SYS_POLL/SYS_SELECT)\n",
+         SYS_RECVFROM/SYS_SETSOCKOPT/SYS_CONNECT/SYS_LISTEN/SYS_ACCEPT/SYS_GETSOCKNAME/\
+         SYS_POLL/SYS_SELECT)\n",
     );
     0
 }
