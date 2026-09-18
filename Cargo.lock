@@ -392,6 +392,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "std-hello-oxidebsd-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "std-hello-syscall-smoke"
 version = "0.1.0"
 

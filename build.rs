@@ -160,6 +160,10 @@ fn main() {
         "std-hello-syscall-smoke",
         "STD_HELLO_SYSCALL_SMOKE_ELF_PATH",
     );
+    build_userland_crate(
+        "std-hello-oxidebsd-syscall-smoke",
+        "STD_HELLO_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
+    );
     build_userland_crate("access-syscall-smoke", "ACCESS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pipe-backpressure-syscall-smoke",
@@ -241,6 +245,17 @@ fn main() {
     // Real Rust `std` target proof of concept -- see `userland-std/std-hello/src/main.rs`'s own
     // doc comment. Also embedded into oxfs below.
     let std_hello_elf_path = build_std_hello_spike(&musl_sysroot);
+
+    // The real thing: OxideBSD's own x86_64-unknown-oxidebsd target (genuinely reports
+    // target_os = "oxidebsd", not borrowed Linux identity) -- see `userland-std/
+    // std-hello-oxidebsd/src/main.rs`'s own doc comment and `build_std_oxidebsd_userland_crate`'s
+    // for the real, disclosed ~40s-per-build cost (a genuine std/core/alloc recompile every time,
+    // no prebuilt std exists for a brand-new custom target). Also embedded into oxfs below.
+    let std_hello_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
+        "std-hello-oxidebsd",
+        "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
+        &musl_sysroot,
+    );
 
     // Derisk check for the fbdoom/doomgeneric port -- see userland/float-smoke/main.c's own doc
     // comment.
@@ -367,6 +382,10 @@ fn main() {
         (
             "OXFS_STD_HELLO_ELF_PATH",
             std_hello_elf_path.to_str().unwrap(),
+        ),
+        (
+            "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
+            std_hello_oxidebsd_elf_path.to_str().unwrap(),
         ),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
@@ -672,6 +691,228 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
         panic!("building the std-hello spike failed: {status}");
     }
     out
+}
+
+/// Constructs (idempotently -- cheap, just symlinks, safe to call every build) a hybrid rustc
+/// sysroot directory at a stable, repo-relative location so `-Z build-std` compiles against
+/// *our own* forked `rust-lang/rust` (`third_party/rust`, the `oxidebsd` branch) instead of the
+/// pinned nightly's stock `rust-src` component.
+///
+/// **Why this specific shape, not something simpler** -- both gotchas below were found live,
+/// each confirmed by direct experiment before trusting the fix (see the "Rust std target" plan
+/// and its own `project_rust_fork_buildstd_mechanism` memory for the full investigation):
+/// - `rustc --print sysroot` self-detection does **not** work off `current_exe()`/argv0 the way
+///   `xargo`/`cargo-sysroot`-style tooling assumes -- neither a symlinked nor a hardlinked
+///   `bin/rustc` at an alternate location changes what it reports (a distributed rustup rustc
+///   binary appears to bake its install sysroot in at build time). The one thing that reliably
+///   overrides it is the explicit `--sysroot=<path>` CLI flag -- but cargo's own internal
+///   build-std source-discovery step calls `<rustc> --print sysroot` itself without forwarding
+///   user `RUSTFLAGS`, so `build_std_oxidebsd_userland_crate` forces it via `RUSTC_WRAPPER`
+///   instead (cargo's standard rustc-interception env var, the same one `sccache` uses -- wraps
+///   *every* rustc invocation cargo makes, including that internal query).
+/// - Pointing `lib/rustlib/src/rust` straight at the `third_party/rust` checkout fails (`cannot
+///   specify features for packages outside of workspace`) -- the real, rustup-shipped `rust-src`
+///   component is *not* the whole monorepo, just bare `library/` + `src/` directories with **no
+///   top-level `Cargo.toml`** above them; our full clone's own root `[workspace]` (which doesn't
+///   list `library/` as a member) confuses cargo's workspace resolution once `library/std` is
+///   reached through it. Fixed by mirroring just those two directories (no ancestor Cargo.toml)
+///   and pointing `lib/rustlib/src/rust` at *that* instead.
+///
+/// Everything else in the hybrid sysroot is a plain symlink straight to the *real* pinned
+/// toolchain's own directory (`bin/`, top-level `.so`s, `lib/rustlib/<host-target>`,
+/// `lib/rustlib/<other-targets>` for prebuilt target libs/linking) -- only `lib/rustlib/src/rust`
+/// differs. No `rustup toolchain link` needed; this is purely a `--sysroot` value.
+fn build_oxidebsd_rust_sysroot() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let rust_fork = Path::new(manifest_dir).join("third_party/rust");
+    let sysroot_dir = Path::new(manifest_dir).join("target/oxidebsd-rust-sysroot");
+    let src_mirror = Path::new(manifest_dir).join("target/oxidebsd-rust-src-mirror");
+
+    std::fs::create_dir_all(&src_mirror).expect("failed to create target/oxidebsd-rust-src-mirror");
+    for name in ["library", "src"] {
+        symlink_if_missing(&rust_fork.join(name), &src_mirror.join(name));
+    }
+
+    let toolchain_dir = PathBuf::from(rustc_output(manifest_dir, &["--print", "sysroot"]));
+
+    std::fs::create_dir_all(sysroot_dir.join("lib/rustlib/src"))
+        .expect("failed to create target/oxidebsd-rust-sysroot/lib/rustlib/src");
+    for entry in dir_entry_names(&toolchain_dir) {
+        if entry != "lib" {
+            symlink_if_missing(&toolchain_dir.join(&entry), &sysroot_dir.join(&entry));
+        }
+    }
+    for entry in dir_entry_names(&toolchain_dir.join("lib")) {
+        if entry != "rustlib" {
+            symlink_if_missing(
+                &toolchain_dir.join("lib").join(&entry),
+                &sysroot_dir.join("lib").join(&entry),
+            );
+        }
+    }
+    for entry in dir_entry_names(&toolchain_dir.join("lib/rustlib")) {
+        if entry != "src" {
+            symlink_if_missing(
+                &toolchain_dir.join("lib/rustlib").join(&entry),
+                &sysroot_dir.join("lib/rustlib").join(&entry),
+            );
+        }
+    }
+    symlink_if_missing(&src_mirror, &sysroot_dir.join("lib/rustlib/src/rust"));
+
+    sysroot_dir
+}
+
+fn symlink_if_missing(target: &Path, link: &Path) {
+    if link.exists() {
+        return;
+    }
+    std::os::unix::fs::symlink(target, link).unwrap_or_else(|e| {
+        panic!(
+            "failed to symlink {} -> {}: {e}",
+            link.display(),
+            target.display()
+        )
+    });
+}
+
+fn dir_entry_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("failed to read dir {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("failed to read a dir entry in {}: {e}", dir.display()))
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// Writes (always -- cheap, keeps it correct across a changed sysroot path) the small
+/// `RUSTC_WRAPPER` script `build_std_oxidebsd_userland_crate` uses to force every rustc
+/// invocation cargo makes onto our hybrid sysroot. `RUSTC_WRAPPER` is invoked as
+/// `$RUSTC_WRAPPER $RUSTC <args...>` -- `$1` is the real (stock) rustc path cargo resolved.
+fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = Path::new(manifest_dir).join("target/oxidebsd-rustc-wrapper.sh");
+    let script = format!(
+        "#!/bin/sh\nreal_rustc=\"$1\"\nshift\nexec \"$real_rustc\" --sysroot=\"{}\" \"$@\"\n",
+        sysroot.display()
+    );
+    std::fs::write(&path, script).expect("failed to write target/oxidebsd-rustc-wrapper.sh");
+    let mut perms = std::fs::metadata(&path)
+        .expect("failed to stat target/oxidebsd-rustc-wrapper.sh")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&path, perms)
+        .expect("failed to chmod target/oxidebsd-rustc-wrapper.sh");
+    path
+}
+
+/// Builds a real userland crate against OxideBSD's own `x86_64-unknown-oxidebsd` target (see
+/// `x86_64-unknown-oxidebsd.json` and `third_party/rust`'s `oxidebsd` branch) -- the genuine
+/// target-identity path, as opposed to `build_std_hello_spike`'s cheaper
+/// `x86_64-unknown-linux-musl` one. **Real, permanent, disclosed cost**: every build here
+/// genuinely recompiles `std`/`core`/`alloc`/`panic_abort` from source via `-Z
+/// build-std=std,core,alloc,panic_abort` (~40s observed) -- there is no prebuilt `std` for a
+/// brand-new custom target the way there is for a real Tier-1/2 one. `crate_name` must name a
+/// real crate directory under `userland-std/` with its own empty `[workspace]` table (see
+/// `userland-std/std-hello-oxidebsd/Cargo.toml`) and `#![feature(restricted_std)]` in its
+/// `main.rs` (required for any `-Z build-std` target `std` doesn't recognize as fully supported).
+fn build_std_oxidebsd_userland_crate(crate_name: &str, env_var: &str, musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let crate_dir = Path::new(manifest_dir)
+        .join("userland-std")
+        .join(crate_name);
+    let target_spec = Path::new(manifest_dir).join("x86_64-unknown-oxidebsd.json");
+    let target_dir = Path::new(manifest_dir)
+        .join("target/userland-std-oxidebsd")
+        .join(crate_name);
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        crate_dir.join("src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        crate_dir.join("Cargo.toml").display()
+    );
+    println!("cargo:rerun-if-changed={}", target_spec.display());
+    // Once *any* rerun-if-changed is emitted, cargo stops implicitly watching the whole package
+    // directory -- without watching `third_party/rust` too, a patch to our own forked
+    // `library/std` source doesn't trigger a rebuild here at all. **Found live, a real, not
+    // fully root-caused gotcha**: watching the `library` directory alone was NOT reliable --
+    // confirmed via direct experiment, `std::env::consts::OS` kept reporting an empty string
+    // after a real fix landed in `third_party/rust`, across multiple plain `cargo test` reruns,
+    // until `target/x86_64-oxidebsd/debug/build/oxidebsd-*` (cargo's own build-script fingerprint
+    // cache) was deleted by hand to force a genuinely fresh build.rs invocation. Suspected but
+    // unconfirmed cause: `third_party/rust/library` contains a *nested* submodule
+    // (`library/backtrace`, its own separate `.git` boundary) that may confuse cargo's recursive
+    // directory-change scan. Watching the submodule's own git ref file directly (updates on every
+    // commit, unlike `.git/modules/.../HEAD` itself which only changes on branch switch) is a
+    // more reliable second signal, kept alongside the directory watch rather than replacing it.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(manifest_dir).join("third_party/rust/library").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(manifest_dir)
+            .join(".git/modules/third_party/rust/refs/heads/oxidebsd")
+            .display()
+    );
+
+    let rust_sysroot = build_oxidebsd_rust_sysroot();
+    let wrapper = write_oxidebsd_rustc_wrapper(&rust_sysroot);
+
+    let cargo = cargo_bin();
+    let status = Command::new(&cargo)
+        .current_dir(manifest_dir)
+        .args([
+            "build",
+            "--release",
+            "-Z",
+            "build-std=std,core,alloc,panic_abort",
+            "-Z",
+            "json-target-spec",
+            "--manifest-path",
+            crate_dir.join("Cargo.toml").to_str().unwrap(),
+            "--target",
+            target_spec.to_str().unwrap(),
+            "--target-dir",
+            target_dir.to_str().unwrap(),
+        ])
+        // Same discipline as build_userland_crate -- see that function's own doc comment for
+        // why CARGO_ENCODED_RUSTFLAGS must be cleared before setting our own RUSTFLAGS.
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_PKG_NAME")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env("RUSTC_WRAPPER", &wrapper)
+        .env(
+            "RUSTFLAGS",
+            format!(
+                "-C link-self-contained=no -C linker={}/bin/musl-gcc -C link-arg=-no-pie -C link-arg=-Wl,-Ttext-segment=0x16000000",
+                musl_sysroot.display()
+            ),
+        )
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run cargo for {crate_name} (oxidebsd target): {e}"));
+
+    if !status.success() {
+        panic!("building the {crate_name} oxidebsd-target binary failed: {status}");
+    }
+
+    let elf_path = target_dir
+        .join("x86_64-unknown-oxidebsd/release")
+        .join(crate_name);
+    assert!(
+        elf_path.exists(),
+        "{crate_name} (oxidebsd target) build reported success but {} doesn't exist",
+        elf_path.display()
+    );
+    println!("cargo:rustc-env={env_var}={}", elf_path.display());
+    elf_path
 }
 
 fn build_musl_smoke(sysroot: &Path) -> PathBuf {
