@@ -6063,6 +6063,11 @@ fn format_fresh_filesystem() -> bool {
     );
     ok &= seed_file(
         bin,
+        b"std-process-fs-oxidebsd",
+        include_bytes!(env!("OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH")),
+    );
+    ok &= seed_file(
+        bin,
         b"float-smoke",
         include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
     );

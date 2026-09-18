@@ -46,6 +46,7 @@ members = [
   "userland/lsoxmod",
   "userland/std-hello-syscall-smoke",
   "userland/std-hello-oxidebsd-syscall-smoke",
+  "userland/std-process-fs-oxidebsd-syscall-smoke",
   "modules/hello",
   "modules/native_abi",
   "modules/posix_compat",
@@ -288,6 +289,10 @@ harness = false
 
 [[test]]
 name = "std_hello_oxidebsd_syscall_smoke"
+harness = false
+
+[[test]]
+name = "std_process_fs_oxidebsd_syscall_smoke"
 harness = false
 
 # QEMU run/test args (accel/serial/RAM size/NIC/the real ATA data-disk attachment) used to live

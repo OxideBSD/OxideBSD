@@ -164,6 +164,10 @@ fn main() {
         "std-hello-oxidebsd-syscall-smoke",
         "STD_HELLO_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
     );
+    build_userland_crate(
+        "std-process-fs-oxidebsd-syscall-smoke",
+        "STD_PROCESS_FS_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
+    );
     build_userland_crate("access-syscall-smoke", "ACCESS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pipe-backpressure-syscall-smoke",
@@ -254,6 +258,15 @@ fn main() {
     let std_hello_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "std-hello-oxidebsd",
         "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
+        &musl_sysroot,
+    );
+
+    // v0.3.0's "first real std consumer" proof -- std::fs + std::process::Command actually
+    // driving their own internal fork+execve+waitpid, not just runtime startup/shutdown. See
+    // userland-std/std-process-fs-oxidebsd/src/main.rs's own doc comment.
+    let std_process_fs_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
+        "std-process-fs-oxidebsd",
+        "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
 
@@ -386,6 +399,10 @@ fn main() {
         (
             "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
             std_hello_oxidebsd_elf_path.to_str().unwrap(),
+        ),
+        (
+            "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
+            std_process_fs_oxidebsd_elf_path.to_str().unwrap(),
         ),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
