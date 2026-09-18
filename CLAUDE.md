@@ -1453,6 +1453,72 @@ ties both together and exposes `init`/`poll`.
   keyboard-shaped specifically (still true for anything needing a real human *decision* mid-session,
   e.g. `sulogin` credential entry).
 
+## Real Rust `std` target: `x86_64-unknown-oxidebsd` (`third_party/rust`, `userland-std/`, `build.rs`)
+
+v0.3.0 work (see `OxideBSD-doc/ROADMAP.md`) — a private `rust-lang/rust` fork (`OxideBSD/
+rust-oxidebsd`, `oxidebsd` branch) plus a private `libc` crate fork (`OxideBSD/
+libc-crate-oxidebsd`, `oxidebsd` branch, patched in via `library/Cargo.toml`'s
+`[patch.crates-io]`) add real `target_os = "oxidebsd"` support throughout `std`'s *existing*
+`linux`/musl-shaped cfg gates, reusing `sys::pal::unix` wholesale rather than writing a new
+backend — this kernel's own patched musl fork's public C ABI is unchanged from stock musl.
+`library/std/build.rs`'s supported-platform allowlist lists `oxidebsd` too, so consumer binaries
+need no `#![feature(restricted_std)]` — a real, fully-supported target, not one std merely
+tolerates. `build_std_oxidebsd_userland_crate` in `build.rs` does a genuine `-Z
+build-std=std,core,alloc,panic_abort` recompile every build (~20-40s, no prebuilt `std` exists for
+a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the same
+`target/musl-sysroot` every other userland ELF uses.
+
+- **A real, repeatedly-hit build-caching gotcha, distinct from the BusyBox one above**: neither
+  the outer `cargo test`/`cargo build` nor the nested `-Z build-std` cargo invocation tracks
+  `target/musl-sysroot`'s `libc.a` as a dependency — it's referenced only via a raw `-C
+  linker=.../musl-gcc` flag, invisible to cargo's fingerprinting. Editing `third_party/musl` and
+  rebuilding it does **not** force a relink of an already-built `userland-std/*` crate, even
+  though `build.rs` itself correctly reruns and rebuilds musl fresh — the *nested* cargo build for
+  that one userland-std crate silently reuses its own stale cached executable. Confirmed via
+  direct `objdump` inspection: `target/musl-sysroot/lib/libc.a` had the fix, the linked
+  `userland-std` ELF didn't, until `target/userland-std-oxidebsd/<crate>` was deleted by hand.
+  **A second, compounding layer of the same bug**: `modules/oxfs`'s own `build_module_crate`
+  invocation (a fresh `cargo rustc` subprocess every time `build.rs` runs at all) can *also* skip
+  re-embedding a userland-std ELF via its own `include_bytes!(env!(...))` if its own nested
+  cargo's fingerprint doesn't notice the referenced file's content changed — even right after a
+  genuinely fresh relink of that ELF. **The only fix found reliable**: delete both
+  `target/userland-std-oxidebsd` and `target/modules` outright, or (cheaper) `touch
+  modules/oxfs/src/lib.rs` to force *that* crate's own next `cargo rustc` invocation to actually
+  recompile (a real, cargo-tracked source-file change) rather than trusting either layer's
+  incremental cache after a musl/`third_party/rust` edit. **Do not `touch build.rs` itself** to
+  force this — its own `rerun-if-changed` self-watch would also trip BusyBox's mtime-based
+  staleness check (see "BusyBox port" above), triggering an unwanted ~30min rebuild.
+- **Real consumer proofs, each a `#![no_std]` fork+execve+wait4 wrapper spawning a real `std`
+  binary embedded at `/bin/<name>`** (same pattern as `tcc-syscall-smoke`/`std-hello-syscall-
+  smoke`): `std-hello-oxidebsd` (target identity only — `println!`/`process::exit`);
+  `std-process-fs-oxidebsd` (real `std::fs` write/read_to_string/remove_file +
+  `std::process::Command` spawning `/bin/true`/`/bin/echo`); `std-thread-net-signal-oxidebsd`
+  (real `std::thread` spawn/join + `Arc<Mutex<_>>` over real `futex(2)`; real
+  SIGPIPE-ignored-at-startup broken-pipe handling + real `SIGKILL`/`ExitStatusExt::signal()`
+  `wait(2)`-status decoding; real UDP/TCP `socket()`/`bind()`/`local_addr()`/`listen()`/nonblocking
+  `accept()`).
+- **Two real `std` platform-allowlist gaps found and fixed the same way as `restricted_std`**
+  (`third_party/rust`, each a hardcoded `target_os` list `std` uses to pick a fallback code path):
+  `sys/pipe/unix.rs`'s `pipe2` list (without `oxidebsd`, `pipe()` fell back to plain `pipe()` +
+  `ioctl(FIONBIO)`-based `set_cloexec`, both broken here) and `sys/net/connection/socket/
+  unix.rs`'s `Socket::set_nonblocking` (same `ioctl(FIONBIO)` default fallback). **OxideBSD's real
+  `ioctl(2)` only ever handles `TCGETS`/`TCSETS*`/`TIOCGWINSZ`/`TIOCSWINSZ` against the real
+  console fd — any other request or fd returns `ENOTTY`** (see "Interactive shell" above), so any
+  future `std` gap surfacing as a mysterious `ENOTTY`/`ENOSYS`-shaped `io::Error` from a
+  first-real-consumer program is probably this same allowlist-gap class, not a kernel bug.
+- **A real, previously-missing kernel syscall found this way, not just a std/libc gap**:
+  `getsockname(2)` had never been implemented at all (`src/net/tcp.rs`'s `getsockname`/
+  `src/net/udp.rs`'s `oxidebsd_sys_getsockname`, `SYS_GETSOCKNAME=559`) — real Linux's own stock
+  `__NR_getsockname=51` had simply never been remapped, since nothing needed it before a real
+  `std::net` consumer called `local_addr()`. `getpeername` remains a deliberately narrower,
+  disclosed, still-open gap.
+- **No loopback interface exists on this kernel** (single real NIC, see "Real networking" above)
+  — the `std::net` consumer proof is real socket/bind/listen/nonblocking-accept plumbing, not a
+  full external round trip.
+- Not yet exercised through real `std`: anything beyond fs/process/thread/signal-basics/net-
+  plumbing above (no real `TcpStream`/`UdpSocket` data transfer, no `std::net` DNS resolution, no
+  `panic=unwind`).
+
 ## Dependency notes
 
 - `x86_64` crate: `default-features = false, features = ["instructions", "abi_x86_interrupt"]` —
