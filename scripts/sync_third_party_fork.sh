@@ -75,3 +75,13 @@ echo "sync_third_party_fork.sh: starting rebase of oxidebsd onto FETCH_HEAD ($NE
 echo "sync_third_party_fork.sh: resolve any conflicts, verify each patch still applies as intended,"
 echo "sync_third_party_fork.sh: then rebuild/retest before pointing the outer repo at the new commit."
 git rebase FETCH_HEAD
+
+# Harmless no-op for a fork with no nested submodules (musl/busybox/tinycc/posixtestsuite/
+# doomgeneric); real and necessary for third_party/rust, whose own library/backtrace submodule
+# is pinned to a commit that moves independently as upstream rust-lang/rust evolves -- a rebase
+# onto a newer point can leave it checked out at a now-stale (or simply uninitialized after the
+# rebase touched .gitmodules-adjacent state) commit otherwise.
+if [ -f .gitmodules ]; then
+    echo "sync_third_party_fork.sh: updating nested submodules (if any)..."
+    git submodule update --init --recursive --depth 1
+fi
