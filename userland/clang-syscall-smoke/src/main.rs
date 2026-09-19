@@ -213,7 +213,7 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 /// Debug-only: isolates whether clang can even start up and print something trivial, before
 /// blaming the real compile+link path.
 fn check_version() -> bool {
-    let ok = run_and_wait(b"/bin/clang", &[b"clang", b"--version"]);
+    let ok = run_and_wait(b"/bin/clang", &[b"/bin/clang", b"--version"]);
     write_bytes(if ok {
         b"clang-syscall-smoke: --version OK\n"
     } else {
@@ -226,7 +226,15 @@ fn check_version() -> bool {
 fn check_compile_object_only() -> bool {
     let ok = run_and_wait(
         b"/bin/clang",
-        &[b"clang", b"-v", b"-c", b"-o", b"/hello.o", b"/hello.c"],
+        &[
+            b"/bin/clang",
+            b"--target=x86_64-unknown-oxidebsd-musl",
+            b"-v",
+            b"-c",
+            b"-o",
+            b"/hello.o",
+            b"/hello.c",
+        ],
     );
     write_bytes(if ok {
         b"clang-syscall-smoke: -c (object only) OK\n"
@@ -241,7 +249,15 @@ fn check_compile_object_only() -> bool {
 fn check_link_only() -> bool {
     let ok = run_and_wait(
         b"/bin/clang",
-        &[b"clang", b"-v", b"-static", b"-o", b"/hello3.elf", b"/hello.o"],
+        &[
+            b"/bin/clang",
+            b"--target=x86_64-unknown-oxidebsd-musl",
+            b"-v",
+            b"-static",
+            b"-o",
+            b"/hello3.elf",
+            b"/hello.o",
+        ],
     );
     write_bytes(if ok {
         b"clang-syscall-smoke: link-only OK\n"
@@ -258,7 +274,8 @@ fn check_deliberately_broken_link() -> bool {
     let ok = run_and_wait(
         b"/bin/clang",
         &[
-            b"clang",
+            b"/bin/clang",
+            b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
             b"-o",
@@ -282,7 +299,8 @@ fn check_link_to_tmp() -> bool {
     let ok = run_and_wait(
         b"/bin/clang",
         &[
-            b"clang",
+            b"/bin/clang",
+            b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
             b"-o",
@@ -344,7 +362,8 @@ fn check_compile() -> bool {
     let ok = run_and_wait(
         b"/bin/clang",
         &[
-            b"clang",
+            b"/bin/clang",
+            b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
             b"-o",

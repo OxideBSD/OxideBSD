@@ -5109,10 +5109,56 @@ extern "C" fn oxfs_fstat(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
     if real_fd < 0 {
         return -EBADF;
     }
+    // `real_fd` `0`/`1`/`2` is the fixed sentinel `crate::fs::fd::init` assigns the real console's
+    // stdin/stdout/stderr (never reassigned by `dup2`/`fork_inherit`, which copy the ops struct --
+    // and thus `real_fd` -- verbatim; every other fd's own `real_fd` comes from
+    // `oxidebsd_alloc_fd`, bump-allocated starting at `3`). Not backed by any real oxfs inode, so
+    // `resolve_write_fd_inode` below can never find one -- found live via the real Clang/LLVM port:
+    // `llvm::sys::Process::FixupStandardFileDescriptors()` genuinely `fstat()`s its own fd 0/1/2
+    // at startup, and a flat `EBADF` here made it conclude all three were invalid and `dup2` every
+    // one of them onto a freshly opened `/dev/null` -- silently discarding every one of `clang`'s
+    // own later diagnostic/output writes with no error anywhere. Synthesizes a real character-device
+    // stat directly instead, matching how a real Unix kernel reports `fstat()` on a tty (major:minor
+    // `5:1`, matching real Linux's own `/dev/console` -- cosmetic here, nothing decodes it back).
+    if real_fd <= 2 {
+        return write_console_stat(buf_ptr);
+    }
     match resolve_write_fd_inode(real_fd as u64) {
         Some(inode_num) => write_stat(inode_num, buf_ptr),
         None => -EBADF,
     }
+}
+
+/// Synthesizes a real `struct stat` for the console's stdin/stdout/stderr -- see `oxfs_fstat`'s own
+/// doc comment for why this exists (no backing oxfs inode to `write_stat` from). `st_ino`/`st_dev`
+/// are fixed placeholders (`0`); nothing in this codebase or any ported software keys behavior off
+/// their exact values for a tty, only off `S_IFCHR` itself (`isatty()`-style checks use `ioctl`
+/// `TCGETS`, not `fstat`, for that -- see `console::stdin`'s own module doc comment).
+fn write_console_stat(buf_ptr: u64) -> i64 {
+    let stat = MuslStat {
+        st_dev: 0,
+        st_ino: 0,
+        st_nlink: 1,
+        st_mode: S_IFCHR | 0o620,
+        st_uid: 0,
+        st_gid: 0,
+        __pad0: 0,
+        st_rdev: (5u64 << 8) | 1,
+        st_size: 0,
+        st_blksize: BLOCK_SIZE as i64,
+        st_blocks: 0,
+        st_atime_sec: 0,
+        st_atime_nsec: 0,
+        st_mtime_sec: 0,
+        st_mtime_nsec: 0,
+        st_ctime_sec: 0,
+        st_ctime_nsec: 0,
+        __unused: [0; 3],
+    };
+    // SAFETY: same trust boundary as `write_stat` -- caller-owned pointer, sized by the caller's
+    // own `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly).
+    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
+    0
 }
 
 /// Registered for `SYS_LSEEK` -- see that constant's own doc comment for why this exists at all

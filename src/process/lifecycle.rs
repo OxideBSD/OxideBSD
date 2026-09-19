@@ -285,6 +285,34 @@ fn user_stack_bottom(stack_top: VirtAddr) -> VirtAddr {
 /// (the child's pid) flows back through the completely ordinary `Ok(child_pid)` -> `frame.rax`
 /// path — no special-casing needed on the parent side.
 pub fn do_fork_from_current() -> Result<u64, u64> {
+    fork_impl(None)
+}
+
+/// Real vfork-via-`clone(2)`: `musl`'s own `posix_spawn()` (`third_party/musl/src/process/
+/// posix_spawn.c`) issues `clone(child_fn, stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)` to launch
+/// its helper, not a plain `fork()`+`execve()` -- found live via the real on-target Clang/LLVM
+/// port, whose driver uses `posix_spawn()` to launch every subprocess tool (`ld.lld`, `clang -cc1`
+/// when not run integrated). `do_clone` used to flatly reject this combination (`EINVAL`, see its
+/// own doc comment's "vfork-shaped calls... out of scope" note) -- real, but too narrow once a real
+/// consumer needed exactly this shape.
+///
+/// Degrades to a real `fork()` (a genuine, independent, deep-copied address space and
+/// `ThreadGroupShared`, not an actual `CLONE_VM` share), exactly like this codebase's own
+/// `vfork.s` patch already does for the plain `vfork()` libc entry point (see `CLAUDE.md`'s musl
+/// port section) -- real POSIX explicitly permits a `vfork()`-family call to behave as a plain
+/// `fork()`, so this is legal, not a shortcut that could observably misbehave. The one genuine
+/// difference from `do_fork_from_current`: `clone(2)`'s own contract is "the child starts running
+/// `fn(arg)` on `stack`," not "the child resumes at the same call site as the parent" -- so the
+/// child's frame is seeded via `context_switch::seed_clone_frame` (jumps to the given entry point
+/// on `new_user_rsp`) instead of `seed_fork_frame` (resumes at the parent's own return address).
+/// `ptid`/`ctid` aren't threaded through here: this exact flag combination carries neither
+/// `CLONE_PARENT_SETTID` nor `CLONE_CHILD_CLEARTID`, and `do_clone`'s caller already routes any
+/// combination requesting them to the real `CLONE_THREAD` path instead.
+pub fn do_vfork_clone(new_user_rsp: u64) -> Result<u64, u64> {
+    fork_impl(Some(new_user_rsp))
+}
+
+fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
     let caller_pid = scheduler::current_pid();
     let parent_frame = syscall::current_frame() as *const SyscallFrame;
     let phys_offset = memory::phys_mem_offset();
@@ -406,9 +434,15 @@ pub fn do_fork_from_current() -> Result<u64, u64> {
     };
     let kernel_stack_top = kernel_stack.top();
     // SAFETY: parent_frame is the caller's own live SyscallFrame, valid for the duration of this
-    // call (we're still inside sys_fork's own handling of it).
-    let rsp =
-        unsafe { crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame) };
+    // call (we're still inside sys_fork's/sys_clone's own handling of it).
+    let rsp = unsafe {
+        match new_user_rsp {
+            Some(new_rsp) => {
+                crate::process::context_switch::seed_clone_frame(kernel_stack_top, parent_frame, new_rsp)
+            }
+            None => crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame),
+        }
+    };
 
     let child = Process {
         pid: child_pid,
@@ -540,6 +574,14 @@ const PTHREAD_CLONE_FLAGS: u64 = CLONE_VM
     | CLONE_CHILD_CLEARTID
     | CLONE_DETACHED;
 
+/// The second (and, for now, only other) accepted flag combination -- real `vfork()`-via-`clone()`,
+/// exactly what `musl`'s own `posix_spawn()` issues (`third_party/musl/src/process/posix_spawn.c`).
+/// See `do_vfork_clone`'s own doc comment for the real consumer this was found through and why
+/// degrading it to a plain `fork()` is POSIX-legal, not a shortcut.
+const CLONE_VFORK: u64 = 0x0000_4000;
+const SIGCHLD: u64 = 17;
+const VFORK_CLONE_FLAGS: u64 = CLONE_VM | CLONE_VFORK | SIGCHLD;
+
 /// `SYS_CLONE`'s real logic -- real `pthread_create()`'s own kernel-facing half. `pthread_join`
 /// itself needs no kernel support: it's pure userspace futex logic against the child's own
 /// `detach_state`, already fully backed by phase 3's real `futex(2)` once both threads share a
@@ -586,6 +628,9 @@ const PTHREAD_CLONE_FLAGS: u64 = CLONE_VM
 /// terminate_process`'s own tgid-aware exit handling (a later addition, see its own doc comment)
 /// is what actually reaps a non-leader thread instead.
 pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64> {
+    if flags == VFORK_CLONE_FLAGS {
+        return do_vfork_clone(newsp);
+    }
     if flags != PTHREAD_CLONE_FLAGS {
         return Err(EINVAL);
     }
