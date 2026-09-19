@@ -221,9 +221,21 @@ otherwise-shared-rustflags workspace.
   fixed IDE topology, isa-debug-exit wedge-guard/exit-code translation), shared by `qemu_runner.sh`
   and `scripts/run_multiboot2_smoke.sh` (`OXIDEBSD_MULTIBOOT2_LOADER=limine|grub`, default limine).
 - Verified booting clean via both Limine's own multiboot2 protocol and real GRUB (BIOS). **GRUB
-  under UEFI/OVMF crashes inside GRUB/firmware itself** (a video-mode-related page fault before
-  ever reaching this kernel's own code) — a real GRUB/OVMF interop issue, not this kernel's bug;
-  use `OXIDEBSD_FIRMWARE=bios` with the grub loader.
+  under UEFI/OVMF crashes inside GRUB/firmware itself, before ever reaching this kernel's own
+  code** — root-caused by disassembling GRUB's own compiled `multiboot2.mod`/`relocator.mod`
+  (real evidence, not a guess): GRUB's classic-entry boot dispatch always uses its own
+  `grub_relocator32_boot`, which has a genuine internal bug downgrading itself from UEFI's 64-bit
+  long mode back to 32-bit protected mode (confirmed via a fully isolated repro — a trivial,
+  unrelated hand-assembled kernel crashes identically through the same GRUB+OVMF+QEMU pipeline).
+  Two more header tags fixed the *dispatch*, confirmed by the crash address changing: a bare
+  `MULTIBOOT_HEADER_TAG_EFI_BS` (type 7, optional) tells GRUB not to call `ExitBootServices()`
+  first, which is what its dispatch checks (`grub_efi_is_finished`) to choose the native
+  `grub_relocator64_efi_boot` over the buggy downgrade. Past that, a **third, deeper issue
+  remains, outside this kernel's reach**: `grub_relocator64_efi_boot` itself page-faults writing
+  to one of its own global variables (confirmed via QEMU's gdbstub — a correctly-relocated
+  address, but the page is mapped read-only), most likely this specific OVMF build's DXE
+  memory-protection policy being stricter than GRUB 2.14's rarely-exercised EFI64 relocator code
+  accounts for. `OXIDEBSD_FIRMWARE=bios` with the grub loader is the reliable path.
 
 ## Memory management (`src/memory/mod.rs`, `src/memory/allocator.rs`)
 
