@@ -1,6 +1,6 @@
 [submodule "third_party/musl"]
 	path = third_party/musl
-	url = https://github.com/Pomsky2011/musl-oxidebsd.git
+	url = https://github.com/OxideBSD/musl-oxidebsd.git
 [submodule "third_party/busybox"]
 	path = third_party/busybox
 	url = https://github.com/Pomsky2011/busybox-oxidebsd.git
