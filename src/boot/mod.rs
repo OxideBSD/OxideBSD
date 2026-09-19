@@ -9,6 +9,9 @@
 //! downstream of `oxidebsd::init` (GDT/IDT/frame allocator/heap) already treated those two values
 //! as the only real inputs from the bootloader.
 
+#[cfg(feature = "multiboot2")]
+pub mod multiboot2;
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use limine::framebuffer::Framebuffer;

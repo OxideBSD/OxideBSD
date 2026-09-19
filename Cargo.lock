@@ -233,6 +233,13 @@ name = "mq-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "multiboot2-boot-smoke"
+version = "0.1.0"
+dependencies = [
+ "oxidebsd",
+]
+
+[[package]]
 name = "native_abi"
 version = "0.1.0"
 

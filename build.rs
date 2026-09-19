@@ -493,6 +493,34 @@ fn main() {
     // section): the two raw disk image *files* QEMU's `-drive` attaches, as opposed to everything
     // above, which gets embedded into the kernel/module binaries themselves via `include_bytes!`.
     write_data_disk_images();
+
+    // Multiboot2 boot path (see CLAUDE.md's Multiboot2 section): a genuinely separate final ELF,
+    // linked against its own dedicated linker script and the `multiboot2` feature -- not another
+    // `[[test]]`, since those all share the kernel's own rustflags/linker script. Not embedded
+    // anywhere; its own QEMU boot is driven directly by `scripts/run_multiboot2_smoke.sh`.
+    //
+    // **Must stay gated by a reentrancy guard, not called unconditionally.** Unlike every other
+    // `build_*_crate` call above, `smoke/multiboot2-boot-smoke` depends on the real `oxidebsd` lib
+    // itself (not just freestanding `core`/`alloc`) -- so building it re-triggers *this exact
+    // build script* as a dependency build. An unconditional call here recurses forever: building
+    // the smoke crate builds `oxidebsd`, whose build script tries to build the smoke crate again,
+    // which builds `oxidebsd` again... each level spawning a nested `cargo` that deadlocks waiting
+    // on the previous level's own target-dir lock. Found live testing Stage 0: three real nested
+    // `cargo`/build-script processes deep before the innermost one blocked forever on `flock`.
+    //
+    // `CARGO_PRIMARY_PACKAGE` looks like the obvious fix (set only when `oxidebsd` is the package
+    // actually selected for building, not when it's merely a path dependency) but does **not**
+    // work here -- confirmed via `cargo check -vv`: Cargo sets it for the rustc invocations that
+    // compile `build.rs` itself and the final crate, but strips it before actually *running* the
+    // compiled `build-script-build` binary, i.e. exactly the point where this code executes. A
+    // plain `std::env::var_os("CARGO_PRIMARY_PACKAGE")` check here is always `None`, primary
+    // package or not. Use an explicit marker env var instead, set by
+    // `build_multiboot2_boot_smoke_crate` itself on the nested `cargo` command it spawns --
+    // ordinary env inheritance means the recursive inner build of `oxidebsd` (as the smoke
+    // crate's own dependency) sees it and skips this call, terminating the recursion at depth 1.
+    if std::env::var_os("OXIDEBSD_BUILDING_MULTIBOOT2_SMOKE").is_none() {
+        build_multiboot2_boot_smoke_crate();
+    }
 }
 
 fn oxfs_env_var_name(out_name: &str) -> String {
@@ -3496,6 +3524,92 @@ fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
     );
     println!("cargo:rustc-env={env_var}={}", elf_path.display());
     elf_path
+}
+
+/// Cross-builds the Multiboot2 boot-path smoke test (`smoke/multiboot2-boot-smoke/`, wrapping
+/// `tests/multiboot2_boot_smoke.rs`) into a final linked ELF, using the dedicated
+/// `x86_64-oxidebsd-multiboot2.ld` linker script instead of the kernel's own `x86_64-oxidebsd.ld`.
+/// Modeled directly on `build_userland_crate` above -- see CLAUDE.md's Multiboot2 section for why
+/// no other mechanism (`.cargo/config.toml`'s shared rustflags, `rustc-link-arg-bin`/`-tests`) can
+/// give one binary its own linker script under this workspace's otherwise-shared target.
+fn build_multiboot2_boot_smoke_crate() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let smoke_dir = Path::new(manifest_dir).join("smoke/multiboot2-boot-smoke");
+    let target_dir = Path::new(manifest_dir).join("target/multiboot2-boot-smoke");
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(manifest_dir)
+            .join("tests/multiboot2_boot_smoke.rs")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        smoke_dir.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        smoke_dir.join("build.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(manifest_dir)
+            .join("x86_64-oxidebsd-multiboot2.ld")
+            .display()
+    );
+
+    let cargo = cargo_bin();
+    let status = Command::new(&cargo)
+        .current_dir(manifest_dir)
+        .args([
+            "build",
+            "--manifest-path",
+            smoke_dir.join("Cargo.toml").to_str().unwrap(),
+            "--release",
+            "--target-dir",
+            target_dir.to_str().unwrap(),
+        ])
+        // Same rationale as build_userland_crate below: without clearing these, this nested build
+        // inherits the outer build script's own CARGO_* env vars and (more importantly) the
+        // higher-priority CARGO_ENCODED_RUSTFLAGS cargo stashes from the outer build's own
+        // config-resolved rustflags, which would otherwise leak the kernel's `-Tx86_64-oxidebsd.ld`
+        // in ahead of this crate's own build.rs-supplied `-T`.
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_PKG_NAME")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        // Unlike a plain userland crate (which blanks RUSTFLAGS entirely), this crate links the
+        // real `oxidebsd` lib, which pulls in `chacha20` -- needs the same soft-backend cfg
+        // `.cargo/config.toml`'s shared rustflags give the kernel/tests build (see that file's own
+        // comment for why `chacha20`/SSE-disabled targets need it).
+        .env("RUSTFLAGS", "--cfg chacha20_backend=\"soft\"")
+        // Reentrancy guard -- see this function's own call site in `main()` for why this can't be
+        // `CARGO_PRIMARY_PACKAGE`. Plain env inheritance carries this into the nested build's own
+        // `oxidebsd` build-script invocation, which checks for it and skips recursing.
+        .env("OXIDEBSD_BUILDING_MULTIBOOT2_SMOKE", "1")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run cargo for multiboot2-boot-smoke: {e}"));
+
+    if !status.success() {
+        panic!("building the multiboot2-boot-smoke binary failed: {status}");
+    }
+
+    let elf_path: PathBuf = target_dir
+        .join("x86_64-oxidebsd/release")
+        .join("multiboot2-boot-smoke");
+    assert!(
+        elf_path.exists(),
+        "multiboot2-boot-smoke build reported success but {} doesn't exist",
+        elf_path.display()
+    );
+
+    let dest = Path::new(manifest_dir).join("target/multiboot2-boot-smoke.elf");
+    std::fs::copy(&elf_path, &dest).unwrap_or_else(|e| {
+        panic!(
+            "failed to copy multiboot2-boot-smoke ELF to {}: {e}",
+            dest.display()
+        )
+    });
+    dest
 }
 
 /// Cross-builds the kernel module crate at `modules/<crate_name>/` into a single relocatable

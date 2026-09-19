@@ -10,6 +10,12 @@
 # QEMU with the same accel/serial/RAM/NIC/real-ATA-disk flags this project's old
 # `[package.metadata.bootimage]` `run-args`/`test-args` used, and (for a test binary) translates
 # the real `isa-debug-exit` exit code into this script's own pass/fail exit status.
+#
+# The QEMU-driving parts common to any boot path (firmware/OVMF selection, the fixed IDE topology,
+# the isa-debug-exit wedge-guard/exit-code translation) live in `scripts/qemu_common.sh`, shared
+# with `scripts/run_multiboot2_smoke.sh` -- see that file's own doc comment. This script's own
+# behavior is unchanged by that extraction; only the ISO staging above (Limine-specific) and the
+# interactive `cargo run` vs `cargo test` split below stay here.
 
 set -eu
 
@@ -34,31 +40,6 @@ case "$KERNEL_ELF" in
     */deps/*) IS_TEST=1 ;;
     *) IS_TEST=0 ;;
 esac
-
-# --- Firmware selection: UEFI by default (this project's own choice -- real hardware today is
-# UEFI-first), BIOS via OXIDEBSD_FIRMWARE=bios. OVMF itself is a host QEMU prerequisite, like
-# qemu-system-x86_64 already is -- not vendored. ---
-FIRMWARE="${OXIDEBSD_FIRMWARE:-uefi}"
-
-find_ovmf() {
-    if [ -n "${OXIDEBSD_OVMF_PATH:-}" ]; then
-        printf '%s\n' "$OXIDEBSD_OVMF_PATH"
-        return 0
-    fi
-    for p in \
-        /usr/share/edk2/x64/OVMF.4m.fd \
-        /usr/share/edk2-ovmf/x64/OVMF.fd \
-        /usr/share/OVMF/OVMF.fd \
-        /usr/share/ovmf/x64/OVMF.fd \
-        /usr/share/qemu/OVMF.fd
-    do
-        if [ -e "$p" ]; then
-            printf '%s\n' "$p"
-            return 0
-        fi
-    done
-    return 1
-}
 
 # --- Stage a fresh ISO root and build the hybrid image ---
 rm -rf "$ISO_ROOT"
@@ -113,72 +94,15 @@ xorriso -as mkisofs -R -r -J \
 
 "$STAGE_DIR/limine" bios-install "$ISO_PATH" > /dev/null
 
-# --- QEMU argv. Flags below are this project's own old `[package.metadata.bootimage]`
-# `run-args`/`test-args` verbatim (see git history for the removed section's own comments) --
-# only the boot-medium attachment changes (a `-cdrom` ISO instead of bootimage's implicit
-# primary-IDE-master raw disk). Deliberately never `-M q35`: q35 drops the legacy PIIX IDE
-# controller the real ATA disk-persistence `-device ide-hd,bus=ide.1,unit=0` below depends on --
-# staying on the default (unstated) `i440fx` machine type keeps that working under both BIOS and
-# UEFI, since OVMF loads fine there via a single combined `-bios` image with no `-M` change needed.
-set -- -accel kvm -accel tcg -serial stdio -m 8192 -nic user,model=rtl8139
-
-# Opt-in QEMU monitor on a plain TCP port (e.g. OXIDEBSD_QEMU_MONITOR=4445), reachable with any
-# raw TCP client (`socat -,raw TCP:127.0.0.1:4445`, or a plain Python `socket`). Real, deliberate
-# use case beyond interactive debugging: the monitor's own `sendkey <combo>` command genuinely
-# synthesizes guest keystrokes, closing what CLAUDE.md's own test-architecture section otherwise
-# documents as "can't be scripted, manual-QEMU-only" for anything needing live keyboard input --
-# confirmed live tracking down a real Ctrl+C/Ctrl+D bug (see CLAUDE.md's session/controlling-tty
-# section) entirely headlessly, no human at a real display required. Off by default -- nothing
-# else in this project's own tooling needs it.
-if [ -n "${OXIDEBSD_QEMU_MONITOR:-}" ]; then
-    set -- "$@" -monitor "tcp:127.0.0.1:${OXIDEBSD_QEMU_MONITOR},server,nowait"
-fi
-
-# Real emulated xHCI controller + USB keyboard, opt-in only via OXIDEBSD_QEMU_USB=1 -- same
-# opt-in-env-var shape as OXIDEBSD_FIRMWARE/OXIDEBSD_QEMU_DISPLAY above. Deliberately NOT on by
-# default: QEMU's default i440fx machine already wires up a PS/2 keyboard at the hardware-model
-# level, so keystrokes typed into the QEMU display window would otherwise reach both the real
-# PS/2 IRQ path and this new USB one at once, double-pushing every character into stdin. See
-# `src/drivers/usb`'s own module doc comment for the driver this exercises.
-if [ "${OXIDEBSD_QEMU_USB:-0}" = 1 ]; then
-    set -- "$@" -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0
-fi
-
 if [ "$IS_TEST" = 1 ]; then
-    DISK_IMAGE="target/oxfs_test_disk.img"
-    set -- "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 -display none
+    QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
 else
-    DISK_IMAGE="target/oxfs_disk.img"
+    QEMU_DISK_IMAGE="target/oxfs_disk.img"
 fi
-
-# Real ATA data disk pinned explicitly to the secondary channel's master (ide.1, unit 0) -- see
-# CLAUDE.md's "Real disk persistence" section. The boot ISO below must NOT be attached via a bare
-# `-cdrom` flag: QEMU's own convenience default for `-cdrom` on this machine type is *also*
-# ide.1 unit 0 (secondary master), which collides outright ("IDE unit 0 is in use") -- found live
-# on the first real `cargo run` under the new Limine-based runner. Attaching it explicitly to the
-# primary channel's master instead (`ide.0`, unit 0) both fixes the collision and matches the old
-# `bootimage`-era topology exactly (bootimage always attached the boot image itself as the
-# implicit primary master).
-set -- "$@" \
-    -drive "if=none,id=oxfsdisk,format=raw,file=$DISK_IMAGE" \
-    -device ide-hd,drive=oxfsdisk,bus=ide.1,unit=0 \
-    -drive "if=none,id=isocd,media=cdrom,file=$ISO_PATH" \
-    -device ide-cd,drive=isocd,bus=ide.0,unit=0
-
-if [ "$FIRMWARE" = "bios" ]; then
-    set -- "$@" -boot order=d
-elif [ "$FIRMWARE" = "uefi" ]; then
-    OVMF_PATH="$(find_ovmf)" || {
-        echo "qemu_runner.sh: no OVMF firmware found for UEFI boot (the default)." >&2
-        echo "  Install a package providing it (e.g. edk2-ovmf), or set OXIDEBSD_OVMF_PATH." >&2
-        echo "  Set OXIDEBSD_FIRMWARE=bios to boot via BIOS instead." >&2
-        exit 1
-    }
-    set -- "$@" -bios "$OVMF_PATH"
-else
-    echo "qemu_runner.sh: unknown OXIDEBSD_FIRMWARE '$FIRMWARE' (expected 'uefi' or 'bios')" >&2
-    exit 1
-fi
+QEMU_ISO_PATH="$ISO_PATH"
+QEMU_HEADLESS_TEST="$IS_TEST"
+# shellcheck source=./qemu_common.sh
+. "$REPO_ROOT/scripts/qemu_common.sh"
 
 # A `cargo run` invocation gets a real display by default (this kernel has a real VGA console);
 # a `cargo test` binary always forces `-display none` above regardless. `scripts/test_busybox.sh`
@@ -195,39 +119,7 @@ if [ "$IS_TEST" = 0 ]; then
     exec qemu-system-x86_64 "$@"
 fi
 
-# --- Test mode: a real wedged-boot guard (the same "kill QEMU from the host, since nothing
-# inside a genuinely stuck guest can rescue itself" idiom scripts/run_posix_pilot_supervised.sh
-# already uses), then translate the real isa-debug-exit exit code (see src/qemu.rs's
-# QemuExitCode) into this script's own pass/fail status for cargo. ---
+# Test mode: see qemu_common.sh's own doc comment for the wedge-guard/exit-code-translation logic
+# this delegates to.
 TIMEOUT_SECS="${OXIDEBSD_TEST_TIMEOUT_SECS:-28800}"
-
-qemu-system-x86_64 "$@" &
-qemu_pid=$!
-# Written for the same reason as the `cargo run` branch above -- a host-side supervisor (see
-# scripts/run_posix_pilot_supervised.sh) can read this instead of `pkill`-matching a process name
-# that no longer exists post-Limine-migration (every test now stages the identical
-# target/oxidebsd.iso, so there's no longer a per-test-binary-named process to match on at all).
-echo "$qemu_pid" > target/qemu_runner.pid
-
-elapsed=0
-while kill -0 "$qemu_pid" 2>/dev/null; do
-    if [ "$elapsed" -ge "$TIMEOUT_SECS" ]; then
-        echo "qemu_runner.sh: test timed out after ${TIMEOUT_SECS}s, killing QEMU (pid $qemu_pid)" >&2
-        kill "$qemu_pid" 2>/dev/null || true
-        wait "$qemu_pid" 2>/dev/null || true
-        exit 124
-    fi
-    sleep 1
-    elapsed=$((elapsed + 1))
-done
-
-exit_code=0
-wait "$qemu_pid" || exit_code=$?
-
-# QemuExitCode::Success (0x10) -> real QEMU exit code (0x10<<1)|1 = 33; anything else is a failure
-# (QemuExitCode::Failed = 0x11 -> 35, or a genuine crash/signal exit).
-if [ "$exit_code" -eq 33 ]; then
-    exit 0
-else
-    exit "$exit_code"
-fi
+qemu_common_run_test_and_translate_exit "$TIMEOUT_SECS" "$@"

@@ -49,6 +49,7 @@ members = [
   "userland/std-hello-oxidebsd-syscall-smoke",
   "userland/std-process-fs-oxidebsd-syscall-smoke",
   "userland/std-thread-net-signal-oxidebsd-syscall-smoke",
+  "smoke/multiboot2-boot-smoke",
   "modules/hello",
   "modules/native_abi",
   "modules/posix_compat",
@@ -63,6 +64,12 @@ name = "oxidebsd"
 version = "0.3.0-dev"
 edition = "2024"
 license = "BSD-3-Clause"
+
+# Gates the Multiboot2 boot path (`src/boot/multiboot2.rs`) out of the main kernel binary and all
+# existing `tests/*.rs` at the source level -- only `smoke/multiboot2-boot-smoke` enables it. See
+# CLAUDE.md's Multiboot2 section.
+[features]
+multiboot2 = []
 
 [dependencies]
 limine = "0.6"

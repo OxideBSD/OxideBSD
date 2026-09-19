@@ -138,13 +138,14 @@ stdio`).
   ABI-incompatible `core`).
 - SSE/MMX disabled, `disable-redzone: true` (interrupt handlers can't safely use either).
 
-## Boot: Limine (`src/boot.rs`, `x86_64-oxidebsd.ld`, `scripts/qemu_runner.sh`, `third_party/limine`)
+## Boot: Limine (`src/boot/mod.rs`, `x86_64-oxidebsd.ld`, `scripts/qemu_runner.sh`, `third_party/limine`)
 
 Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine boot protocol
 2026-09-09/10 — real UEFI boot capability, needed for the eventual real-hardware (Surface) target
 (see "USB input" below).
 
-- `src/boot.rs` declares the Limine request statics (`HhdmRequest`/`MemmapRequest`/
+- `src/boot/mod.rs` (renamed from `src/boot.rs` when the Multiboot2 boot path below was added)
+  declares the Limine request statics (`HhdmRequest`/`MemmapRequest`/
   `FramebufferRequest`/`RsdpRequest`/`ExecutableCmdlineRequest`) Limine scans for at load time,
   plus a `BootInfo` shim (`physical_memory_offset`/`memory_map` — same field names as the old
   `bootloader::BootInfo`, so every existing call site across `src/main.rs`/`src/lib.rs`/
@@ -186,6 +187,43 @@ Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine
   `.env("RUSTFLAGS", ...)` override actually took effect.
 - Verified via all 51 `tests/*.rs` files migrated and passing, confirmed on both `OXIDEBSD_FIRMWARE`
   values.
+
+## Boot: Multiboot2 (`src/boot/multiboot2.rs`, `x86_64-oxidebsd-multiboot2.ld`, `smoke/multiboot2-boot-smoke/`, `scripts/qemu_common.sh`, `scripts/run_multiboot2_smoke.sh`)
+
+A second, independent boot path alongside Limine — real GRUB or Limine's own `protocol:
+multiboot2` can load this kernel directly. Gated behind a `multiboot2` Cargo feature; one
+dedicated smoke test (`tests/multiboot2_boot_smoke.rs`, structurally identical to `basic_boot.rs`
+via a `multiboot2_entry_point!` macro mirroring `limine_entry_point!`) lives in its own workspace
+member (`smoke/multiboot2-boot-smoke/`) purely so it can get its own linker script under an
+otherwise-shared-rustflags workspace.
+
+- A real, hand-written 32-bit-protected-mode → 64-bit-long-mode trampoline (`global_asm!`, Intel
+  syntax): builds temporary page tables (a fixed 64 MiB low-identity window + a kernel-higher-half
+  window sized *dynamically* from linker-provided `_kernel_phys_start`/`_kernel_phys_end` — this
+  kernel's own embedded content already makes `.rodata` alone >100 MiB, so a hardcoded page count
+  would go stale exactly like the userland-load-base floor already has), enables PAE/LME/paging,
+  hands off to Rust (`init_from_mbi`: parses the real Multiboot2 memory map into the same
+  `limine::memmap::Entry` shape the frame allocator consumes, builds final page tables including a
+  fresh 8 GiB HHDM window at `MULTIBOOT2_HHDM_OFFSET`, returns a `&'static BootInfo`).
+- **Real bug**: the smoke crate depends on the `oxidebsd` lib itself (unlike every other
+  `build_*_crate` helper in `build.rs`), so an unconditional call to build it from `oxidebsd`'s own
+  build script recurses forever. `CARGO_PRIMARY_PACKAGE` looks like the fix but isn't — Cargo sets
+  it only while *compiling* a package, not while running its already-built build-script binary.
+  Fixed with an explicit `OXIDEBSD_BUILDING_MULTIBOOT2_SMOKE` reentrancy-guard env var instead.
+- **Two real bugs found on the first real boot, both silent triple faults** (no IDT exists this
+  early in boot): (1) the final page tables dropped Stage A's own low-identity window, exactly
+  where the still-active call stack (`boot32_stack`) lives — `Cr3::write` unmapped the stack out
+  from under itself; fixed by keeping that window mapped permanently instead. (2) entering Rust via
+  `jmp` instead of `call` left `RSP` at the wrong System V ABI parity (`%16==0`, not `8`) —
+  harmless until the first alignment-sensitive instruction, `cpu::fpu::init`'s `fxsave`; fixed with
+  a `sub rsp, 8`.
+- `scripts/qemu_common.sh`: the loader-agnostic parts of driving QEMU (firmware/OVMF selection, the
+  fixed IDE topology, isa-debug-exit wedge-guard/exit-code translation), shared by `qemu_runner.sh`
+  and `scripts/run_multiboot2_smoke.sh` (`OXIDEBSD_MULTIBOOT2_LOADER=limine|grub`, default limine).
+- Verified booting clean via both Limine's own multiboot2 protocol and real GRUB (BIOS). **GRUB
+  under UEFI/OVMF crashes inside GRUB/firmware itself** (a video-mode-related page fault before
+  ever reaching this kernel's own code) — a real GRUB/OVMF interop issue, not this kernel's bug;
+  use `OXIDEBSD_FIRMWARE=bios` with the grub loader.
 
 ## Memory management (`src/memory/mod.rs`, `src/memory/allocator.rs`)
 
