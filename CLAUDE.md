@@ -233,9 +233,16 @@ otherwise-shared-rustflags workspace.
   `grub_relocator64_efi_boot` over the buggy downgrade. Past that, a **third, deeper issue
   remains, outside this kernel's reach**: `grub_relocator64_efi_boot` itself page-faults writing
   to one of its own global variables (confirmed via QEMU's gdbstub — a correctly-relocated
-  address, but the page is mapped read-only), most likely this specific OVMF build's DXE
-  memory-protection policy being stricter than GRUB 2.14's rarely-exercised EFI64 relocator code
-  accounts for. `OXIDEBSD_FIRMWARE=bios` with the grub loader is the reliable path.
+  address, but the page is mapped read-only). **Confirmed via web search to be a known, already-
+  diagnosed upstream GRUB 2.14 regression** (our exact installed version, released 2026-01-14),
+  not an OVMF quirk: commit `d72208423dca` ("kern/dl: Use correct segment in
+  `grub_dl_set_mem_attrs()`") made GRUB correctly mark loaded modules' `.text` read-only per real
+  ELF section flags, but the x86 relocator's own stubs are patched *in place at runtime* and GNU
+  `as` always emits plain `.text` as `"ax"` (no write flag) — so the runtime patch now faults. A
+  fix (moves those stubs into a new `.text.relocator` section flagged `"awx"`) was submitted
+  upstream 2026-05-13 ("relocator/x86: fix multiboot2 Xen boot failure on GRUB 2.14"); merge
+  status into a release build unconfirmed as of this writing. `OXIDEBSD_FIRMWARE=bios` with the
+  grub loader remains the reliable path until a fixed GRUB lands.
 
 ## Memory management (`src/memory/mod.rs`, `src/memory/allocator.rs`)
 
