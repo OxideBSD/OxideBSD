@@ -40,9 +40,11 @@ Current state:
 - A real, on-target C compiler (`third_party/tinycc`, vendored TinyCC) — `tcc` runs as an ordinary
   seeded `/bin` binary and can genuinely compile+link a real C file against a real, seeded
   `/usr/include`/`/usr/lib` musl tree, producing a real runnable ELF — see "TinyCC" below. Real
-  `futex(2)`, real threading, and milestone 1 of real dynamic linking (`PT_INTERP`) exist — but
-  GCC/Clang remain unstarted: both need real multi-process subprocess pipelines (`cc1`/`as`/`ld`
-  as separate `fork`+`execve`d binaries) neither of the above by itself provides.
+  `futex(2)`, real threading, and milestone 1 of real dynamic linking (`PT_INTERP`) exist. A second,
+  real on-target Clang/LLVM toolchain is in progress (`third_party/llvm-project`, see "Clang/LLVM
+  port" below) — the real multi-process subprocess pipeline (`cc1`/`ld.lld` as separate
+  `fork`/`posix_spawn`+`execve`d binaries) neither TinyCC nor GCC provides is now real and working;
+  a real compile+link round trip isn't clean yet (open bug, see that section).
 - Real USB input (xHCI + HID boot-protocol keyboard, see "USB input" below) — this kernel's first
   real-hardware boot target.
 
@@ -1048,6 +1050,72 @@ tcc's `-usegcc=yes` escape hatch (safe — pure freestanding numeric helpers, no
 - Verified via `tests/tcc_syscall_smoke.rs` — real `fork`+`execve` `tcc -static -o /hello.elf
   /hello.c`, `wait4`, then `fork`+`execve` the produced ELF itself, plus the same round trip via
   bare `tcc -o`. **Not covered**: `-run` (in-memory JIT execution), self-hosting.
+
+## Clang/LLVM port: in progress (`third_party/llvm-project`, `modules/oxfs`, `build.rs`)
+
+A second, real on-target C/C++ toolchain — genuinely self-hosted (a host-built cross-compiler
+builds a target-executable `clang`+`ld.lld`), not vendored binaries. Vendored as a submodule
+(`OxideBSD/llvm-project-oxidebsd`, `oxidebsd` branch, sparse checkout trimmed of tests/docs/
+unittests, tag `llvmorg-23.1.1`). `build.rs` mirrors `build_tinycc`'s pattern:
+`build_llvm_host_toolchain` (host cross-compiler) → `build_llvm_target_runtimes` (libc++/libc++abi/
+libunwind + compiler-rt, statically self-contained) → `build_llvm_target_toolchain` (the real,
+on-target-executable `clang`+`ld.lld`, built using the host cross-compiler). A real `Triple::
+OxideBSD` + `clang::driver::toolchains::OxideBSD` (`clang/lib/Driver/ToolChains/OxideBSD.{h,cpp}`)
+picks `gnutools::{Assembler,Linker,StaticLibTool}` and defaults to LLD by literal name (`ld.lld`),
+not a triple-prefixed name. `modules/oxfs` seeds `clang`/`ld.lld` under `/bin` alongside `tcc`, plus
+a generated `/lib/clang/23` resource-dir tree (`write_clang_runtime_manifest`, mirroring
+`write_tcc_runtime_manifest`'s pattern).
+
+**This is the real subprocess-pipeline milestone CLAUDE.md's own intro names as the reason GCC/
+Clang were historically unstarted**: `clang`'s driver forks real, separate `cc1`/`ld.lld` child
+processes — not something built here, just something that had to start working. Getting from
+`ld.lld --version` running at all to a real `clang -static -o out.elf in.c` round trip took three
+real, independent bugs, each found live via `tests/clang_syscall_smoke.rs` +
+`userland/clang-syscall-smoke/`:
+
+- **A real musl bug, `__init_tls.c`**: its raw `mmap` syscall for large-`PT_TLS` binaries never got
+  the packed-args ABI patch the public `mmap()` wrapper already has — `ld.lld` (the first on-target
+  binary with a `PT_TLS` big enough to cross musl's `builtin_tls` fast-path threshold) crashed with
+  a page fault into `-EFAULT`. Fixed on the musl `oxidebsd` branch.
+- **`oxfs_fstat` returned a flat `EBADF` for the console's stdin/stdout/stderr** (`real_fd` `0`/`1`/
+  `2` — no backing oxfs inode exists for them). `llvm::sys::Process::FixupStandardFileDescriptors()`
+  genuinely `fstat()`s its own fd `0`/`1`/`2` at Clang startup; the `EBADF` made it conclude all
+  three were invalid and `dup2` every one onto a freshly opened `/dev/null` — silently discarding
+  every one of Clang's own later diagnostic/output writes, no visible error anywhere. Fixed:
+  `oxfs_fstat` synthesizes a real character-device `stat` for `real_fd <= 2` instead.
+- **`do_clone` flatly rejected `CLONE_VM|CLONE_VFORK|SIGCHLD`** (real vfork-via-`clone()`) — exactly
+  what musl's own `posix_spawn()` issues to launch `ld.lld` (`third_party/musl/src/process/
+  posix_spawn.c`). Fixed: `do_clone` accepts this second flag combination too, degrading to a real
+  `fork()` (`do_vfork_clone`, sharing `do_fork_from_current`'s body via a common `fork_impl`) — the
+  same "vfork degrades to fork" simplification `vfork.s` already uses, POSIX-legal. Uncovered a
+  **paired real musl ABI bug**: `clone.s`'s hand-written asm stub bypasses `syscall_arch.h`'s normal
+  carry-flag→negative-errno conversion (same bug class as `vfork.s`/`__unmapself.s` before it, the
+  ABI-convention half rather than the number-remap half) — on failure it returned this kernel's raw
+  *positive* errno as-is, which `posix_spawn` read as a small, valid-looking child pid instead of an
+  error, then `waitpid()`'d on a pid that was never created (`ECHILD`, ABI-wire evidence, not the
+  real failure). Fixed on the musl `oxidebsd` branch.
+- **A real, deferred gap in the `OxideBSD` toolchain's own constructor, closed once a real on-target
+  invocation finally exercised it**: `OxideBSD::OxideBSD()` only ever registered `SysRoot + "/lib"`
+  as a `crt1.o`/`crti.o`/`crtn.o` search path (correct for the *host-side* cross-compile sysroot
+  layout, `target/musl-sysroot`) — but on-target, `D.SysRoot` is empty (nothing to point
+  `--sysroot=` at) and the real oxfs seed layout puts those files under `/usr/lib` instead (see
+  "TinyCC" above). `ToolChain::GetFilePath` silently falls back to an unresolved bare filename on a
+  miss, which is exactly what left `ld.lld` invoked with a plain `"crt1.o"` it could never open.
+  Fixed: the constructor now registers both directories.
+- **The smoke test's own invocation needed fixing too**: `argv[0]` must be the resolvable
+  `/bin/clang`, not the bare `"clang"` (Clang's own `InstalledDir` self-location came up empty
+  otherwise), and `--target=x86_64-unknown-oxidebsd-musl` must be passed explicitly (the on-target
+  binary's own baked-in default triple is still `x86_64-unknown-linux-gnu`).
+
+**Still open, not yet root-caused**: `ld.lld -static -o out.elf in.o` now fails with `ld.lld: error:
+in.o: section header string table index 1 does not exist`. Confirmed *not* a truncation/plumbing
+bug — the object is written (a few plain `write()`s), closed cleanly (`commit_write_buffer`
+succeeds), and read back by `ld.lld` via one `pread()` that returns the exact byte count written.
+`tcc`'s own compile+link round trip through this identical oxfs write/close/reopen path still
+passes clean, so the write path itself isn't implicated — the object's actual *content* is what
+`ld.lld` considers malformed, cause unknown (a real Clang/LLVM codegen quirk for this target is one
+live theory, not yet confirmed). A hex dump of the actual committed bytes is the next real step, not
+more syscall tracing.
 
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`src/process/elf.rs`, `src/process/lifecycle.rs`, `build.rs`, `modules/oxfs`)
 
