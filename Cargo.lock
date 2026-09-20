@@ -442,10 +442,6 @@ name = "sysv-shm-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
-name = "tcc-syscall-smoke"
-version = "0.1.0"
-
-[[package]]
 name = "tcp-syscall-smoke"
 version = "0.1.0"
 

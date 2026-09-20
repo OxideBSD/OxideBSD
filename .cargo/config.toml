@@ -3,7 +3,7 @@ target = "x86_64-oxidebsd.json"
 
 [alias]
 # `-vv` is the only verbosity level that shows a build script's own raw stdout (every `make`/
-# `configure` subprocess build.rs shells out to, e.g. the musl/BusyBox/TinyCC builds) live in the
+# `configure` subprocess build.rs shells out to, e.g. the musl/BusyBox/Clang/LLVM builds) live in the
 # terminal instead of silently buffering it until/unless the build script itself fails -- see
 # `[term] verbose` above (deliberately absent): that key is boolean-only, equivalent to a single
 # `-v`, and still hides this output; Cargo also refuses to let `[alias]` redefine a built-in

@@ -61,7 +61,7 @@ for rel in $(cat /posix-tests/manifest.txt); do
     # this pilot's own corpus: its own hand-written `getuid() == 0` check has no `set_nonroot()`
     # fallback at all -- it just bails `PTS_UNTESTED` unconditionally under root, real assertion
     # never reached. Patching that check into the test itself was deliberately rejected: even
-    # though `third_party/posixtestsuite` is now (like musl/BusyBox/TinyCC) a personal fork on an
+    # though `third_party/posixtestsuite` is now (like musl/BusyBox) a personal fork on an
     # `oxidebsd` branch -- Pomsky2011/posixtestsuite, carrying one real, upstream-filed fix
     # (emscripten-core/posixtestsuite#16, a stale `_POSIX_ASYNCHRONOUS_IO` version-gate bug, not an
     # OxideBSD-specific accommodation) -- silently rewriting a test's own assertion logic to make it

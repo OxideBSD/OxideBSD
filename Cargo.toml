@@ -15,7 +15,6 @@ members = [
   "userland/session-syscall-smoke",
   "userland/needs-syscall-smoke",
   "userland/needs-syscall2-smoke",
-  "userland/tcc-syscall-smoke",
   "userland/clang-syscall-smoke",
   "userland/access-syscall-smoke",
   "userland/pipe-backpressure-syscall-smoke",
@@ -180,10 +179,6 @@ harness = false
 
 [[test]]
 name = "needs_syscall2_smoke"
-harness = false
-
-[[test]]
-name = "tcc_syscall_smoke"
 harness = false
 
 [[test]]

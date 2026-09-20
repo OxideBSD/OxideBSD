@@ -7,7 +7,7 @@
 //! `wait4`, not just "the binary boots."
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
-//! function call from a test's own `main()` -- same reasoning `tcc-syscall-smoke`/
+//! function call from a test's own `main()` -- same reasoning `clang-syscall-smoke`/
 //! `std-hello-syscall-smoke` document. `fork` + `execve` `/bin/std-hello-oxidebsd`, `wait4` for
 //! it, and check the real `wait(2)`-encoded exit status decodes to `42`
 //! (`std::process::exit(42)` in `std-hello-oxidebsd`'s own `main()`) via `WEXITSTATUS`

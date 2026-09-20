@@ -7,7 +7,7 @@
 //! for the full scenario (a real `fork`+`execve` of `/dynlink-smoke.elf` through a genuine
 //! `PT_INTERP` load).
 //!
-//! Same `SYS_TEST_EXIT` convention `tests/tcc_syscall_smoke.rs` established: `scheduler::start`/
+//! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
 //! `process::do_exit` never return control to this file's own `main`, so the child reports
 //! pass/fail through a syscall number no real ABI uses, registered directly against a handler
 //! that calls `exit_qemu`.

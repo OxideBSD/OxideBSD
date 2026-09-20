@@ -1,5 +1,5 @@
 #!/bin/sh
-# Resyncs one of this project's vendored `third_party/*` forks (musl, busybox, tinycc,
+# Resyncs one of this project's vendored `third_party/*` forks (musl, busybox,
 # posixtestsuite, doomgeneric, and now rust) against a newer point in its real upstream history.
 #
 # Every fork here is pinned deliberately, not tracked continuously (see CLAUDE.md's own notes on
@@ -76,7 +76,7 @@ echo "sync_third_party_fork.sh: resolve any conflicts, verify each patch still a
 echo "sync_third_party_fork.sh: then rebuild/retest before pointing the outer repo at the new commit."
 git rebase FETCH_HEAD
 
-# Harmless no-op for a fork with no nested submodules (musl/busybox/tinycc/posixtestsuite/
+# Harmless no-op for a fork with no nested submodules (musl/busybox/posixtestsuite/
 # doomgeneric); real and necessary for third_party/rust, whose own library/backtrace submodule
 # is pinned to a commit that moves independently as upstream rust-lang/rust evolves -- a rebase
 # onto a newer point can leave it checked out at a now-stale (or simply uninitialized after the

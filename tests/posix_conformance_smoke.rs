@@ -1,12 +1,12 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write -- everything
-//! `sh`/`tcc`/the pilot's own compiled test binaries need to actually run), `signal`
+//! `sh`/the pilot's own compiled test binaries need to actually run), `signal`
 //! (`SYS_KILL`/`SYS_SIGACTION`/`SYS_SIGTIMEDWAIT`/`SYS_SIGQUEUE` -- the `kill`/`sigqueue`/`sigwait`
 //! pilot interfaces), `clock` (`SYS_CLOCK_GETTIME`/`SYS_NANOSLEEP` -- the other two pilot
 //! interfaces), `posix_compat` (`SYS_MQ_OPEN`...`SYS_MQ_GETSETATTR`, plus `ioctl`/`fcntl` for
 //! musl's own `isatty()`-style startup probes), `net` (just so `SYS_SOCKET` is a real registered
 //! syscall -- see that module's own loading comment below for why: musl's `initgroups()` needs a
 //! real `EAFNOSUPPORT`, not a generic `ENOSYS`, to fall back to parsing `/etc/group`), and `oxfs`
-//! (the filesystem -- `/bin/sh`, `/bin/tcc`, and the whole `/posix-tests` tree this pilot runs
+//! (the filesystem -- `/bin/sh` and the whole `/posix-tests` tree this pilot runs
 //! against), then spawns
 //! `userland/posix-conformance-driver/` as pid 1 -- see that crate's own module doc comment for
 //! why a dedicated driver exists instead of just spawning `sh` directly (this project's own

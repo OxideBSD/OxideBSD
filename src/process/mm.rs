@@ -551,7 +551,7 @@ fn do_mmap_fb(
 /// `MAP_SHARED`/`MAP_PRIVATE` choice (`private`) instead of always behaving as `MAP_SHARED`. Scoped
 /// deliberately: a nonzero `off` is never actually populated/mapped from — a real, in-bounds
 /// request still gets an honest `EINVAL` (no real caller in this kernel's own call graph, BusyBox/
-/// TinyCC/musl itself, ever requests one), and one genuinely out-of-bounds gets a real `ENXIO` —
+/// Clang/LLVM/musl itself, ever requests one), and one genuinely out-of-bounds gets a real `ENXIO` —
 /// see the `off != 0` handling below for why that split exists and doesn't conflict with this same
 /// function's own MPR handling for the (far more common) `off == 0` case.
 ///
@@ -642,7 +642,7 @@ fn do_mmap_file_backed(
             return Err(ENXIO);
         }
         // Still no real support for actually populating from a nonzero offset -- no real caller in
-        // this kernel's own call graph (BusyBox, TinyCC, musl itself) ever requests one, and the
+        // this kernel's own call graph (BusyBox, Clang/LLVM, musl itself) ever requests one, and the
         // one case that does (a within-bounds nonzero offset) is purely hypothetical here, so this
         // stays an honest EINVAL rather than silently reading from offset 0 instead.
         return Err(EINVAL);

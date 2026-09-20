@@ -4,10 +4,6 @@
 [submodule "third_party/busybox"]
 	path = third_party/busybox
 	url = https://github.com/Pomsky2011/busybox-oxidebsd.git
-[submodule "third_party/tinycc"]
-	path = third_party/tinycc
-	url = https://github.com/Pomsky2011/tinycc-oxidebsd.git
-	branch = oxidebsd
 [submodule "third_party/posixtestsuite"]
 	path = third_party/posixtestsuite
 	url = https://github.com/Pomsky2011/posixtestsuite.git

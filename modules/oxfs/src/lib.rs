@@ -190,12 +190,13 @@ const SYS_CLOSE: u64 = 6;
 /// needed it), and musl's own `lseek()` (`src/unistd/lseek.c`) already issues a plain
 /// `syscall(SYS_lseek, fd, offset, whence)` with no `SYS__llseek` fallback on this arch -- no
 /// musl-side patch needed at all, unlike almost every other syscall this ABI has added. Found live
-/// via TinyCC (see CLAUDE.md's TinyCC section): its own object-file loader needs a real file size
-/// upfront (`fseek(f, 0, SEEK_END)`/`ftell`) to read `crt1.o`/`libc.a` whole into memory before
-/// parsing their real ELF/ar headers -- without this registered, that `fseek` silently failed
-/// (`[boot] unrecognized syscall number 8`), and tcc's own file-loading code doesn't check the
-/// return value, so it went on to read a garbage/zero-length buffer and reported `invalid object
-/// file` for every crt/lib file it opened, not just "not found".
+/// via TinyCC (this project's first on-target C compiler, since removed once Clang/LLVM superseded
+/// it): its own object-file loader needs a real file size upfront (`fseek(f, 0, SEEK_END)`/
+/// `ftell`) to read `crt1.o`/`libc.a` whole into memory before parsing their real ELF/ar headers --
+/// without this registered, that `fseek` silently failed (`[boot] unrecognized syscall number 8`),
+/// and its own file-loading code didn't check the return value, so it went on to read a
+/// garbage/zero-length buffer and reported `invalid object file` for every crt/lib file it opened,
+/// not just "not found".
 const SYS_LSEEK: u64 = 8;
 /// Real x86_64 Linux's own `__NR_access` value -- like `SYS_LSEEK` above, still at its inert
 /// value in `third_party/musl/arch/x86_64/bits/syscall.h.in` (confirmed unclaimed by grepping
@@ -487,11 +488,12 @@ const BLOCK_SIZE: usize = 4096;
 const NUM_BLOCKS: usize = 262144;
 /// Raised from 64 alongside `NUM_BLOCKS` above, same reason -- ~300 applets plus root/`hello.txt`/
 /// `big.txt`/the self-check's own `/gdtest` fixtures need comfortably more than 64 inode slots.
-/// Raised again, 512 -> 1024, once TinyCC (`third_party/tinycc`, see CLAUDE.md's TinyCC section)
-/// needed musl's entire real header tree seeded under `/usr/include` at runtime -- measured
-/// exactly against the real built `target/musl-sysroot`, not estimated: 217 header files (plus
-/// ~7 subdirectories) + ~9 `/usr/lib` crt/lib files + tcc's own `libtcc1.a` + 5 bundled headers +
-/// the `tcc` binary itself is ~250 new inodes, overflowing the ~180 that were free at 512.
+/// Raised again, 512 -> 1024, once TinyCC (this project's first on-target C compiler, since
+/// removed once Clang/LLVM superseded it) needed musl's entire real header tree seeded under
+/// `/usr/include` at runtime -- measured exactly against the real built `target/musl-sysroot`, not
+/// estimated: 217 header files (plus ~7 subdirectories) + ~9 `/usr/lib` crt/lib files + tcc's own
+/// `libtcc1.a` + 5 bundled headers + the `tcc` binary itself was ~250 new inodes, overflowing the
+/// ~180 that were free at 512.
 /// Raised again, 1024 -> 2048, alongside `NUM_BLOCKS` above -- the expanded POSIX pilot corpus
 /// adds several hundred new files plus one subdirectory per interface under `/posix-tests/bin/`.
 /// Raised again, 2048 -> 8192 (`NUM_BLOCKS` 16384 -> 65536 alongside it), once the pilot expanded
@@ -568,7 +570,8 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// this build now expects -- `mount_from_disk`'s own layout check (below) already treats any
 /// mismatch here exactly like a `NUM_BLOCKS`/`MAX_INODES` change: a clean, automatic reformat, not
 /// a crash or silent misread. Any content on an existing `target/oxfs_disk.img` besides the
-/// seeded-at-boot roster (BusyBox/musl/TinyCC/POSIX corpus, all reseeded fresh on format) is lost.
+/// seeded-at-boot roster (BusyBox/musl/Clang/LLVM/POSIX corpus, all reseeded fresh on format) is
+/// lost.
 const SUPERBLOCK_VERSION: u32 = 2;
 
 const INODE_TABLE_START: u32 = 1;
@@ -5871,8 +5874,9 @@ fn write_superblock() {
 /// (both, below) run to completion *before* its own subsequent per-block data-read loop, which is
 /// where a real failure (`oxidebsd_block_read` returning nonzero partway through) actually gets
 /// detected and turned into a `return false`. A stale disk image predating a real layout change --
-/// concretely, the very case this fix was found from: `MAX_INODES` doubling (512 -> 1024, see
-/// CLAUDE.md's TinyCC section) shifts `INODE_TABLE_BLOCKS`/`DATA_BLOCK_OFFSET` forward, so an
+/// concretely, the very case this fix was found from: `MAX_INODES` doubling (512 -> 1024, for
+/// TinyCC's own runtime tree -- see `MAX_INODES`'s own doc comment) shifts
+/// `INODE_TABLE_BLOCKS`/`DATA_BLOCK_OFFSET` forward, so an
 /// already-existing disk image written under the old, smaller layout has real, physically
 /// different bytes at every "data block" location the new layout expects -- mounted cleanly enough
 /// to load a bitmap marking most of the *old* install's blocks used (a fully-packed ~300-applet
@@ -6149,11 +6153,10 @@ fn ensure_dir(parent: u32, name: &[u8]) -> u32 {
 
 /// Seeds a whole manifest of `(relative_path, content)` pairs (each `relative_path` real,
 /// `/`-separated, e.g. `"bits/alltypes.h"`) under `root`, creating any missing intermediate
-/// directories via `ensure_dir` along the way. Used for TinyCC's own on-target runtime tree
-/// (`/usr/include`, `/usr/lib`, `/usr/lib/tcc` -- see `format_fresh_filesystem`'s own call sites
-/// and CLAUDE.md's TinyCC section) -- the first content this filesystem seeds shaped like a real
-/// nested directory tree (musl's own `include/bits`, `include/sys`, ...) rather than a small fixed
-/// set of top-level files.
+/// directories via `ensure_dir` along the way. Used for the on-target musl runtime tree
+/// (`/usr/include`, `/usr/lib` -- see `format_fresh_filesystem`'s own call sites) -- the first
+/// content this filesystem seeds shaped like a real nested directory tree (musl's own
+/// `include/bits`, `include/sys`, ...) rather than a small fixed set of top-level files.
 fn seed_tree(root: u32, files: &[(&str, &[u8])]) -> bool {
     let mut ok = true;
     for (rel_path, content) in files {
@@ -6172,20 +6175,20 @@ fn seed_tree(root: u32, files: &[(&str, &[u8])]) -> bool {
     ok
 }
 
-/// `MUSL_INCLUDE_FILES`/`MUSL_LIB_FILES`/`TCC_RUNTIME_FILES` -- generated by build.rs's
-/// `write_tcc_runtime_manifest` (see its own doc comment for why this is a generated `include!`
+/// `MUSL_INCLUDE_FILES`/`MUSL_LIB_FILES` -- generated by build.rs's
+/// `write_musl_runtime_manifest` (see its own doc comment for why this is a generated `include!`
 /// rather than the `env!()`-per-file pattern every other embedded ELF in this file uses). Declared
 /// at module scope since it defines real top-level `pub static` items, consumed by
 /// `format_fresh_filesystem`'s own `/usr` seeding below.
-include!(env!("TCC_RUNTIME_MANIFEST_PATH"));
+include!(env!("MUSL_RUNTIME_MANIFEST_PATH"));
 
 /// `CLANG_RESOURCE_FILES` -- generated by build.rs's `write_clang_runtime_manifest`, same idiom as
-/// `TCC_RUNTIME_FILES` above. Consumed by `format_fresh_filesystem`'s own `/lib/clang/23` seeding
+/// `MUSL_INCLUDE_FILES` above. Consumed by `format_fresh_filesystem`'s own `/lib/clang/23` seeding
 /// below -- see CLAUDE.md's Clang/LLVM port section.
 include!(env!("CLANG_RUNTIME_MANIFEST_PATH"));
 
 /// `POSIX_TEST_FILES` -- generated by build.rs's `write_posix_test_manifest`, same idiom as
-/// `TCC_RUNTIME_FILES` above. Consumed by `format_fresh_filesystem`'s own `/posix-tests` seeding
+/// `MUSL_INCLUDE_FILES` above. Consumed by `format_fresh_filesystem`'s own `/posix-tests` seeding
 /// below; see `posix_conformance.sh`'s own doc comment for what actually runs against this tree.
 /// Also defines `POSIX_TEST_EXTRA_FILES` -- a second, separate array for pilot fixtures that need
 /// seeding at a literal path *outside* `/posix-tests` entirely: `sigaltstack/9-1.c`'s own
@@ -6303,15 +6306,10 @@ fn format_fresh_filesystem() -> bool {
         include_bytes!(env!("OXFS_LSOXMOD_ELF_PATH")),
     );
     ok &= seed_symlink(bin, b"lsmod", b"lsoxmod");
-    // tcc: OxideBSD's first on-target C compiler -- real upstream TinyCC (`third_party/tinycc`,
-    // see CLAUDE.md's TinyCC section and `build_tinycc`'s own doc comment in build.rs), cross-built
-    // against this same musl sysroot with `--config-musl`. Milestone A only: the binary launches
-    // and its own `-v`/`--help` work (no filesystem access needed for those). It can't yet actually
-    // compile/link a real C file -- that needs musl's header tree, crt objects, `libc.a`, and tcc's
-    // own `libtcc1.a` seeded under `/usr`, wired in separately once that milestone lands.
-    ok &= seed_file(bin, b"tcc", include_bytes!(env!("OXFS_TCC_ELF_PATH")));
-    // clang/ld.lld: OxideBSD's second real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM
-    // port section) -- a real, statically-linked, self-hosted Clang+LLD, cross-compiled by itself
+    // clang/ld.lld: OxideBSD's real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM port
+    // section -- TinyCC, this project's earlier, simpler on-target compiler, served as an early
+    // proof that a real on-target compile+link was even possible, and was removed once Clang/LLVM
+    // superseded it) -- a real, statically-linked, self-hosted Clang+LLD, cross-compiled by itself
     // (build.rs's `build_llvm_target_toolchain`) rather than upstream-vendored binaries. Seeded as
     // `ld.lld` (not `lld`): lld's own single binary dispatches ELF/COFF/MachO/wasm flavor off
     // `argv[0]`, and `ld.lld` is exactly what `OxideBSD::getDefaultLinker()` (the Clang driver)
@@ -6980,18 +6978,16 @@ fn format_fresh_filesystem() -> bool {
         dir_insert(dev, b"fb0", fb0).expect("oxfs: failed to insert /dev/fb0 into /dev");
     }
 
-    // TinyCC's own on-target runtime tree -- see CLAUDE.md's TinyCC section. `/usr/include`,
-    // `/usr/lib`, `/usr/lib/tcc` exactly match tcc's own compiled-in defaults (`CONFIG_TCCDIR`/
-    // `CONFIG_TCC_CRTPREFIX`/`CONFIG_TCC_SYSINCLUDEPATHS`, baked in via build.rs's
-    // `--prefix=/usr` configure flag), so no extra `-B`/`-I`/`-L` flags are needed to invoke `tcc`
-    // on target.
+    // The real, on-target musl runtime tree -- `/usr/include`/`/usr/lib` -- what Clang/LLVM's own
+    // on-target `clang`/`ld.lld` links a user's C file against (`-DCLANG_DEFAULT_SYSROOT=/usr`,
+    // see `build_llvm_target_toolchain`'s own doc comment in build.rs), so no extra `--sysroot`
+    // flag is needed to invoke `clang` on target. Originally built for TinyCC (this project's
+    // first on-target C compiler, since removed once Clang/LLVM superseded it).
     let usr = ensure_dir(root, b"usr");
     let usr_include = ensure_dir(usr, b"include");
     ok &= seed_tree(usr_include, MUSL_INCLUDE_FILES);
     let usr_lib = ensure_dir(usr, b"lib");
     ok &= seed_tree(usr_lib, MUSL_LIB_FILES);
-    let usr_lib_tcc = ensure_dir(usr_lib, b"tcc");
-    ok &= seed_tree(usr_lib_tcc, TCC_RUNTIME_FILES);
 
     // A real POSIX conformance baseline (see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
     // "Verification" section): a curated pilot subset of `third_party/posixtestsuite`'s own
@@ -7087,13 +7083,13 @@ fn format_fresh_filesystem() -> bool {
         include_bytes!(env!("OXFS_PSHARED_COND_CRASH_ELF_PATH")),
     );
 
-    // A real fixture for exercising the compiler end to end (`tcc -static -o hello.elf hello.c`,
-    // by hand at the hush prompt or via `tests/tcc_syscall_smoke.rs`) -- a real `printf`, not a
+    // A real fixture for exercising the compiler end to end (`clang -static -o hello.elf hello.c`,
+    // by hand at the hush prompt or via `tests/clang_syscall_smoke.rs`) -- a real `printf`, not a
     // bare `return`, so it exercises musl's stdio/writev path, not just process exit.
     ok &= seed_file(
         root,
         b"hello.c",
-        b"#include <stdio.h>\nint main(void) {\n    printf(\"hello from tcc\\n\");\n    return 0;\n}\n",
+        b"#include <stdio.h>\nint main(void) {\n    printf(\"hello, OxideBSD\\n\");\n    return 0;\n}\n",
     );
 
     if !ok {

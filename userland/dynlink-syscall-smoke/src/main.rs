@@ -7,7 +7,7 @@
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- same reasoning every other real-`SYSCALL` smoke
-//! test in this codebase documents (see `tests/tcc_syscall_smoke.rs`'s own module doc comment):
+//! test in this codebase documents (see `tests/fork_wait.rs`'s own module doc comment):
 //! this is the first time this kernel has ever loaded two ELF images (the main binary and its
 //! interpreter) into one address space and jumped into the interpreter's own entry instead of the
 //! main binary's, exactly the class of thing worth exercising through the genuine ring-3 path.

@@ -39,7 +39,7 @@
 //! so a fixed, generous 64 MiB constant is fine and never goes stale. The *kernel higher-half*
 //! window (`temp_pd_high`, reused directly by the final tables -- see `install_final_page_tables`)
 //! has to cover the kernel's own **entire loaded image**, which is a completely different scale:
-//! this kernel's own embedded BusyBox/musl/TinyCC/Clang+LLVM/POSIX-conformance-corpus content
+//! this kernel's own embedded BusyBox/musl/Clang+LLVM/POSIX-conformance-corpus content
 //! makes `.rodata` alone upward of 100 MiB already (confirmed via `readelf -l` against a real
 //! release build) and grows over time -- the exact "embedded corpus outgrew a fixed constant"
 //! class of bug CLAUDE.md documents hitting the userland-load-base floor repeatedly. That window
@@ -709,7 +709,7 @@ unsafe fn parse_mmap(mbi_phys: u64) -> &'static [&'static Entry] {
 /// starts handing out frames from the low end of the first usable region, which for this boot path
 /// begins at/near `BOOT32_TRAMPOLINE_PHYS_BASE`: for any kernel image large enough that its own
 /// footprint reaches into that region's *first* handful of frames (true for this kernel's real
-/// build, whose embedded BusyBox/musl/TinyCC/Clang+LLVM/POSIX-corpus content puts the image well
+/// build, whose embedded BusyBox/musl/Clang+LLVM/POSIX-corpus content puts the image well
 /// into the hundreds of MiB -- see this file's own module doc comment), the very first heap/module
 /// page allocated after boot silently aliases live kernel code/data/page-tables instead of real
 /// free memory. Found live: a real, reproducible hang immediately after "mapping heap" logged, with

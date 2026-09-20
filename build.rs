@@ -70,7 +70,7 @@ include!("build_busybox.rs");
 
 /// Builds Limine's small C deploy/install tool (`limine.c` -> `limine`) from the vendored
 /// `-binary`-branch submodule (`third_party/limine`, a personal fork pinned the same way as
-/// musl/busybox/tinycc), then stages it plus every prebuilt bootloader-stage blob this project
+/// musl/busybox), then stages it plus every prebuilt bootloader-stage blob this project
 /// needs into a fixed location, `target/limine-stage/`, that `scripts/qemu_runner.sh` reads from
 /// directly -- the runner never reaches into `third_party/limine` itself, mirroring how nothing
 /// else in this file hands another tool a path into `third_party/*` directly either (env-var/
@@ -78,7 +78,7 @@ include!("build_busybox.rs");
 /// (`limine-bios.sys`, `limine-bios-cd.bin`, `limine-uefi-cd.bin`, `BOOTX64.EFI`, `BOOTIA32.EFI`)
 /// as pre-built, committed blobs -- `make` here only compiles the deploy tool itself (`limine.c`,
 /// a plain host-native C program with a trivial `.POSIX` Makefile that already does its own real
-/// incremental-rebuild tracking, unlike tinycc's own more elaborate out-of-tree build -- no
+/// incremental-rebuild tracking, unlike BusyBox's own more elaborate out-of-tree build -- no
 /// separate staleness bookkeeping needed here, `make` is cheap to just always invoke).
 fn build_limine_deploy_tool() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -155,7 +155,6 @@ fn main() {
     build_userland_crate("session-syscall-smoke", "SESSION_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("needs-syscall-smoke", "NEEDS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("needs-syscall2-smoke", "NEEDS_SYSCALL2_SMOKE_ELF_PATH");
-    build_userland_crate("tcc-syscall-smoke", "TCC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("clang-syscall-smoke", "CLANG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "std-hello-syscall-smoke",
@@ -303,21 +302,18 @@ fn main() {
     // userland/pshared-cond-crash/main.c's own doc comment.
     let pshared_cond_crash_elf_path = build_pshared_cond_crash(&musl_sysroot);
 
-    // TinyCC: OxideBSD's first on-target C compiler -- see CLAUDE.md's TinyCC section and
-    // `build_tinycc`'s own doc comment. The `tcc` binary itself is embedded into oxfs's `/bin`
-    // alongside every BusyBox applet; `write_tcc_runtime_manifest` separately produces the
-    // generated `/usr/include`+`/usr/lib`+`/usr/lib/tcc` manifest tcc needs to actually compile and
-    // link a user's C file once running on target (not needed just to launch).
-    let tinycc_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/tinycc");
-    let tcc_elf_path = build_tinycc(&musl_sysroot);
-    let tcc_runtime_manifest_path = write_tcc_runtime_manifest(&musl_sysroot, &tinycc_dir);
+    // Real, on-target `/usr/include`+`/usr/lib` musl runtime tree -- what Clang/LLVM's own
+    // on-target `clang`/`ld.lld` links a user's C file against.
+    let musl_runtime_manifest_path = write_musl_runtime_manifest(&musl_sysroot);
 
-    // Clang/LLVM: OxideBSD's second real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM
-    // port section). A two-stage cross-compile: a host-executable cross compiler
+    // Clang/LLVM: OxideBSD's real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM port
+    // section -- TinyCC, an earlier, simpler on-target compiler, served as this project's first
+    // proof that a real on-target compile+link was even possible, and was removed once Clang/LLVM
+    // superseded it). A two-stage cross-compile: a host-executable cross compiler
     // (`build_llvm_host_toolchain`) builds the target's own C++ runtime
     // (`build_llvm_target_runtimes`) and then the real, on-target-executable clang+lld
     // (`build_llvm_target_toolchain`) using that same cross compiler. Genuinely slow on a clean
-    // checkout (multi-hour) -- staleness-gated the same way `build_tinycc` is.
+    // checkout (multi-hour).
     vendor_linux_uapi_headers(&musl_sysroot);
     let llvm_host_build = build_llvm_host_toolchain();
     build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
@@ -334,9 +330,9 @@ fn main() {
     let doom1_wad_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
 
     // A real POSIX conformance baseline: see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
-    // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment. Source-only
-    // (compiled on-target by `tcc`, not cross-compiled here) -- see `write_posix_test_manifest`'s
-    // own doc comment for why.
+    // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment.
+    // Cross-compiled with `musl-gcc` on the host, not compiled on-target -- see
+    // `write_posix_test_manifest`'s own doc comment for why.
     let posixtestsuite_dir =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/posixtestsuite");
     let posix_test_manifest_path = write_posix_test_manifest(&musl_sysroot, &posixtestsuite_dir);
@@ -456,14 +452,13 @@ fn main() {
             pshared_cond_crash_elf_path.to_str().unwrap(),
         ),
         ("OXFS_LSOXMOD_ELF_PATH", lsoxmod_elf_path.to_str().unwrap()),
-        ("OXFS_TCC_ELF_PATH", tcc_elf_path.to_str().unwrap()),
         ("OXFS_CLANG_ELF_PATH", clang_elf_path.to_str().unwrap()),
         ("OXFS_LLD_ELF_PATH", lld_elf_path.to_str().unwrap()),
         ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
         ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
-            "TCC_RUNTIME_MANIFEST_PATH",
-            tcc_runtime_manifest_path.to_str().unwrap(),
+            "MUSL_RUNTIME_MANIFEST_PATH",
+            musl_runtime_manifest_path.to_str().unwrap(),
         ),
         (
             "CLANG_RUNTIME_MANIFEST_PATH",
@@ -579,7 +574,8 @@ fn build_musl_sysroot() -> PathBuf {
             .args([
                 "--disable-shared",
                 &format!("--prefix={}", sysroot.display()),
-                // Found live, via TinyCC (see CLAUDE.md's TinyCC section): this project's dev
+                // Found live, via TinyCC (this project's first on-target C compiler, since
+                // removed once Clang/LLVM superseded it): this project's dev
                 // host's own real gcc defaults to PIE (confirmed directly: `echo | gcc -E -dM -`
                 // defines `__PIC__`/`__PIE__` with *no* flags at all -- a real, common modern
                 // distro default, not something this project's own toolchain chose). musl's own
@@ -606,8 +602,8 @@ fn build_musl_sysroot() -> PathBuf {
                 // `obj/crt/Scrt1.o`/`obj/crt/rcrt1.o` (musl's own real PIE crt variants) still
                 // force `-fPIC` back on for themselves specifically
                 // (`third_party/musl/Makefile`'s own `CFLAGS_ALL += -fPIC` line for those two
-                // files only) -- unaffected, and also never embedded into this project's own tcc
-                // runtime manifest in the first place (see `write_tcc_runtime_manifest`'s own
+                // files only) -- unaffected, and also never embedded into this project's own musl
+                // runtime manifest in the first place (see `write_musl_runtime_manifest`'s own
                 // doc comment on why those two are skipped).
                 "CFLAGS=-fno-pie -fno-PIC",
             ])
@@ -1122,10 +1118,10 @@ const DOOMGENERIC_SOURCES: &[&str] = &[
     "i_video_oxidebsd",
 ];
 
-/// Same three-way staleness-check shape `build_tinycc` established (`build.rs`'s own mtime,
-/// `musl_sysroot/lib/libc.a`'s mtime, a recursive source-tree walk) -- reuses `latest_mtime`
-/// directly rather than a bespoke walker, since this tree has no generated build artifacts of its
-/// own to skip (compiled straight into `target/doomgeneric/`, never in-tree).
+/// A three-way staleness check (`build.rs`'s own mtime, `musl_sysroot/lib/libc.a`'s mtime, a
+/// recursive source-tree walk) -- reuses `latest_mtime` directly rather than a bespoke walker,
+/// since this tree has no generated build artifacts of its own to skip (compiled straight into
+/// `target/doomgeneric/`, never in-tree).
 fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let doomgeneric_dir = Path::new(manifest_dir).join("third_party/doomgeneric/doomgeneric");
@@ -1373,11 +1369,12 @@ fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
 /// **Deliberately builds from a fresh copy of `third_party/musl`, not in the same tree
 /// `build_musl_sysroot` already builds the static sysroot in.** That static build configures with
 /// `--disable-shared CFLAGS=-fno-pie -fno-PIC` -- exactly wrong for real shared objects (genuine
-/// PIC codegen, not the anti-PIE workaround TinyCC's static linking needed, see that function's
-/// own doc comment) -- and both builds happen in-place (no out-of-tree `O=` mechanism musl's
-/// Makefile supports, confirmed against `build_musl_sysroot`'s own precedent). Running a second,
-/// differently-flagged configure+make in the same source directory would silently corrupt the
-/// static `libc.a` that TinyCC and the whole BusyBox roster already depend on. The copy is a
+/// PIC codegen, not the anti-PIE workaround every real on-target static-linked consumer needs,
+/// see `build_musl_sysroot`'s own doc comment) -- and both builds happen in-place (no out-of-tree
+/// `O=` mechanism musl's Makefile supports, confirmed against `build_musl_sysroot`'s own
+/// precedent). Running a second, differently-flagged configure+make in the same source directory
+/// would silently corrupt the static `libc.a` that Clang/LLVM and the whole BusyBox roster already
+/// depend on. The copy is a
 /// one-time cost (gated on the destination not already existing) -- this deliberately does not try
 /// to detect a stale copy against upstream source changes the way `build_busybox_applet`'s
 /// staleness floor does; re-syncing this copy after a real `third_party/musl` patch is a manual
@@ -1511,221 +1508,6 @@ fn build_dynlink_smoke(sysroot: &Path, fixture_base: u64) -> PathBuf {
     out
 }
 
-/// Cross-builds TinyCC (`third_party/tinycc`, real upstream `release_0_9_27` vendored on this
-/// project's own `oxidebsd` submodule branch -- same pin/update procedure as musl/BusyBox) against
-/// `musl_sysroot` via `musl-gcc`, the same "shell out to the real toolchain, no cargo" idiom
-/// `build_musl_smoke`/`build_busybox_applet` already use. Unlike BusyBox this is a plain,
-/// non-Kconfig `./configure` + `make` project -- `--config-musl` is real, maintained upstream musl
-/// support (confirmed against a real build: Alpine Linux, a musl distro, ships tcc in production
-/// the same way) -- so there's no per-applet flip/oldconfig dance, one configure and one make.
-///
-/// `--prefix=/usr` does **not** touch the host's real `/usr` -- it only becomes a compiled-in
-/// default baked into the `tcc` binary itself, i.e. where *it* looks for headers/crt objects/its
-/// own runtime library once *it* is running on OxideBSD. Confirmed against the real generated
-/// `config.h`: `CONFIG_TCCDIR` = `/usr/lib/tcc`, `CONFIG_TCC_CRTPREFIX` = `/usr/lib`,
-/// `CONFIG_TCC_SYSINCLUDEPATHS` includes `/usr/include` -- exactly the layout `modules/oxfs`'s own
-/// seeding wires up (`seed_tree`/`format_fresh_filesystem`, once Milestone B lands), so no extra
-/// `-B`/`-I`/`-L` flags are needed at `tcc` invocation time on target.
-///
-/// **`libtcc1.a` (tcc's own runtime helper library) deliberately does not use tcc's normal
-/// self-hosting recipe.** tcc's own `Makefile` builds it as `libtcc1.a : tcc$(EXESUF) FORCE`,
-/// running the just-built `tcc` binary *on the host* to compile `lib/*.c`. Confirmed live that this
-/// cannot work here: the just-built `tcc` is linked against this project's own *patched* musl
-/// (carry-flag errno conversion, remapped `__NR_*` values -- see CLAUDE.md's musl-port section), so
-/// every syscall it issues is misinterpreted by the real host kernel's real Linux ABI -- running it
-/// directly on the host doesn't crash, it silently does nothing (`./tcc --version` exits `0` with
-/// no output at all). tcc's own Makefile has a documented escape hatch for exactly this shape of
-/// problem, normally meant for cross-architecture builds: `<target>-libtcc1-usegcc=yes`, which
-/// swaps in a real, host-executable `$(CC)` instead of self-hosting via the freshly built `tcc`.
-/// Safe here because `libtcc1.a`'s own sources (`lib/*.c`, `lib/*.S`) are pure freestanding
-/// numeric helper routines (softfloat/int64 conversions) with no syscalls at all -- compiling them
-/// with the host-executable `musl-gcc` wrapper directly (a real host tool, unlike the cross-built
-/// `tcc` itself) produces object code that's ABI-correct for the target either way.
-///
-/// **Built in-place inside the submodule** (matching `build_musl_sysroot`'s own precedent, not
-/// `build_busybox_applet`'s out-of-tree `O=` build -- tcc's Makefile has no equivalent out-of-tree
-/// mechanism), so unlike `build_busybox_applet`'s freshness-floor check, this deliberately does
-/// **not** `cargo:rerun-if-changed` the submodule directory: tcc's own build outputs (`tcc`, `.o`
-/// files, `libtcc1.a`) land in the exact same directories as its source, so watching that tree
-/// would make every build's own output look like a source change to cargo on the *next* build,
-/// forcing a real rebuild every single time regardless of whether anything actually changed. The
-/// same reasoning is why source-mtime staleness here can't just be `latest_mtime(&tinycc_dir)`
-/// either -- that would walk right back over the build's own prior output sitting in the same
-/// directory, making it look perpetually newer than itself. `tinycc_source_mtime` (below) is
-/// `latest_mtime`'s same walk with the exact build-output names/extensions
-/// `clean_tinycc_build_outputs` already excludes skipped. Real source patches now exist
-/// (`x86_64-link.c`'s own `ELF_START_ADDR`, see CLAUDE.md's TinyCC section for why a real
-/// on-target-compiled program needs its own safe default link address) -- found live the same way
-/// the freshness-floor lesson itself was learned elsewhere in this file, so this tracks it from the
-/// start rather than deferring the way an earlier version of this comment once said to.
-fn build_tinycc(musl_sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let tinycc_dir = Path::new(manifest_dir).join("third_party/tinycc");
-    let tcc_bin = tinycc_dir.join("tcc");
-    let libtcc1 = tinycc_dir.join("libtcc1.a");
-
-    let build_rs_mtime = std::fs::metadata(Path::new(manifest_dir).join("build.rs"))
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::SystemTime::now());
-    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::SystemTime::now());
-    let freshness_floor = build_rs_mtime
-        .max(musl_mtime)
-        .max(tinycc_source_mtime(&tinycc_dir));
-    let already_fresh = [&tcc_bin, &libtcc1].into_iter().all(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .map(|m| m >= freshness_floor)
-            .unwrap_or(false)
-    });
-    if already_fresh {
-        return tcc_bin;
-    }
-
-    clean_tinycc_build_outputs(&tinycc_dir);
-
-    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
-    if !tinycc_dir.join("config.mak").exists() {
-        let status = Command::new("./configure")
-            .current_dir(&tinycc_dir)
-            .arg(format!("--cc={}", musl_gcc.display()))
-            .arg("--config-musl")
-            .arg("--prefix=/usr")
-            // Explicit, not derived from --prefix alone: confirmed live that tinycc's own
-            // configure (only when NOT given a --cross-prefix, which this build.rs invocation
-            // never does) probes the *build host's* own `/usr/lib64/crti.o` to decide whether to
-            // bake in `lib64` instead of `lib` (`CONFIG_LDDIR`, used to derive
-            // `CONFIG_TCC_LIBPATHS`/`CONFIG_TCC_CRTPREFIX`) -- a real host-environment quirk
-            // (whether *this build machine's* distro happens to split `/usr/lib64`) completely
-            // unrelated to the target musl sysroot's own layout, which is always flat `/usr/lib`
-            // (confirmed against `target/musl-sysroot/lib`'s own real `make install` output --
-            // musl doesn't do a lib64 multilib split at all). Found live: a first build without
-            // these three flags produced a `tcc` that reported `file 'crt1.o' not found`/
-            // `library 'c' not found` at real runtime inside QEMU, since it was searching
-            // `/usr/lib64` on target, which oxfs never seeds anything into. These three flags
-            // bypass that host-autodetection entirely by stating the real target layout directly
-            // (matches CLAUDE.md's TinyCC section for the full story).
-            .arg("--crtprefix=/usr/lib")
-            .arg("--libpaths=/usr/lib")
-            .arg("--sysincludepaths=/usr/include")
-            .status()
-            .unwrap_or_else(|e| panic!("failed to run tinycc's configure: {e}"));
-        if !status.success() {
-            panic!("tinycc configure failed: {status}");
-        }
-    }
-
-    // 0xe280000 (was 0xa280000; +0x4000000, see module::MODULE_VA_BASE's own doc comment): next
-    // free slot past the BusyBox applet range (highest in use is CRYPTPW's 0xe240000, was
-    // 0xe240000 (was 0xa240000), in `BUSYBOX_APPLETS_PASS2`) -- tcc lives in the same "standalone binary embedded
-    // into oxfs's /bin" bucket as every applet, just built from its own upstream project instead
-    // of BusyBox's.
-    let status = Command::new("make")
-        .current_dir(&tinycc_dir)
-        .arg("tcc")
-        .arg("LDFLAGS=-static -no-pie -Wl,-Ttext-segment=0xe280000")
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run make tcc: {e}"));
-    if !status.success() {
-        panic!("building tcc failed: {status}");
-    }
-
-    let status = Command::new("make")
-        .current_dir(&tinycc_dir)
-        .arg("x86_64-libtcc1-usegcc=yes")
-        .arg(format!("CC={}", musl_gcc.display()))
-        .arg("libtcc1.a")
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run make libtcc1.a: {e}"));
-    if !status.success() {
-        panic!("building tinycc's libtcc1.a failed: {status}");
-    }
-
-    tcc_bin
-}
-
-/// Removes tinycc's own previous build outputs (not its source) from an in-place build -- see
-/// `build_tinycc`'s own doc comment for why a stale binary needs to be actively cleared rather than
-/// relying on `make`'s incremental tracking (no dependency on `musl_sysroot`'s installed headers at
-/// all). Scoped to exactly the two directories tinycc ever writes into (`third_party/tinycc` itself
-/// and its `lib/` subdirectory, for `libtcc1.a`'s own object files) and a fixed set of known
-/// build-output names/extensions -- never touches `win32/`/`tests/`/etc, and never deletes a real
-/// source file.
-fn clean_tinycc_build_outputs(tinycc_dir: &Path) {
-    for dir in [tinycc_dir.to_path_buf(), tinycc_dir.join("lib")] {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if is_tinycc_build_output(name) {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    }
-}
-
-/// Shared exclusion list between `clean_tinycc_build_outputs` and `tinycc_source_mtime` -- kept as
-/// one function specifically so the two can't silently drift apart (a name added to one but not
-/// the other would either leave a stale build output uncleaned or make a real build output look
-/// like a perpetually-changing "source" file).
-fn is_tinycc_build_output(name: &str) -> bool {
-    name == "tcc"
-        || name == "config.mak"
-        || name == "config.h"
-        || name.ends_with(".o")
-        || name.ends_with(".a")
-}
-
-/// Like `latest_mtime`, but skips tinycc's own build outputs (`is_tinycc_build_output`) -- see
-/// `build_tinycc`'s own doc comment for why this can't just be `latest_mtime(&tinycc_dir)`
-/// directly (built in-place, so that would walk right back over the build's own prior output).
-///
-/// **Also emits `cargo:rerun-if-changed` for every real source file it walks past** -- load-
-/// bearing, not a nicety: found live, the hard way, right after `x86_64-link.c`'s own
-/// `ELF_START_ADDR` was first patched -- a `cargo build` right afterward finished in `0.09s` and
-/// silently kept using the *stale* `tcc` binary, because nothing in this build script had ever
-/// told cargo that `third_party/tinycc`'s source was worth watching at all. Cargo only re-invokes
-/// `main()` when a path from a *previous run's own* `rerun-if-changed` set changes -- with none
-/// registered for tinycc, a real source edit there was completely invisible to cargo's own decision
-/// of whether to re-run this file, so `tinycc_source_mtime`'s own freshness check (correct in
-/// isolation) never even got a chance to run. Same class of bug as the freshness-floor lesson
-/// `build_busybox_applet` already documents, just one level up the stack (cargo not re-invoking
-/// `build.rs` at all, rather than this function's own logic making the wrong call once invoked).
-fn tinycc_source_mtime(tinycc_dir: &Path) -> std::time::SystemTime {
-    let mut latest = std::time::UNIX_EPOCH;
-    let mut stack = vec![tinycc_dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            if name_str.starts_with('.') {
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if !is_tinycc_build_output(name_str) {
-                let path = entry.path();
-                println!("cargo:rerun-if-changed={}", path.display());
-                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                    latest = latest.max(modified);
-                }
-            }
-        }
-    }
-    latest
-}
-
 /// Latest mtime across every real source file under `dir`, skipping VCS metadata (any directory
 /// starting with `.`) -- computed once per `cargo build` invocation, not once per applet (see
 /// `build_busybox_applet`'s own doc comment for why that distinction matters at ~300 applets). A
@@ -1762,9 +1544,9 @@ fn latest_mtime(dir: &Path) -> std::time::SystemTime {
 
 /// Recursively collects every real file under `dir`, returning `(relative_path, absolute_path)`
 /// pairs with `/`-separated relative paths (not platform-`PathBuf`-component-dependent) -- used to
-/// enumerate `musl_sysroot/include`/`musl_sysroot/lib` and tinycc's own bundled `include/` for
-/// `write_tcc_runtime_manifest` below. Shares `latest_mtime`'s own stack-based walk shape and
-/// dotfile-skipping, but returns paths instead of a single max mtime.
+/// enumerate `musl_sysroot/include`/`musl_sysroot/lib` for `write_musl_runtime_manifest` below.
+/// Shares `latest_mtime`'s own stack-based walk shape and dotfile-skipping, but returns paths
+/// instead of a single max mtime.
 fn collect_dir_files(dir: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
@@ -1796,13 +1578,15 @@ fn collect_dir_files(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Generates a single Rust source file declaring `MUSL_INCLUDE_FILES`/`MUSL_LIB_FILES`/
-/// `TCC_RUNTIME_FILES` -- `&[(&str, &[u8])]` arrays of (path relative to their own eventual
-/// `/usr/...` destination, embedded content) -- consumed by `modules/oxfs/src/lib.rs`'s
-/// `format_fresh_filesystem` via a single `include!(env!("TCC_RUNTIME_MANIFEST_PATH"))`, feeding
-/// its own `seed_tree` helper. See CLAUDE.md's TinyCC section for why this is real, on-target
-/// runtime content tcc needs (musl's headers/crt/`libc.a`, tcc's own `libtcc1.a` + bundled
-/// compiler-magic headers), not just the compiler binary itself.
+/// Generates a single Rust source file declaring `MUSL_INCLUDE_FILES`/`MUSL_LIB_FILES` --
+/// `&[(&str, &[u8])]` arrays of (path relative to their own eventual `/usr/...` destination,
+/// embedded content) -- consumed by `modules/oxfs/src/lib.rs`'s `format_fresh_filesystem` via a
+/// single `include!(env!("MUSL_RUNTIME_MANIFEST_PATH"))`, feeding its own `seed_tree` helper. This
+/// is real, on-target runtime content a real on-target compile needs (musl's headers/crt/
+/// `libc.a`), not just a compiler binary itself -- originally built for TinyCC (this project's
+/// first on-target C compiler, since removed once Clang/LLVM superseded it), now also what
+/// Clang/LLVM's own on-target `clang`/`ld.lld` link against (see CLAUDE.md's Clang/LLVM port
+/// section).
 ///
 /// Written as a real generated file with literal absolute `include_bytes!` paths, not the
 /// `env!()`-indirected `cargo:rustc-env`-per-file pattern every other embedded ELF in this build
@@ -1812,11 +1596,11 @@ fn collect_dir_files(dir: &Path) -> Vec<(String, PathBuf)> {
 /// that has no other reason to need a name would be pure ceremony. The generated file is itself a
 /// build artifact -- never checked in, already host-specific -- so embedding this host's own
 /// absolute paths directly is no less portable than the indirection used elsewhere.
-fn write_tcc_runtime_manifest(musl_sysroot: &Path, tinycc_dir: &Path) -> PathBuf {
+fn write_musl_runtime_manifest(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let out_dir = Path::new(manifest_dir).join("target/generated");
     std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
-    let out_path = out_dir.join("tcc_runtime_manifest.rs");
+    let out_path = out_dir.join("musl_runtime_manifest.rs");
 
     let mut src = String::new();
     let write_array = |src: &mut String, array_name: &str, files: &[(String, PathBuf)]| {
@@ -1831,9 +1615,9 @@ fn write_tcc_runtime_manifest(musl_sysroot: &Path, tinycc_dir: &Path) -> PathBuf
     };
 
     // /usr/include -- musl's own real header tree, embedded whole (not a hand-curated subset --
-    // see CLAUDE.md's TinyCC section for why: even a trivial `printf` pulls in a nontrivial
-    // closure of internal `bits/*.h`/`features.h` headers, and the full tree is already sitting
-    // here post-`make install` at zero extra build cost).
+    // even a trivial `printf` pulls in a nontrivial closure of internal `bits/*.h`/`features.h`
+    // headers, and the full tree is already sitting here post-`make install` at zero extra build
+    // cost).
     let mut headers = collect_dir_files(&musl_sysroot.join("include"));
     headers.sort();
     write_array(&mut src, "MUSL_INCLUDE_FILES", &headers);
@@ -1841,34 +1625,16 @@ fn write_tcc_runtime_manifest(musl_sysroot: &Path, tinycc_dir: &Path) -> PathBuf
     // /usr/lib -- crt objects + every musl-produced `.a` (libc.a plus its small stub archives, for
     // real `-lm`/`-lpthread`/etc. link-line compatibility even though musl merges everything into
     // libc.a itself). `rcrt1.o`/`Scrt1.o` (PIE-only crt variants) and `musl-gcc.specs` (a host
-    // build-tool artifact, meaningless inside a target sysroot) are deliberately skipped -- tcc on
-    // this kernel always links `-static`, never PIE (a real, separate decision made in
-    // `third_party/tinycc/libtcc.c`'s own `tcc_new()`, not a missing kernel capability -- `elf.rs`
-    // does now have real `PT_INTERP` support, see CLAUDE.md's "Dynamic linking" section, just never
-    // wired up for tcc's own output).
+    // build-tool artifact, meaningless inside a target sysroot) are deliberately skipped -- every
+    // real on-target compiler this kernel has ever had always links `-static`, never PIE (`elf.rs`
+    // does have real `PT_INTERP` support, see CLAUDE.md's "Dynamic linking" section, just never
+    // wired up for either compiler's own output).
     let mut lib_files: Vec<(String, PathBuf)> = collect_dir_files(&musl_sysroot.join("lib"))
         .into_iter()
         .filter(|(rel, _)| !matches!(rel.as_str(), "rcrt1.o" | "Scrt1.o" | "musl-gcc.specs"))
         .collect();
     lib_files.sort();
     write_array(&mut src, "MUSL_LIB_FILES", &lib_files);
-
-    // /usr/lib/tcc -- tcc's own runtime helper library plus its own bundled compiler-magic headers
-    // (`stdarg.h`/`stddef.h`/`float.h`/... -- distinct from musl's real userspace headers above,
-    // needed because tcc's preprocessor wants its own compatible versions of a handful of
-    // compiler-intrinsic headers). Confirmed against tcc's own `tcc.h`
-    // (`CONFIG_TCC_SYSINCLUDEPATHS`'s first entry is `{B}/include`, `{B}` == `CONFIG_TCCDIR` ==
-    // `/usr/lib/tcc`) that these belong at `tcc/include/*.h`, not flat under `tcc/`.
-    let mut tcc_runtime_files: Vec<(String, PathBuf)> =
-        vec![("libtcc1.a".to_string(), tinycc_dir.join("libtcc1.a"))];
-    let mut tcc_headers = collect_dir_files(&tinycc_dir.join("include"));
-    tcc_headers.sort();
-    tcc_runtime_files.extend(
-        tcc_headers
-            .into_iter()
-            .map(|(rel, abs)| (format!("include/{rel}"), abs)),
-    );
-    write_array(&mut src, "TCC_RUNTIME_FILES", &tcc_runtime_files);
 
     std::fs::write(&out_path, src)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
@@ -1909,7 +1675,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 /// Idempotently vendors a handful of real Linux kernel uapi headers (`linux/`, `asm/`,
 /// `asm-generic/`) from the *host's* own `/usr/include` into the musl sysroot. Needed only by
 /// libc++'s own `src/atomic.cpp` (`#ifdef __linux__ #include <linux/futex.h>`, unconditional in
-/// this LLVM version) -- neither musl nor tcc need any of this. Safe to vendor verbatim:
+/// this LLVM version) -- musl itself needs none of this. Safe to vendor verbatim:
 /// `linux/futex.h`'s `FUTEX_WAIT=0`/`FUTEX_WAKE=1`/`FUTEX_PRIVATE=128` are confirmed to exactly
 /// match this kernel's own real `do_futex` opcode numbering (`src/process/limits.rs`), and the
 /// whole directory is GPL-2.0-with-Linux-syscall-note licensed specifically to permit this exact
@@ -1935,11 +1701,10 @@ fn vendor_linux_uapi_headers(musl_sysroot: &Path) {
 ///
 /// X86-only, clang+lld only (no clang-tools-extra/lldb/mlir/polly), no tests/docs/examples --
 /// this is a build tool, not a product install. `LLVM_ENABLE_EH`/`RTTI=OFF` matches LLVM's own
-/// upstream default. Real, multi-hour-on-a-clean-checkout cost -- staleness-gated the same way
-/// `build_tinycc` is, but **not** a full recursive walk of `third_party/llvm-project` (600+MB,
-/// tens of thousands of files): `cargo:rerun-if-changed` is scoped to just the directories this
-/// project actually patches, matching `build_musl_sysroot`'s own directory-level (not per-file)
-/// scoping.
+/// upstream default. Real, multi-hour-on-a-clean-checkout cost -- staleness-gated, but **not** a
+/// full recursive walk of `third_party/llvm-project` (600+MB, tens of thousands of files):
+/// `cargo:rerun-if-changed` is scoped to just the directories this project actually patches,
+/// matching `build_musl_sysroot`'s own directory-level (not per-file) scoping.
 fn build_llvm_host_toolchain() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let llvm_root = Path::new(manifest_dir).join("third_party/llvm-project");
@@ -2054,7 +1819,7 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     }
 
     // compiler-rt builtins: a standalone, bare-metal-style configure with no OS-specific detection
-    // at all -- these are freestanding numeric helpers, the same role `libtcc1.a` plays for tcc.
+    // at all -- these are freestanding numeric helpers with no syscalls of their own.
     if !compiler_rt_build.join("build.ninja").exists() {
         std::fs::create_dir_all(&compiler_rt_build)
             .expect("failed to create target/compiler-rt-target-build");
@@ -2169,8 +1934,8 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
 /// similar) search the *host's* `/usr/include` and incorrectly find host-only glibc headers musl
 /// doesn't provide (`execinfo.h` is the real one that broke this live). `-DCLANG_DEFAULT_SYSROOT=
 /// /usr` bakes in oxfs's real on-target musl layout (`/usr/include`, `/usr/lib` -- see
-/// `format_fresh_filesystem`'s own tcc seeding) so on-target invocations need no extra
-/// `--sysroot` flag, matching tcc's own `--prefix=/usr` convenience.
+/// `format_fresh_filesystem`'s own seeding) so on-target invocations need no extra `--sysroot`
+/// flag.
 fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let llvm_src = Path::new(manifest_dir).join("third_party/llvm-project/llvm");
@@ -2326,7 +2091,7 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
     build_dir
 }
 
-/// Generates `CLANG_RESOURCE_FILES` (mirrors `write_tcc_runtime_manifest`'s own pattern): clang's
+/// Generates `CLANG_RESOURCE_FILES` (mirrors `write_musl_runtime_manifest`'s own pattern): clang's
 /// own resource-dir intrinsic headers (`stddef.h`/`stdarg.h`/x86 intrinsics/...) plus the
 /// compiler-rt builtins archive `build_llvm_target_runtimes` installs, seeded on-target under
 /// `/lib/clang/23` -- clang's own binary-relative default resource-dir location (`<bindir>/../lib/
@@ -3189,7 +2954,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
 }
 
 /// Generates `target/generated/posix_test_manifest.rs` (same `include!`-a-generated-file idiom
-/// `write_tcc_runtime_manifest` above already established, for the same reason: real file content
+/// `write_musl_runtime_manifest` above already established, for the same reason: real file content
 /// embedded via literal-path `include_bytes!`, not the `env!()`-per-file pattern every hand-written
 /// embedded ELF in this codebase uses -- there's no reason to invent ~70 one-off names for data
 /// with no other identity need). `discover_posix_test_files` above is the single source of truth
@@ -3201,9 +2966,9 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
 /// the real toolchain any on-target C program would use. Found live, the hard way: `tcc`'s own
 /// linker generates unresolved GOT/PLT indirection for calls into specific musl functions
 /// (`sigaction`, `fflush` confirmed; `printf`/`clock_gettime`/`kill`/etc. unaffected) even under a
-/// fully `-static` link -- the same *class* of bug CLAUDE.md's TinyCC section already documents
-/// finding and partially fixing (`tccelf.c`'s `build_got_entries`), but that fix evidently doesn't
-/// cover every code path. Symptom: a real ring-3 null-pointer read fault before the affected
+/// fully `-static` link -- the same *class* of bug this project already found and partially fixed
+/// once before (`tccelf.c`'s `build_got_entries`), but that fix evidently didn't cover every code
+/// path. Symptom: a real ring-3 null-pointer read fault before the affected
 /// binary's own first instruction, and -- found investigating the crash -- real stdio output was
 /// silently never reaching the console for *any* on-target-compiled pilot binary at all, tcc bug
 /// or not. Cross-compiling with the same real, already-proven `musl-gcc` toolchain
@@ -3221,9 +2986,8 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
 /// 488-file curated dedup to the ~1700-file full suite). Before that, each file got its own
 /// `POSIX_TEST_LOAD_BASE + index * POSIX_TEST_LOAD_STEP` slot -- moved down from an original
 /// `0xcf40000`/`0x40000`-step layout (only ~195 slots in the same gap) when the list first grew
-/// past 68 files. `0xe800000` itself sits comfortably above `tcc`'s own `0xe280000` load
-/// (`build_tinycc`'s own comment) plus its real ~1.1 MiB size, not just past the BusyBox applet
-/// range's own ceiling (`0xe240000`) tcc's base was originally chosen relative to. `t0` (the
+/// past 68 files. `0xe800000` itself sits comfortably past the BusyBox applet range's own ceiling
+/// (`0xe240000`). `t0` (the
 /// suite's own real timeout-wrapper utility, see
 /// `posix_conformance.sh`'s own doc comment for why a real `alarm()`-based wrapper matters on a
 /// kernel with no preemption) is cross-compiled the same way, at its own fixed base just below the
@@ -4022,9 +3786,10 @@ const OXFS_INODE_STRIDE: u64 = 128;
 /// the same real inputs `modules/oxfs/src/lib.rs`'s own `INODE_TABLE_BLOCKS`/`BITMAP_BLOCKS` are,
 /// not separately hand-picked numbers.
 /// **Found live as a real, hand-duplicated staleness bug, not just a theoretical risk this comment
-/// warns about**: this constant was left at its old value (a literal `18`, correct only for the
-/// pre-TinyCC `MAX_INODES = 512`) when that constant was bumped to `1024` (see CLAUDE.md's TinyCC
-/// section) -- silently sizing every *newly created* `oxfs_disk.img` 16 blocks (64 KiB) too small
+/// warns about**: this constant was left at its old value (a literal `18`, correct only for a
+/// prior `MAX_INODES = 512`) when that constant was bumped to `1024` (to fit TinyCC's own inode
+/// footprint, back when this project still had it) -- silently sizing every *newly created*
+/// `oxfs_disk.img` 16 blocks (64 KiB) too small
 /// for the real on-disk layout the kernel-side code actually uses, not just leaving a
 /// *pre-existing* stale file too small. Confirmed live against a real, already-formatted disk
 /// predating this fix: `mount_from_disk`'s own per-block data read failed partway through (the

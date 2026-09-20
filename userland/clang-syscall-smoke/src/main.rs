@@ -1,6 +1,6 @@
-//! Real-`SYSCALL` smoke test for OxideBSD's second real on-target compiler, Clang/LLVM
+//! Real-`SYSCALL` smoke test for OxideBSD's real on-target compiler, Clang/LLVM
 //! (`third_party/llvm-project`, see CLAUDE.md's Clang/LLVM port section): confirms `/bin/clang`,
-//! seeded by `modules/oxfs`'s `format_fresh_filesystem` alongside `tcc`, can actually compile and
+//! seeded by `modules/oxfs`'s `format_fresh_filesystem`, can actually compile and
 //! link a real C file on target -- not just launch. This is the real proof of the "cc1/as/ld as
 //! separate binaries" subprocess-pipeline milestone CLAUDE.md names as the reason GCC/Clang were
 //! historically unstarted: `clang`'s own driver internally forks `clang -cc1` (compile) then
@@ -8,12 +8,12 @@
 //! just something it has to survive.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
-//! function call from a test's own `main()` -- same reasoning `tcc-syscall-smoke` documents.
+//! function call from a test's own `main()` -- same reasoning `tests/fork_wait.rs` documents.
 //!
 //! Two parts, both through `tests/clang_syscall_smoke.rs` spawning this binary as pid 1:
 //! 1. `fork` + `execve` `/bin/clang -static -o /hello.elf /hello.c` (`/hello.c` seeded by oxfs's
-//!    own `format_fresh_filesystem`, a real `printf`, not a bare `return` -- the same fixture
-//!    `tcc-syscall-smoke` uses), `wait4` for a clean exit. Internally: `clang` forks `clang -cc1`
+//!    own `format_fresh_filesystem`, a real `printf`, not a bare `return`), `wait4` for a clean
+//!    exit. Internally: `clang` forks `clang -cc1`
 //!    to produce an object file, then forks `ld.lld` to link it against the compiler-rt builtins
 //!    archive and musl's `libc.a` -- both real, separate `fork`+`execve`d children of the `clang`
 //!    process this test's own child became, invisible to this file except in that they must all
@@ -132,9 +132,8 @@ struct RawArgvEntry {
 const MAX_ARGV: usize = 8;
 
 /// `path` is the real fs path `execve` loads (`/bin/clang`, `/hello.elf`); `argv` is the complete
-/// argv[] including argv[0]. Envp is a fixed, minimal `PATH=` (empty value, present) -- matches
-/// `tcc-syscall-smoke`'s own precedent; harmless here since neither `clang` nor `hello.elf` call
-/// `execvp`/care about `$PATH` at all.
+/// argv[] including argv[0]. Envp is a fixed, minimal `PATH=` (empty value, present) -- harmless
+/// here since neither `clang` nor `hello.elf` call `execvp`/care about `$PATH` at all.
 fn execve(path: &[u8], argv: &[&[u8]]) -> Result<u64, u64> {
     let mut entries = [RawArgvEntry { ptr: 0, len: 0 }; MAX_ARGV + 1];
     for (i, arg) in argv.iter().enumerate() {

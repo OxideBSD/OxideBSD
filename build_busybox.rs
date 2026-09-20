@@ -8,7 +8,7 @@
 // applet binary's mtime against `build.rs`'s own mtime as one of three freshness-floor inputs (a
 // real, deliberate check -- a load-address or Kconfig-flip change in this file genuinely can
 // change what an applet's own binary should contain). But `build.rs` also contains everything
-// *else* this project's build does (musl, TinyCC, every `userland/*`/`modules/*` crate, the POSIX
+// *else* this project's build does (musl, Clang/LLVM, every `userland/*`/`modules/*` crate, the POSIX
 // conformance pilot's own manifest generator, ...) -- editing *any* of that unrelated code still
 // touches `build.rs`'s own mtime, which made every one of the 256+ already-built applet binaries
 // look stale and forced a full ~20-30 minute BusyBox roster rebuild on the next `cargo build`,
