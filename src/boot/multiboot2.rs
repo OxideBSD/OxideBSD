@@ -66,6 +66,14 @@ const MULTIBOOT2_BOOTLOADER_MAGIC: u32 = 0x36d7_6289;
 
 const TAG_TYPE_END: u32 = 0;
 const TAG_TYPE_MMAP: u32 = 6;
+const TAG_TYPE_FRAMEBUFFER: u32 = 8;
+
+/// Multiboot2 framebuffer info tag's own `framebuffer_type` field (spec section 3.6.9) -- the only
+/// one `parse_mmap` below understands. `0` (indexed/palette) and `2` (EGA text) are real,
+/// documented alternatives no real UEFI/BIOS+QEMU or real hardware GOP/VBE framebuffer this
+/// project targets actually reports -- left unhandled (no `FbInfo` populated, `console::
+/// framebuffer` stays a no-op) rather than guessed at.
+const FRAMEBUFFER_TYPE_RGB: u8 = 1;
 
 /// Multiboot2 memory-map entry `type` field values (spec section 3.6.8).
 const MULTIBOOT_MEMORY_AVAILABLE: u32 = 1;
@@ -77,6 +85,13 @@ const MULTIBOOT_MEMORY_BADRAM: u32 = 5;
 
 const HUGE_PAGE_SIZE: u64 = 0x20_0000; // 2 MiB
 const ONE_GIB: u64 = 0x4000_0000;
+
+/// Physical load address of the Stage A trampoline (`. = 0x100000` in
+/// `x86_64-oxidebsd-multiboot2.ld`) -- must stay in sync with that linker script. Used, alongside
+/// `_kernel_phys_end`, to carve the kernel's own real physical footprint out of the "usable"
+/// memory-map entries handed to `memory::BootInfoFrameAllocator` (see `exclude_kernel_range`'s own
+/// doc comment for why this is required at all, unlike the Limine boot path).
+const BOOT32_TRAMPOLINE_PHYS_BASE: u64 = 0x100000;
 
 /// Same fixed higher-half base the plain-Limine kernel linker script already uses -- see
 /// `x86_64-oxidebsd-multiboot2.ld`'s own doc comment for why `.text`/etc. keep this exact VMA.
@@ -186,6 +201,22 @@ global_asm!(
     ".long 12", // size
     ".long _efi64_start",
     ".long 0", // pad to the next 8-byte boundary (12 -> 16)
+    // Framebuffer request tag (type 5, spec section 3.1.7) -- without this, a loader's own
+    // graphics setup is undefined (real GRUB/Limine-as-multiboot2 may leave text mode active or
+    // not touch video state at all), which is exactly the real, live bug this tag fixes: a real
+    // boot reached a working `hush` prompt (confirmed via the serial-mirrored console log) with a
+    // genuinely black screen -- no framebuffer had ever been set up for `console::framebuffer` to
+    // find. `width`/`height`/`depth` all `0` means "no preference, loader's choice" (spec's own
+    // documented meaning for that field combination). `flags = 1` (optional): a loader that can't
+    // satisfy this should still boot us, just without a framebuffer, matching this tag's sibling
+    // `EFI_BS` tag's own precedent above rather than refusing to boot outright.
+    ".short 5",  // type
+    ".short 1",  // flags (optional)
+    ".long 20",  // size
+    ".long 0",   // width (no preference)
+    ".long 0",   // height (no preference)
+    ".long 0",   // depth (no preference)
+    ".long 0",   // pad to the next 8-byte boundary (20 -> 24)
     // End tag.
     ".long 0",
     ".long 8",
@@ -195,7 +226,20 @@ global_asm!(
     ".section .boot32.bss, \"aw\", @nobits",
     ".align 16",
     "boot32_stack_bottom:",
-    ".skip 65536", // 64 KiB -- generous headroom for oxidebsd::init() + a smoke test's own main()
+    // 1 MiB -- real, measured need, not the smoke test's own original 64 KiB guess. This stack
+    // never gets replaced by a "real" per-process kernel stack this early in boot (see this
+    // static's own doc comment above) -- it's still the active call stack all the way through
+    // `oxidebsd::init()` AND every module's own `module_init`, INCLUDING `modules/oxfs`'s real
+    // mount-or-format pass over its entire seeded content. Found live via a real, silent (no
+    // guard page) stack overflow: the original 64 KiB was sized only for `smoke/
+    // multiboot2-boot-smoke`'s own minimal `oxidebsd::init()`-then-exit workload, never revisited
+    // once `smoke/multiboot2-kernel` (the real kernel, module loading included) started using this
+    // same trampoline -- a deep call chain parsing/relocating `modules/oxfs`'s own ~241 MiB object
+    // (thousands of ELF sections) overran it, corrupting adjacent memory including a live
+    // `BootInfoFrameAllocator`'s own `free_list` field on the stack further up the same chain
+    // (confirmed via `addr2line` against the exact faulting `RIP`/stack pointer, not guessed).
+    // Comfortably inside the 64 MiB low-identity window (`temp_pd_low`) this lives within.
+    ".skip 0x100000",
     ".global boot32_stack_top",
     "boot32_stack_top:",
     ".align 4096",
@@ -479,6 +523,10 @@ pub unsafe fn init_from_mbi(magic: u32, mbi_phys: u64) -> &'static BootInfo {
 
     unsafe { install_final_page_tables() };
 
+    // See `boot::set_hhdm_offset`'s own doc comment: without this, `boot::hhdm_offset()` panics
+    // the instant anything calls it under this boot path (e.g. doom's own `/dev/fb0` mmap).
+    super::set_hhdm_offset(MULTIBOOT2_HHDM_OFFSET);
+
     static mut BOOT_INFO: Option<BootInfo> = None;
     unsafe {
         BOOT_INFO = Some(BootInfo {
@@ -504,6 +552,19 @@ static mut MMAP_STORAGE: [Entry; MAX_MMAP_ENTRIES] = [const {
 }; MAX_MMAP_ENTRIES];
 static mut MMAP_PTRS: [MaybeUninit<&'static Entry>; MAX_MMAP_ENTRIES] =
     [const { MaybeUninit::uninit() }; MAX_MMAP_ENTRIES];
+
+/// Populated by `parse_mmap` below if the loader's own Multiboot2 info structure carries a real
+/// RGB framebuffer info tag (spec section 3.6.9) -- see `boot::FbInfo`'s own doc comment for why
+/// this exists at all (Limine's own framebuffer request/response mechanism is unreachable under
+/// this boot path). `None` if no such tag is present (e.g. a loader that ignored this file's own
+/// framebuffer *request* header tag) or reports a non-RGB type this driver doesn't handle.
+static mut MB2_FB_INFO: Option<super::FbInfo> = None;
+
+pub fn primary_framebuffer() -> Option<super::FbInfo> {
+    // SAFETY: written at most once, by `parse_mmap`, before any other code (including this
+    // function's own first real caller, `console::framebuffer::init`) runs.
+    unsafe { *core::ptr::addr_of!(MB2_FB_INFO) }
+}
 
 /// Walks the Multiboot2 info structure at `mbi_phys` (spec section 3.4: a `total_size`/`reserved`
 /// header followed by a sequence of 8-byte-aligned tags), keeping only the `MULTIBOOT_TAG_TYPE_MMAP`
@@ -561,9 +622,69 @@ unsafe fn parse_mmap(mbi_phys: u64) -> &'static [&'static Entry] {
                 }
             }
         }
+        // Real Multiboot2 framebuffer info tag (spec section 3.6.9) -- see `MB2_FB_INFO`'s own
+        // doc comment. `size >= 32` covers the tag's fixed-size fields (type/size/addr/pitch/
+        // width/height/bpp/type/reserved); the extra `>= 38` guard below covers the 6 further
+        // bytes real RGB color-info carries (red/green/blue field-position + mask-size pairs).
+        // **`reserved` is a `u16`, not a `u8`** -- confirmed live, the hard way: an earlier
+        // version of this code treated it as one byte, reading every color-info field exactly one
+        // byte too early. The resulting garbage (`red(shift=0,size=16) green(shift=8,size=8)
+        // blue(shift=8,size=0)`) rendered `console::framebuffer`'s text console in the wrong
+        // color (blue instead of white/grey) while doom's own direct pixel writes -- a completely
+        // separate path, bypassing this tag's color info entirely -- stayed correct throughout,
+        // which is what made this easy to misdiagnose as a doom-specific issue at first glance.
+        if typ == TAG_TYPE_FRAMEBUFFER && size >= 32 {
+            let fb_addr = unsafe { ((tag_addr + 8) as *const u64).read_unaligned() };
+            let fb_pitch = unsafe { ((tag_addr + 16) as *const u32).read_unaligned() };
+            let fb_width = unsafe { ((tag_addr + 20) as *const u32).read_unaligned() };
+            let fb_height = unsafe { ((tag_addr + 24) as *const u32).read_unaligned() };
+            let fb_bpp = unsafe { ((tag_addr + 28) as *const u8).read_unaligned() };
+            let fb_type = unsafe { ((tag_addr + 29) as *const u8).read_unaligned() };
+            if fb_type == FRAMEBUFFER_TYPE_RGB && size >= 38 {
+                let red_shift = unsafe { ((tag_addr + 32) as *const u8).read_unaligned() };
+                let red_size = unsafe { ((tag_addr + 33) as *const u8).read_unaligned() };
+                let green_shift = unsafe { ((tag_addr + 34) as *const u8).read_unaligned() };
+                let green_size = unsafe { ((tag_addr + 35) as *const u8).read_unaligned() };
+                let blue_shift = unsafe { ((tag_addr + 36) as *const u8).read_unaligned() };
+                let blue_size = unsafe { ((tag_addr + 37) as *const u8).read_unaligned() };
+                // SAFETY: written at most once, before any other code reads `MB2_FB_INFO` (see
+                // that static's own doc comment).
+                unsafe {
+                    MB2_FB_INFO = Some(super::FbInfo {
+                        // `fb_addr` is a raw *physical* address (spec section 3.6.9) -- unlike
+                        // Limine's own `Framebuffer::address()`, which is already a directly
+                        // dereferenceable virtual pointer. Translated via this boot path's own
+                        // HHDM window (`install_final_page_tables` maps every 2 MiB chunk up to
+                        // `MULTIBOOT2_HHDM_CEILING_BYTES` unconditionally, MMIO included, not just
+                        // memory-map-reported "usable" RAM -- a real framebuffer's PCI-BAR-mapped
+                        // physical address is comfortably within that range on any real or QEMU
+                        // x86_64 target this project builds for).
+                        address: fb_addr + MULTIBOOT2_HHDM_OFFSET,
+                        width: fb_width as u64,
+                        height: fb_height as u64,
+                        pitch: fb_pitch as u64,
+                        bpp: fb_bpp as u16,
+                        red_mask_size: red_size,
+                        red_mask_shift: red_shift,
+                        green_mask_size: green_size,
+                        green_mask_shift: green_shift,
+                        blue_mask_size: blue_size,
+                        blue_mask_shift: blue_shift,
+                    });
+                }
+            }
+        }
         // Every tag is padded to an 8-byte boundary (spec section 3.4).
         offset += (size + 7) & !7;
     }
+
+    // SAFETY: entries [0, count) were just written above by this same function, no aliasing
+    // reference exists yet -- safe to take a mutable slice before handing out any `&'static Entry`.
+    count = unsafe {
+        let storage: &mut [Entry] =
+            core::slice::from_raw_parts_mut((&raw mut MMAP_STORAGE).cast::<Entry>(), count);
+        exclude_kernel_range(storage, count)
+    };
 
     // SAFETY: entries [0, count) were just written above; no aliasing &mut exists.
     unsafe {
@@ -573,6 +694,89 @@ unsafe fn parse_mmap(mbi_phys: u64) -> &'static [&'static Entry] {
         }
         core::slice::from_raw_parts((&raw const MMAP_PTRS).cast::<&'static Entry>(), count)
     }
+}
+
+/// Carves the kernel's own real physical footprint (`[BOOT32_TRAMPOLINE_PHYS_BASE,
+/// _kernel_phys_end)`, covering both the Stage A trampoline and the main kernel image) out of any
+/// `MEMMAP_USABLE` entry that overlaps it, clipping or splitting that entry as needed. Returns the
+/// (possibly larger, if an entry was split in two) entry count.
+///
+/// **Why this is required at all, unlike the Limine boot path**: a real Multiboot2 memory map
+/// (spec section 3.6.8) reports raw firmware-level regions (from the BIOS e820 map or UEFI's own
+/// memory map) with no concept of "where the loader put the kernel" -- unlike Limine's own memory
+/// map, which already reports the kernel/modules region as a distinct, non-`MEMMAP_USABLE` type.
+/// Left unfixed, `memory::BootInfoFrameAllocator`'s bump allocator -- fed this raw map directly --
+/// starts handing out frames from the low end of the first usable region, which for this boot path
+/// begins at/near `BOOT32_TRAMPOLINE_PHYS_BASE`: for any kernel image large enough that its own
+/// footprint reaches into that region's *first* handful of frames (true for this kernel's real
+/// build, whose embedded BusyBox/musl/TinyCC/Clang+LLVM/POSIX-corpus content puts the image well
+/// into the hundreds of MiB -- see this file's own module doc comment), the very first heap/module
+/// page allocated after boot silently aliases live kernel code/data/page-tables instead of real
+/// free memory. Found live: a real, reproducible hang immediately after "mapping heap" logged, with
+/// no panic (consistent with silent corruption of currently-executing code/page-table frames, not
+/// a caught fault) -- confirmed absent once this exclusion pass was added. The (much smaller)
+/// `multiboot2-boot-smoke` test's own tiny image just never had the misfortune of an early
+/// allocation landing somewhere load-bearing.
+fn exclude_kernel_range(entries: &mut [Entry], count: usize) -> usize {
+    let excl_start = BOOT32_TRAMPOLINE_PHYS_BASE;
+    // Rounded UP to the next page boundary -- `_kernel_phys_end` (the linker-computed end of
+    // `.bss`) is *not* page-aligned in general (nothing forces the last byte of `.bss` onto a
+    // 4096 boundary), but `BootInfoFrameAllocator::allocate_frame`'s own `region.base / 4096`
+    // truncates *down* when computing a region's first frame number. Left un-rounded here, the
+    // very first frame handed out from the region this shrinks still starts at
+    // `floor(_kernel_phys_end / 4096) * 4096` -- *inside* the excluded kernel range by however many
+    // bytes `_kernel_phys_end` overshoots its own page boundary. Found live: that overlap frame is
+    // exactly where `MMAP_STORAGE`/`MMAP_PTRS` (this same file's own memory-map entries) happen to
+    // sit, right at the tail end of the kernel's `.bss` -- the first consumer to receive that frame
+    // (confirmed via `addr2line` against a real fault) zeroed/overwrote them, corrupting a `&'static
+    // Entry` pointer this exact function's own caller chain reads back later, producing a page
+    // fault dereferencing the resulting garbage address.
+    let excl_end = ((&raw const _kernel_phys_end) as u64).div_ceil(4096) * 4096;
+
+    let mut new_count = count;
+    // Snapshot the pre-exclusion count: a split below can append one new entry past the original
+    // range, which never itself overlaps `[excl_start, excl_end)` (it starts at `excl_end`), so
+    // re-scanning it would be wasted work, not a correctness issue either way.
+    for i in 0..count {
+        if entries[i].type_ != MEMMAP_USABLE {
+            continue;
+        }
+        let entry_base = entries[i].base;
+        let entry_end = entry_base + entries[i].length;
+        let overlap_start = entry_base.max(excl_start);
+        let overlap_end = entry_end.min(excl_end);
+        if overlap_start >= overlap_end {
+            continue; // no real overlap
+        }
+
+        let head_len = overlap_start - entry_base;
+        let tail_len = entry_end - overlap_end;
+        if head_len == 0 && tail_len == 0 {
+            // The exclusion fully covers this entry -- drop it entirely.
+            entries[i].type_ = MEMMAP_RESERVED;
+        } else if tail_len == 0 {
+            // Exclusion eats the tail only -- shrink in place.
+            entries[i].length = head_len;
+        } else if head_len == 0 {
+            // Exclusion eats the head only -- shift the start forward in place.
+            entries[i].base = overlap_end;
+            entries[i].length = tail_len;
+        } else {
+            // Exclusion is strictly inside this entry -- shrink to the head in place, and append a
+            // new entry for the tail (dropped silently if `MAX_MMAP_ENTRIES` is already exhausted;
+            // real machines report well under 20 raw entries, so this is not expected to fire).
+            entries[i].length = head_len;
+            if new_count < entries.len() {
+                entries[new_count] = Entry {
+                    base: overlap_end,
+                    length: tail_len,
+                    type_: MEMMAP_USABLE,
+                };
+                new_count += 1;
+            }
+        }
+    }
+    new_count
 }
 
 fn translate_mmap_type(mb_type: u32) -> u64 {

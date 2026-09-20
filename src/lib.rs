@@ -12,6 +12,7 @@ pub mod console;
 pub mod cpu;
 pub mod drivers;
 pub mod fs;
+pub mod kernel_main;
 pub mod memory;
 pub mod module;
 pub mod net;

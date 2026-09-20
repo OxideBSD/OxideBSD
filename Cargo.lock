@@ -240,6 +240,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiboot2-kernel"
+version = "0.1.0"
+dependencies = [
+ "oxidebsd",
+]
+
+[[package]]
 name = "native_abi"
 version = "0.1.0"
 

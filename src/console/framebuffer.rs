@@ -37,7 +37,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use limine::framebuffer::Framebuffer;
+use crate::boot::FbInfo;
 
 /// Set while a userland process holds a real `/dev/fb0` physical mmap (`process::mm::do_mmap_fb`)
 /// -- `redraw()` below early-returns while this is set. Load-bearing, not a nicety: this module's
@@ -348,7 +348,7 @@ static VGAFONT16: [[u8; 16]; 256] = [
 /// size/shift, not assumed to be a fixed XRGB8888 layout even though that's what OVMF/QEMU's
 /// stdvga always reports in practice) -- truncates precision if a channel's real mask is narrower
 /// than 8 bits (e.g. a 565 format), exact whenever it's a full 8.
-fn pack_rgb(fb: &Framebuffer, r: u8, g: u8, b: u8) -> u32 {
+fn pack_rgb(fb: &FbInfo, r: u8, g: u8, b: u8) -> u32 {
     let chan = |value: u8, size: u8, shift: u8| -> u32 {
         if size == 0 {
             return 0;
@@ -453,7 +453,7 @@ fn redraw_target() -> Option<RedrawTarget> {
     let grid_width = crate::console::vga::width() * GLYPH_WIDTH;
     let grid_height = crate::console::vga::height() * GLYPH_HEIGHT;
     Some(RedrawTarget {
-        base: fb.address() as *mut u8,
+        base: fb.address as *mut u8,
         pitch: fb.pitch as usize,
         fb_width,
         fb_height,
@@ -501,8 +501,8 @@ pub fn redraw() {
         if *slot != Some(key) || at_cursor_edge {
             let fg_rgb = PALETTE[cell.fg as usize];
             let bg_rgb = PALETTE[cell.bg as usize];
-            let fg = pack_rgb(fb, fg_rgb.0, fg_rgb.1, fg_rgb.2);
-            let bg = pack_rgb(fb, bg_rgb.0, bg_rgb.1, bg_rgb.2);
+            let fg = pack_rgb(&fb, fg_rgb.0, fg_rgb.1, fg_rgb.2);
+            let bg = pack_rgb(&fb, bg_rgb.0, bg_rgb.1, bg_rgb.2);
             target.draw_cell(
                 target.x_offset + col * GLYPH_WIDTH,
                 target.y_offset + row * GLYPH_HEIGHT,
@@ -514,7 +514,7 @@ pub fn redraw() {
                 // A real two-scanline underline (the classic BIOS text-mode default shape -- see
                 // `vga::CURSOR_SHAPE_START`/`_END`'s own comment for the real hardware equivalent
                 // this mirrors), drawn in white so it stays legible against any background.
-                let white = pack_rgb(fb, 0xFF, 0xFF, 0xFF);
+                let white = pack_rgb(&fb, 0xFF, 0xFF, 0xFF);
                 let x0 = target.x_offset + col * GLYPH_WIDTH;
                 let y0 = target.y_offset + (row + 1) * GLYPH_HEIGHT - 2;
                 for gy in 0..2 {

@@ -14,11 +14,10 @@ pub mod multiboot2;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use limine::framebuffer::Framebuffer;
 use limine::memmap::Entry;
-use limine::request::{
-    ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest, RsdpRequest,
-};
+#[cfg(not(feature = "multiboot2"))]
+use limine::request::FramebufferRequest;
+use limine::request::{ExecutableCmdlineRequest, HhdmRequest, MemmapRequest, RsdpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
@@ -38,6 +37,7 @@ static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 static CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
 #[unsafe(link_section = ".requests")]
+#[cfg(not(feature = "multiboot2"))]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".requests")]
@@ -79,27 +79,95 @@ static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 /// `kmain` itself, which doesn't exist in this kernel.
 pub fn hhdm_offset() -> u64 {
     let offset = HHDM_OFFSET.load(Ordering::Relaxed);
-    assert_ne!(offset, 0, "hhdm_offset() called before read_boot_info()");
+    assert_ne!(
+        offset, 0,
+        "hhdm_offset() called before read_boot_info()/multiboot2::init_from_mbi()"
+    );
     offset
 }
 
-/// The first framebuffer Limine reports, if any -- unlike the legacy VGA text buffer, a real,
-/// Limine-mapped linear framebuffer genuinely exists under both BIOS and UEFI (Limine sets one up
-/// itself either way, no legacy hardware assumption involved), and `Framebuffer::address()` is
-/// already a valid, directly dereferenceable pointer -- no HHDM offset math needed, unlike every
-/// other raw physical address this file hands out. Backs `console::framebuffer`, which rasterizes
-/// `console::vga`'s own real ANSI/VT100-driven text buffer onto it: the real VGA text buffer at
-/// physical `0xb8000` isn't backed by anything at all under Limine (found live: a bare
-/// `0xb8000`-based pointer page-faulted with no IDT installed yet, escalating to a triple fault,
-/// confirmed under both BIOS and UEFI -- `bootloader` v0.9's own `map_physical_memory` feature
-/// used to map literally all of physical memory, legacy MMIO holes included, so this never came
-/// up before), so `console::vga::Writer` now targets a plain in-memory shadow buffer instead (see
-/// that module's own `SHADOW_BUFFER` doc comment) and this framebuffer is what actually makes its
-/// content visible.
-pub fn primary_framebuffer() -> Option<&'static Framebuffer> {
-    FRAMEBUFFER_REQUEST
+/// Sets `HHDM_OFFSET` for boot paths other than plain Limine -- `read_boot_info` (Limine) sets it
+/// directly since it lives in this same file; `boot::multiboot2::init_from_mbi` calls this instead
+/// (its own `MULTIBOOT2_HHDM_OFFSET` is a different value from whatever Limine would have chosen).
+/// Without this, `hhdm_offset()` panics the moment anything calls it under multiboot2 -- found
+/// live: `drivers::fbdev::current_fb_geometry` (backing `/dev/fb0`, hence doom's own framebuffer
+/// mmap) calls it to recover a framebuffer's real physical address from `FbInfo::address`, which
+/// only makes sense if this offset matches whatever one `FbInfo::address` was actually computed
+/// with.
+#[cfg(feature = "multiboot2")]
+pub(crate) fn set_hhdm_offset(offset: u64) {
+    HHDM_OFFSET.store(offset, Ordering::Relaxed);
+}
+
+/// Boot-path-agnostic framebuffer descriptor -- `console::framebuffer` consumes this shape instead
+/// of `limine::framebuffer::Framebuffer` directly, since the Multiboot2 boot path
+/// (`boot::multiboot2`) has its own, completely different mechanism for a framebuffer (a header
+/// request tag plus its own info-tag layout) with no access to Limine's own request/response
+/// mechanism at all. Field shapes mirror `limine::framebuffer::Framebuffer`'s own (not
+/// coincidentally -- that's the mechanism this type was extracted from) so the Limine-side
+/// conversion below is a plain field-for-field copy.
+#[derive(Clone, Copy)]
+pub struct FbInfo {
+    pub address: u64,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+}
+
+/// The primary framebuffer this boot reported, if any, in the boot-path-agnostic `FbInfo` shape.
+///
+/// Under the plain Limine boot path (this function, `multiboot2`'s own sibling below handles the
+/// other one): unlike the legacy VGA text buffer, a real, Limine-mapped linear framebuffer
+/// genuinely exists under both BIOS and UEFI (Limine sets one up itself either way, no legacy
+/// hardware assumption involved), and `Framebuffer::address()` is already a valid, directly
+/// dereferenceable pointer -- no HHDM offset math needed, unlike every other raw physical address
+/// this file hands out. Backs `console::framebuffer`, which rasterizes `console::vga`'s own real
+/// ANSI/VT100-driven text buffer onto it: the real VGA text buffer at physical `0xb8000` isn't
+/// backed by anything at all under Limine (found live: a bare `0xb8000`-based pointer page-faulted
+/// with no IDT installed yet, escalating to a triple fault, confirmed under both BIOS and UEFI --
+/// `bootloader` v0.9's own `map_physical_memory` feature used to map literally all of physical
+/// memory, legacy MMIO holes included, so this never came up before), so `console::vga::Writer`
+/// now targets a plain in-memory shadow buffer instead (see that module's own `SHADOW_BUFFER` doc
+/// comment) and this framebuffer is what actually makes its content visible.
+#[cfg(not(feature = "multiboot2"))]
+pub fn primary_framebuffer() -> Option<FbInfo> {
+    let fb = FRAMEBUFFER_REQUEST
         .response()
-        .and_then(|r| r.framebuffers().first().copied())
+        .and_then(|r| r.framebuffers().first().copied())?;
+    Some(FbInfo {
+        address: fb.address() as u64,
+        width: fb.width,
+        height: fb.height,
+        pitch: fb.pitch,
+        bpp: fb.bpp,
+        red_mask_size: fb.red_mask_size,
+        red_mask_shift: fb.red_mask_shift,
+        green_mask_size: fb.green_mask_size,
+        green_mask_shift: fb.green_mask_shift,
+        blue_mask_size: fb.blue_mask_size,
+        blue_mask_shift: fb.blue_mask_shift,
+    })
+}
+
+/// Multiboot2 sibling of the function above -- delegates to `boot::multiboot2`'s own parsed
+/// framebuffer info tag (spec section 3.6.9). Limine's own `FRAMEBUFFER_REQUEST` never gets a
+/// response at all when booted this way (that request/response mechanism is Limine-native-
+/// protocol-only) -- found live: a real multiboot2 boot reached a working `hush` prompt (confirmed
+/// via the serial-mirrored console log) with a genuinely black screen, since nothing had ever
+/// populated a real framebuffer for `console::framebuffer` to find. Fixed by adding a real
+/// Multiboot2 framebuffer *request* header tag (this file's own `global_asm!` block) and parsing
+/// the loader's own framebuffer *info* tag it produces in response (`boot::multiboot2::
+/// primary_framebuffer`).
+#[cfg(feature = "multiboot2")]
+pub fn primary_framebuffer() -> Option<FbInfo> {
+    multiboot2::primary_framebuffer()
 }
 
 /// The real ACPI RSDP (Root System Description Pointer)'s address, if Limine found one -- the

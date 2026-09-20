@@ -26,8 +26,11 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 use x86_64::VirtAddr;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, Size4KiB,
+};
 
+use crate::memory::BootInfoFrameAllocator;
 use crate::process::elf::{read_u16, read_u32, read_u64};
 use crate::{serial_print, serial_println};
 
@@ -398,8 +401,8 @@ pub fn load(
     object_bytes: &[u8],
     panic_symbol: &str,
     fatal_on_panic: bool,
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    mapper: &mut OffsetPageTable<'static>,
+    frame_allocator: &mut BootInfoFrameAllocator,
 ) -> Result<i32, ModuleError> {
     serial_println!(
         "[module] {}: loading ({} byte object)",
@@ -538,10 +541,63 @@ pub fn load(
     // #[unsafe(no_mangle)] pub extern "C" fn module_init() -> i32) matches this transmute.
     let module_init: extern "C" fn() -> i32 = unsafe { core::mem::transmute(init_addr) };
     set_current_module_fatal(fatal_on_panic);
+    // SAFETY: module loading is single-threaded and never re-entrant (one `load` call runs to
+    // completion, including its own `module_init`, before another can start) -- safe to stash raw
+    // pointers here for `oxidebsd_module_alloc_zeroed` (see its own doc comment) to use for
+    // exactly the duration of this one `module_init()` call, cleared immediately after.
+    unsafe {
+        CURRENT_LOAD_MAPPER = mapper;
+        CURRENT_LOAD_FRAME_ALLOCATOR = frame_allocator;
+    }
     let result = module_init();
+    unsafe {
+        CURRENT_LOAD_MAPPER = core::ptr::null_mut();
+        CURRENT_LOAD_FRAME_ALLOCATOR = core::ptr::null_mut();
+    }
     serial_println!("[module] {}: module_init returned {}", name, result);
 
     Ok(result)
+}
+
+/// Raw pointers to the currently-active mapper/frame_allocator, valid only for the duration of a
+/// module's own `module_init()` call (see `load`'s own call site, right above). Lets
+/// `oxidebsd_module_alloc_zeroed` -- an exported kernel API a module calls *from inside*
+/// `module_init` -- reach the same `allocate_region`/`map_region` machinery `load` itself already
+/// used for the module's own code/data, without threading them through `module_init`'s fixed,
+/// parameterless `extern "C" fn() -> i32` signature. Single-core, sequential module loading only
+/// -- never concurrent, never re-entrant.
+static mut CURRENT_LOAD_MAPPER: *mut OffsetPageTable<'static> = core::ptr::null_mut();
+static mut CURRENT_LOAD_FRAME_ALLOCATOR: *mut BootInfoFrameAllocator = core::ptr::null_mut();
+
+/// Kernel API exposed to modules (resolved via `resolve_external_symbol`, called from a module's
+/// own `module_init`): hands back a fresh, zeroed, kernel-VA-mapped buffer of `size_bytes`, backed
+/// by real physical frames from the frame allocator -- exactly the `allocate_region`/`map_region`
+/// machinery `load` already uses for a module's own code/data, just reachable from *inside*
+/// `module_init` too. Exists so a module with a large runtime storage need (e.g. oxfs's own block
+/// pool) doesn't have to declare that storage as a `static mut` array baked into its own object
+/// file -- see CLAUDE.md's oxfs section for why that was a real, measured problem (a single
+/// module's own mapped region reaching into the GiB range purely from empty, never-yet-written
+/// pool storage). Returns 0 on failure (region exhausted, out of physical memory, or called
+/// outside a module's own `module_init` -- the last case is a caller bug, not a real runtime
+/// condition).
+pub(crate) extern "C" fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64 {
+    // SAFETY: only ever non-null for the duration of some module's own `module_init`, on this
+    // same single core -- never concurrent, never re-entrant (see the statics' own doc comment).
+    let mapper = unsafe { CURRENT_LOAD_MAPPER.as_mut() };
+    let frame_allocator = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() };
+    let (Some(mapper), Some(frame_allocator)) = (mapper, frame_allocator) else {
+        serial_println!("[module] oxidebsd_module_alloc_zeroed: called outside module_init");
+        return 0;
+    };
+    let region_size = align_up(size_bytes, PAGE_SIZE);
+    let base = match allocate_region(region_size) {
+        Ok(base) => base,
+        Err(_) => return 0,
+    };
+    match map_region(base, region_size, mapper, frame_allocator) {
+        Ok(()) => base,
+        Err(_) => 0,
+    }
 }
 
 /// `/proc/modules` -- real Linux's own seven-space-separated-field format per line (`name size
@@ -607,8 +663,8 @@ fn allocate_region(size: u64) -> Result<u64, ModuleError> {
 fn map_region(
     base: u64,
     size: u64,
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    mapper: &mut OffsetPageTable<'static>,
+    frame_allocator: &mut BootInfoFrameAllocator,
 ) -> Result<(), ModuleError> {
     if size == 0 {
         return Ok(());
@@ -713,6 +769,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_register_syscall" => {
             Some(crate::syscall::oxidebsd_register_syscall as *const () as u64)
         }
+        "oxidebsd_module_alloc_zeroed" => Some(oxidebsd_module_alloc_zeroed as *const () as u64),
         "oxidebsd_sys_exit" => Some(crate::syscall::oxidebsd_sys_exit as *const () as u64),
         "oxidebsd_sys_exit_group" => {
             Some(crate::syscall::oxidebsd_sys_exit_group as *const () as u64)
@@ -992,6 +1049,12 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_block_read" => Some(crate::drivers::ata::oxidebsd_block_read as *const () as u64),
         "oxidebsd_block_write" => {
             Some(crate::drivers::ata::oxidebsd_block_write as *const () as u64)
+        }
+        "oxidebsd_block_read_batch" => {
+            Some(crate::drivers::ata::oxidebsd_block_read_batch as *const () as u64)
+        }
+        "oxidebsd_block_write_batch" => {
+            Some(crate::drivers::ata::oxidebsd_block_write_batch as *const () as u64)
         }
         _ => None,
     }

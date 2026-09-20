@@ -428,3 +428,87 @@ pub extern "C" fn oxidebsd_block_write(block_no: u64, buf_ptr: u64) -> i64 {
         Err(_) => -1,
     }
 }
+
+/// Blocks per `read_sectors`/`write_sectors` command `oxidebsd_block_{read,write}_batch` chunk
+/// their transfer into -- `31 * 8 = 248` sectors, comfortably under LBA28's 255-sector-per-command
+/// ceiling (`sector_count: u8`, where `0` means 256 -- deliberately never hit, avoids that special
+/// case entirely) while still batching almost the maximum a single command can carry.
+const MAX_BLOCKS_PER_COMMAND: u64 = 31;
+
+/// Real, multi-block counterpart to `oxidebsd_block_read` -- reads `count` *consecutive* oxfs
+/// blocks starting at `start_block` into `buf_ptr` (`count * 4096` contiguous bytes) as one real
+/// `READ SECTORS` command per `MAX_BLOCKS_PER_COMMAND`-sized chunk, rather than one command (and,
+/// for the write side, one `CACHE FLUSH`) per individual 4 KiB block. Found live: `mount_from_disk`/
+/// `flush_all_to_disk` calling the single-block API in a loop across tens of thousands of blocks
+/// made a fresh-format-and-flush (or a full mount) measurably slow under QEMU's software TCG --
+/// each real ATA command/flush has fixed per-command overhead (drive select, `BSY`/`DRQ` polling)
+/// independent of how much data it carries, so batching directly cuts the number of commands (and,
+/// for writes, flushes) by up to `MAX_BLOCKS_PER_COMMAND`x for any contiguous run. Same `-1`/`0`
+/// and `buf_ptr` conventions as `oxidebsd_block_read`; a run's own contiguity is the caller's
+/// responsibility (this function's own `block_no` space has no concept of "not really adjacent").
+pub extern "C" fn oxidebsd_block_read_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64 {
+    if !DATA_DISK_PRESENT.load(Ordering::Relaxed) {
+        return -1;
+    }
+    let mut remaining = count;
+    let mut block = start_block;
+    let mut offset: u64 = 0;
+    while remaining > 0 {
+        let chunk = remaining.min(MAX_BLOCKS_PER_COMMAND);
+        let base_lba = (block * 8) as u32;
+        let byte_len = (chunk * 4096) as usize;
+        // SAFETY: caller guarantees buf_ptr points to `count * 4096` live, writable bytes.
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut((buf_ptr + offset) as *mut u8, byte_len)
+        };
+        if read_sectors(
+            DATA_DISK_CHANNEL,
+            DATA_DISK_DRIVE,
+            base_lba,
+            (chunk * 8) as u8,
+            buf,
+        )
+        .is_err()
+        {
+            return -1;
+        }
+        remaining -= chunk;
+        block += chunk;
+        offset += byte_len as u64;
+    }
+    0
+}
+
+/// Write counterpart to `oxidebsd_block_read_batch` -- see that function's own doc comment for the
+/// real, measured problem this solves. Each `MAX_BLOCKS_PER_COMMAND`-sized chunk gets its own
+/// single `CACHE FLUSH` (via `write_sectors`), not one per individual 4 KiB block.
+pub extern "C" fn oxidebsd_block_write_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64 {
+    if !DATA_DISK_PRESENT.load(Ordering::Relaxed) {
+        return -1;
+    }
+    let mut remaining = count;
+    let mut block = start_block;
+    let mut offset: u64 = 0;
+    while remaining > 0 {
+        let chunk = remaining.min(MAX_BLOCKS_PER_COMMAND);
+        let base_lba = (block * 8) as u32;
+        let byte_len = (chunk * 4096) as usize;
+        // SAFETY: caller guarantees buf_ptr points to `count * 4096` live, readable bytes.
+        let buf = unsafe { core::slice::from_raw_parts((buf_ptr + offset) as *const u8, byte_len) };
+        if write_sectors(
+            DATA_DISK_CHANNEL,
+            DATA_DISK_DRIVE,
+            base_lba,
+            (chunk * 8) as u8,
+            buf,
+        )
+        .is_err()
+        {
+            return -1;
+        }
+        remaining -= chunk;
+        block += chunk;
+        offset += byte_len as u64;
+    }
+    0
+}

@@ -188,7 +188,7 @@ Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine
 - Verified via all 51 `tests/*.rs` files migrated and passing, confirmed on both `OXIDEBSD_FIRMWARE`
   values.
 
-## Boot: Multiboot2 (`src/boot/multiboot2.rs`, `x86_64-oxidebsd-multiboot2.ld`, `smoke/multiboot2-boot-smoke/`, `scripts/qemu_common.sh`, `scripts/run_multiboot2_smoke.sh`)
+## Boot: Multiboot2 (`src/boot/multiboot2.rs`, `x86_64-oxidebsd-multiboot2.ld`, `smoke/multiboot2-boot-smoke/`, `smoke/multiboot2-kernel/`, `scripts/qemu_common.sh`, `scripts/run_multiboot2_smoke.sh`, `scripts/run_multiboot2_kernel.sh`)
 
 A second, independent boot path alongside Limine — real GRUB or Limine's own `protocol:
 multiboot2` can load this kernel directly. Gated behind a `multiboot2` Cargo feature; one
@@ -243,6 +243,65 @@ otherwise-shared-rustflags workspace.
   upstream 2026-05-13 ("relocator/x86: fix multiboot2 Xen boot failure on GRUB 2.14"); merge
   status into a release build unconfirmed as of this writing. `OXIDEBSD_FIRMWARE=bios` with the
   grub loader remains the reliable path until a fixed GRUB lands.
+- **`smoke/multiboot2-kernel/`**: a second, separate entry crate booting the *real* kernel (module
+  loading, `hush` spawn, scheduler handoff — `oxidebsd::kernel_main::run_real_system`, shared
+  verbatim with `src/main.rs`'s own Limine path) via Multiboot2, not just the trampoline-only smoke
+  test above. Needs its own crate rather than reusing `src/main.rs` directly (the smoke test's own
+  trick): every embedded module/`hush` ELF's `include_bytes!(env!("..._PATH"))` needs a
+  `rustc-env` var only visible while compiling the package that set it, never a downstream
+  dependent — confirmed directly, not assumed. `scripts/run_multiboot2_kernel.sh` builds and boots
+  it interactively; needs `RUSTFLAGS` to fully override (not merely append to) the plain kernel's
+  own config-resolved `-Tx86_64-oxidebsd.ld`, same reasoning as `build_multiboot2_boot_smoke_crate`.
+- **A real, previously-latent frame-allocator bug, only surfaced by a kernel this large**: a
+  Multiboot2 memory map (unlike Limine's own) has no concept of "where the loader put the kernel" —
+  left unfixed, `BootInfoFrameAllocator` treated this kernel's own ~266 MiB debug image as free
+  memory and started handing out frames that alias its own live code/page-tables, hanging silently
+  right after the heap-mapping log line (no panic — consistent with corrupting currently-executing
+  state, not a caught fault). The tiny `multiboot2-boot-smoke` test never allocates enough to hit
+  it. Fixed: `exclude_kernel_range` carves `[0x100000, _kernel_phys_end)` out of any `MEMMAP_USABLE`
+  entry before it reaches the frame allocator, splitting an entry if the exclusion falls strictly
+  inside it.
+- **Real UEFI can't load this real kernel via Multiboot2 at all, separately from the GRUB/UEFI bug
+  above**: Multiboot2's fixed-physical-address placement (no relocation, unlike Limine's native
+  protocol) needs one contiguous free hole the image's full size — confirmed live, Limine's own
+  multiboot2 loader panics `"Could not find viable load address for executable"` under OVMF for
+  this real ~266 MiB image (the small smoke-test image never hit this either). Real BIOS/SeaBIOS's
+  much simpler, unfragmented memory map has no such hole shortage. `scripts/run_multiboot2_kernel.sh`
+  therefore defaults to `OXIDEBSD_FIRMWARE=bios` itself (unlike every other script here, which
+  defaults to `uefi`) — this is now the *only* known-working firmware choice for either loader with
+  the real, full-size kernel.
+- **`exclude_kernel_range`'s own alignment bug, found chasing a real, reproducible page fault**:
+  `_kernel_phys_end` isn't page-aligned, but the exclusion used it as-is — `BootInfoFrameAllocator`'s
+  `region.base / 4096` truncates *down*, so the first frame handed out after exclusion still
+  overlapped the kernel's own `.bss` (specifically `MMAP_PTRS` itself, right at the tail of the
+  image) by however many bytes `_kernel_phys_end` overshot its own page boundary. The first
+  consumer to receive that frame corrupted a `&'static Entry` pointer read back later, producing a
+  fault at a garbage address inside `BootInfoFrameAllocator::allocate_frame` — root-caused via
+  `addr2line` against the real faulting `RIP`, not guessed. Fixed: round the exclusion's own end up
+  to the next page boundary.
+- **`boot32_stack` (the Stage A trampoline's own stack, never replaced by a real per-process kernel
+  stack this early in boot) was only 64 KiB, sized for `multiboot2-boot-smoke`'s tiny workload,
+  never revisited once `multiboot2-kernel` (module loading + oxfs's real mount-or-format pass)
+  started using the same trampoline**. Silently overflowed (no guard page) into the corrupted-frame
+  bug above with no evidence beyond a shifted stack pointer. Bumped to 1 MiB.
+- **Real Multiboot2 framebuffer support**: added the header's own framebuffer *request* tag (type
+  5) plus parsing of the loader's *info* tag (type 8) it produces in response — without either,
+  `console::framebuffer` has nothing to find and the screen stays black, confirmed live (a real
+  boot reached a working `hush` prompt, serial-log-confirmed, with a genuinely blank display).
+  `boot::FbInfo` is a new boot-path-agnostic descriptor `console::framebuffer`/`drivers::fbdev` now
+  consume instead of `limine::framebuffer::Framebuffer` directly, so the same rasterizer/`/dev/fb0`
+  code serves either boot path. **A real off-by-one-byte bug in the info tag's own layout**: its
+  `reserved` field (right after `framebuffer_type`) is a `u16`, not a `u8` — every color-info field
+  read one byte too early, producing plausible-looking but wrong red/green/blue mask values (e.g.
+  `red_size=16`, an impossible width for one channel) that rendered the whole text console in the
+  wrong color (blue instead of white) while doom's own direct pixel writes — a separate path,
+  bypassing this tag entirely — stayed correct throughout, which is what made it look
+  doom-specific at first. Root-caused by printing the parsed values and back-solving what a
+  one-byte shift would produce (a clean, standard XRGB8888 layout), not by guessing at the fix.
+  Also required exposing a `boot::set_hhdm_offset` setter: `boot::hhdm_offset()` (used by
+  `drivers::fbdev` to recover the framebuffer's real physical address) was populated only by
+  Limine's own `read_boot_info`, panicking the instant anything called it under multiboot2.
+  Confirmed end to end: a real, playable doom frame captured via QEMU's own `screendump`.
 
 ## Memory management (`src/memory/mod.rs`, `src/memory/allocator.rs`)
 
@@ -627,7 +686,11 @@ non-relocatable `ET_EXEC` binary with zero relocations) — this is the largest 
   reference, the single largest bloat source before `--gc-sections`. Hand-rolled byte formatting
   instead.
 - **Modules can't use `alloc`/`Vec`/`BTreeMap`** — avoids depending on `#[global_allocator]`'s
-  unstable-ABI internals from relocated code. State lives in fixed-size `static mut` arrays.
+  unstable-ABI internals from relocated code. State lives in fixed-size `static mut` arrays, or,
+  for a genuinely large pool (see oxfs's own `BLOCKS`/`WRITE_BUFFERS`), real kernel-allocated
+  memory via `oxidebsd_module_alloc_zeroed` — a module calling this from *inside* its own
+  `module_init` reaches the exact `allocate_region`/`map_region` machinery `module::load` already
+  used for that module's own code, rather than baking the pool into its own object file's `.bss`.
 - **A `static mut` gotcha distinct from `gdt.rs`'s**: a private `static mut` buffer written but
   never observably read back through an externally-reachable function can have the write deleted
   as an unobservable dead store. Module state needs a syscall-reachable read to survive
@@ -678,6 +741,16 @@ self-referencing `.`/`..`.
 - **The on-disk bitmap was once hardcoded to one block** (broken past `NUM_BLOCKS=32768`) and the
   block allocator was once an O(n²) rescan — both fixed as part of the max-file-size redesign.
   `SUPERBLOCK_VERSION` bumped alongside.
+- **`BLOCKS`/`WRITE_BUFFERS` are real, kernel-allocated memory (`oxidebsd_module_alloc_zeroed`,
+  `src/module.rs`), not `static mut` arrays baked into this module's own object file** — found live
+  investigating a boot-path memory failure: those two pools alone made this module's own mapped
+  region ~1.5 GiB (the block pool's real ~1 GiB capacity plus the write-buffer pool, versus ~230 MiB
+  of actual code/embedded seed content). `init_pools()` (top of `module_init`) requests both from
+  the kernel via a new symbol modules can call *from inside* `module_init`, reusing the exact
+  `allocate_region`/`map_region` machinery `module::load` already uses for a module's own code —
+  bridged via raw pointers `load` stashes for the duration of one `module_init` call
+  (`CURRENT_LOAD_MAPPER`/`_FRAME_ALLOCATOR`, `src/module.rs`), since `module_init`'s own fixed,
+  parameterless calling convention can't carry them directly.
 
 An earlier FAT32 module (8.3 names only, one path component per call, a directory that could never
 grow past its first cluster, one kernel-wide cwd, whole-file-buffered reads, no `unlink`/`rmdir`/
@@ -724,9 +797,18 @@ layer.
   `set_block_used` are the *only* functions that ever touch `BLOCKS`/`INODES`/`BLOCK_USED`.
 - **`PERSISTENCE_READY`** (`static mut` gate) stays `false` for the entire format/mount duration,
   set `true` right after, before any real syscall becomes reachable.
-- **Known, accepted limitation: mount-time load is bitmap-filtered, not true lazy fault-in** — the
-  pinned `x86_64` crate has no `rep insw`/`outsw` wrapper, so every 512-byte sector transfer is
-  256 individually-trapped port reads under QEMU's TCG.
+- **Known, accepted limitation: mount-time load is bitmap-filtered, not true lazy fault-in.**
+  Sector transfers themselves are NOT the bottleneck this once implied — `insw`/`outsw` (hand-rolled
+  `rep insw`/`outsw` via inline `asm!`, not the pinned `x86_64` crate's own `Port` abstraction,
+  which has no such wrapper) already move a whole 512-byte sector in one trapped instruction under
+  QEMU's TCG. The real per-command cost is fixed overhead (drive select, `BSY`/`DRQ` polling)
+  independent of transfer size — `oxidebsd_block_{read,write}_batch` (`src/drivers/ata.rs`) cut
+  this by issuing one real command (and, for writes, one `CACHE FLUSH`) per *contiguous* run of
+  oxfs blocks instead of one per individual 4 KiB block; `mount_from_disk`/`flush_all_to_disk` use
+  these instead of the single-block API for their own data-block loops. A full fresh-format-and-
+  flush of this kernel's real seed content is still genuinely slow in absolute terms (tens of
+  thousands of real blocks) — confirmed via direct baseline comparison to be pre-existing behavior,
+  not a regression from either this change or oxfs's own kernel-allocated-pool refactor above.
 - **No raw block device is exposed to userland** — the disk is purely internal to oxfs's own
   persistence.
 - Verified via `tests/ata_smoke.rs`, `tests/oxfs_persistence_syscall_smoke.rs`. **Not covered**:

@@ -166,6 +166,21 @@ unsafe extern "C" {
     /// this translates into.
     fn oxidebsd_block_read(block_no: u64, buf_ptr: u64) -> i64;
     fn oxidebsd_block_write(block_no: u64, buf_ptr: u64) -> i64;
+    /// Real, multi-block counterparts to `oxidebsd_block_read`/`_write` -- see their own doc
+    /// comments (kernel tree, `src/drivers/ata.rs`) for why `mount_from_disk`/`flush_all_to_disk`
+    /// use these instead of the single-block versions for any *contiguous* run of blocks: one real
+    /// ATA command (and, for writes, one `CACHE FLUSH`) per run instead of one per individual 4 KiB
+    /// block, a real, measured difference at this pool's own scale (tens of thousands of blocks).
+    /// `buf_ptr` must point to `count * BLOCK_SIZE` contiguous bytes.
+    fn oxidebsd_block_read_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64;
+    fn oxidebsd_block_write_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64;
+    /// Real, kernel-allocated (not baked into this module's own object file) storage -- see
+    /// `BLOCKS`/`WRITE_BUFFERS`'s own doc comments for why. Returns a zeroed, kernel-VA-mapped
+    /// pointer to `size_bytes` of fresh memory, or `0` on failure (only ever called once each,
+    /// from `module_init`, which reboots the whole system on any failure here the same as any
+    /// other `module_init` failure -- see this module's own `fatal_on_panic = true` in
+    /// `src/kernel_main.rs`, kernel tree).
+    fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
 }
 
 const SYS_OPEN: u64 = 5;
@@ -864,7 +879,17 @@ impl Inode {
 const TOTAL_BLOCKS: usize = NUM_BLOCKS + TMPFS_NUM_BLOCKS;
 const TOTAL_INODES: usize = MAX_INODES + TMPFS_MAX_INODES;
 
-static mut BLOCKS: [[u8; BLOCK_SIZE]; TOTAL_BLOCKS] = [[0; BLOCK_SIZE]; TOTAL_BLOCKS];
+/// Real, kernel-allocated storage (`oxidebsd_module_alloc_zeroed`, set once by `init_pools` at the
+/// very top of `module_init`), *not* a `static mut [[u8; BLOCK_SIZE]; TOTAL_BLOCKS]` array baked
+/// into this module's own object file the way every other fixed-size pool here is. This one pool
+/// alone would otherwise be `TOTAL_BLOCKS * BLOCK_SIZE` ~= 1 GiB of pure, never-yet-written `.bss`
+/// -- harmless to the on-disk object size (`.bss` never costs file bytes), but *not* harmless to
+/// how much of this module's own mapped kernel VA/physical footprint is pure empty pool versus
+/// real code -- found live investigating a boot-path memory failure: this module's own mapped
+/// region was measured at ~1.5 GiB, of which barely 15% was actual code/embedded seed content.
+/// `read_block`/`write_block` are the only two functions that ever touch it -- everything else
+/// here goes through them, same discipline `WRITE_BUFFERS` below already establishes.
+static mut BLOCKS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
 static mut BLOCK_USED: [bool; TOTAL_BLOCKS] = [false; TOTAL_BLOCKS];
 static mut INODES: [Inode; TOTAL_INODES] = [Inode::FREE; TOTAL_INODES];
 static mut OPEN_FILES: [Option<(u64, OpenFile)>; MAX_OPEN_FILES] = [None; MAX_OPEN_FILES];
@@ -874,10 +899,38 @@ static mut OPEN_FILES: [Option<(u64, OpenFile)>; MAX_OPEN_FILES] = [None; MAX_OP
 /// is `None` until the first real `write()` call (or, for `O_APPEND`, until `open()`'s own
 /// preload -- see that call site) actually needs somewhere to put bytes; a fd that's opened but
 /// never written to (a plain read, or a real POSIX `shm_open(O_RDONLY|O_CREAT, ...)`) never
-/// touches this pool at all.
-static mut WRITE_BUFFERS: [[u8; MAX_WRITE_BUFFER]; MAX_WRITE_BUFFERS] =
-    [[0; MAX_WRITE_BUFFER]; MAX_WRITE_BUFFERS];
+/// touches this pool at all. Real, kernel-allocated storage, same rationale and same
+/// `init_pools`-time setup as `BLOCKS_PTR` above -- `MAX_WRITE_BUFFERS * MAX_WRITE_BUFFER` was the
+/// second-largest contributor (256 MiB) to this module's own oversized mapped region.
+static mut WRITE_BUFFERS_PTR: *mut [u8; MAX_WRITE_BUFFER] = core::ptr::null_mut();
 static mut WRITE_BUFFER_USED: [bool; MAX_WRITE_BUFFERS] = [false; MAX_WRITE_BUFFERS];
+
+/// Claims real kernel-allocated storage for `BLOCKS_PTR`/`WRITE_BUFFERS_PTR` -- must run first,
+/// before `module_init`'s mount-or-format decision (or anything else) ever calls `read_block`/
+/// `write_block`/`write_buffer`. Returns `false` on failure (kernel out of memory), which
+/// `module_init` treats as a fatal `module_init` failure like any other -- this module's own
+/// `fatal_on_panic = true` (see `src/kernel_main.rs`, kernel tree) reboots rather than resuming
+/// with a filesystem that has nowhere to actually store a block.
+fn init_pools() -> bool {
+    let blocks_bytes = (TOTAL_BLOCKS * BLOCK_SIZE) as u64;
+    let write_buffers_bytes = (MAX_WRITE_BUFFERS * MAX_WRITE_BUFFER) as u64;
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let blocks_addr = unsafe { oxidebsd_module_alloc_zeroed(blocks_bytes) };
+    if blocks_addr == 0 {
+        return false;
+    }
+    let write_buffers_addr = unsafe { oxidebsd_module_alloc_zeroed(write_buffers_bytes) };
+    if write_buffers_addr == 0 {
+        return false;
+    }
+    // SAFETY: both addresses are freshly kernel-allocated, zeroed, and mapped read/write for
+    // exactly the sizes requested above -- never written through any other pointer.
+    unsafe {
+        BLOCKS_PTR = blocks_addr as *mut [u8; BLOCK_SIZE];
+        WRITE_BUFFERS_PTR = write_buffers_addr as *mut [u8; MAX_WRITE_BUFFER];
+    }
+    true
+}
 
 /// Claims a free `WRITE_BUFFERS` slot, `None` if the pool is exhausted (a real, if unlikely,
 /// resource limit -- surfaces to a caller as `ENOSPC`, same errno `oxfs_write` already returns for
@@ -903,8 +956,10 @@ fn free_write_buffer(idx: usize) {
 /// whatever length they actually need (`oxfs_write` writes into it; `commit_write_buffer` reads
 /// `[..len]` back out).
 fn write_buffer(idx: usize) -> &'static mut [u8; MAX_WRITE_BUFFER] {
-    let bufs = unsafe { &mut *core::ptr::addr_of_mut!(WRITE_BUFFERS) };
-    &mut bufs[idx]
+    // SAFETY: `WRITE_BUFFERS_PTR` is set once, by `init_pools`, before any real syscall (hence
+    // before any caller of this function) becomes reachable -- see that function's own doc
+    // comment. `idx` is always a value `alloc_write_buffer` handed out, in `[0, MAX_WRITE_BUFFERS)`.
+    unsafe { &mut *WRITE_BUFFERS_PTR.add(idx) }
 }
 
 const LOCK_SH: u64 = 1;
@@ -943,14 +998,15 @@ fn release_flocks_for(real_fd: u64) {
 }
 
 fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
-    // SAFETY: see BLOCKS's own doc comment -- single-core, syscall-serialized access only. Copies
-    // the whole block out by value rather than returning a reference, so no borrow of the static
-    // ever outlives this call -- deliberately simple over clever, see the module doc comment.
-    unsafe { (*core::ptr::addr_of!(BLOCKS))[n as usize] }
+    // SAFETY: see BLOCKS_PTR's own doc comment -- single-core, syscall-serialized access only,
+    // set once by `init_pools` before any real syscall is reachable. Copies the whole block out
+    // by value rather than returning a reference, so no borrow of the pool ever outlives this
+    // call -- deliberately simple over clever, see the module doc comment.
+    unsafe { *BLOCKS_PTR.add(n as usize) }
 }
 
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
-    unsafe { (*core::ptr::addr_of_mut!(BLOCKS))[n as usize] = *data };
+    unsafe { *BLOCKS_PTR.add(n as usize) = *data };
     persist_data_block_if_ready(n, data);
 }
 
@@ -5854,18 +5910,36 @@ fn mount_from_disk() -> bool {
         }
     }
 
+    // Real, multi-block data read: one `oxidebsd_block_read_batch` call per *contiguous* run of
+    // used blocks, not one `oxidebsd_block_read` per individual block -- see that function's own
+    // doc comment (kernel tree) for why this matters at this pool's own scale. `BLOCKS_PTR` is
+    // itself one contiguous kernel-allocated region, so a run's destination is simply
+    // `BLOCKS_PTR.add(run_start)` -- no intermediate per-block copy needed the way a stack buffer
+    // would require. Skips `write_block`'s own `persist_data_block_if_ready` call (harmless to
+    // skip here: that call is a no-op until `PERSISTENCE_READY` flips true, well after this
+    // function returns -- see that flag's own doc comment).
     let mut loaded: u32 = 0;
-    for i in 0..NUM_BLOCKS as u32 {
-        if block_used(i) {
-            let mut data = [0u8; BLOCK_SIZE];
-            let phys = DATA_BLOCK_OFFSET as u64 + i as u64;
-            if unsafe { oxidebsd_block_read(phys, data.as_mut_ptr() as u64) } != 0 {
-                log("[oxfs] mount: failed to read a data block -- falling back to format\n");
-                return false;
-            }
-            write_block(i, &data);
-            loaded += 1;
+    let mut i: u32 = 0;
+    while i < NUM_BLOCKS as u32 {
+        if !block_used(i) {
+            i += 1;
+            continue;
         }
+        let run_start = i;
+        let mut run_len: u32 = 0;
+        while run_start + run_len < NUM_BLOCKS as u32 && block_used(run_start + run_len) {
+            run_len += 1;
+        }
+        let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
+        // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
+        // [0, TOTAL_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
+        let dst = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
+        if unsafe { oxidebsd_block_read_batch(phys, run_len as u64, dst) } != 0 {
+            log("[oxfs] mount: failed to read a data block -- falling back to format\n");
+            return false;
+        }
+        loaded += run_len;
+        i = run_start + run_len;
     }
 
     let mut msg_buf = [0u8; 96];
@@ -5927,16 +6001,33 @@ fn flush_all_to_disk() {
         }
     }
 
+    // Real, multi-block data write: one `oxidebsd_block_write_batch` call (one real `CACHE FLUSH`)
+    // per *contiguous* run of used blocks, not one per individual block -- see that function's own
+    // doc comment (kernel tree) for why this matters at this pool's own scale. `BLOCKS_PTR` is
+    // itself one contiguous kernel-allocated region, so a run's source is simply
+    // `BLOCKS_PTR.add(run_start)` -- no intermediate per-block copy needed the way `read_block`'s
+    // own by-value return would require.
     let mut flushed: u32 = 0;
-    for i in 0..NUM_BLOCKS as u32 {
-        if block_used(i) {
-            let data = read_block(i);
-            let phys = DATA_BLOCK_OFFSET as u64 + i as u64;
-            unsafe {
-                oxidebsd_block_write(phys, data.as_ptr() as u64);
-            }
-            flushed += 1;
+    let mut i: u32 = 0;
+    while i < NUM_BLOCKS as u32 {
+        if !block_used(i) {
+            i += 1;
+            continue;
         }
+        let run_start = i;
+        let mut run_len: u32 = 0;
+        while run_start + run_len < NUM_BLOCKS as u32 && block_used(run_start + run_len) {
+            run_len += 1;
+        }
+        let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
+        // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
+        // [0, TOTAL_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
+        let src = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
+        unsafe {
+            oxidebsd_block_write_batch(phys, run_len as u64, src);
+        }
+        flushed += run_len;
+        i = run_start + run_len;
     }
 
     let mut msg_buf = [0u8; 96];
@@ -7749,6 +7840,10 @@ fn format_fresh_filesystem() -> bool {
 /// actually use.
 #[unsafe(no_mangle)]
 pub extern "C" fn module_init() -> i32 {
+    if !init_pools() {
+        return -1;
+    }
+
     let has_disk = block_device_present();
 
     let ok = if has_disk && mount_from_disk() {

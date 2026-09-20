@@ -1,7 +1,8 @@
 //! Real framebuffer geometry query, backing `/dev/fb0` (`modules/oxfs`'s `OpenFile::Framebuffer`)
 //! and the `do_mmap` MMIO-mapping path (`process::mm::do_mmap_fb`). Deliberately thin: this file
-//! owns no state of its own, just translates Limine's already-real `boot::primary_framebuffer()`
-//! response into a plain, `#[repr(C)]`, syscall/module-boundary-safe shape.
+//! owns no state of its own, just translates `boot::primary_framebuffer()`'s already-real,
+//! boot-path-agnostic `FbInfo` response into a plain, `#[repr(C)]`, syscall/module-boundary-safe
+//! shape.
 //!
 //! This is genuine, general-purpose framebuffer-device infrastructure (not doomgeneric-specific)
 //! -- the first real graphical-output primitive a future desktop environment could also build on.
@@ -15,8 +16,8 @@ use crate::boot;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FbGeometry {
-    /// Real physical base address (not the HHDM-mapped virtual one `Framebuffer::address()`
-    /// itself returns) -- `fb.address() as u64 - boot::hhdm_offset()`.
+    /// Real physical base address (not the HHDM-mapped virtual one `FbInfo::address` itself
+    /// holds) -- `fb.address - boot::hhdm_offset()`.
     pub phys_base: u64,
     /// `fb.height * fb.pitch` -- the real total byte extent, used to clamp any mmap request so it
     /// can never map past the framebuffer's own real bounds regardless of what length a caller
@@ -38,8 +39,8 @@ pub fn current_fb_geometry() -> Option<FbGeometry> {
         return None;
     }
     Some(FbGeometry {
-        phys_base: fb.address() as u64 - boot::hhdm_offset(),
-        len: fb.size() as u64,
+        phys_base: fb.address - boot::hhdm_offset(),
+        len: fb.height * fb.pitch,
         width: fb.width as u32,
         height: fb.height as u32,
         pitch: fb.pitch as u32,
