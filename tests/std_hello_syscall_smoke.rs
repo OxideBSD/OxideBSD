@@ -124,7 +124,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
     );
 
-    const STD_HELLO_SYSCALL_SMOKE_ELF: &[u8] = include_bytes!(env!("STD_HELLO_SYSCALL_SMOKE_ELF_PATH"));
+    const STD_HELLO_SYSCALL_SMOKE_ELF: &[u8] =
+        include_bytes!(env!("STD_HELLO_SYSCALL_SMOKE_ELF_PATH"));
     serial_println!(
         "std_hello_syscall_smoke: spawning std-hello-syscall-smoke as pid 1 ({} byte ELF)",
         STD_HELLO_SYSCALL_SMOKE_ELF.len()

@@ -437,9 +437,11 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
     // call (we're still inside sys_fork's/sys_clone's own handling of it).
     let rsp = unsafe {
         match new_user_rsp {
-            Some(new_rsp) => {
-                crate::process::context_switch::seed_clone_frame(kernel_stack_top, parent_frame, new_rsp)
-            }
+            Some(new_rsp) => crate::process::context_switch::seed_clone_frame(
+                kernel_stack_top,
+                parent_frame,
+                new_rsp,
+            ),
             None => crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame),
         }
     };

@@ -210,13 +210,13 @@ global_asm!(
     // documented meaning for that field combination). `flags = 1` (optional): a loader that can't
     // satisfy this should still boot us, just without a framebuffer, matching this tag's sibling
     // `EFI_BS` tag's own precedent above rather than refusing to boot outright.
-    ".short 5",  // type
-    ".short 1",  // flags (optional)
-    ".long 20",  // size
-    ".long 0",   // width (no preference)
-    ".long 0",   // height (no preference)
-    ".long 0",   // depth (no preference)
-    ".long 0",   // pad to the next 8-byte boundary (20 -> 24)
+    ".short 5", // type
+    ".short 1", // flags (optional)
+    ".long 20", // size
+    ".long 0",  // width (no preference)
+    ".long 0",  // height (no preference)
+    ".long 0",  // depth (no preference)
+    ".long 0",  // pad to the next 8-byte boundary (20 -> 24)
     // End tag.
     ".long 0",
     ".long 8",

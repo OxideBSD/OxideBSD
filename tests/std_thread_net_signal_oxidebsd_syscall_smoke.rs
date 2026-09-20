@@ -122,8 +122,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
     );
 
-    const STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF: &[u8] =
-        include_bytes!(env!("STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH"));
+    const STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF: &[u8] = include_bytes!(env!(
+        "STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH"
+    ));
     serial_println!(
         "std_thread_net_signal_oxidebsd_syscall_smoke: spawning std-thread-net-signal-oxidebsd-syscall-smoke as pid 1 ({} byte ELF)",
         STD_THREAD_NET_SIGNAL_OXIDEBSD_SYSCALL_SMOKE_ELF.len()

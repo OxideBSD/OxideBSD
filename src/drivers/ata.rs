@@ -458,9 +458,8 @@ pub extern "C" fn oxidebsd_block_read_batch(start_block: u64, count: u64, buf_pt
         let base_lba = (block * 8) as u32;
         let byte_len = (chunk * 4096) as usize;
         // SAFETY: caller guarantees buf_ptr points to `count * 4096` live, writable bytes.
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut((buf_ptr + offset) as *mut u8, byte_len)
-        };
+        let buf =
+            unsafe { core::slice::from_raw_parts_mut((buf_ptr + offset) as *mut u8, byte_len) };
         if read_sectors(
             DATA_DISK_CHANNEL,
             DATA_DISK_DRIVE,
