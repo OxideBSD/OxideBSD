@@ -905,7 +905,11 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 /// `library/Cargo.toml`'s `[patch.crates-io]` routes `libc` at our own `libc-crate-oxidebsd` fork
 /// (its `oxidebsd` branch reuses the real `linux`/musl cfg-gated code paths throughout, since our
 /// musl fork's public C ABI is unchanged from stock).
-fn build_std_oxidebsd_userland_crate(crate_name: &str, env_var: &str, musl_sysroot: &Path) -> PathBuf {
+fn build_std_oxidebsd_userland_crate(
+    crate_name: &str,
+    env_var: &str,
+    musl_sysroot: &Path,
+) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crate_dir = Path::new(manifest_dir)
         .join("userland-std")
@@ -915,10 +919,7 @@ fn build_std_oxidebsd_userland_crate(crate_name: &str, env_var: &str, musl_sysro
         .join("target/userland-std-oxidebsd")
         .join(crate_name);
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        crate_dir.join("src").display()
-    );
+    println!("cargo:rerun-if-changed={}", crate_dir.join("src").display());
     println!(
         "cargo:rerun-if-changed={}",
         crate_dir.join("Cargo.toml").display()
@@ -939,7 +940,9 @@ fn build_std_oxidebsd_userland_crate(crate_name: &str, env_var: &str, musl_sysro
     // more reliable second signal, kept alongside the directory watch rather than replacing it.
     println!(
         "cargo:rerun-if-changed={}",
-        Path::new(manifest_dir).join("third_party/rust/library").display()
+        Path::new(manifest_dir)
+            .join("third_party/rust/library")
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -1884,7 +1887,8 @@ const CLANG_TARGET_TRIPLE: &str = "x86_64-unknown-oxidebsd-musl";
 /// this repo (the host's own `/usr/include`) -- `collect_dir_files` isn't a fit since that returns
 /// `include_bytes!`-ready paths for a generated Rust source, not a real filesystem copy.
 fn copy_dir_recursive(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).unwrap_or_else(|e| panic!("failed to create {}: {e}", dest.display()));
+    std::fs::create_dir_all(dest)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", dest.display()));
     let Ok(entries) = std::fs::read_dir(src) else {
         return;
     };
@@ -2127,7 +2131,9 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
         .arg(format!("-D{p}LIBCXX_ENABLE_THREADS=ON"))
         .arg(format!("-D{p}LIBCXX_HAS_MUSL_LIBC=ON"))
         .arg(format!("-D{p}LIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON"))
-        .arg(format!("-D{p}LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=ON"))
+        .arg(format!(
+            "-D{p}LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=ON"
+        ))
         .arg(format!("-D{p}LIBCXXABI_ENABLE_SHARED=OFF"))
         .arg(format!("-D{p}LIBCXXABI_ENABLE_STATIC=ON"))
         .arg(format!("-D{p}LIBCXXABI_USE_LLVM_UNWINDER=ON"))
@@ -2172,11 +2178,24 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
     let clang_bin = build_dir.join("bin/clang-23");
     let lld_bin = build_dir.join("bin/lld");
 
-    let freshness_floor = std::fs::metadata(host_build.join(format!(
-        "lib/{CLANG_TARGET_TRIPLE}/libc++.a"
-    )))
-    .and_then(|m| m.modified())
-    .unwrap_or(std::time::SystemTime::now());
+    // Real, previously-live build-caching gotcha, the same class CLAUDE.md's std-target section
+    // already documents for `build_std_oxidebsd_userland_crate`/`modules/oxfs`, hit here too:
+    // this staleness check only ever compared against the *host* build's own `libc++.a` mtime,
+    // never `musl_sysroot`'s -- so patching musl and rebuilding it (this function's own caller
+    // already does that unconditionally) left `clang_bin`/`lld_bin` looking perfectly "fresh"
+    // and skipped `ninja` entirely, silently keeping the on-target `clang`/`lld` binaries linked
+    // against the *old* musl. Found live: a real musl `execve.c` fix (a stale
+    // `MAX_EXECVE_ENTRIES` truncating a real `clang -cc1` subprocess's own argv) never actually
+    // took effect in the seeded `/bin/clang` until this was fixed, even though the fresh musl
+    // source was rebuilt correctly every time.
+    let musl_libc_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let freshness_floor =
+        std::fs::metadata(host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a")))
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::now())
+            .max(musl_libc_mtime);
     let already_fresh = [&clang_bin, &lld_bin].into_iter().all(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -2187,7 +2206,18 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
         return build_dir;
     }
 
-    if !build_dir.join("build.ninja").exists() {
+    if build_dir.join("build.ninja").exists() {
+        // `ninja` has no dependency edge from `musl_sysroot`'s own libraries to this build's
+        // *link* steps (they're resolved by the linker via `-DCMAKE_SYSROOT=`, never recorded as
+        // ninja-tracked inputs) -- so if `clang_bin`/`lld_bin` are merely musl-stale (already
+        // compiled, just linked against an old `libc.a`), plain `ninja clang lld` below would
+        // see its own build graph as fully satisfied and do nothing at all. Deleting just the
+        // final output binaries forces ninja to consider those two link edges outstanding and
+        // redo them -- a real relink using already-compiled object files, not a full rebuild.
+        for bin in [&clang_bin, &lld_bin] {
+            let _ = std::fs::remove_file(bin);
+        }
+    } else {
         std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-target-build");
         let host_clang = host_build.join("bin/clang");
         let host_clangxx = host_build.join("bin/clang++");
@@ -2210,10 +2240,7 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
             .arg("-DCMAKE_EXE_LINKER_FLAGS=-static -fuse-ld=lld")
             .arg("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")
             .arg("-DCMAKE_CROSSCOMPILING=TRUE")
-            .arg(format!(
-                "-DCMAKE_FIND_ROOT_PATH={}",
-                musl_sysroot.display()
-            ))
+            .arg(format!("-DCMAKE_FIND_ROOT_PATH={}", musl_sysroot.display()))
             .args([
                 "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
                 "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",

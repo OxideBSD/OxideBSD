@@ -2494,21 +2494,26 @@ enum OpenFile {
         /// check).
         readonly: bool,
         /// Real `O_RDWR` (as opposed to `O_WRONLY`) at `open()` time -- unlocks real `read()`/
-        /// `lseek()`/`pread()`/`pwrite()` support directly against this same fd's own pending (or
+        /// `pread()`/`pwrite()` support directly against this same fd's own pending (or
         /// already-committed, via `resolve_write_fd_inode`'s forced early commit) content, on top
         /// of the ordinary write-then-commit-at-close path every `Write` fd already has -- see
-        /// `oxfs_read`/`oxfs_lseek`/`oxfs_pread`/`oxfs_pwrite`'s own doc comments. `false` (the
-        /// existing, unchanged behavior: `read()`/`lseek()` are `EBADF`/`ESPIPE`) for a plain
-        /// `O_WRONLY` fd -- found missing live via the Open POSIX Test Suite's `aio_read`/
-        /// `aio_write`/`lio_listio` pilot, all three of which `open(O_CREAT|O_RDWR)` then read back
-        /// through the very same fd they just wrote.
+        /// `oxfs_read`/`oxfs_pread`/`oxfs_pwrite`'s own doc comments. `false` (the existing,
+        /// unchanged behavior: `read()` is `EBADF`) for a plain `O_WRONLY` fd -- found missing
+        /// live via the Open POSIX Test Suite's `aio_read`/`aio_write`/`lio_listio` pilot, all
+        /// three of which `open(O_CREAT|O_RDWR)` then read back through the very same fd they
+        /// just wrote. **Not** what gates `lseek()`/`write()`-after-seek any more, see
+        /// `position`'s own doc comment below.
         readwrite: bool,
-        /// Real `read()`/`lseek()` cursor -- meaningful only when `readwrite` is `true` (an
-        /// ordinary `O_WRONLY` fd has no real seekable position at all, see `readonly`'s sibling
-        /// `readwrite` field above). Distinct from `len` (this fd's own pending-write-buffer
-        /// extent, still used exactly as before for the write side) since a real caller can
-        /// `lseek()` this back to an earlier position without discarding what's already been
-        /// written.
+        /// Real `write()`/`lseek()` cursor -- meaningful for every `Write` fd now, `O_WRONLY`
+        /// included (see `oxfs_lseek`'s own doc comment for the real bug this closes: an
+        /// on-target Clang/LLVM `ld.lld` link corrupting its own freshly-written ELF object by
+        /// backpatching its header via `lseek(SEEK_SET)` + `write()`, which used to be flatly
+        /// `ESPIPE` for a plain `O_WRONLY` fd). Distinct from `len` (this fd's own
+        /// pending-write-buffer extent, still used exactly as before for the streaming-append
+        /// fast path) -- `oxfs_write` compares this against `write_pos + len` (the streaming
+        /// path's own natural next append point) to decide whether a `write()` call should take
+        /// that fast path or instead land at this exact seeked position via the same
+        /// `write_inode_at` primitive `pwrite(2)` uses (see `oxfs_write`'s own doc comment).
         position: usize,
         /// The real requested creation mode (`open(O_CREAT, mode)`'s own `mode` argument, masked
         /// to `0o777`) -- only meaningful when `existing_inode` is still `None` at `commit_write_
@@ -3673,6 +3678,23 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
 /// replaces). May flush more than once for one large `len`; each flush re-fetches `find_open_file`
 /// immediately before/after rather than holding a field-level borrow across it, the same
 /// aliasing-avoidance discipline `oxfs_read`'s own `readwrite` handling already establishes.
+///
+/// **Real random-access write, once `lseek()` has moved `position` away from the streaming
+/// append point** (`write_pos + len`, i.e. where this fast path would land next) -- found live
+/// via a real on-target Clang/LLVM `clang -cc1`/`ld.lld` ELF object write:
+/// `llvm::raw_fd_ostream::pwrite_impl` backpatches the freshly-written ELF header's
+/// `e_shoff`/`e_shnum` fields via a real `lseek(SEEK_SET)` + `write()` + `lseek(SEEK_SET)`
+/// sequence (LLVM never issues a real `pwrite64` syscall for this, on any platform), then
+/// resumes wherever it left off. `oxfs_lseek` now gives every `Write` fd (not just `O_RDWR`
+/// ones) a real seekable `position` -- but until this fast path itself learned to check for a
+/// divergence, a plain `write()` after that `lseek()` kept blindly appending to the streaming
+/// buffer's own tail regardless of `position`, so both backpatches silently landed at the file's
+/// real end instead of overwriting the header, corrupting every object `ld.lld` tried to link
+/// (`ld.lld: error: <obj>: section header string table index 1 does not exist` -- the header's
+/// own `e_shnum`/`e_shoff` never left their initial zero placeholders). Routed through the exact
+/// same `resolve_write_fd_inode`/`write_inode_at` primitives `oxfs_pwrite` already uses --
+/// deliberately bypasses `WRITE_BUFFERS` entirely, forcing an early commit of anything still
+/// buffered first so this never overwrites stale, not-yet-flushed content.
 extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
     match find_open_file(fd) {
         Some(OpenFile::Write { readonly: true, .. }) => return -EBADF,
@@ -3690,6 +3712,37 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
     // touching `WRITE_BUFFERS` so a fd that only ever does zero-length writes never claims a slot.
     if len == 0 {
         return 0;
+    }
+    if let Some(OpenFile::Write {
+        position,
+        write_pos,
+        len: buf_len,
+        ..
+    }) = find_open_file(fd)
+    {
+        let natural_append = *write_pos + *buf_len as u64;
+        if *position as u64 != natural_append {
+            let seek_pos = *position;
+            let Some(inode) = resolve_write_fd_inode(fd) else {
+                return -EIO;
+            };
+            // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
+            let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+            if !write_inode_at(inode, seek_pos, data) {
+                return -EIO;
+            }
+            let Some(OpenFile::Write {
+                position,
+                write_pos,
+                ..
+            }) = find_open_file(fd)
+            else {
+                return -EBADF;
+            };
+            *position += data.len();
+            *write_pos = (*write_pos).max(*position as u64);
+            return len as i64;
+        }
     }
     let requested = len as usize;
     let mut written = 0usize;
@@ -3710,6 +3763,7 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
         let OpenFile::Write {
             buf_slot,
             len: buf_len,
+            position,
             ..
         } = file
         else {
@@ -3733,6 +3787,7 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
         let src = unsafe { core::slice::from_raw_parts((ptr as *const u8).add(written), n) };
         buffer[*buf_len..*buf_len + n].copy_from_slice(src);
         *buf_len += n;
+        *position += n;
         written += n;
     }
     if written > 0 {
@@ -5221,13 +5276,18 @@ fn write_console_stat(buf_ptr: u64) -> i64 {
 /// (found live via TinyCC needing a real file size upfront to load `crt1.o`/`libc.a` whole).
 /// `offset`/`whence` arrive as real `u64` register values -- `offset` is reinterpreted as `i64`
 /// (real `lseek(2)`'s own signed-offset convention; musl's `off_t` is 64-bit on this arch, so no
-/// truncation). Real `SEEK_SET=0`/`SEEK_CUR=1`/`SEEK_END=2` -- no divergence to remap. Only the
+/// truncation). Real `SEEK_SET=0`/`SEEK_CUR=1`/`SEEK_END=2` -- no divergence to remap. The
 /// `{FileRead,DirListing,ProcRead,ProcDir}` variants have a real `position`/size to seek within,
-/// plus now `Write` fds with real `readwrite` support (see that field's own doc comment) -- a
-/// plain `O_WRONLY` `Write` fd (an in-progress accumulate-then-commit buffer, not a real
-/// random-access file) and the synthetic `/dev/*` variants still report `ESPIPE`, the real POSIX
-/// answer for "this fd has no seekable position", rather than silently accepting a seek that would
-/// never actually change what a later `read`/`write` sees.
+/// and so does every `Write` fd now, `O_WRONLY` included, not just `O_RDWR` ones -- only the
+/// synthetic `/dev/*` variants still report `ESPIPE`, the real POSIX answer for "this fd has no
+/// seekable position". **Real, previously-missing plain-`O_WRONLY` seek support**, found live via
+/// a real on-target Clang/LLVM `ld.lld` link: `llvm::raw_fd_ostream` backpatches a freshly
+/// written ELF object's header fields (`e_shoff`/`e_shnum`) via `lseek(SEEK_SET)` + `write()` +
+/// `lseek(SEEK_SET)` on its own `O_WRONLY` output fd -- with this reporting `ESPIPE` (silently
+/// ignored by LLVM's own error-handling, no crash), `oxfs_write`'s own append-only fast path
+/// never noticed the corresponding `write()`s were meant to overwrite the header in place, so
+/// they landed at the file's real tail instead (see `oxfs_write`'s own doc comment for the full
+/// story and the exact `ld.lld` error this produced).
 extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let real_fd = unsafe { oxidebsd_real_fd_of(fd) };
@@ -5235,12 +5295,12 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         return -EBADF;
     }
     let real_fd = real_fd as u64;
-    // Real `O_RDWR` support: a separate, sequential lookup rather than a branch inside the match
-    // below -- see `oxfs_read`'s own doc comment for why (`resolve_write_fd_inode` needs its own
-    // fresh `find_open_file` call, which would alias the match's own `&mut OpenFile`). Forces an
-    // early real commit so `size` reflects everything written so far, not just this fd's own
-    // still-pending buffer.
-    if matches!(find_open_file(real_fd), Some(OpenFile::Write { readwrite: true, .. })) {
+    // Real seekable-`Write`-fd support: a separate, sequential lookup rather than a branch inside
+    // the match below -- see `oxfs_read`'s own doc comment for why (`resolve_write_fd_inode`
+    // needs its own fresh `find_open_file` call, which would alias the match's own `&mut
+    // OpenFile`). Forces an early real commit so `size` reflects everything written so far, not
+    // just this fd's own still-pending buffer.
+    if matches!(find_open_file(real_fd), Some(OpenFile::Write { .. })) {
         let Some(inode) = resolve_write_fd_inode(real_fd) else {
             return -EIO;
         };
@@ -5272,6 +5332,9 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         OpenFile::DirListing { content: _, len, position, .. } => (position, *len as i64),
         OpenFile::ProcRead { len, position, .. } => (position, *len as i64),
         OpenFile::ProcDir { len, position, .. } => (position, *len as i64),
+        // `OpenFile::Write` is always caught by the unconditional check above now (every `Write`
+        // fd, `O_WRONLY` included, has a real seekable `position`) -- kept here only so this
+        // match stays exhaustive against `OpenFile`'s own variant list.
         OpenFile::Write { .. }
         | OpenFile::DevRandom
         | OpenFile::DevNull

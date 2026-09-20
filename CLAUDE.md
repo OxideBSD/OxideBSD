@@ -1190,7 +1190,7 @@ tcc's `-usegcc=yes` escape hatch (safe — pure freestanding numeric helpers, no
   /hello.c`, `wait4`, then `fork`+`execve` the produced ELF itself, plus the same round trip via
   bare `tcc -o`. **Not covered**: `-run` (in-memory JIT execution), self-hosting.
 
-## Clang/LLVM port: in progress (`third_party/llvm-project`, `modules/oxfs`, `build.rs`)
+## Clang/LLVM port: Milestone 7 done, real compile+link+run round trip (`third_party/llvm-project`, `modules/oxfs`, `build.rs`)
 
 A second, real on-target C/C++ toolchain — genuinely self-hosted (a host-built cross-compiler
 builds a target-executable `clang`+`ld.lld`), not vendored binaries. Vendored as a submodule
@@ -1246,15 +1246,47 @@ real, independent bugs, each found live via `tests/clang_syscall_smoke.rs` +
   otherwise), and `--target=x86_64-unknown-oxidebsd-musl` must be passed explicitly (the on-target
   binary's own baked-in default triple is still `x86_64-unknown-linux-gnu`).
 
-**Still open, not yet root-caused**: `ld.lld -static -o out.elf in.o` now fails with `ld.lld: error:
-in.o: section header string table index 1 does not exist`. Confirmed *not* a truncation/plumbing
-bug — the object is written (a few plain `write()`s), closed cleanly (`commit_write_buffer`
-succeeds), and read back by `ld.lld` via one `pread()` that returns the exact byte count written.
-`tcc`'s own compile+link round trip through this identical oxfs write/close/reopen path still
-passes clean, so the write path itself isn't implicated — the object's actual *content* is what
-`ld.lld` considers malformed, cause unknown (a real Clang/LLVM codegen quirk for this target is one
-live theory, not yet confirmed). A hex dump of the actual committed bytes is the next real step, not
-more syscall tracing.
+**Two more real bugs closed the whole milestone, both root-caused by hexdumping the actual
+committed object bytes (not more syscall tracing) once a real link kept failing with `ld.lld:
+error: <obj>: section header string table index 1 does not exist`:**
+
+- **Real bug 1, in oxfs itself**: `llvm::raw_fd_ostream::pwrite_impl` (LLVM's ELF object writer,
+  on every platform — never a real `pwrite64` syscall) backpatches a freshly-written object's
+  header (`e_shoff`/`e_shnum`, computed only after every section is already written) via
+  `lseek(SEEK_SET)` + `write()` + `lseek(SEEK_SET)` on its own plain `O_WRONLY` output fd. oxfs's
+  `Write`-mode fds reported `ESPIPE` for *any* `lseek()`, silently ignored by LLVM's own
+  error-handling (no crash) — so both backpatch `write()`s landed at the file's real tail instead
+  of overwriting the header in place, leaving `e_shoff`/`e_shnum` at their initial zero
+  placeholders (confirmed byte-for-byte: the object's last 10 bytes were exactly the two patch
+  values that belonged at offsets 40/60). Fixed: every `Write` fd (`O_WRONLY` included, not just
+  `O_RDWR`) now gets a real seekable `position`, and `oxfs_write` compares it against the
+  streaming path's own natural next-append offset (`write_pos + len`) to decide whether a
+  `write()` call should take the existing fast buffered-append path or instead overwrite at that
+  exact seeked position via the same `write_inode_at` primitive `pwrite(2)` already uses
+  (`oxfs_lseek`/`oxfs_write` in `modules/oxfs/src/lib.rs`).
+- **Real bug 2, in musl**: `execve.c`'s own `MAX_EXECVE_ENTRIES` (a fixed-size stack array
+  converting a real NUL-terminated `argv[]` into this ABI's length-prefixed wire format) was
+  hardcoded to `32`, stale against `src/process/lifecycle.rs`'s own `MAX_PTR_LEN_ENTRIES` (raised
+  to `256` earlier in this same port) — silently truncating a real `clang` driver → `cc1`
+  subprocess exec's argv mid-flag whenever enough preceding flags (`-dumpdir`/`-static-define`,
+  present only on the full compile+link path, never a bare `-c`, which clang runs `cc1` in-process
+  and never execs at all) pushed a later flag's own *value* past index 31 — surfaced as a bogus
+  `error: argument to '-internal-isystem' is missing`. Fixed on the musl `oxidebsd` branch.
+  **A third, real build-caching gap found applying this fix**: `build_llvm_target_toolchain`'s own
+  staleness check only ever compared `clang`/`ld.lld`'s mtimes against the *host* build's
+  `libc++.a`, never `musl_sysroot`'s — so a musl-only fix left the on-target `clang`/`ld.lld`
+  binaries looking "fresh" and silently kept linked against the *old* musl (this build-caching
+  bug class already burned the userland-std/`modules/oxfs` build path once, see the std-target
+  section below — same shape, different consumer). Fixed: the staleness floor now includes
+  `musl_sysroot`'s own `libc.a` mtime, and going stale that way now deletes just the two output
+  binaries (not the whole build dir) to force a real `ninja` relink from already-compiled objects,
+  since ninja itself has no dependency edge from an external sysroot lib to its own link steps.
+
+Verified end to end via `tests/clang_syscall_smoke.rs`: a real `clang -static -o /hello.elf
+/hello.c` (real `cc1` compile, real `ld.lld` link against `crt1.o`/`crti.o`/`crtn.o`/
+`libclang_rt.builtins.a`/`libc.a`/`crtn.o`) followed by actually running the produced `/hello.elf`,
+which printed its own output and exited `0`. Closes this port's own headline subprocess-pipeline
+milestone.
 
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`src/process/elf.rs`, `src/process/lifecycle.rs`, `build.rs`, `modules/oxfs`)
 
