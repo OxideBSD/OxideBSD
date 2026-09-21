@@ -180,6 +180,10 @@ fn main() {
     build_userland_crate("dynlink-syscall-smoke", "DYNLINK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pie-aslr-driver", "PIE_ASLR_DRIVER_ELF_PATH");
     build_userland_crate(
+        "native-bin-syscall-smoke",
+        "NATIVE_BIN_SYSCALL_SMOKE_ELF_PATH",
+    );
+    build_userland_crate(
         "sa-siginfo-syscall-smoke",
         "SA_SIGINFO_SYSCALL_SMOKE_ELF_PATH",
     );
@@ -372,10 +376,18 @@ fn main() {
     // comment) -- a plain work-stealing pool over a shared atomic index, not a thread per applet
     // (~300 of those would vastly oversubscribe an 8-core host) and not a chunked static split
     // (uneven applet build times would leave some workers idle while others queue up).
+    // The 12 names in `NATIVE_BIN_UTILITIES` are filtered out here, so BusyBox neither builds nor
+    // embeds them -- their `/bin/<name>` is a native `bin/<name>` crate instead (see below). Done
+    // as a filter, not by deleting their tuples from `BUSYBOX_APPLETS`/`BUSYBOX_APPLETS_PASS2`,
+    // on purpose: every applet's staleness check watches `build_busybox.rs`'s own mtime, so
+    // editing that file forces a full ~256-applet BusyBox rebuild (roughly an hour) for a change
+    // that alters no applet's binary. The now-inert tuples there can be deleted whenever that file
+    // next needs an unrelated edit anyway.
     let all_applets: Vec<(&str, &str, u64)> = BUSYBOX_APPLETS
         .iter()
         .copied()
         .chain(BUSYBOX_APPLETS_PASS2.iter().copied())
+        .filter(|&(_, out_name, _)| !NATIVE_BIN_UTILITIES.contains(&out_name))
         .collect();
     let jobs = build_jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -497,6 +509,30 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
+    // Native `bin/<name>` utilities (see `NATIVE_BIN_UTILITIES`) bind to the *same*
+    // `OXFS_<NAME>_ELF_PATH` names their BusyBox predecessors used, so `sys/modules/oxfs`'s existing
+    // `seed_file(bin, b"<name>", include_bytes!(env!(...)))` call sites need no edit at all.
+    // `build_crate_at` only watches each crate's *own* directory -- `lib/oxlibc` is their shared
+    // dependency, so a change there has to retrigger this build script explicitly.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/oxlibc").display()
+    );
+    let native_bin_paths: Vec<(String, String)> = NATIVE_BIN_UTILITIES
+        .iter()
+        .map(|&name| {
+            let elf = build_pie_crate_at(
+                &format!("bin/{name}"),
+                &format!("BIN_{}_ELF_PATH", name.to_uppercase()),
+            );
+            (oxfs_env_var_name(name), elf.to_str().unwrap().to_string())
+        })
+        .collect();
+    oxfs_extra_env.extend(
+        native_bin_paths
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str())),
+    );
     build_module_crate("oxfs", "OXFS", &oxfs_extra_env);
 
     // Real disk persistence (see sys/drivers/ata.rs and sys/modules/oxfs's own "Real disk persistence"
@@ -532,6 +568,13 @@ fn main() {
         build_multiboot2_boot_smoke_crate();
     }
 }
+
+/// `/bin` utilities that are native OxideBSD binaries (`bin/<name>`, built by `build_pie_crate_at`
+/// against `lib/oxlibc`) instead of BusyBox applets -- the first batch of the userland replacement.
+/// See `main`'s `all_applets` filter for how BusyBox is kept from also building/embedding them.
+const NATIVE_BIN_UTILITIES: &[&str] = &[
+    "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "touch",
+];
 
 fn oxfs_env_var_name(out_name: &str) -> String {
     let suffix = if out_name == "sh" {

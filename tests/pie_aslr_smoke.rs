@@ -12,7 +12,7 @@
 //! report is strictly sequential: each `execve`d process's own `wait4` in its parent completes
 //! before the next report can possibly arrive, so there is never real concurrent access). The
 //! final `SYS_TEST_EXIT` call (from the driver, once both runs have fully completed) is what
-//! actually evaluates the three accumulated reports and calls `exit_qemu`.
+//! actually evaluates the four accumulated reports and calls `exit_qemu`.
 #![no_std]
 #![no_main]
 
@@ -107,10 +107,7 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
 
     let pass =
         driver_ok && count_ok && bounds_ok && aligned_ok && randomized_ok && fork_inherits_ok;
-    serial_println!(
-        "pie_aslr_smoke: {}",
-        if pass { "PASS" } else { "FAIL" }
-    );
+    serial_println!("pie_aslr_smoke: {}", if pass { "PASS" } else { "FAIL" });
     exit_qemu(if pass {
         QemuExitCode::Success
     } else {

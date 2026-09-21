@@ -32,7 +32,8 @@ Current state:
   hand-written `stsh` shell, since removed entirely (v0.2.0 cleanup). 256 BusyBox applets run as
   standalone static binaries, `execve`'d individually (not a multi-call `busybox` binary
   dispatching on `argv[0]` — that passthrough exists now, but the roster hasn't been rebuilt to
-  use it).
+  use it). 12 of them (`echo true false pwd cat ls mkdir rm cp mv ln touch`) are now native
+  `bin/<name>` PIE binaries over `lib/oxlibc` instead — see "Real PIE/ASLR loading" below.
 - A real networking stack (`sys/drivers/pci.rs`, `sys/net/*`, `sys/modules/net/`): PCI + an rtl8139
   driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP/raw-ICMP sockets, `poll(2)`, and real hostname
   resolution over musl's own DNS stub resolver (no DNS protocol code of its own) — see "Real
@@ -1287,6 +1288,44 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   actually enforcing real placement/protection outside the narrow anonymous-mmap-window scope that
   now exists (real file-backed segment protection and `MAP_FIXED` placement guarantees a real
   dynamic loader would need are still permissive no-ops/bump-allocators).
+
+## Real PIE/ASLR loading + native `/bin` utilities (`sys/process/aslr.rs`, `lib/oxlibc`, `bin/*`, `build.rs`)
+
+- A no-`PT_INTERP` `ET_DYN` main binary is a real PIE: `do_execve` loads it at a fresh random,
+  page-aligned bias from `aslr::pick_bias()` (~32 bits, window starts at `0x3000_0000_0000`, an
+  empty gap above the mmap region). `fork` never re-picks (it never calls `elf::load`). Every
+  fixed-`ET_EXEC` (`regress/*`, BusyBox) is unchanged. `user_stack::build` adds `main_bias` to
+  `AT_PHDR`/`AT_ENTRY` (silently correct before only because that bias was always 0).
+- **No in-kernel relocation processor**: a PIE-model binary must have *zero* relocations, enforced
+  at build time by `build_pie_crate_at`'s `assert_zero_relocations` (fails the build). Traps found
+  live: (1) ordinary disciplined Rust still gets relocations, because `#[track_caller]` bounds-check
+  `Location` metadata embeds a real address — a fixed-address link hides this entirely (same source:
+  0 relocs as `ET_EXEC`, 4 as `ET_DYN`); `build_pie_crate_at` bakes in `-C panic=immediate-abort -Z
+  location-detail=none` to fix it (so `#[panic_handler]` is mostly dead code). (2) `_start as usize
+  as u64` compiles to a stored, GOT-style address — take symbol addresses with `asm!("lea …",
+  sym _start)`. (3) no `core::fmt`, no tables of slices (use `if` chains).
+- PIE crates use **no `-T<linker.ld>`**: rust-lld's default script is what maps the ELF header/phdrs
+  into the first `PT_LOAD` (so `AT_PHDR` is dereferenceable; note the first phdr is `PT_PHDR`, not
+  `PT_LOAD`). Their `build.rs` is just `-pie` + `--no-dynamic-linker`.
+- `lib/oxlibc` (`#![no_std]`, deliberately the seed of the eventual libc): syscall stubs,
+  `entry_point!` (`global_asm!` `_start` capturing `RSP`), `exit`, the crate graph's one
+  `#[panic_handler]`, `fs`/`io`/`path`/`args`. `bin/{echo,true,false,pwd,cat,ls,mkdir,rm,cp,mv,ln,
+  touch}` bind to the same `OXFS_<NAME>_ELF_PATH` names their BusyBox predecessors used, so
+  `sys/modules/oxfs`'s `seed_file` calls are unchanged. `NATIVE_BIN_UTILITIES` in `build.rs` filters
+  them out of the roster — deliberately *not* by deleting their tuples from `build_busybox.rs`,
+  which would force a ~1h full BusyBox rebuild (the inert tuples can go with the next unrelated
+  edit there). `usr.bin/lsoxmod` is PIE too.
+- Behavior notes: flags are `-n` echo, `-a -l` ls (sorted; no timestamps/symlink targets), `-p`
+  mkdir, `-r -f` rm, `-r` cp, `-s` ln, `-c` touch; short-flag clusters (`-rf`) work. `cat` with no
+  file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
+  `cat` just exits). `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
+  counts *used* records, so deleting under a live cursor skips entries. `touch` on an existing
+  file is only an existence check (`oxfs_utimensat` doesn't move timestamps).
+- **Gotcha**: a persistent `target/oxfs_disk.img` keeps its old seeded binaries — the native
+  utilities only appear after a fresh format (delete the image; formatting takes ~10 min).
+- Verified by `tests/pie_aslr_smoke.rs` (real per-exec randomization, fork inherits),
+  `tests/native_bin_syscall_smoke.rs` (all 12, flags + error paths), and `sh /test_busybox.sh`
+  through real hush (104/104), driven headlessly via `OXIDEBSD_QEMU_MONITOR` `sendkey`.
 
 ## Real getrandom/sysinfo/sigaltstack/pause/sigsuspend/POSIX timers/POSIX message queues/SysV IPC (`sys/modules/posix_compat`, `sys/modules/signal`, `sys/modules/clock`, `sys/fs/{mqueue,sysv_msg,sysv_sem,sysv_shm,sysv_ipc}.rs`)
 

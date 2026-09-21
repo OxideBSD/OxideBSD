@@ -15,12 +15,12 @@
 //! by `tests/pie_aslr_smoke.rs`), then `fork()`s itself once: the child re-reports the identical
 //! value (proving `fork()` never re-randomizes -- see `aslr.rs`'s own doc comment for why this
 //! must hold by construction) before exiting; the parent `wait4()`s for it. Two full runs of this
-//! binary (driven by `pie-aslr-driver`) therefore produce three reports total -- first-run,
-//! second-run, second-run's-forked-child -- which `tests/pie_aslr_smoke.rs`'s own
-//! `SYS_TEST_REPORT_U64` handler accumulates and `SYS_TEST_EXIT`'s handler evaluates: the first
-//! two must differ (real per-`execve()` randomization) and the second and third must match
-//! (`fork()` inheritance), and all reported values must land inside
-//! `process::aslr::PIE_ASLR_BASE..PIE_ASLR_CEILING`, page-aligned.
+//! binary (driven by `pie-aslr-driver`) therefore produce four reports total -- first run, its
+//! forked child, second run, its forked child -- which `tests/pie_aslr_smoke.rs`'s own
+//! `SYS_TEST_REPORT_U64` handler accumulates and `SYS_TEST_EXIT`'s handler evaluates: the two runs'
+//! own addresses must differ (real per-`execve()` randomization), each run's forked child must
+//! match its own parent (`fork()` inheritance), and the reported values must land inside
+//! `process::aslr::PIE_ASLR_BASE..PIE_ASLR_CEILING`, with the runs differing by whole pages.
 #![no_std]
 #![no_main]
 

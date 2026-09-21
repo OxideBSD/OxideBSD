@@ -37,6 +37,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cat"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,6 +92,13 @@ name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
+
+[[package]]
+name = "cp"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -136,6 +150,20 @@ dependencies = [
 [[package]]
 name = "dynlink-syscall-smoke"
 version = "0.1.0"
+
+[[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
+name = "false"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
 
 [[package]]
 name = "fb-mmap-syscall-smoke"
@@ -208,6 +236,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b23ac50abb8261cb38c6e2a7192d3302e0836dac1628f6a93b82b4fad185897"
 
 [[package]]
+name = "ln"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -217,8 +252,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ls"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
 name = "lsoxmod"
 version = "0.1.0"
+
+[[package]]
+name = "mkdir"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
 
 [[package]]
 name = "mmap-syscall-smoke"
@@ -245,6 +294,17 @@ version = "0.1.0"
 dependencies = [
  "oxidebsd",
 ]
+
+[[package]]
+name = "mv"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
+name = "native-bin-syscall-smoke"
+version = "0.1.0"
 
 [[package]]
 name = "native_abi"
@@ -282,6 +342,10 @@ dependencies = [
  "spin",
  "x86_64",
 ]
+
+[[package]]
+name = "oxlibc"
+version = "0.1.0"
 
 [[package]]
 name = "pause-syscall-smoke"
@@ -342,8 +406,22 @@ name = "pthread-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "pwd"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
 name = "ring3-smoke"
 version = "0.1.0"
+
+[[package]]
+name = "rm"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
 
 [[package]]
 name = "rt-signal-syscall-smoke"
@@ -452,6 +530,20 @@ version = "0.1.0"
 [[package]]
 name = "tcp-syscall-smoke"
 version = "0.1.0"
+
+[[package]]
+name = "touch"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
+
+[[package]]
+name = "true"
+version = "0.1.0"
+dependencies = [
+ "oxlibc",
+]
 
 [[package]]
 name = "typenum"

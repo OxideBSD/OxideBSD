@@ -103,7 +103,12 @@ fn execve_probe() -> ! {
                     break;
                 }
             }
-            let _ = syscall(SYS_WRITE, STDOUT, buf.as_ptr().add(i) as u64, (buf.len() - i) as u64);
+            let _ = syscall(
+                SYS_WRITE,
+                STDOUT,
+                buf.as_ptr().add(i) as u64,
+                (buf.len() - i) as u64,
+            );
         }
         let nl = b"\n";
         let _ = syscall(SYS_WRITE, STDOUT, nl.as_ptr() as u64, nl.len() as u64);
