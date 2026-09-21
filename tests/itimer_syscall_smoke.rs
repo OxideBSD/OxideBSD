@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit/write/getpid/clock_gettime's own
 //! syscall registration path) and `clock` (`SYS_SETITIMER`/`SYS_GETITIMER`), and spawns
-//! `userland/itimer-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
+//! `regress/itimer-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
 //! full two-part scenario (a `setitimer`/`getitimer` round trip, then a real default-disposition
 //! `SIGALRM` termination check across a genuine `SYSCALL` boundary).
 //!
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/itimer-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/itimer-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

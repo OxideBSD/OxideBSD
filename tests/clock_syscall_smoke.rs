@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit's own syscall registration path) and
 //! `clock` (`SYS_CLOCK_GETTIME`/`SYS_CLOCK_GETRES`/`SYS_CLOCK_SETTIME`/`SYS_CLOCK_NANOSLEEP`/...),
-//! then spawns `userland/clock-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
+//! then spawns `regress/clock-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
 //! for the full eight-part scenario closing the Open POSIX Test Suite pilot's `clock_getcpuclockid/
 //! *.c`/`clock_getres/*.c`/`clock_nanosleep/*.c`/`clock_settime/*.c` files.
 //!
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/clock-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/clock-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

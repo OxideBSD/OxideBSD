@@ -4,7 +4,7 @@
 //! `SYS_SCHED_GET_PRIORITY_MAX`/`SYS_SCHED_GET_PRIORITY_MIN`), and `oxfs` (`SYS_OPEN`/
 //! `SYS_CLOSE`/`SYS_READ`/`SYS_WRITE`, plus this pass's `SYS_FSYNC`/`SYS_SYNC`/`SYS_FTRUNCATE`/
 //! `SYS_FALLOCATE`/`SYS_FLOCK`/`SYS_STATFS`/`SYS_FSTATFS`), then spawns
-//! `userland/needs-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
+//! `regress/needs-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
 //! full scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -24,8 +24,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/needs-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/needs-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

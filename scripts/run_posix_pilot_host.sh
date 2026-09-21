@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs the same vendored Open POSIX Test Suite (third_party/posixtestsuite) OxideBSD's own pilot
-# (tests/posix_conformance_smoke.rs, modules/oxfs/src/posix_conformance.sh) uses, but compiled and
+# Runs the same vendored Open POSIX Test Suite (external/gpl2/posixtestsuite) OxideBSD's own pilot
+# (tests/posix_conformance_smoke.rs, sys/modules/oxfs/src/posix_conformance.sh) uses, but compiled and
 # run directly on *this host* against its real glibc/Linux -- a genuine, apples-to-apples
 # comparison point instead of a guess. Same corpus-discovery rule as build.rs's own
 # `discover_posix_test_files` (every real conformance/interfaces/*.c file except *-buildonly.c,
@@ -24,7 +24,7 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-SUITE_DIR="$REPO_ROOT/third_party/posixtestsuite"
+SUITE_DIR="$REPO_ROOT/external/gpl2/posixtestsuite"
 INTERFACES_DIR="$SUITE_DIR/conformance/interfaces"
 INCLUDE_DIR="$SUITE_DIR/include"
 OUT_DIR="$REPO_ROOT/target/host-posix-pilot"

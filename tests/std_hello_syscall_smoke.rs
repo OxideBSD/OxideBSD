@@ -1,9 +1,9 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write), `posix_compat`
 //! (ioctl/fcntl), and `oxfs` (open/close/stat -- `/bin/std-hello`, seeded by
-//! `modules/oxfs`'s `module_init`), then spawns `userland/std-hello-syscall-smoke/` as pid 1 --
+//! `sys/modules/oxfs`'s `module_init`), then spawns `regress/std-hello-syscall-smoke/` as pid 1 --
 //! see that crate's own module doc comment for the full scenario (real `fork`+`execve` of a
 //! genuinely unmodified, prebuilt upstream Rust `std` binary linked against this project's own
-//! musl sysroot -- see `userland-std/std-hello/main.rs` and `build.rs`'s
+//! musl sysroot -- see `regress/std/std-hello/main.rs` and `build.rs`'s
 //! `build_std_hello_spike`).
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established.
@@ -20,7 +20,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/std-hello-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant.
+/// Must match `regress/std-hello-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant.
 const SYS_TEST_EXIT: u64 = 9999;
 
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
@@ -66,7 +66,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     // Real `std`'s runtime init touches signal disposition (SIGPIPE ignore) and reads the clock --
     // load `signal`/`clock` too so those come back as real successes, not `ENOSYS`, matching what
-    // a normal boot (`src/main.rs`) always has in place before spawning pid 1.
+    // a normal boot (`sys/main.rs`) always has in place before spawning pid 1.
     const SIGNAL_MOD: &[u8] = include_bytes!(env!("SIGNAL_MOD_PATH"));
     const SIGNAL_PANIC_SYMBOL: &str = env!("SIGNAL_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

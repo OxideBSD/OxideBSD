@@ -1,6 +1,6 @@
 //! Networking Phase 3's smoke test (see this repo's networking plan): exercises every syscall
-//! `modules/net` registers (`SYS_SOCKET`/`SYS_BIND`/`SYS_SENDTO`/`SYS_RECVFROM`/
-//! `SYS_SETSOCKOPT`) by calling `src/net/udp.rs`'s kernel-exported handlers directly (same
+//! `sys/modules/net` registers (`SYS_SOCKET`/`SYS_BIND`/`SYS_SENDTO`/`SYS_RECVFROM`/
+//! `SYS_SETSOCKOPT`) by calling `sys/net/udp.rs`'s kernel-exported handlers directly (same
 //! "no real process needed" style `tests/rtl8139_smoke.rs`/`tests/icmp_smoke.rs` already use --
 //! `scheduler::current_pid()` defaults to `0` before any process is spawned, the same pid
 //! `crate::fd::init()` bootstraps fd 0/1/2 under, so fd allocation/registration works fine called

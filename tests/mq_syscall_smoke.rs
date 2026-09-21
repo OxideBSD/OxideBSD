@@ -2,7 +2,7 @@
 //! registration path), `signal` (`SYS_KILL`/`SYS_SIGACTION` -- `mq_notify`'s `SIGEV_SIGNAL`
 //! delivery reuses `process::do_kill` directly, and the test installs a real `SIGUSR1` handler),
 //! `clock` (`SYS_CLOCK_GETTIME`, for the real-deadline part), and `posix_compat`
-//! (`SYS_MQ_OPEN`...`SYS_MQ_GETSETATTR`), then spawns `userland/mq-syscall-smoke/` as pid 1 -- see
+//! (`SYS_MQ_OPEN`...`SYS_MQ_GETSETATTR`), then spawns `regress/mq-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full eight-part POSIX-message-queue scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -23,14 +23,14 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/mq-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no shared
-/// crate across this ABI boundary, same convention every other userland/kernel pair here uses.
+/// Must match `regress/mq-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no shared
+/// crate across this ABI boundary, same convention every other regress/kernel pair here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 /// The real ABI number -- see `tests/socketpair_syscall_smoke.rs`'s own precedent for why this is
 /// registered directly here (delegating straight to `oxidebsd_close_fd`, the same real logic
-/// `modules/oxfs` registers it against at real boot) instead of loading all of
+/// `sys/modules/oxfs` registers it against at real boot) instead of loading all of
 /// `oxfs` just to exercise the one generic close path this test's final part needs (`mq_close`
-/// isn't its own syscall -- see `src/fs/mqueue.rs`'s own doc comment).
+/// isn't its own syscall -- see `sys/fs/mqueue.rs`'s own doc comment).
 const SYS_CLOSE: u64 = 6;
 
 extern "C" fn test_close_handler(fd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

@@ -4,7 +4,7 @@
 //! mtime/ctime scenario), `signal` (`SYS_SIGACTION`/`SYS_SIGRETURN`, plus the real
 //! ring-3-page-fault-to-signal delivery parts 2-4 exercise), and `oxfs`
 //! (`SYS_OPEN`/`SYS_CLOSE`/`SYS_UNLINK`/`SYS_FTRUNCATE`/`SYS_FSTAT`, real `/tmp`), then spawns
-//! `userland/mmap-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
+//! `regress/mmap-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
 //! scenario list (the `mmap/12-1.c` unlink-before-first-commit fix, three real
 //! fault-to-signal-delivery scenarios closing `mmap/11-2.c`/`11-3.c`, and the real `MAP_FIXED`/
 //! `MAP_PRIVATE`/`EBADF`/`EINVAL`/`mlockall`/mtime-ctime scenarios closing `mmap/3-1.c`, `9-1.c`,
@@ -27,8 +27,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/mmap-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/mmap-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

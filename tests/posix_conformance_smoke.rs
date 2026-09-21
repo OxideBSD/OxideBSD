@@ -8,7 +8,7 @@
 //! real `EAFNOSUPPORT`, not a generic `ENOSYS`, to fall back to parsing `/etc/group`), and `oxfs`
 //! (the filesystem -- `/bin/sh` and the whole `/posix-tests` tree this pilot runs
 //! against), then spawns
-//! `userland/posix-conformance-driver/` as pid 1 -- see that crate's own module doc comment for
+//! `regress/posix-conformance-driver/` as pid 1 -- see that crate's own module doc comment for
 //! why a dedicated driver exists instead of just spawning `sh` directly (this project's own
 //! established rule against scripting live interactive keyboard input -- see CLAUDE.md's Test
 //! architecture section -- and hush is normally pid 1 and interactive).
@@ -34,8 +34,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/posix-conformance-driver/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/posix-conformance-driver/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -113,8 +113,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     // interface is in `POSIX_TEST_PILOT_FILES`) -- loaded purely so `SYS_SOCKET` is a genuinely
     // *registered* syscall rather than falling through to the generic "unrecognized syscall
     // number" ENOSYS path. Found live: `sched_setparam/26-1.c`'s own privilege-drop
-    // (`su user -c ...`, see `modules/oxfs/src/posix_conformance.sh`) calls real `initgroups()`,
-    // which probes a real `AF_UNIX` socket to a local `nscd` daemon first (`third_party/musl/src/
+    // (`su user -c ...`, see `sys/modules/oxfs/src/posix_conformance.sh`) calls real `initgroups()`,
+    // which probes a real `AF_UNIX` socket to a local `nscd` daemon first (`external/mit/musl/src/
     // passwd/nscd_query.c`) and only falls back to parsing `/etc/group` for real when that
     // `socket()` call fails with exactly `EAFNOSUPPORT` -- an unregistered syscall's generic
     // `ENOSYS` doesn't qualify, so `su` died with a real "can't set groups: Function not

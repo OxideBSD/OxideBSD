@@ -3,8 +3,8 @@
 # through the Multiboot2 path, via either Limine's own `protocol: multiboot2` or real GRUB, with a
 # real QEMU display + serial-to-stdio so you can drive `hush` interactively (and, e.g., run doom).
 # See CLAUDE.md's Multiboot2 section and `oxidebsd::kernel_main`'s own doc comment for why this
-# needs its own dedicated crate (`smoke/multiboot2-kernel/`) rather than reusing `src/main.rs`
-# directly the way `smoke/multiboot2-boot-smoke` reuses `tests/multiboot2_boot_smoke.rs`.
+# needs its own dedicated crate (`regress/multiboot2-kernel/`) rather than reusing `sys/main.rs`
+# directly the way `regress/multiboot2-boot-smoke` reuses `tests/multiboot2_boot_smoke.rs`.
 #
 # Unlike `scripts/run_multiboot2_smoke.sh` (headless, test-shaped, expects the ELF already built
 # by build.rs's own side effect), this script builds its own crate directly and always boots
@@ -36,7 +36,7 @@ cd "$REPO_ROOT"
 OXIDEBSD_FIRMWARE="${OXIDEBSD_FIRMWARE:-bios}"
 export OXIDEBSD_FIRMWARE
 
-CRATE_DIR="smoke/multiboot2-kernel"
+CRATE_DIR="regress/multiboot2-kernel"
 TARGET_DIR="target/multiboot2-kernel"
 KERNEL_ELF="target/multiboot2-kernel.elf"
 
@@ -47,7 +47,7 @@ echo "  a while)." >&2
 # `[target.x86_64-oxidebsd] rustflags` (`-Tx86_64-oxidebsd.ld`, for the *plain* Limine kernel)
 # still applies to this invocation too (config discovery is based on cwd/target, unaware of which
 # crate's own build.rs also wants to supply a linker script) -- fighting with this crate's own
-# `smoke/multiboot2-kernel/build.rs`-supplied `-Tx86_64-oxidebsd-multiboot2.ld` and producing two
+# `regress/multiboot2-kernel/build.rs`-supplied `-Tx86_64-oxidebsd-multiboot2.ld` and producing two
 # conflicting `-T` scripts (confirmed live: rust-lld's "unable to place section" errors, sections
 # double-assigned). An env `RUSTFLAGS` fully replaces (not merges with) the config-resolved value
 # per Cargo's own precedence rules, matching exactly what `build.rs`'s own

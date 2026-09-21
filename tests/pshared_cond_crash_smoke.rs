@@ -5,8 +5,8 @@
 //! unconditionally blocks/restores signals around the fork transition), `posix_compat`
 //! (`SYS_FUTEX` -- what real `pthread_mutex`/`pthread_cond` are actually built on), and `oxfs`
 //! (serving `/pshared-cond-crash.elf` and real `/tmp`), then spawns
-//! `userland/pshared-cond-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
-//! the fork+execve+wait4 scenario, and `userland/pshared-cond-crash/main.c`'s own doc comment for
+//! `regress/pshared-cond-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
+//! the fork+execve+wait4 scenario, and `regress/pshared-cond-crash/main.c`'s own doc comment for
 //! what the executed fixture itself isolates: a real cross-process `PTHREAD_PROCESS_SHARED`
 //! mutex/cond, one forked child, distilled from the Open POSIX Test Suite's own
 //! `pthread_cond_broadcast/1-2.c`, which appears to genuinely stall during a full pilot run.
@@ -28,8 +28,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/pshared-cond-crash-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
-/// no shared crate across this ABI boundary, same convention every other userland/kernel pair
+/// Must match `regress/pshared-cond-crash-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
+/// no shared crate across this ABI boundary, same convention every other regress/kernel pair
 /// here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -79,7 +79,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
     // Populates SYS_SIGPROCMASK -- real fork() unconditionally blocks/restores signals around the
-    // fork transition (__block_app_sigs/__restore_sigs in third_party/musl/src/process/fork.c).
+    // fork transition (__block_app_sigs/__restore_sigs in external/mit/musl/src/process/fork.c).
     const SIGNAL_MOD: &[u8] = include_bytes!(env!("SIGNAL_MOD_PATH"));
     const SIGNAL_PANIC_SYMBOL: &str = env!("SIGNAL_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

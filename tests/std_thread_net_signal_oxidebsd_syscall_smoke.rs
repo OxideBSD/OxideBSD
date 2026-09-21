@@ -1,8 +1,8 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write), `posix_compat`
 //! (ioctl/fcntl/futex), `signal`/`clock` (real `std`'s runtime init touches both), `oxfs`
 //! (open/close/stat -- `/bin/std-thread-net-signal-oxidebsd` and its own `/bin/true`/`/bin/sleep`
-//! dependencies, all seeded by `modules/oxfs`'s `module_init`), and `net` (real socket/bind/
-//! listen/accept), then spawns `userland/std-thread-net-signal-oxidebsd-syscall-smoke/` as pid 1
+//! dependencies, all seeded by `sys/modules/oxfs`'s `module_init`), and `net` (real socket/bind/
+//! listen/accept), then spawns `regress/std-thread-net-signal-oxidebsd-syscall-smoke/` as pid 1
 //! -- see that crate's own module doc comment for the full scenario (v0.3.0's real `std` consumer
 //! proof, extended past fs/`process::Command` into `std::thread`, signals, and `std::net`).
 //!
@@ -20,7 +20,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/std-thread-net-signal-oxidebsd-syscall-smoke/src/main.rs`'s own
+/// Must match `regress/std-thread-net-signal-oxidebsd-syscall-smoke/src/main.rs`'s own
 /// `SYS_TEST_EXIT` constant.
 const SYS_TEST_EXIT: u64 = 9999;
 

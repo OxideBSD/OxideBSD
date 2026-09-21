@@ -2,7 +2,7 @@
 //! registration path, `SYS_WAIT4`'s new optional rusage-pointer 4th argument), `posix_compat`
 //! (`SYS_SETUID`, this pass's new `SYS_GETRUSAGE`), and `oxfs` (`SYS_OPEN`/`SYS_CLOSE`/
 //! `SYS_MKDIR`/`SYS_CHDIR`/`SYS_GETCWD`/`SYS_STAT`/`SYS_UNLINK`, plus this pass's `SYS_LINK`/
-//! `SYS_MKNOD`/`SYS_CHROOT`), then spawns `userland/needs-syscall2-smoke/` as pid 1 -- see that
+//! `SYS_MKNOD`/`SYS_CHROOT`), then spawns `regress/needs-syscall2-smoke/` as pid 1 -- see that
 //! crate's own module doc comment for the full scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -22,8 +22,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/needs-syscall2-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/needs-syscall2-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

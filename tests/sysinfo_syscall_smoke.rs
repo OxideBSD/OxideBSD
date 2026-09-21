@@ -1,5 +1,5 @@
 //! Boots the full kernel, loads `native_abi` (write/exit's own syscall registration path) and
-//! `posix_compat` (`SYS_SYSINFO`), then spawns `userland/sysinfo-syscall-smoke/` as pid 1 -- see
+//! `posix_compat` (`SYS_SYSINFO`), then spawns `regress/sysinfo-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full three-part scenario (a real call's fields,
 //! `uptime` non-decreasing across two calls, `totalram` stable across two calls).
 //!
@@ -20,8 +20,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sysinfo-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/sysinfo-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

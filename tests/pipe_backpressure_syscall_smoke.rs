@@ -4,7 +4,7 @@
 //! consumer and grow the kernel heap until the allocator panicked) and its fix (a bounded buffer
 //! with a real blocking writer, `BlockReason::WaitingForPipeSpace`).
 //!
-//! Spawns `userland/pipe-backpressure-syscall-smoke/` as pid 1 (same shape `tests/fork_wait.rs`
+//! Spawns `regress/pipe-backpressure-syscall-smoke/` as pid 1 (same shape `tests/fork_wait.rs`
 //! and `tests/socketpair_syscall_smoke.rs` already established) and lets it drive `pipe`/`fork`/
 //! `write`/`read`/`close`/`wait4` entirely through real `SYSCALL`/`SYSRETQ` -- proving the fix
 //! from inside an actual syscall context, not by calling `crate::pipe`'s functions directly as
@@ -23,7 +23,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/pipe-backpressure-syscall-smoke/src/main.rs`'s own constant.
+/// Must match `regress/pipe-backpressure-syscall-smoke/src/main.rs`'s own constant.
 const SYS_TEST_EXIT: u64 = 9999;
 /// The real ABI number -- see `tests/socketpair_syscall_smoke.rs`'s own module doc comment for
 /// why this is registered directly here instead of by loading the full `oxfs` module (a pipe fd's
@@ -43,7 +43,7 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
     oxidebsd::hlt_loop();
 }
 
-/// `SYS_CLOSE`'s real handler (registered by `modules/oxfs` at real boot) is pure
+/// `SYS_CLOSE`'s real handler (registered by `sys/modules/oxfs` at real boot) is pure
 /// filesystem-agnostic delegation to this same function.
 extern "C" fn test_close_handler(fd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
     oxidebsd_close_fd(fd) as i64

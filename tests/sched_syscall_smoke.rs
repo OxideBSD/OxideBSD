@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit/getpid's own syscall registration
 //! path) and `posix_compat` (`SYS_SETUID`/`SYS_SCHED_SETSCHEDULER`/`SYS_SCHED_GETSCHEDULER`/
 //! `SYS_SCHED_GETPARAM`/`SYS_SCHED_GET_PRIORITY_MAX`/`SYS_SCHED_GET_PRIORITY_MIN`/
-//! `SYS_SCHED_RR_GET_INTERVAL`/`SYS_SCHED_YIELD`), then spawns `userland/sched-syscall-smoke/` as
+//! `SYS_SCHED_RR_GET_INTERVAL`/`SYS_SCHED_YIELD`), then spawns `regress/sched-syscall-smoke/` as
 //! pid 1 -- see that crate's own module doc comment for the full nine-part scenario closing the
 //! Open POSIX Test Suite pilot's `sched_getparam/*.c`/`sched_getscheduler/*.c`/
 //! `sched_get_priority_max/2-1.c`/`sched_get_priority_min/2-1.c`/`sched_rr_get_interval/*.c`/
@@ -24,8 +24,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sched-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/sched-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

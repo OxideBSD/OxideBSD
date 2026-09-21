@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write), `posix_compat`
 //! (ioctl/fcntl), `signal`/`clock` (real `std`'s runtime init touches both), and `oxfs`
 //! (open/close/stat -- `/bin/std-process-fs-oxidebsd` and its own `/bin/true`/`/bin/echo`
-//! dependencies, all seeded by `modules/oxfs`'s `module_init`), then spawns `userland/
+//! dependencies, all seeded by `sys/modules/oxfs`'s `module_init`), then spawns `userland/
 //! std-process-fs-oxidebsd-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
 //! for the full scenario (v0.3.0's "first real `std` consumer" proof: real `std::fs` +
 //! `std::process::Command`, not just the runtime-startup/shutdown path
@@ -21,7 +21,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/std-process-fs-oxidebsd-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
+/// Must match `regress/std-process-fs-oxidebsd-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
 /// constant.
 const SYS_TEST_EXIT: u64 = 9999;
 

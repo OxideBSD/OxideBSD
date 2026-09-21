@@ -2,7 +2,7 @@
 //! registration path), `posix_compat` (`SYS_GETUID`/`SYS_GETEUID`/`SYS_GETGID`/`SYS_GETEGID`/
 //! `SYS_SETUID`/`SYS_SETGID`/`SYS_GETGROUPS`), and `oxfs` (`SYS_STAT`/`SYS_CHMOD`/`SYS_CHOWN`,
 //! plus the real per-inode permission enforcement `oxfs_open` now performs), then spawns
-//! `userland/uid-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
+//! `regress/uid-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
 //! three-part scenario (root identity + getgroups, a chmod/chown round trip, then a real
 //! `setuid`-driven privilege drop followed by a real `EACCES` denial).
 //!
@@ -23,8 +23,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/uid-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/uid-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

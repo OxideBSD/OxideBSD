@@ -1,8 +1,8 @@
 //! Real-`SYSCALL` counterpart to this session's `/proc` completion pass (system-wide files,
-//! per-fd enumeration, chdir into `/proc`) -- see `userland/proc-smoke/src/main.rs`'s own module
-//! doc comment for why a real spawned process is needed at all (`modules/oxfs`'s own boot-time
+//! per-fd enumeration, chdir into `/proc`) -- see `regress/proc-smoke/src/main.rs`'s own module
+//! doc comment for why a real spawned process is needed at all (`sys/modules/oxfs`'s own boot-time
 //! self-check runs as pid 0, before any real process exists, so it can't exercise
-//! `/proc/<pid>/...` navigation). Spawns `userland/proc-smoke/` as pid 1, same shape
+//! `/proc/<pid>/...` navigation). Spawns `regress/proc-smoke/` as pid 1, same shape
 //! `tests/fork_wait.rs` already established for `fork`/`wait4`/`exit`.
 //!
 //! Loads `native_abi` (for `read`/`write`/`getpid`) and `oxfs` (for `open`/`chdir`/`getcwd`/
@@ -23,7 +23,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/proc-smoke/src/main.rs`'s own constant.
+/// Must match `regress/proc-smoke/src/main.rs`'s own constant.
 const SYS_TEST_EXIT: u64 = 9999;
 
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

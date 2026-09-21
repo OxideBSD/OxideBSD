@@ -1,4 +1,4 @@
-//! Smoke test for `src/random.rs`'s `oxidebsd_random_bytes` -- the real, SHA-256/ChaCha20-backed
+//! Smoke test for `sys/random.rs`'s `oxidebsd_random_bytes` -- the real, SHA-256/ChaCha20-backed
 //! random byte source added to unblock BusyBox's vendored TLS code (`networking/tls.c`'s
 //! `tls_get_random`, called via `/dev/urandom` -- see CLAUDE.md's "Real networking" known-gaps
 //! entry on `wget` HTTPS). Only exercises the kernel-resident generator itself, not `modules/
@@ -12,12 +12,12 @@
 //! buffer a stub could also satisfy), and the output isn't a degenerate all-same-byte pattern.
 //!
 //! Also covers the two later additions to this module -- the persistent `ENTROPY_POOL` and the
-//! `RDRAND`/`RDSEED` hypervisor-distrust gate (see `src/random.rs`'s own doc comment) -- neither
+//! `RDRAND`/`RDSEED` hypervisor-distrust gate (see `sys/random.rs`'s own doc comment) -- neither
 //! of which the original assertions above actually exercise: two consecutive
 //! `oxidebsd_random_bytes` calls already differ from the monotonic call counter alone, pool or no
 //! pool, so "output changed" alone doesn't prove the pool is real. `entropy_pool_snapshot`/
 //! `mix_entropy`/`running_under_hypervisor` are all `pub` specifically for this file's use (see
-//! their own doc comments in `src/random.rs`).
+//! their own doc comments in `sys/random.rs`).
 #![no_std]
 #![no_main]
 
@@ -125,7 +125,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     // section here would deadlock the instant a timer tick landed mid-lock, not just misbehave.
     // 500 iterations of both entry points is cheap (SHA-256/ChaCha20 over tiny buffers) but real
     // regression coverage for the single-core IRQ-vs-syscall-context deadlock this design has to
-    // avoid (see src/random.rs's own ENTROPY_POOL doc comment).
+    // avoid (see sys/random.rs's own ENTROPY_POOL doc comment).
     let mut stress_buf = [0u8; 8];
     for i in 0..500u64 {
         mix_entropy(i);

@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (write/exit/fork/wait4/getpid's own syscall
 //! registration path, plus `SYS_CLONE` itself) and `posix_compat` (`SYS_FUTEX`, real
-//! threading phase 3's own work), then spawns `userland/clone-syscall-smoke/` as pid 1 -- see that
+//! threading phase 3's own work), then spawns `regress/clone-syscall-smoke/` as pid 1 -- see that
 //! crate's own module doc comment for the full clone+join scenario ("Real threading" phases 4+5:
 //! shared/refcounted `AddressSpace`, `ThreadGroupShared`, real `clone(2)`).
 //!
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/clone-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/clone-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

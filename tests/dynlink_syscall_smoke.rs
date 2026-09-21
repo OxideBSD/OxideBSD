@@ -3,7 +3,7 @@
 //! calls even in this single-interpreter case), `posix_compat` (ioctl/fcntl, for musl's
 //! `isatty()`-style probes), and `oxfs` (open/close/stat/getdents -- serving `/dynlink-smoke.elf`
 //! and its real `PT_INTERP` interpreter, `/lib/ld-musl-x86_64.so.1` -> `/usr/lib/libc.so`), then
-//! spawns `userland/dynlink-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
+//! spawns `regress/dynlink-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
 //! for the full scenario (a real `fork`+`execve` of `/dynlink-smoke.elf` through a genuine
 //! `PT_INTERP` load).
 //!
@@ -24,8 +24,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/dynlink-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/dynlink-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

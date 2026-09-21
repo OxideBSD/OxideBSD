@@ -4,9 +4,9 @@
 //! `init_cancellation()` installs a real `SIGCANCEL` handler the first time it's ever called),
 //! `posix_compat` (`SYS_FUTEX` -- what real `pthread_join` is actually built on), and `oxfs`
 //! (serving `/pthread-cancel-crash.elf` and `/bin/musl`), then spawns
-//! `userland/pthread-cancel-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
+//! `regress/pthread-cancel-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
 //! the full two-part scenario this isolates: a real, expected `SIGSEGV` inside the Open POSIX Test
-//! Suite's own `pthread_cancel/5-1.c` (`userland/pthread-cancel-crash/main.c`'s own doc comment
+//! Suite's own `pthread_cancel/5-1.c` (`regress/pthread-cancel-crash/main.c`'s own doc comment
 //! has the exact mechanism), immediately followed by a real `fork`+`execve`+`wait4` of an
 //! already-proven-working musl binary to check whether the system is still healthy afterward.
 //!
@@ -27,8 +27,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/pthread-cancel-crash-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
-/// no shared crate across this ABI boundary, same convention every other userland/kernel pair
+/// Must match `regress/pthread-cancel-crash-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
+/// no shared crate across this ABI boundary, same convention every other regress/kernel pair
 /// here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

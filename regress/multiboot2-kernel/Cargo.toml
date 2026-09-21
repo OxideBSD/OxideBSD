@@ -1,0 +1,20 @@
+[package]
+name = "multiboot2-kernel"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The *real* kernel, reachable via the Multiboot2 boot path (GRUB or Limine's own `protocol:
+# multiboot2`) -- as opposed to `regress/multiboot2-boot-smoke`, which only proves the boot
+# trampoline itself. This crate's own `src/main.rs` calls straight into
+# `oxidebsd::kernel_main::run_real_system` (see that module's own doc comment for why that
+# function has to live inside the `oxidebsd` library, not be reused from `sys/main.rs` the way the
+# smoke crate reuses `tests/multiboot2_boot_smoke.rs`) -- module loading, spawning BusyBox's
+# `hush` as pid 1, and handing off to the scheduler, byte-for-byte the same code path the ordinary
+# Limine boot (`cargo run`) reaches.
+[dependencies]
+oxidebsd = { path = "../..", features = ["multiboot2"] }
+
+[[bin]]
+name = "multiboot2-kernel"
+path = "src/main.rs"

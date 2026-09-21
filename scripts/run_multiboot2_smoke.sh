@@ -1,6 +1,6 @@
 #!/bin/sh
 # Boots target/multiboot2-boot-smoke.elf (built by build.rs's build_multiboot2_boot_smoke_crate --
-# see smoke/multiboot2-boot-smoke/) as a real Multiboot2 kernel, via either Limine's own
+# see regress/multiboot2-boot-smoke/) as a real Multiboot2 kernel, via either Limine's own
 # multiboot2 protocol (fast, zero new host deps, proves the trampoline itself) or real GRUB (the
 # independent second-loader confirmation -- proves genuine bootloader-agnosticism, not "Limine
 # wearing a different hat"). See CLAUDE.md's Multiboot2 section.

@@ -1,6 +1,6 @@
 //! Multiboot2 boot-path smoke test (see CLAUDE.md's Multiboot2 section). Lives here so it's
 //! visually grouped with every other `tests/*.rs` smoke test, but its actual compilation unit is
-//! the separate `smoke/multiboot2-boot-smoke` workspace member (needed so it can get its own
+//! the separate `regress/multiboot2-boot-smoke` workspace member (needed so it can get its own
 //! linker script -- see that crate's `build.rs`) -- it is deliberately not one of this package's
 //! own `[[test]]` entries and is not touched by a plain `cargo test`.
 //!

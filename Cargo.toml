@@ -1,62 +1,62 @@
 [workspace]
 members = [
-  "userland/ring3-smoke",
-  "userland/fork-exec-smoke",
-  "userland/socketpair-syscall-smoke",
-  "userland/ping-syscall-smoke",
-  "userland/udp-syscall-smoke",
-  "userland/poll-syscall-smoke",
-  "userland/tcp-syscall-smoke",
-  "userland/proc-smoke",
-  "userland/itimer-syscall-smoke",
-  "userland/uid-syscall-smoke",
-  "userland/oxfs-persistence-syscall-smoke",
-  "userland/mount-syscall-smoke",
-  "userland/session-syscall-smoke",
-  "userland/needs-syscall-smoke",
-  "userland/needs-syscall2-smoke",
-  "userland/clang-syscall-smoke",
-  "userland/access-syscall-smoke",
-  "userland/pipe-backpressure-syscall-smoke",
-  "userland/dynlink-syscall-smoke",
-  "userland/sa-siginfo-syscall-smoke",
-  "userland/getrandom-syscall-smoke",
-  "userland/sysinfo-syscall-smoke",
-  "userland/sigaltstack-syscall-smoke",
-  "userland/pause-syscall-smoke",
-  "userland/sigsuspend-syscall-smoke",
-  "userland/posix-timer-syscall-smoke",
-  "userland/mq-syscall-smoke",
-  "userland/sysv-msg-syscall-smoke",
-  "userland/sysv-sem-syscall-smoke",
-  "userland/sysv-shm-syscall-smoke",
-  "userland/sig-syscall-smoke",
-  "userland/rt-signal-syscall-smoke",
-  "userland/mmap-syscall-smoke",
-  "userland/clock-syscall-smoke",
-  "userland/sched-syscall-smoke",
-  "userland/clone-syscall-smoke",
-  "userland/pthread-syscall-smoke",
-  "userland/sem-open-syscall-smoke",
-  "userland/pthread-cancel-crash-smoke",
-  "userland/pshared-cond-crash-smoke",
-  "userland/fb-mmap-syscall-smoke",
-  "userland/keyevent-syscall-smoke",
-  "userland/posix-conformance-driver",
-  "userland/lsoxmod",
-  "userland/std-hello-syscall-smoke",
-  "userland/std-hello-oxidebsd-syscall-smoke",
-  "userland/std-process-fs-oxidebsd-syscall-smoke",
-  "userland/std-thread-net-signal-oxidebsd-syscall-smoke",
-  "smoke/multiboot2-boot-smoke",
-  "smoke/multiboot2-kernel",
-  "modules/hello",
-  "modules/native_abi",
-  "modules/posix_compat",
-  "modules/signal",
-  "modules/clock",
-  "modules/oxfs",
-  "modules/net",
+  "regress/ring3-smoke",
+  "regress/fork-exec-smoke",
+  "regress/socketpair-syscall-smoke",
+  "regress/ping-syscall-smoke",
+  "regress/udp-syscall-smoke",
+  "regress/poll-syscall-smoke",
+  "regress/tcp-syscall-smoke",
+  "regress/proc-smoke",
+  "regress/itimer-syscall-smoke",
+  "regress/uid-syscall-smoke",
+  "regress/oxfs-persistence-syscall-smoke",
+  "regress/mount-syscall-smoke",
+  "regress/session-syscall-smoke",
+  "regress/needs-syscall-smoke",
+  "regress/needs-syscall2-smoke",
+  "regress/clang-syscall-smoke",
+  "regress/access-syscall-smoke",
+  "regress/pipe-backpressure-syscall-smoke",
+  "regress/dynlink-syscall-smoke",
+  "regress/sa-siginfo-syscall-smoke",
+  "regress/getrandom-syscall-smoke",
+  "regress/sysinfo-syscall-smoke",
+  "regress/sigaltstack-syscall-smoke",
+  "regress/pause-syscall-smoke",
+  "regress/sigsuspend-syscall-smoke",
+  "regress/posix-timer-syscall-smoke",
+  "regress/mq-syscall-smoke",
+  "regress/sysv-msg-syscall-smoke",
+  "regress/sysv-sem-syscall-smoke",
+  "regress/sysv-shm-syscall-smoke",
+  "regress/sig-syscall-smoke",
+  "regress/rt-signal-syscall-smoke",
+  "regress/mmap-syscall-smoke",
+  "regress/clock-syscall-smoke",
+  "regress/sched-syscall-smoke",
+  "regress/clone-syscall-smoke",
+  "regress/pthread-syscall-smoke",
+  "regress/sem-open-syscall-smoke",
+  "regress/pthread-cancel-crash-smoke",
+  "regress/pshared-cond-crash-smoke",
+  "regress/fb-mmap-syscall-smoke",
+  "regress/keyevent-syscall-smoke",
+  "regress/posix-conformance-driver",
+  "usr.bin/lsoxmod",
+  "regress/std-hello-syscall-smoke",
+  "regress/std-hello-oxidebsd-syscall-smoke",
+  "regress/std-process-fs-oxidebsd-syscall-smoke",
+  "regress/std-thread-net-signal-oxidebsd-syscall-smoke",
+  "regress/multiboot2-boot-smoke",
+  "regress/multiboot2-kernel",
+  "sys/modules/hello",
+  "sys/modules/native_abi",
+  "sys/modules/posix_compat",
+  "sys/modules/signal",
+  "sys/modules/clock",
+  "sys/modules/oxfs",
+  "sys/modules/net",
 ]
 
 [package]
@@ -65,9 +65,20 @@ version = "0.3.0-dev"
 edition = "2024"
 license = "BSD-3-Clause"
 
-# Gates the Multiboot2 boot path (`src/boot/multiboot2.rs`) out of the main kernel binary and all
-# existing `tests/*.rs` at the source level -- only `smoke/multiboot2-boot-smoke` (trampoline-only
-# smoke test) and `smoke/multiboot2-kernel` (the real kernel, reachable via GRUB/Multiboot2) enable
+# Real BSD source trees name the kernel `sys/`, not `src/` -- Cargo's own default convention
+# (`src/lib.rs`/`src/main.rs`, applied automatically whenever no explicit `[lib]`/`[[bin]]` path is
+# given) stops applying the moment the directory isn't literally named `src`, so both need spelling
+# out explicitly here.
+[lib]
+path = "sys/lib.rs"
+
+[[bin]]
+name = "oxidebsd"
+path = "sys/main.rs"
+
+# Gates the Multiboot2 boot path (`sys/boot/multiboot2.rs`) out of the main kernel binary and all
+# existing `tests/*.rs` at the source level -- only `regress/multiboot2-boot-smoke` (trampoline-only
+# smoke test) and `regress/multiboot2-kernel` (the real kernel, reachable via GRUB/Multiboot2) enable
 # it. See CLAUDE.md's Multiboot2 section.
 [features]
 multiboot2 = []

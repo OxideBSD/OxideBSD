@@ -8,7 +8,7 @@
 // applet binary's mtime against `build.rs`'s own mtime as one of three freshness-floor inputs (a
 // real, deliberate check -- a load-address or Kconfig-flip change in this file genuinely can
 // change what an applet's own binary should contain). But `build.rs` also contains everything
-// *else* this project's build does (musl, Clang/LLVM, every `userland/*`/`modules/*` crate, the POSIX
+// *else* this project's build does (musl, Clang/LLVM, every `regress/*`/`modules/*` crate, the POSIX
 // conformance pilot's own manifest generator, ...) -- editing *any* of that unrelated code still
 // touches `build.rs`'s own mtime, which made every one of the 256+ already-built applet binaries
 // look stale and forced a full ~20-30 minute BusyBox roster rebuild on the next `cargo build`,
@@ -26,7 +26,7 @@
     // live filesystem -- see CLAUDE.md's oxfs section). Data-driven (a plain list, not one
     // hand-duplicated block of variables per applet like the original TRUE/ECHO-only version of
     // this function) specifically so adding the next applet is a one-line addition here. Load
-    // addresses continue the existing `0x<b|c|d...>00000` sequence every prior userland/BusyBox
+    // addresses continue the existing `0x<b|c|d...>00000` sequence every prior regress/BusyBox
     // binary in this codebase already claimed one of (see CLAUDE.md's "User-mode execution"
     // section) -- each must stay clear of every other one already in use.
     //
@@ -40,8 +40,8 @@
     // `CONFIG_HUSH_INTERACTIVE` is left off (`allnoconfig`'s own default), so hush just reads and
     // executes commands from stdin like a script, no prompt/readline/job-control machinery that
     // would need real termios/ioctl support this kernel doesn't have. See CLAUDE.md's BusyBox
-    // section for what this needed: real pipe(2)/dup2(2) (modules/posix_compat, src/fs/pipe.rs,
-    // src/fs/fd.rs), discovered the same iterative "boot and see what's unrecognized" way musl/cat's
+    // section for what this needed: real pipe(2)/dup2(2) (sys/modules/posix_compat, sys/fs/pipe.rs,
+    // sys/fs/fd.rs), discovered the same iterative "boot and see what's unrecognized" way musl/cat's
     // own new syscalls were.
     // "FALSE"/"YES"/"MORE" continue the same load-address sequence right past HUSH's own
     // 0xe00000. `more`'s own isatty()/TIOCGWINSZ probe hits the same already-documented,
@@ -49,7 +49,7 @@
     // section) -- without a real terminal, it just falls back to dumping the whole file, the same
     // shape `cat` already has.
     //
-    // The next batch (`mkdir` through `uniq`) directly exercises the syscalls `modules/oxfs` added
+    // The next batch (`mkdir` through `uniq`) directly exercises the syscalls `sys/modules/oxfs` added
     // over `modules/fat32` -- `mkdir`/`rmdir`/`rm`/`mv` map straight onto
     // `mkdir`/`rmdir`/`unlink`/`rename`, all real (`rm`'s directory-recursion mode, `-r`, isn't
     // exercised or expected to work -- it needs `lstat`/`readdir`, neither implemented). `cp`/
@@ -61,7 +61,7 @@
     // `uniq` are plain stdin/stdout/file text tools needing nothing beyond `open`/`read`/`write`/
     // `close`; `basename`/`dirname`/`printf`/`seq` do no filesystem I/O at all beyond `write`ing
     // their result, the same shape `echo`/`true`/`false` already have. `kill` was included once
-    // `modules/signal` (see CLAUDE.md) made real process signaling exist -- the gap that had
+    // `sys/modules/signal` (see CLAUDE.md) made real process signaling exist -- the gap that had
     // blocked it.
     //
     // Everything from `ADDGROUP` on is a later, much larger pass: once `SYS_STAT`/`SYS_FSTAT`/
@@ -81,7 +81,7 @@
     // kernel's own image grew past them, then again -- this array's own base `0x4100000` ->
     // `0x8100000`, `+0x4000000` -- once the POSIX conformance pilot's own full-corpus expansion
     // (see `build.rs`'s `discover_posix_test_files`) grew the kernel image past *that* floor too.
-    // See this array's own base and `userland/ring3-smoke/linker.ld`'s doc comment for the full
+    // See this array's own base and `regress/ring3-smoke/linker.ld`'s doc comment for the full
     // story of why, and how to re-derive the safe floor before trusting any of these numbers
     // again.
     const BUSYBOX_APPLETS: &[(&str, &str, u64)] = &[
@@ -371,7 +371,7 @@
 /// toolchain" idiom `build_musl_smoke` already uses for a single `.c` file.
 ///
 /// Follows BusyBox's own documented recipe for a minimal, non-interactive single-applet config --
-/// the comment at `third_party/busybox/scripts/kconfig/Makefile:22`: `make allnoconfig`, flip the
+/// the comment at `external/gpl2/busybox/scripts/kconfig/Makefile:22`: `make allnoconfig`, flip the
 /// one applet's config line to `=y` by hand, then build directly. Confirmed empirically (not just
 /// followed blindly) that this produces a real `NUM_APPLETS == 1` build -- checked below via
 /// `include/NUM_APPLETS.h` -- which is what makes BusyBox's own `main()` (`libbb/appletlib.c`)
@@ -389,7 +389,7 @@
 /// **Staleness-checked, unlike `build_musl_sysroot`'s own `config.mak`-exists guard**: skips the
 /// entire `allnoconfig`/flip/`oldconfig`/`make` sequence if `out_dir`'s own `busybox` binary
 /// already exists and is newer than `busybox_source_mtime` (the latest mtime across all of
-/// `third_party/busybox`, computed once by the caller -- see `latest_mtime`'s own doc comment --
+/// `external/gpl2/busybox`, computed once by the caller -- see `latest_mtime`'s own doc comment --
 /// not per applet), `build_busybox.rs` itself (so editing *this file's own recipe* -- flips, load
 /// address, applet roster -- invalidates every cached binary too, not just a real source edit),
 /// and `musl_sysroot`'s own `libc.a` (every applet links against it, so a musl source edit has to
@@ -411,7 +411,7 @@ fn build_busybox_applet(
     busybox_source_mtime: std::time::SystemTime,
 ) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let busybox_dir = Path::new(manifest_dir).join("third_party/busybox");
+    let busybox_dir = Path::new(manifest_dir).join("external/gpl2/busybox");
     let out_dir = Path::new(manifest_dir).join(format!("target/busybox-{out_name}"));
     let binary_path = out_dir.join("busybox");
 
@@ -439,7 +439,7 @@ fn build_busybox_applet(
     // that *same, already-populated* `O=` directory doesn't actually guarantee every object file
     // gets recompiled -- BusyBox's own incremental build tracks its own source files, but not
     // musl's *installed* sysroot headers (`target/musl-sysroot/include/...`, copied out of
-    // `third_party/musl` by `build_musl_sysroot`'s own `make install`) as a dependency at all.
+    // `external/mit/musl` by `build_musl_sysroot`'s own `make install`) as a dependency at all.
     // Confirmed live: after a real musl syscall-number fix, `libbb/change_identity.o` inside an
     // already-built applet's own `O=` directory still had a five-day-old mtime predating the fix
     // entirely -- only a handful of this applet's ~177 object files were newer than the changed
@@ -562,7 +562,7 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
         // this is off -- `allnoconfig` disables both despite their own `default y`, the same way
         // it disables everything else this function already has to flip back on. Discovered as a
         // real gap, not preemptively enabled: `cat.elf --help` printed nothing at all until
-        // src/syscall/'s stderr fix (fd 2) landed, and even with that fix would have only shown
+        // sys/syscall/'s stderr fix (fd 2) landed, and even with that fix would have only shown
         // the generic fallback without this -- see CLAUDE.md's BusyBox section.
         (
             "# CONFIG_SHOW_USAGE is not set".to_string(),
@@ -614,7 +614,7 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
         // its Kconfig `default`, even after growing newly visible via `CONFIG_HUSH`'s own `select
         // SHELL_HUSH`. Left unflipped, hush had **no real control flow at all**: no `if`/`for`/
         // `while`/`case`, no functions, no command substitution, no `$((...))` arithmetic -- only
-        // a flat sequence of individual command lines, which is why `modules/oxfs/src/
+        // a flat sequence of individual command lines, which is why `sys/modules/oxfs/src/
         // test_busybox.sh` (see CLAUDE.md's BusyBox section) had to be written as one instead of
         // using any real script control flow. Flipped directly here, the same
         // known-shape-text-replacement way as everything else in this function, rather than

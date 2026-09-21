@@ -2,7 +2,7 @@
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
-//! `userland/tcp-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`listen`/`accept`/
+//! `regress/tcp-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`listen`/`accept`/
 //! `read`/`write`/`fcntl` entirely through real `SYSCALL`/`SYSRETQ`.
 //!
 //! The synthetic peer's own script (ARP reply, SYN, final ACK, data segment, FIN) needs this
@@ -11,7 +11,7 @@
 //! observe itself, and this file's own `main()` can't run again once `scheduler::start` hands
 //! control to the child anyway. So the whole script is driven by one **test-only**,
 //! step-dispatched syscall the child calls at each scripted moment: `SYS_TEST_TCP_STEP = 9997`.
-//! See `userland/tcp-syscall-smoke/src/main.rs`'s own module doc comment for why this doesn't
+//! See `regress/tcp-syscall-smoke/src/main.rs`'s own module doc comment for why this doesn't
 //! reintroduce the blind spot being closed here -- `socket`/`bind`/`listen`/`accept`/`read`/
 //! `write`/`fcntl` still only ever run when the child calls them via real `SYSCALL`.
 //!
@@ -39,7 +39,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/tcp-syscall-smoke/src/main.rs`'s own constants.
+/// Must match `regress/tcp-syscall-smoke/src/main.rs`'s own constants.
 const SYS_TEST_EXIT: u64 = 9999;
 const SYS_TEST_TCP_STEP: u64 = 9997;
 const LISTEN_PORT: u16 = 7001;
@@ -121,7 +121,7 @@ fn build_arp_reply(
 }
 
 /// Ten parameters, one per real field this test needs to vary across the SYN/ACK/data segments
-/// it builds -- see `src/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
+/// it builds -- see `sys/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn build_tcp_frame(
     dest_mac: [u8; 6],
@@ -168,7 +168,7 @@ fn build_tcp_frame(
     }
 
     // TCP checksum: a 12-byte pseudo-header prepended to the segment, checksum field zeroed while
-    // summing -- matches src/net/tcp.rs's own tcp_checksum exactly, duplicated here on purpose
+    // summing -- matches sys/net/tcp.rs's own tcp_checksum exactly, duplicated here on purpose
     // (this test builds wire bytes independently, not by calling into the implementation it's
     // verifying).
     let mut pseudo = [0u8; 12 + 128];

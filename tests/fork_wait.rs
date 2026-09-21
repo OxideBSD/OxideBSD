@@ -1,4 +1,4 @@
-//! Boots the full kernel (modules included) and spawns `userland/fork-exec-smoke/` as pid 1 in
+//! Boots the full kernel (modules included) and spawns `regress/fork-exec-smoke/` as pid 1 in
 //! place of the real interactive shell, exercising a real ring-3 `fork`/`wait4`/`exit` round trip
 //! end to end without needing interactive keyboard input the way driving the real shell would.
 //!
@@ -23,8 +23,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/fork-exec-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no shared
-/// crate across this ABI boundary, same convention every other userland/kernel pair here uses.
+/// Must match `regress/fork-exec-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no shared
+/// crate across this ABI boundary, same convention every other regress/kernel pair here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

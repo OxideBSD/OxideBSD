@@ -1,5 +1,5 @@
-//! Cross-builds the userland demo binaries under `userland/` and the kernel modules under
-//! `modules/` so `src/main.rs` can embed them via `include_bytes!(env!(...))`. This keeps
+//! Cross-builds the regression/utility binaries under `regress/`/`usr.bin/` and the kernel modules
+//! under `sys/modules/` so `sys/main.rs` can embed them via `include_bytes!(env!(...))`. This keeps
 //! `cargo build`/`cargo run`/`cargo test` working with no manual pre-step.
 //!
 //! Builds into target-dirs of their own (`target/userland`, `target/modules`), not the shared
@@ -69,11 +69,11 @@ fn build_jobs() -> usize {
 include!("build_busybox.rs");
 
 /// Builds Limine's small C deploy/install tool (`limine.c` -> `limine`) from the vendored
-/// `-binary`-branch submodule (`third_party/limine`, a personal fork pinned the same way as
+/// `-binary`-branch submodule (`external/bsd/limine`, a personal fork pinned the same way as
 /// musl/busybox), then stages it plus every prebuilt bootloader-stage blob this project
 /// needs into a fixed location, `target/limine-stage/`, that `scripts/qemu_runner.sh` reads from
-/// directly -- the runner never reaches into `third_party/limine` itself, mirroring how nothing
-/// else in this file hands another tool a path into `third_party/*` directly either (env-var/
+/// directly -- the runner never reaches into `external/bsd/limine` itself, mirroring how nothing
+/// else in this file hands another tool a path into `external/*` directly either (env-var/
 /// fixed-path handoff instead). The `-binary` branch ships every actual bootloader stage
 /// (`limine-bios.sys`, `limine-bios-cd.bin`, `limine-uefi-cd.bin`, `BOOTX64.EFI`, `BOOTIA32.EFI`)
 /// as pre-built, committed blobs -- `make` here only compiles the deploy tool itself (`limine.c`,
@@ -82,7 +82,7 @@ include!("build_busybox.rs");
 /// separate staleness bookkeeping needed here, `make` is cheap to just always invoke).
 fn build_limine_deploy_tool() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let limine_dir = Path::new(manifest_dir).join("third_party/limine");
+    let limine_dir = Path::new(manifest_dir).join("external/bsd/limine");
     let stage_dir = Path::new(manifest_dir).join("target/limine-stage");
 
     println!(
@@ -93,7 +93,7 @@ fn build_limine_deploy_tool() {
     let status = Command::new("make")
         .current_dir(&limine_dir)
         .status()
-        .unwrap_or_else(|e| panic!("failed to run make for third_party/limine: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run make for external/bsd/limine: {e}"));
     if !status.success() {
         panic!("building limine's deploy tool failed: {status}");
     }
@@ -232,8 +232,10 @@ fn main() {
     build_userland_crate("keyevent-syscall-smoke", "KEYEVENT_SYSCALL_SMOKE_ELF_PATH");
     // A real standalone userland utility (embedded into oxfs's own /bin below, not a test) --
     // same category as ring3-smoke/musl-smoke above, not a BusyBox applet. Lists OxideBSD's own
-    // loaded kernel modules by reading the real /proc/modules this pass added to modules/oxfs.
-    let lsoxmod_elf_path = build_userland_crate("lsoxmod", "LSOXMOD_ELF_PATH");
+    // loaded kernel modules by reading the real /proc/modules this pass added to sys/modules/oxfs.
+    // Lives at `usr.bin/lsoxmod`, not `regress/`, like every other userland crate -- it's a real
+    // BSD-shaped utility, not test infrastructure.
+    let lsoxmod_elf_path = build_crate_at("usr.bin/lsoxmod", "LSOXMOD_ELF_PATH");
 
     build_module_crate("hello", "HELLO", &[]);
     build_module_crate("native_abi", "NATIVE_ABI", &[]);
@@ -250,12 +252,12 @@ fn main() {
     // Also embedded into oxfs below.
     let musl_smoke_elf_path = build_musl_smoke(&musl_sysroot);
 
-    // Real Rust `std` target proof of concept -- see `userland-std/std-hello/src/main.rs`'s own
+    // Real Rust `std` target proof of concept -- see `regress/std/std-hello/src/main.rs`'s own
     // doc comment. Also embedded into oxfs below.
     let std_hello_elf_path = build_std_hello_spike(&musl_sysroot);
 
     // The real thing: OxideBSD's own x86_64-unknown-oxidebsd target (genuinely reports
-    // target_os = "oxidebsd", not borrowed Linux identity) -- see `userland-std/
+    // target_os = "oxidebsd", not borrowed Linux identity) -- see `regress/std/
     // std-hello-oxidebsd/src/main.rs`'s own doc comment and `build_std_oxidebsd_userland_crate`'s
     // for the real, disclosed ~40s-per-build cost (a genuine std/core/alloc recompile every time,
     // no prebuilt std exists for a brand-new custom target). Also embedded into oxfs below.
@@ -267,7 +269,7 @@ fn main() {
 
     // v0.3.0's "first real std consumer" proof -- std::fs + std::process::Command actually
     // driving their own internal fork+execve+waitpid, not just runtime startup/shutdown. See
-    // userland-std/std-process-fs-oxidebsd/src/main.rs's own doc comment.
+    // regress/std/std-process-fs-oxidebsd/src/main.rs's own doc comment.
     let std_process_fs_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "std-process-fs-oxidebsd",
         "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
@@ -275,31 +277,31 @@ fn main() {
     );
 
     // Extends the real std consumer proof into std::thread, signals, and std::net -- see
-    // userland-std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
+    // regress/std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
     let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "std-thread-net-signal-oxidebsd",
         "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
 
-    // Derisk check for the fbdoom/doomgeneric port -- see userland/float-smoke/main.c's own doc
+    // Derisk check for the fbdoom/doomgeneric port -- see regress/float-smoke/main.c's own doc
     // comment.
     let float_smoke_elf_path = build_float_smoke(&musl_sysroot);
 
-    // "Real threading" phases 1-5's own finish line -- see userland/pthread-smoke/main.c's own
+    // "Real threading" phases 1-5's own finish line -- see regress/pthread-smoke/main.c's own
     // doc comment.
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
 
-    // Real cross-process named-semaphore coordination -- see userland/sem-open-smoke/main.c's own
+    // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
     let sem_open_smoke_elf_path = build_sem_open_smoke(&musl_sysroot);
 
-    // Isolated pthread_cancel/5-1.c crash-then-wedge repro -- see userland/pthread-cancel-crash/
+    // Isolated pthread_cancel/5-1.c crash-then-wedge repro -- see regress/pthread-cancel-crash/
     // main.c's own doc comment.
     let pthread_cancel_crash_elf_path = build_pthread_cancel_crash(&musl_sysroot);
 
     // Isolated pthread_cond_broadcast/1-2.c real-cross-process-stall repro -- see
-    // userland/pshared-cond-crash/main.c's own doc comment.
+    // regress/pshared-cond-crash/main.c's own doc comment.
     let pshared_cond_crash_elf_path = build_pshared_cond_crash(&musl_sysroot);
 
     // Real, on-target `/usr/include`+`/usr/lib` musl runtime tree -- what Clang/LLVM's own
@@ -323,27 +325,27 @@ fn main() {
     let clang_runtime_manifest_path = write_clang_runtime_manifest(&llvm_target_build);
 
     // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
-    // comment for the source list, and `third_party/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
+    // comment for the source list, and `external/gpl2/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
     // for the backend. `doom1.wad` (the freely-redistributable shareware IWAD) is vendored
     // directly, not built.
     let doom_elf_path = build_doomgeneric(&musl_sysroot);
-    let doom1_wad_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/doom1.wad");
+    let doom1_wad_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("share/games/doom/doom1.wad");
 
     // A real POSIX conformance baseline: see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`'s own
-    // "Verification" section and `modules/oxfs/src/posix_conformance.sh`'s doc comment.
+    // "Verification" section and `sys/modules/oxfs/src/posix_conformance.sh`'s doc comment.
     // Cross-compiled with `musl-gcc` on the host, not compiled on-target -- see
     // `write_posix_test_manifest`'s own doc comment for why.
     let posixtestsuite_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/posixtestsuite");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("external/gpl2/posixtestsuite");
     let posix_test_manifest_path = write_posix_test_manifest(&musl_sysroot, &posixtestsuite_dir);
 
     // Real PT_INTERP / dynamic-linking milestone 1: a real, separate shared musl build (see
     // `build_musl_sysroot_shared`'s own doc comment for why it can't reuse the static sysroot
     // above, and why it's linked at its own natural base rather than a fixed one) producing
     // `libc.so` (which doubles as `ld-musl-x86_64.so.1`, musl's own convention) -- the kernel
-    // itself picks its real runtime placement (`src/process/lifecycle.rs`'s `INTERP_LOAD_BASE`, `0x10000000`)
+    // itself picks its real runtime placement (`sys/process/lifecycle.rs`'s `INTERP_LOAD_BASE`, `0x10000000`)
     // at `execve` time, not this build. The fixture binary
-    // (`userland/dynlink-smoke/main.c`) is fixed at `0x8d00000` -- an ordinary `ET_EXEC` main
+    // (`regress/dynlink-smoke/main.c`) is fixed at `0x8d00000` -- an ordinary `ET_EXEC` main
     // binary, same fixed-link-time-base treatment every other userland crate here gets, distinct
     // from `INTERP_LOAD_BASE` since the two must be *co-resident* in the same address space for a
     // real `PT_INTERP` exec to work at all. (Both moved `+0x4000000` alongside every other fixed
@@ -353,7 +355,7 @@ fn main() {
     let dynlink_libc_so_path = dynlink_musl_sysroot.join("lib/libc.so");
     let dynlink_smoke_elf_path = build_dynlink_smoke(&dynlink_musl_sysroot, dynlink_fixture_base);
 
-    let busybox_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/busybox");
+    let busybox_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("external/gpl2/busybox");
     println!("cargo:rerun-if-changed={}", busybox_dir.display());
     let busybox_source_mtime = latest_mtime(&busybox_dir);
 
@@ -395,7 +397,7 @@ fn main() {
     // from BUSYBOX_APPLETS itself (not one hand-written `let ..._elf_path = ...` line per applet)
     // so the next applet added there doesn't need a matching edit here too -- `oxfs_env_var_name`
     // derives each one's `OXFS_<NAME>_ELF_PATH` env var straight from its own `out_name`, with one
-    // explicit exception ("sh" -> "HUSH", matching `modules/oxfs/src/lib.rs`'s existing
+    // explicit exception ("sh" -> "HUSH", matching `sys/modules/oxfs/src/lib.rs`'s existing
     // `OXFS_HUSH_ELF_PATH`/`seed_file(root, b"sh.elf", ...)` naming, itself inherited from this
     // applet's own Kconfig symbol `HUSH`, not its embedded filename).
     let hush_elf_path_for_main = target_dir_busybox_elf("sh");
@@ -484,7 +486,7 @@ fn main() {
     );
     build_module_crate("oxfs", "OXFS", &oxfs_extra_env);
 
-    // Real disk persistence (see src/drivers/ata.rs and modules/oxfs's own "Real disk persistence"
+    // Real disk persistence (see sys/drivers/ata.rs and sys/modules/oxfs's own "Real disk persistence"
     // section): the two raw disk image *files* QEMU's `-drive` attaches, as opposed to everything
     // above, which gets embedded into the kernel/module binaries themselves via `include_bytes!`.
     write_data_disk_images();
@@ -495,7 +497,7 @@ fn main() {
     // anywhere; its own QEMU boot is driven directly by `scripts/run_multiboot2_smoke.sh`.
     //
     // **Must stay gated by a reentrancy guard, not called unconditionally.** Unlike every other
-    // `build_*_crate` call above, `smoke/multiboot2-boot-smoke` depends on the real `oxidebsd` lib
+    // `build_*_crate` call above, `regress/multiboot2-boot-smoke` depends on the real `oxidebsd` lib
     // itself (not just freestanding `core`/`alloc`) -- so building it re-triggers *this exact
     // build script* as a dependency build. An unconditional call here recurses forever: building
     // the smoke crate builds `oxidebsd`, whose build script tries to build the smoke crate again,
@@ -542,18 +544,18 @@ fn target_dir_busybox_elf(out_name: &str) -> String {
         .to_string()
 }
 
-/// Configures, builds, and installs the vendored, OxideBSD-patched musl (`third_party/musl` -- a
+/// Configures, builds, and installs the vendored, OxideBSD-patched musl (`external/mit/musl` -- a
 /// submodule pointing at a personal fork, patched on its own `oxidebsd` branch to speak this
 /// kernel's native ABI directly -- see `CLAUDE.md`'s musl section) into `target/musl-sysroot`,
 /// producing a `musl-gcc`-style wrapper this build script can shell out to for
-/// `userland/musl-smoke/`. Uses musl's own build system directly (`configure`/`make`/
+/// `regress/musl-smoke/`. Uses musl's own build system directly (`configure`/`make`/
 /// `make install`) -- there's no Cargo/Rust involved at all, it's a plain C library. Skips
 /// `./configure` if a `config.mak` already exists (configure itself takes several seconds
 /// re-probing the host compiler on every run; `make`/`make install` are already fast, idempotent
 /// no-ops when nothing changed, so only configure needs this guard).
 fn build_musl_sysroot() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let musl_dir = Path::new(manifest_dir).join("third_party/musl");
+    let musl_dir = Path::new(manifest_dir).join("external/mit/musl");
     let sysroot = Path::new(manifest_dir).join("target/musl-sysroot");
 
     println!(
@@ -601,7 +603,7 @@ fn build_musl_sysroot() -> PathBuf {
                 // *input* to any linker unambiguous instead of depending on that relaxation).
                 // `obj/crt/Scrt1.o`/`obj/crt/rcrt1.o` (musl's own real PIE crt variants) still
                 // force `-fPIC` back on for themselves specifically
-                // (`third_party/musl/Makefile`'s own `CFLAGS_ALL += -fPIC` line for those two
+                // (`external/mit/musl/Makefile`'s own `CFLAGS_ALL += -fPIC` line for those two
                 // files only) -- unaffected, and also never embedded into this project's own musl
                 // runtime manifest in the first place (see `write_musl_runtime_manifest`'s own
                 // doc comment on why those two are skipped).
@@ -636,11 +638,11 @@ fn build_musl_sysroot() -> PathBuf {
     sysroot
 }
 
-/// Cross-builds `userland/musl-smoke/main.c` against `sysroot` (see `build_musl_sysroot` above),
+/// Cross-builds `regress/musl-smoke/main.c` against `sysroot` (see `build_musl_sysroot` above),
 /// at a load address (`0x80c0000`, was `0x40c0000` before the whole family's own `+0x4000000`
 /// move -- see `module::MODULE_VA_BASE`'s own doc comment) clear of both the kernel's own image
 /// (the actually-binding constraint today, not the bootloader's fixed ~6 MiB identity-mapped
-/// low-memory region -- see `userland/ring3-smoke/linker.ld`'s own comment for the full story of
+/// low-memory region -- see `regress/ring3-smoke/linker.ld`'s own comment for the full story of
 /// why this floor moves and how to re-derive it) and every other
 /// userland crate's load base (`0x8000000`-`0x8080000`) -- confirmed empirically via `readelf -hl`
 /// before this was written, the same discipline CLAUDE.md's own `ring3-smoke` load-address
@@ -685,10 +687,10 @@ fn ensure_libunwind_in_sysroot(sysroot: &Path) {
     });
 }
 
-/// Real `std` on OxideBSD (see `userland-std/std-hello/src/main.rs`'s own doc comment for the
+/// Real `std` on OxideBSD (see `regress/std/std-hello/src/main.rs`'s own doc comment for the
 /// full rationale). Built via a direct `rustc` invocation, not `cargo build` -- **not just a
-/// Phase-0 shortcut, a confirmed-necessary choice**: `userland-std/std-hello` has its own real
-/// `Cargo.toml` + `userland-std/.cargo/config.toml` (`target = "x86_64-unknown-linux-musl"`,
+/// Phase-0 shortcut, a confirmed-necessary choice**: `regress/std/std-hello` has its own real
+/// `Cargo.toml` + `regress/std/.cargo/config.toml` (`target = "x86_64-unknown-linux-musl"`,
 /// `[unstable] build-std = []`), but `cargo build` from that crate still pulls in the *repo
 /// root's* `.cargo/config.toml` `[unstable] build-std = ["core","alloc","compiler_builtins"]`
 /// regardless -- confirmed via `cargo -Z unstable-options config get unstable.build-std` --
@@ -704,10 +706,10 @@ fn ensure_libunwind_in_sysroot(sysroot: &Path) {
 /// rebuild from `rust-src` for `x86_64-unknown-linux-musl` instead of using the real prebuilt
 /// ones this target already ships -- wasteful at best, a real divergence risk at worst. A direct
 /// `rustc` invocation has no directory-tree config-discovery mechanism at all, sidestepping the
-/// whole problem. (The crate's own `Cargo.toml`/`userland-std/.cargo/config.toml` are still real
-/// and useful for local iteration -- `cd userland-std/std-hello && cargo build` works today, just
+/// whole problem. (The crate's own `Cargo.toml`/`regress/std/.cargo/config.toml` are still real
+/// and useful for local iteration -- `cd regress/std/std-hello && cargo build` works today, just
 /// slower than it should be from the redundant core/alloc rebuild; not what this function uses
-/// for the actual embedded artifact.) If a future `userland-std/*` crate needs genuine Cargo
+/// for the actual embedded artifact.) If a future `regress/std/*` crate needs genuine Cargo
 /// dependencies (breaking the "single `rustc`-compiled file" model this function assumes), the
 /// known escape hatch -- not yet implemented -- is to have `build.rs` copy that crate's source to
 /// a location outside this repo's directory tree entirely (e.g. under the OS temp dir) before
@@ -728,7 +730,7 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
     ensure_libunwind_in_sysroot(sysroot);
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland-std/std-hello/src/main.rs");
+    let src = Path::new(manifest_dir).join("regress/std/std-hello/src/main.rs");
     let target_dir = Path::new(manifest_dir).join("target/std-hello");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/std-hello");
     let out = target_dir.join("std-hello");
@@ -773,7 +775,7 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
 
 /// Constructs (idempotently -- cheap, just symlinks, safe to call every build) a hybrid rustc
 /// sysroot directory at a stable, repo-relative location so `-Z build-std` compiles against
-/// *our own* forked `rust-lang/rust` (`third_party/rust`, the `oxidebsd` branch) instead of the
+/// *our own* forked `rust-lang/rust` (`external/mit/rust`, the `oxidebsd` branch) instead of the
 /// pinned nightly's stock `rust-src` component.
 ///
 /// **Why this specific shape, not something simpler** -- both gotchas below were found live,
@@ -788,7 +790,7 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
 ///   user `RUSTFLAGS`, so `build_std_oxidebsd_userland_crate` forces it via `RUSTC_WRAPPER`
 ///   instead (cargo's standard rustc-interception env var, the same one `sccache` uses -- wraps
 ///   *every* rustc invocation cargo makes, including that internal query).
-/// - Pointing `lib/rustlib/src/rust` straight at the `third_party/rust` checkout fails (`cannot
+/// - Pointing `lib/rustlib/src/rust` straight at the `external/mit/rust` checkout fails (`cannot
 ///   specify features for packages outside of workspace`) -- the real, rustup-shipped `rust-src`
 ///   component is *not* the whole monorepo, just bare `library/` + `src/` directories with **no
 ///   top-level `Cargo.toml`** above them; our full clone's own root `[workspace]` (which doesn't
@@ -802,7 +804,7 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
 /// differs. No `rustup toolchain link` needed; this is purely a `--sysroot` value.
 fn build_oxidebsd_rust_sysroot() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let rust_fork = Path::new(manifest_dir).join("third_party/rust");
+    let rust_fork = Path::new(manifest_dir).join("external/mit/rust");
     let sysroot_dir = Path::new(manifest_dir).join("target/oxidebsd-rust-sysroot");
     let src_mirror = Path::new(manifest_dir).join("target/oxidebsd-rust-src-mirror");
 
@@ -841,9 +843,29 @@ fn build_oxidebsd_rust_sysroot() -> PathBuf {
     sysroot_dir
 }
 
+/// **Real, previously-latent bug, found live by this project's own BSD-style repo reorg**:
+/// `link.exists()` follows symlinks, so it reports `false` for a *dangling* one (its target moved
+/// or was renamed) exactly as readily as for "nothing here at all" -- indistinguishable from this
+/// function's own point of view, so it fell through to `symlink()`, which fails with a real
+/// `EEXIST` since the dangling link itself is still a real directory entry needing removal first,
+/// not creation. Confirmed live: moving `third_party/rust` -> `external/mit/rust` left exactly
+/// this stale symlink behind in `target/oxidebsd-rust-src-mirror/`. Fixed: `symlink_metadata`
+/// (does *not* follow symlinks) tells this function whether *any* entry sits at `link` -- if it's
+/// already a symlink pointing at the current `target`, done; if it's a symlink pointing anywhere
+/// else (stale), remove it and recreate; anything else already there is a genuine, unexpected
+/// conflict worth still panicking on.
 fn symlink_if_missing(target: &Path, link: &Path) {
-    if link.exists() {
-        return;
+    match std::fs::symlink_metadata(link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if matches!(std::fs::read_link(link), Ok(existing) if existing == target) {
+                return;
+            }
+            std::fs::remove_file(link).unwrap_or_else(|e| {
+                panic!("failed to remove stale symlink {}: {e}", link.display())
+            });
+        }
+        Ok(_) => return,
+        Err(_) => {}
     }
     std::os::unix::fs::symlink(target, link).unwrap_or_else(|e| {
         panic!(
@@ -889,14 +911,14 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 }
 
 /// Builds a real userland crate against OxideBSD's own `x86_64-unknown-oxidebsd` target (see
-/// `x86_64-unknown-oxidebsd.json` and `third_party/rust`'s `oxidebsd` branch) -- the genuine
+/// `x86_64-unknown-oxidebsd.json` and `external/mit/rust`'s `oxidebsd` branch) -- the genuine
 /// target-identity path, as opposed to `build_std_hello_spike`'s cheaper
 /// `x86_64-unknown-linux-musl` one. **Real, permanent, disclosed cost**: every build here
 /// genuinely recompiles `std`/`core`/`alloc`/`panic_abort` from source via `-Z
 /// build-std=std,core,alloc,panic_abort` (~40s observed) -- there is no prebuilt `std` for a
 /// brand-new custom target the way there is for a real Tier-1/2 one. `crate_name` must name a
-/// real crate directory under `userland-std/` with its own empty `[workspace]` table (see
-/// `userland-std/std-hello-oxidebsd/Cargo.toml`). No `#![feature(restricted_std)]` needed --
+/// real crate directory under `regress/std/` with its own empty `[workspace]` table (see
+/// `regress/std/std-hello-oxidebsd/Cargo.toml`). No `#![feature(restricted_std)]` needed --
 /// `library/std/build.rs` lists `target_os = "oxidebsd"` in its supported-platform allowlist, and
 /// `library/Cargo.toml`'s `[patch.crates-io]` routes `libc` at our own `libc-crate-oxidebsd` fork
 /// (its `oxidebsd` branch reuses the real `linux`/musl cfg-gated code paths throughout, since our
@@ -908,7 +930,7 @@ fn build_std_oxidebsd_userland_crate(
 ) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crate_dir = Path::new(manifest_dir)
-        .join("userland-std")
+        .join("regress/std")
         .join(crate_name);
     let target_spec = Path::new(manifest_dir).join("x86_64-unknown-oxidebsd.json");
     let target_dir = Path::new(manifest_dir)
@@ -922,26 +944,33 @@ fn build_std_oxidebsd_userland_crate(
     );
     println!("cargo:rerun-if-changed={}", target_spec.display());
     // Once *any* rerun-if-changed is emitted, cargo stops implicitly watching the whole package
-    // directory -- without watching `third_party/rust` too, a patch to our own forked
+    // directory -- without watching `external/mit/rust` too, a patch to our own forked
     // `library/std` source doesn't trigger a rebuild here at all. **Found live, a real, not
     // fully root-caused gotcha**: watching the `library` directory alone was NOT reliable --
     // confirmed via direct experiment, `std::env::consts::OS` kept reporting an empty string
-    // after a real fix landed in `third_party/rust`, across multiple plain `cargo test` reruns,
+    // after a real fix landed in `external/mit/rust`, across multiple plain `cargo test` reruns,
     // until `target/x86_64-oxidebsd/debug/build/oxidebsd-*` (cargo's own build-script fingerprint
     // cache) was deleted by hand to force a genuinely fresh build.rs invocation. Suspected but
-    // unconfirmed cause: `third_party/rust/library` contains a *nested* submodule
+    // unconfirmed cause: `external/mit/rust/library` contains a *nested* submodule
     // (`library/backtrace`, its own separate `.git` boundary) that may confuse cargo's recursive
     // directory-change scan. Watching the submodule's own git ref file directly (updates on every
     // commit, unlike `.git/modules/.../HEAD` itself which only changes on branch switch) is a
     // more reliable second signal, kept alongside the directory watch rather than replacing it.
+    // (This ref-file path is real internal git bookkeeping keyed by this submodule's original
+    // `external/mit/rust` registration, not the current working-tree path -- git doesn't relocate
+    // `.git/modules/<name>` on a `git mv`-based submodule move, so it deliberately stays as-is.)
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(manifest_dir)
-            .join("third_party/rust/library")
+            .join("external/mit/rust/library")
             .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
+        // Real internal git bookkeeping keyed by this submodule's original `third_party/rust`
+        // registration, not its current `external/mit/rust` working-tree path -- git does not
+        // relocate `.git/modules/<name>` on a `git mv`-based submodule move (confirmed live:
+        // `external/mit/rust/.git`'s own gitdir pointer still resolves through this exact path).
         Path::new(manifest_dir)
             .join(".git/modules/third_party/rust/refs/heads/oxidebsd")
             .display()
@@ -1001,7 +1030,7 @@ fn build_std_oxidebsd_userland_crate(
 
 fn build_musl_smoke(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/musl-smoke/main.c");
+    let src = Path::new(manifest_dir).join("regress/musl-smoke/main.c");
     let target_dir = Path::new(manifest_dir).join("target/musl-smoke");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/musl-smoke");
     let out = target_dir.join("musl-smoke");
@@ -1025,11 +1054,11 @@ fn build_musl_smoke(sysroot: &Path) -> PathBuf {
     out
 }
 
-/// Derisk check for the fbdoom/doomgeneric port -- see `userland/float-smoke/main.c`'s own doc
+/// Derisk check for the fbdoom/doomgeneric port -- see `regress/float-smoke/main.c`'s own doc
 /// comment for why. Same `build_musl_smoke` recipe, next free slot in that family
 /// (`0x8200000`, clear of `sem-open-smoke`/its neighbors' own `0x81c0000`).
-/// The real id Software Doom engine sources this build compiles, matching `third_party/
-/// doomgeneric/doomgeneric/Makefile.linuxvt`'s own `SRC_DOOM` list -- the closest existing
+/// The real id Software Doom engine sources this build compiles, matching
+/// `external/gpl2/doomgeneric/doomgeneric/Makefile.linuxvt`'s own `SRC_DOOM` list -- the closest existing
 /// upstream Makefile to this port (no SDL/X11, real framebuffer + input) -- **minus** `i_video`/
 /// `i_input`/`doomgeneric_linuxvt` (real Linux fbdev/evdev-specific; `i_video.c` doesn't even
 /// compile against this musl fork's sysroot, which vendors no `<linux/fb.h>`), **plus** this
@@ -1124,7 +1153,7 @@ const DOOMGENERIC_SOURCES: &[&str] = &[
 /// `target/doomgeneric/`, never in-tree).
 fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let doomgeneric_dir = Path::new(manifest_dir).join("third_party/doomgeneric/doomgeneric");
+    let doomgeneric_dir = Path::new(manifest_dir).join("external/gpl2/doomgeneric/doomgeneric");
     // Found live fixing the Space-doesn't-open-doors bug: this function's own `already_fresh`
     // mtime check is dead code without this -- cargo only reruns build.rs at all for paths it's
     // explicitly told to watch (once any `cargo:rerun-if-changed` is emitted anywhere, cargo's
@@ -1193,7 +1222,7 @@ fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
 
 fn build_float_smoke(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/float-smoke/main.c");
+    let src = Path::new(manifest_dir).join("regress/float-smoke/main.c");
     let target_dir = Path::new(manifest_dir).join("target/float-smoke");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/float-smoke");
     let out = target_dir.join("float-smoke");
@@ -1217,15 +1246,15 @@ fn build_float_smoke(sysroot: &Path) -> PathBuf {
     out
 }
 
-/// "Real threading" phases 1-5's own finish line -- see `userland/pthread-smoke/main.c`'s own doc
+/// "Real threading" phases 1-5's own finish line -- see `regress/pthread-smoke/main.c`'s own doc
 /// comment for the scenario. Same `build_musl_smoke` recipe, one slot further along
 /// (`0x8100000`, clear of `musl-smoke`'s `0x80c0000`) -- this binary is `fork`+`execve`'d fresh by
-/// `userland/pthread-syscall-smoke/`, never co-resident with any other fixed-base image (unlike
+/// `regress/pthread-syscall-smoke/`, never co-resident with any other fixed-base image (unlike
 /// `build_dynlink_smoke`'s own interpreter-coexistence case), so it only needs to stay clear of the
 /// kernel's own image/heap/phys-mem window, not any other userland crate specifically.
 fn build_pthread_smoke(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/pthread-smoke/main.c");
+    let src = Path::new(manifest_dir).join("regress/pthread-smoke/main.c");
     let target_dir = Path::new(manifest_dir).join("target/pthread-smoke");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/pthread-smoke");
     let out = target_dir.join("pthread-smoke");
@@ -1251,16 +1280,16 @@ fn build_pthread_smoke(sysroot: &Path) -> PathBuf {
 }
 
 /// Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) -- see
-/// `userland/sem-open-smoke/main.c`'s own doc comment for the scenario, and
-/// `process::limits::futex_key`'s own doc comment (`src/process/limits.rs`) for the real
+/// `regress/sem-open-smoke/main.c`'s own doc comment for the scenario, and
+/// `process::limits::futex_key`'s own doc comment (`sys/process/limits.rs`) for the real
 /// physical-address-keyed `FUTEX_WAIT`/`FUTEX_WAKE` fix this proves. Same `build_musl_smoke`
 /// recipe `build_pthread_smoke` above already establishes, one slot further along (`0x8140000`,
 /// clear of `pthread-smoke`'s own `0x8100000`) -- this binary is `fork`+`execve`'d fresh by
-/// `userland/sem-open-syscall-smoke/`, never co-resident with any other fixed-base image, so it
+/// `regress/sem-open-syscall-smoke/`, never co-resident with any other fixed-base image, so it
 /// only needs to stay clear of the kernel's own image/heap/phys-mem window.
 fn build_sem_open_smoke(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/sem-open-smoke/main.c");
+    let src = Path::new(manifest_dir).join("regress/sem-open-smoke/main.c");
     let target_dir = Path::new(manifest_dir).join("target/sem-open-smoke");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/sem-open-smoke");
     let out = target_dir.join("sem-open-smoke");
@@ -1285,7 +1314,7 @@ fn build_sem_open_smoke(sysroot: &Path) -> PathBuf {
 }
 
 /// Reproduces the Open POSIX Test Suite's own `pthread_cancel/5-1.c` scenario in isolation -- see
-/// `userland/pthread-cancel-crash/main.c`'s own doc comment for why (a real, expected crash inside
+/// `regress/pthread-cancel-crash/main.c`'s own doc comment for why (a real, expected crash inside
 /// that pilot file seemed to leave the whole kernel wedged for the rest of a full-corpus boot; this
 /// isolates the crash from the ~1700-file harness to find out why). Same `build_musl_smoke` recipe
 /// `build_pthread_smoke` above already establishes (needs `-pthread` for the same reason that one
@@ -1293,7 +1322,7 @@ fn build_sem_open_smoke(sysroot: &Path) -> PathBuf {
 /// (`0x8180000`, clear of `sem-open-smoke`'s own `0x8140000`).
 fn build_pthread_cancel_crash(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/pthread-cancel-crash/main.c");
+    let src = Path::new(manifest_dir).join("regress/pthread-cancel-crash/main.c");
     let target_dir = Path::new(manifest_dir).join("target/pthread-cancel-crash");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/pthread-cancel-crash");
     let out = target_dir.join("pthread-cancel-crash");
@@ -1321,13 +1350,13 @@ fn build_pthread_cancel_crash(sysroot: &Path) -> PathBuf {
 /// Isolates the real cross-process `pthread_mutex`/`pthread_cond` (`PTHREAD_PROCESS_SHARED`)
 /// mechanism from the Open POSIX Test Suite's own `pthread_cond_broadcast/1-2.c`, which appears to
 /// genuinely stall somewhere in its real `fork==1` scenarios during a full pilot run -- see
-/// `userland/pshared-cond-crash/main.c`'s own doc comment for the exact narrower scenario this
+/// `regress/pshared-cond-crash/main.c`'s own doc comment for the exact narrower scenario this
 /// reproduces (one forked child, not up to `MAX_PROCESS_CHILDREN = 200`). Same `build_musl_smoke`
 /// recipe (needs `-pthread`), one slot further along (`0x81c0000`, clear of
 /// `pthread-cancel-crash`'s own `0x8180000`).
 fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/pshared-cond-crash/main.c");
+    let src = Path::new(manifest_dir).join("regress/pshared-cond-crash/main.c");
     let target_dir = Path::new(manifest_dir).join("target/pshared-cond-crash");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/pshared-cond-crash");
     let out = target_dir.join("pshared-cond-crash");
@@ -1361,12 +1390,12 @@ fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
 /// `.rela.dyn`/`DT_RELA` table (confirmed via `readelf -r`), and real musl's own self-relocation
 /// bootstrap (`ldso/dlstart.c`) always computes `real_addr = AT_BASE + stored_value`, expecting
 /// `stored_value` to be zero-based -- a fixed-base link double-counts the base and produces a wild
-/// pointer. `src/process/elf.rs`'s `elf::load` now applies a real, kernel-chosen runtime bias instead (see
-/// its own doc comment and `src/process/lifecycle.rs`'s `INTERP_LOAD_BASE`) -- this build only needs to
+/// pointer. `sys/process/elf.rs`'s `elf::load` now applies a real, kernel-chosen runtime bias instead (see
+/// its own doc comment and `sys/process/lifecycle.rs`'s `INTERP_LOAD_BASE`) -- this build only needs to
 /// produce a normally-linked, real `-fPIC` shared object, the same shape any real musl
 /// distro ships.
 ///
-/// **Deliberately builds from a fresh copy of `third_party/musl`, not in the same tree
+/// **Deliberately builds from a fresh copy of `external/mit/musl`, not in the same tree
 /// `build_musl_sysroot` already builds the static sysroot in.** That static build configures with
 /// `--disable-shared CFLAGS=-fno-pie -fno-PIC` -- exactly wrong for real shared objects (genuine
 /// PIC codegen, not the anti-PIE workaround every real on-target static-linked consumer needs,
@@ -1377,7 +1406,7 @@ fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
 /// depend on. The copy is a
 /// one-time cost (gated on the destination not already existing) -- this deliberately does not try
 /// to detect a stale copy against upstream source changes the way `build_busybox_applet`'s
-/// staleness floor does; re-syncing this copy after a real `third_party/musl` patch is a manual
+/// staleness floor does; re-syncing this copy after a real `external/mit/musl` patch is a manual
 /// step for now (`rm -rf target/musl-src-shared`), matching this milestone's own deliberately
 /// narrow scope.
 ///
@@ -1388,13 +1417,13 @@ fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
 /// invocation) stays directly usable as a host-side cross-compiler without a second relocation
 /// step. This means the *default* dynamic-linker path baked into anything linked against this
 /// sysroot would be this host's own absolute sysroot path, not the real target path
-/// (`/lib/ld-musl-x86_64.so.1`, matching where `modules/oxfs` seeds it) -- `build_dynlink_smoke`
+/// (`/lib/ld-musl-x86_64.so.1`, matching where `sys/modules/oxfs` seeds it) -- `build_dynlink_smoke`
 /// below overrides it explicitly per-link via `-Wl,--dynamic-linker=...` rather than trying to
 /// thread a real target-relative prefix through (confirmed via direct `readelf -p .interp`
 /// experimentation that this override wins over the specs file's own default).
 fn build_musl_sysroot_shared() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let real_musl_dir = Path::new(manifest_dir).join("third_party/musl");
+    let real_musl_dir = Path::new(manifest_dir).join("external/mit/musl");
     let musl_dir = Path::new(manifest_dir).join("target/musl-src-shared");
     let sysroot = Path::new(manifest_dir).join("target/musl-sysroot-shared");
 
@@ -1405,12 +1434,12 @@ fn build_musl_sysroot_shared() -> PathBuf {
             .current_dir(&real_musl_dir)
             .status()
             .unwrap_or_else(|e| {
-                panic!("failed to copy third_party/musl for the shared build: {e}")
+                panic!("failed to copy external/mit/musl for the shared build: {e}")
             });
         if !status.success() {
-            panic!("copying third_party/musl for the shared build failed: {status}");
+            panic!("copying external/mit/musl for the shared build failed: {status}");
         }
-        // `cp -a` faithfully copies whatever build state `third_party/musl` itself happens to be
+        // `cp -a` faithfully copies whatever build state `external/mit/musl` itself happens to be
         // in right now -- including, almost always, `build_musl_sysroot`'s own already-built
         // static `config.mak`/`obj/`/`lib/*.a` (musl builds in place, no `O=` out-of-tree
         // mechanism, same reasoning `build_musl_sysroot`'s own doc comment already gives). Left
@@ -1422,7 +1451,7 @@ fn build_musl_sysroot_shared() -> PathBuf {
         // supposedly-`-fPIC` build (the same class of bug CLAUDE.md's BusyBox section documents
         // for a stale out-of-tree build directory). `make distclean` (`rm -rf obj lib` +
         // `rm -f config.mak`) guarantees a truly pristine tree regardless of what state
-        // `third_party/musl` was in at copy time -- run exactly once, right after a fresh copy,
+        // `external/mit/musl` was in at copy time -- run exactly once, right after a fresh copy,
         // not on every subsequent `cargo build` (which would defeat this build's own incremental
         // compilation once it's genuinely configured for real).
         let status = Command::new("make")
@@ -1472,19 +1501,19 @@ fn build_musl_sysroot_shared() -> PathBuf {
     sysroot
 }
 
-/// Cross-builds `userland/dynlink-smoke/main.c` (one `write()` call) against `sysroot` (see
+/// Cross-builds `regress/dynlink-smoke/main.c` (one `write()` call) against `sysroot` (see
 /// `build_musl_sysroot_shared` above) as a real, dynamically-linked `ET_EXEC` binary: `-no-pie`
 /// (matching `build_musl_smoke`'s own reasoning -- keeps this the *main binary*, not itself an
-/// `ET_DYN` image, so only the interpreter needs `src/process/elf.rs`'s new `ET_DYN` handling), fixed at
-/// `fixture_base` (must stay clear of `src/process/lifecycle.rs`'s `INTERP_LOAD_BASE` -- both images load
+/// `ET_DYN` image, so only the interpreter needs `sys/process/elf.rs`'s new `ET_DYN` handling), fixed at
+/// `fixture_base` (must stay clear of `sys/process/lifecycle.rs`'s `INTERP_LOAD_BASE` -- both images load
 /// into the *same* address space for a real `PT_INTERP` exec, unlike every other fixed-base
 /// userland binary in this codebase, which never coexists with another image), and an explicit
 /// `-Wl,--dynamic-linker=/lib/ld-musl-x86_64.so.1` overriding the sysroot's own host-path default
 /// (see `build_musl_sysroot_shared`'s own doc comment) so the baked-in `PT_INTERP` string matches
-/// the real target path `modules/oxfs` seeds this at.
+/// the real target path `sys/modules/oxfs` seeds this at.
 fn build_dynlink_smoke(sysroot: &Path, fixture_base: u64) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("userland/dynlink-smoke/main.c");
+    let src = Path::new(manifest_dir).join("regress/dynlink-smoke/main.c");
     let target_dir = Path::new(manifest_dir).join("target/dynlink-smoke");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/dynlink-smoke");
     let out = target_dir.join("dynlink-smoke");
@@ -1512,7 +1541,7 @@ fn build_dynlink_smoke(sysroot: &Path, fixture_base: u64) -> PathBuf {
 /// starting with `.`) -- computed once per `cargo build` invocation, not once per applet (see
 /// `build_busybox_applet`'s own doc comment for why that distinction matters at ~300 applets). A
 /// plain recursive walk rather than a crate dependency: this only runs when build.rs's own
-/// `cargo:rerun-if-changed` gate already decided `third_party/busybox` changed, so it's a rare,
+/// `cargo:rerun-if-changed` gate already decided `external/gpl2/busybox` changed, so it's a rare,
 /// not hot-path, cost -- not worth a `walkdir`-style dependency for.
 fn latest_mtime(dir: &Path) -> std::time::SystemTime {
     let mut latest = std::time::UNIX_EPOCH;
@@ -1580,7 +1609,7 @@ fn collect_dir_files(dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Generates a single Rust source file declaring `MUSL_INCLUDE_FILES`/`MUSL_LIB_FILES` --
 /// `&[(&str, &[u8])]` arrays of (path relative to their own eventual `/usr/...` destination,
-/// embedded content) -- consumed by `modules/oxfs/src/lib.rs`'s `format_fresh_filesystem` via a
+/// embedded content) -- consumed by `sys/modules/oxfs/src/lib.rs`'s `format_fresh_filesystem` via a
 /// single `include!(env!("MUSL_RUNTIME_MANIFEST_PATH"))`, feeding its own `seed_tree` helper. This
 /// is real, on-target runtime content a real on-target compile needs (musl's headers/crt/
 /// `libc.a`), not just a compiler binary itself -- originally built for TinyCC (this project's
@@ -1642,7 +1671,7 @@ fn write_musl_runtime_manifest(musl_sysroot: &Path) -> PathBuf {
 }
 
 /// The triple this project's real on-target Clang/LLVM port builds for -- genuine `Triple::
-/// OxideBSD` OS identity (see `third_party/llvm-project`'s `oxidebsd` branch), `musl` environment
+/// OxideBSD` OS identity (see `external/apache2/llvm`'s `oxidebsd` branch), `musl` environment
 /// so LLVM/Clang's existing `Triple::isMusl()`-gated behavior (dynamic-linker naming, static/PIE
 /// defaults, CRT object selection in `Gnu.cpp`) applies for free, matching real musl-linux
 /// conventions the project's musl fork already provides on disk.
@@ -1677,7 +1706,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 /// libc++'s own `src/atomic.cpp` (`#ifdef __linux__ #include <linux/futex.h>`, unconditional in
 /// this LLVM version) -- musl itself needs none of this. Safe to vendor verbatim:
 /// `linux/futex.h`'s `FUTEX_WAIT=0`/`FUTEX_WAKE=1`/`FUTEX_PRIVATE=128` are confirmed to exactly
-/// match this kernel's own real `do_futex` opcode numbering (`src/process/limits.rs`), and the
+/// match this kernel's own real `do_futex` opcode numbering (`sys/process/limits.rs`), and the
 /// whole directory is GPL-2.0-with-Linux-syscall-note licensed specifically to permit this exact
 /// kind of userspace consumption (same exception real libc's like musl/glibc themselves rely on).
 /// A one-time copy (checked via `linux/futex.h`'s own presence) -- these never change once copied.
@@ -1694,7 +1723,7 @@ fn vendor_linux_uapi_headers(musl_sysroot: &Path) {
 }
 
 /// Builds a *host-executable* Clang+LLD cross compiler (`--target=x86_64-unknown-oxidebsd-musl`)
-/// from `third_party/llvm-project` -- see CLAUDE.md's Clang/LLVM port section. First stage of a
+/// from `external/apache2/llvm` -- see CLAUDE.md's Clang/LLVM port section. First stage of a
 /// two-stage bootstrap: this compiler runs on the build host but targets OxideBSD, and exists only
 /// to build the target's own C++ runtime (`build_llvm_target_runtimes`) and the *real*,
 /// on-target-executable clang+lld (`build_llvm_target_toolchain`) below.
@@ -1702,12 +1731,12 @@ fn vendor_linux_uapi_headers(musl_sysroot: &Path) {
 /// X86-only, clang+lld only (no clang-tools-extra/lldb/mlir/polly), no tests/docs/examples --
 /// this is a build tool, not a product install. `LLVM_ENABLE_EH`/`RTTI=OFF` matches LLVM's own
 /// upstream default. Real, multi-hour-on-a-clean-checkout cost -- staleness-gated, but **not** a
-/// full recursive walk of `third_party/llvm-project` (600+MB, tens of thousands of files):
+/// full recursive walk of `external/apache2/llvm` (600+MB, tens of thousands of files):
 /// `cargo:rerun-if-changed` is scoped to just the directories this project actually patches,
 /// matching `build_musl_sysroot`'s own directory-level (not per-file) scoping.
 fn build_llvm_host_toolchain() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let llvm_root = Path::new(manifest_dir).join("third_party/llvm-project");
+    let llvm_root = Path::new(manifest_dir).join("external/apache2/llvm");
     let build_dir = Path::new(manifest_dir).join("target/llvm-host-build");
     let clang_bin = build_dir.join("bin/clang-23");
     let lld_bin = build_dir.join("bin/lld");
@@ -1798,7 +1827,7 @@ fn build_llvm_host_toolchain() -> PathBuf {
 /// fails with undefined `__cxa_throw`/`_Unwind_Resume`/exception-class vtable symbols.
 fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let llvm_root = Path::new(manifest_dir).join("third_party/llvm-project");
+    let llvm_root = Path::new(manifest_dir).join("external/apache2/llvm");
     let libcxx_out = host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a"));
     let compiler_rt_build = Path::new(manifest_dir).join("target/compiler-rt-target-build");
     let builtins_dest = host_build.join(format!(
@@ -1938,13 +1967,13 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
 /// flag.
 fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let llvm_src = Path::new(manifest_dir).join("third_party/llvm-project/llvm");
+    let llvm_src = Path::new(manifest_dir).join("external/apache2/llvm/llvm");
     let build_dir = Path::new(manifest_dir).join("target/llvm-target-build");
     let clang_bin = build_dir.join("bin/clang-23");
     let lld_bin = build_dir.join("bin/lld");
 
     // Real, previously-live build-caching gotcha, the same class CLAUDE.md's std-target section
-    // already documents for `build_std_oxidebsd_userland_crate`/`modules/oxfs`, hit here too:
+    // already documents for `build_std_oxidebsd_userland_crate`/`sys/modules/oxfs`, hit here too:
     // this staleness check only ever compared against the *host* build's own `libc++.a` mtime,
     // never `musl_sysroot`'s -- so patching musl and rebuilding it (this function's own caller
     // already does that unconditionally) left `clang_bin`/`lld_bin` looking perfectly "fresh"
@@ -2137,8 +2166,9 @@ fn write_clang_runtime_manifest(target_build: &Path) -> PathBuf {
 /// were added, then re-run -- the same "found live, fixed forward" discipline every other exclusion
 /// in this codebase's history follows, not something to pre-solve by static reading alone.
 // `fork/11-1.c`: **FIXED**, confirmed PASS via an isolated canary run -- root cause was two real,
-// independent musl bugs, not a kernel bug at all (patched on `third_party/musl`'s `oxidebsd`
-// branch, `src/process/_Fork.c` and `src/stdio/ftrylockfile.c`):
+// independent musl bugs, not a kernel bug at all (patched on `external/mit/musl`'s `oxidebsd`
+// branch, `src/process/_Fork.c` and `src/stdio/ftrylockfile.c` -- both musl's own internal source
+// layout, unrelated to this kernel's own `sys/` tree):
 // (1) `_Fork()`'s `__post_Fork` correctly resets the surviving thread's own `tid` and
 //     `__thread_list_lock` in the child, but never touched any `FILE`'s own `.lock` word -- a
 //     `flockfile(stdout)` held by the parent before `fork()` left `stdout`'s lock word holding a
@@ -2173,7 +2203,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     // parent's own `do { cur = times(&t); } while (cur - start < sysconf(_SC_CLK_TCK))` (its
     // return value, `crate::cpu::interrupts::ticks()`, was always real) -- it was the *child*'s
     // own `while ((child_tms.tms_utime + child_tms.tms_stime) <= 0)`, which an unconditionally
-    // all-zero `tms` struct (`sys_times`'s own doc comment in `src/syscall/ffi.rs` explains why --
+    // all-zero `tms` struct (`sys_times`'s own doc comment in `sys/syscall/ffi.rs` explains why --
     // that call site predated `Process::cpu_ticks`, added later purely for `clock_gettime`, and
     // was never revisited) could never satisfy. Root cause found by tracing the test's own actual
     // blocking primitive, same as the `pthread_cond_timedwait` fixes above -- not the live
@@ -2217,16 +2247,16 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     // wait/wake pair on `(tgid, addr)` alone -- correct for a *private* futex, but a real
     // `sem_open()` semaphore is `pshared` (real, unmodified musl clears `FUTEX_PRIVATE` for it),
     // and its backing `/dev/shm`-mapped `MAP_SHARED` page generally lands at a *different* virtual
-    // address in each of two independent `fork()`ed processes (`NEXT_MMAP_PAGE`, `src/process/
+    // address in each of two independent `fork()`ed processes (`NEXT_MMAP_PAGE`, `sys/process/
     // mm.rs`'s own bump allocator, is one global counter shared across every process, never reset
     // per caller) -- so a waiter's own `FUTEX_WAIT` and a waker's own `FUTEX_WAKE` almost never
-    // agreed on the same key. Fixed via `process::limits::futex_key` (`src/process/limits.rs`): a
+    // agreed on the same key. Fixed via `process::limits::futex_key` (`sys/process/limits.rs`): a
     // *shared* futex now resolves `addr` through the caller's own address space to the real
     // physical address backing it instead, identical across every process mapping the same
     // physical frame regardless of virtual address; a private futex is unaffected, still keyed by
     // `(tgid, addr)` exactly as before. Also verified end to end via `tests/
     // sem_open_syscall_smoke.rs` (a genuinely unmodified `sem_open()`+`fork()`+`sem_post()`/
-    // `sem_wait()` C fixture, `userland/sem-open-smoke/main.c`). Removed from this list entirely,
+    // `sem_wait()` C fixture, `regress/sem-open-smoke/main.c`). Removed from this list entirely,
     // same as `sigwait/6-1.c`/`6-2.c`/`fork/11-1.c` below -- none of these four live under a
     // `pthread_*`/`aio_*`/`lio_listio*` prefix, so removing them here is what actually re-includes
     // them in a real full-corpus run.
@@ -2266,7 +2296,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     // children, each looping `NLOOP=1000` times calling `shm_open(name, O_RDONLY|O_CREAT|O_EXCL,
     // ...)` with **no `close(fd)` anywhere in the loop** -- a real bug in the test's own
     // `child_func` on any system, but harmless on real POSIX platforms since fd exhaustion there is
-    // scoped *per-process* (bounded by that process's own `RLIMIT_NOFILE`). `modules/oxfs`'s
+    // scoped *per-process* (bounded by that process's own `RLIMIT_NOFILE`). `sys/modules/oxfs`'s
     // `OPEN_FILES` table (`MAX_OPEN_FILES`) was **global**, not per-process, and every slot paid a
     // full `MAX_WRITE_BUFFER` (128 KiB) regardless of use -- so even a generous static bump (8 ->
     // 256) only delayed exhaustion, it couldn't survive this test's up-to-1000-simultaneous-real-
@@ -2274,7 +2304,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     //
     // **The real fix**: `OpenFile::Write`'s own content buffer moved out of the `OPEN_FILES` enum
     // entirely into a separate, smaller `WRITE_BUFFERS` pool, claimed lazily only by a fd that
-    // actually calls `write()` (see that pool's own doc comment in `modules/oxfs/src/lib.rs`) --
+    // actually calls `write()` (see that pool's own doc comment in `sys/modules/oxfs/src/lib.rs`) --
     // most concurrently-open fds across this whole corpus, including every one of this test's own
     // 1000 objects (`O_RDONLY`, never written to), never touch it at all. This let `MAX_OPEN_FILES`
     // scale 256 -> 2048 while *lowering* total static memory cost (~8 MiB vs. the old ~32 MiB for
@@ -2336,7 +2366,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     //     "siblings", so the leader got processed while the worker (the caller, not yet reached in
     //     the loop) was still alive -- `terminate_process`'s own `other_thread_alive` check saw that
     //     and wrongly treated the *leader* as a disposable non-leader thread, silently stranding it
-    //     with no parent notification. Fixed in `src/process/lifecycle.rs::terminate_thread_group`:
+    //     with no parent notification. Fixed in `sys/process/lifecycle.rs::terminate_thread_group`:
     //     every non-leader group member is terminated first, the leader (`pid == tgid`) always last,
     //     regardless of whether it's the original caller or one of its "siblings".
     // (2) `2-5.c` (100 threads, two mutexes, real contended condvar hand-off): musl's own
@@ -2348,7 +2378,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
     //     doesn't fit this ABI's plain 4-register `SYS_FUTEX` wire format (real `futex(2)` needs 6
     //     args for this op), so a dedicated `SYS_FUTEX_REQUEUE=557` was added instead, and the one
     //     real call site (`unlock_requeue`) patched on the `oxidebsd` musl branch to call it
-    //     directly -- see `src/process/limits.rs::do_futex_requeue`'s own doc comment. This alone
+    //     directly -- see `sys/process/limits.rs::do_futex_requeue`'s own doc comment. This alone
     //     doesn't make `2-5.c` fully `PASS` (it now reaches a real `UNRESOLVED` from something else
     //     in its own giant pshared/altclock scenario matrix, not a hang), but it's no longer a
     //     permanent hang, and its previously-unreachable neighbors `4-2.c`/`4-3.c` -- blocked from
@@ -2411,7 +2441,7 @@ const POSIX_KNOWN_HANGS: &[&str] = &[
 ///   full-corpus supervised run has ever flagged -- `fork/8-1.c`, `sched_yield/1-1.c`,
 ///   `pthread_attr_setstacksize/2-1.c`, `pthread_cancel/5-2.c`, `pthread_cond_timedwait/
 ///   {2-5,4-1}.c`, `shm_open/23-1.c` (a real global-fd-table-exhaustion cascade, fixed by moving
-///   `OpenFile::Write`'s content buffer out of `modules/oxfs`'s `OPEN_FILES` table into its own
+///   `OpenFile::Write`'s content buffer out of `sys/modules/oxfs`'s `OPEN_FILES` table into its own
 ///   separate, lazily-claimed `WRITE_BUFFERS` pool -- see that pool's own doc comment), and
 ///   `pthread_kill/6-1.c` (the last to go: a real fault-to-signal-delivery bug, a synchronously-
 ///   generated `SIGSEGV` occurring while blocked -- fixed via `process::signals::
@@ -2472,7 +2502,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
     // futex/threading/fork/signal-delivery/timer/fd-table change, not emptied out:
     // `fork/11-1.c`/`pthread_attr_destroy/1-1.c`/`pthread_atfork/3-3.c` (real thread-group signal
     // delivery + `exit_group(2)`), the four named-semaphore files (real physical-address-keyed
-    // shared-futex, `process::limits::futex_key` in `src/process/limits.rs`), `sigwait/4-1.c`/
+    // shared-futex, `process::limits::futex_key` in `sys/process/limits.rs`), `sigwait/4-1.c`/
     // `timer_settime/{2-1,6-1,9-1}.c` (real timer-expiry signal wake, `wake_if_sigwaiting`),
     // `clock_settime/7-2.c` (a `clock_settime(CLOCK_REALTIME, ...)` forwarding the wall clock past
     // an already-sleeping `clock_nanosleep()` target now actively re-wakes it,
@@ -2480,10 +2510,10 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
     // `F_GETFL` `O_APPEND` reporting, `crate::fs::fd::FdIsAppend` -- real, unmodified musl's own
     // AIO code needs this bit to serialize concurrent writes to the same fd; also fixed
     // `resolve_write_fd_inode` to keep re-committing on every call instead of only the first,
-    // `modules/oxfs/src/lib.rs`), and the full
+    // `sys/modules/oxfs/src/lib.rs`), and the full
     // `shm_open`+`shm_unlink`+`sigaction/1-{1,2}.c` block **including** `shm_open/23-1.c`
     // itself (the real `MAX_OPEN_FILES`/`WRITE_BUFFERS` global-fd-table-exhaustion-cascade fix,
-    // `modules/oxfs/src/lib.rs` -- `shm_open/23-1.c` no longer needs excluding at all, see
+    // `sys/modules/oxfs/src/lib.rs` -- `shm_open/23-1.c` no longer needs excluding at all, see
     // `POSIX_KNOWN_HANGS`'s own doc comment; its own `TIMEOUT` here is a real, expected, bounded
     // outcome, not a symptom of the bug this block regression-tests). Add to this list, don't just
     // replace it, so a real regression gets caught immediately.
@@ -2593,8 +2623,8 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // `pthread_cond_timedwait/{2-5,4-1,4-2,4-3}.c`: real regression coverage for the
             // `terminate_thread_group` leader-ordering fix and the new real `SYS_FUTEX_REQUEUE`
             // handler -- see `POSIX_KNOWN_HANGS`'s own doc comment above (both files used to be
-            // permanent hangs listed there) and `src/process/lifecycle.rs::terminate_thread_group`/
-            // `src/process/limits.rs::do_futex_requeue` for the real fixes. Confirmed via this exact
+            // permanent hangs listed there) and `sys/process/lifecycle.rs::terminate_thread_group`/
+            // `sys/process/limits.rs::do_futex_requeue` for the real fixes. Confirmed via this exact
             // canary mechanism: `4-1.c`/`4-2.c`/`4-3.c` now cleanly `PASS`; `2-5.c` no longer hangs
             // but reaches a real `UNRESOLVED` from something else in its own giant scenario matrix,
             // a legitimate outcome kept here to catch any future regression back to a real hang.
@@ -2604,7 +2634,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             "pthread_cond_timedwait/4-3.c",
             // `fork/8-1.c`: real regression coverage for the `sys_times`/`child_cpu_ticks` fix --
             // see `POSIX_KNOWN_HANGS`'s own doc comment above (used to be a permanent hang listed
-            // there) and `src/syscall/ffi.rs::sys_times` for the real fix. Confirmed `PASS`.
+            // there) and `sys/syscall/ffi.rs::sys_times` for the real fix. Confirmed `PASS`.
             "fork/8-1.c",
             // `pthread_attr_setstacksize/2-1.c`: **was never actually a hang** -- confirmed via a
             // genuinely isolated single-file canary run (the full-corpus supervised run that
@@ -2661,7 +2691,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // outcome; not fixable without a much larger design change (keeping every detached
             // thread's TCB reserved indefinitely, which musl doesn't do).
             // `4-3.c`: was a *different*, actually-fixable case -- real, unmodified musl's own
-            // `pthread_detach()` (`third_party/musl/src/thread/pthread_detach.c`) unconditionally
+            // `pthread_detach()` (`external/mit/musl/src/thread/pthread_detach.c`) unconditionally
             // fell back to an internal `__pthread_join(t, 0)` call whenever its own
             // `a_cas(&t->detach_state, DT_JOINABLE, DT_DETACHED)` failed, even when the failure
             // meant "already detached, not exiting" -- a case it could detect directly from the
@@ -2688,7 +2718,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // nothing in `do_sched_setparam` ever checked "appropriate privilege" (`CAP_SYS_NICE`
             // on real Linux) before this, only uid-ownership (`has_sched_permission`), so the
             // raise silently succeeded. Fixed via `limits::sched_priority_raise_permitted`
-            // (`src/process/limits.rs`), wired into both `do_sched_setscheduler`/`do_sched_setparam`.
+            // (`sys/process/limits.rs`), wired into both `do_sched_setscheduler`/`do_sched_setparam`.
             "sched_setparam/23-6.c",
             // `mmap/6-2.c`: real `PROT_NONE` enforcement -- a mapping's covered pages simply never
             // get a page-table entry when neither `PROT_READ` nor `PROT_WRITE` is set, reusing
@@ -2763,7 +2793,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // `pthread_rwlock_rdlock/2-{1,2,3}.c`: found chasing these -- `do_sched_setscheduler`
             // returning the former policy (not `0`) on success broke `pthread_setschedparam()`'s
             // own real, unmodified internal `-__syscall(...)` negation idiom whenever a caller's
-            // own prior policy was already non-`SCHED_OTHER`. Fixed in `src/process/limits.rs` --
+            // own prior policy was already non-`SCHED_OTHER`. Fixed in `sys/process/limits.rs` --
             // see `do_sched_setscheduler`'s own doc comment for the real host-verified detail. Not
             // a full fix for these three files' own real assertions (real priority-aware rwlock
             // reader/writer preference, which real Linux's own default pthread_rwlock doesn't
@@ -2817,7 +2847,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // private-condvar broadcast/signal chain-wake beyond the first directly-woken waiter
             // issued syscall 456 (never registered here) instead of 557, permanently stranding the
             // rest. Fixed by renaming the macro to `__NR_oxidebsd_futex_requeue` -- see
-            // `third_party/musl/arch/x86_64/bits/syscall.h.in`'s own doc comment on that macro for
+            // `external/mit/musl/arch/x86_64/bits/syscall.h.in`'s own doc comment on that macro for
             // the full story. Also closes `pthread_cond_timedwait/2-5.c` (stuck `UNRESOLVED` for
             // multiple prior sessions) and `pthread_cond_destroy/2-1.c` -- same root cause, one fix.
             "pthread_cond_broadcast/1-1.c",
@@ -2932,7 +2962,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
     // signal blocking) hanging the same way the garbage-attr/atfork/futex-adjacent ones did.
     // **`pthread_attr_init/2-1.c` is now FIXED** (confirmed PASS via an isolated canary run) --
     // root cause was `SYS_exit_group` sharing the exact same syscall number as a bare per-thread
-    // `SYS_exit` (see `third_party/musl/arch/x86_64/bits/syscall.h.in`'s `__NR_exit_group` doc
+    // `SYS_exit` (see `external/mit/musl/arch/x86_64/bits/syscall.h.in`'s `__NR_exit_group` doc
     // comment and `process::do_exit_group`'s own doc comment in the OxideBSD tree): `main()`
     // returning on the thread-group leader only ever tore down the leader itself, silently
     // orphaning this test's still-sleeping detached child thread, which later deadlocked in its
@@ -3194,7 +3224,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     // at the point the pilot script runs (`/`) -- so it has to be seeded at that *exact* path, not
     // under `/posix-tests/` like every other pilot binary. Kept in a second, separate generated
     // array (`POSIX_TEST_EXTRA_FILES`) seeded directly at oxfs's own root rather than folded into
-    // `POSIX_TEST_FILES` above, which `modules/oxfs` seeds under `/posix-tests` specifically.
+    // `POSIX_TEST_FILES` above, which `sys/modules/oxfs` seeds under `/posix-tests` specifically.
     // +0x4000000 (was 0xa7a0000) alongside every other fixed userland/BusyBox/module address --
     // see module::MODULE_VA_BASE's own doc comment.
     const SIGALTSTACK_9_BUILDONLY_LOAD_BASE: u64 = 0xe7a0000;
@@ -3241,13 +3271,27 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     out_path
 }
 
-/// Cross-builds the userland crate at `userland/<crate_name>/` and exposes its resulting ELF's
-/// path via `cargo:rustc-env=<env_var>=<path>`, and returns that same path so callers that need
-/// the raw bytes on the host side (`main`, for embedding `ring3-smoke` into the FAT32 image) don't
-/// have to re-derive it.
+/// Cross-builds the regression-test crate at `regress/<crate_name>/` and exposes its resulting
+/// ELF's path via `cargo:rustc-env=<env_var>=<path>`, and returns that same path so callers that
+/// need the raw bytes on the host side (`main`, for embedding `ring3-smoke` into the FAT32 image)
+/// don't have to re-derive it. Thin wrapper around `build_crate_at` below -- every call site here
+/// wants the same `regress/` parent; `build_crate_at` exists directly for the rare crate (real
+/// BSD-shaped utilities like `usr.bin/lsoxmod`, eventually `usr.bin/make`) that doesn't.
 fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
+    build_crate_at(&format!("regress/{crate_name}"), env_var)
+}
+
+/// Cross-builds the crate at the repo-root-relative `relative_dir` and exposes its resulting ELF's
+/// path via `cargo:rustc-env=<env_var>=<path>` -- see `build_userland_crate`'s own doc comment for
+/// why this exists as a separate, explicit-path function rather than folding a parent-directory
+/// parameter into every one of that function's ~49 call sites.
+fn build_crate_at(relative_dir: &str, env_var: &str) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let userland_dir = Path::new(manifest_dir).join("userland").join(crate_name);
+    let userland_dir = Path::new(manifest_dir).join(relative_dir);
+    let crate_name = Path::new(relative_dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| panic!("build_crate_at: {relative_dir:?} has no final path component"));
     let target_dir = Path::new(manifest_dir).join("target/userland");
 
     println!(
@@ -3317,7 +3361,7 @@ fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
     elf_path
 }
 
-/// Cross-builds the Multiboot2 boot-path smoke test (`smoke/multiboot2-boot-smoke/`, wrapping
+/// Cross-builds the Multiboot2 boot-path smoke test (`regress/multiboot2-boot-smoke/`, wrapping
 /// `tests/multiboot2_boot_smoke.rs`) into a final linked ELF, using the dedicated
 /// `x86_64-oxidebsd-multiboot2.ld` linker script instead of the kernel's own `x86_64-oxidebsd.ld`.
 /// Modeled directly on `build_userland_crate` above -- see CLAUDE.md's Multiboot2 section for why
@@ -3325,7 +3369,7 @@ fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
 /// give one binary its own linker script under this workspace's otherwise-shared target.
 fn build_multiboot2_boot_smoke_crate() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let smoke_dir = Path::new(manifest_dir).join("smoke/multiboot2-boot-smoke");
+    let smoke_dir = Path::new(manifest_dir).join("regress/multiboot2-boot-smoke");
     let target_dir = Path::new(manifest_dir).join("target/multiboot2-boot-smoke");
 
     println!(
@@ -3403,8 +3447,8 @@ fn build_multiboot2_boot_smoke_crate() -> PathBuf {
     dest
 }
 
-/// Cross-builds the kernel module crate at `modules/<crate_name>/` into a single relocatable
-/// (`ET_REL`) object file, ready for `src/module.rs` to load and relocate at boot, and exposes it
+/// Cross-builds the kernel module crate at `sys/modules/<crate_name>/` into a single relocatable
+/// (`ET_REL`) object file, ready for `sys/module.rs` to load and relocate at boot, and exposes it
 /// via `cargo:rustc-env=<name_var>_MOD_PATH=<path>` (`name_var` is `env_var` upper-cased). See
 /// `CLAUDE.md`'s module-loading section for the full rationale; in short:
 ///
@@ -3413,7 +3457,7 @@ fn build_multiboot2_boot_smoke_crate() -> PathBuf {
 ///   skipping the link step entirely.
 /// - `-C relocation-model=static` (scoped to this nested build only, via `RUSTFLAGS`) keeps every
 ///   relocation a simple absolute/PC-relative form -- no GOT -- in exchange for requiring the
-///   module's eventual mapped address to stay within the low 2 GiB (see `src/module.rs`'s
+///   module's eventual mapped address to stay within the low 2 GiB (see `sys/module.rs`'s
 ///   `MODULE_VA_BASE`).
 /// - The module's own object alone has an open-ended, code-content-dependent set of undefined
 ///   symbols (anything from `memcpy` to `core::fmt::write` to panic machinery, depending on what
@@ -3430,7 +3474,7 @@ fn build_multiboot2_boot_smoke_crate() -> PathBuf {
 /// linker script to pass, they're never linked at all).
 fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)]) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let module_dir = Path::new(manifest_dir).join("modules").join(crate_name);
+    let module_dir = Path::new(manifest_dir).join("sys/modules").join(crate_name);
     let target_dir = Path::new(manifest_dir).join("target/modules");
 
     println!(
@@ -3488,7 +3532,7 @@ fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)
         // integer, as `module_init` does registering each syscall handler) -- correct for the old
         // `MODULE_VA_BASE=0x10000000`, but `RelocationOverflow` for the current one
         // (`0xffffffff90000000`, moved into the kernel's own top-2GiB region specifically so
-        // `R_X86_64_PC32`/`PLT32` calls into real kernel functions resolve -- see `src/module.rs`'s
+        // `R_X86_64_PC32`/`PLT32` calls into real kernel functions resolve -- see `sys/module.rs`'s
         // own `MODULE_VA_BASE` doc comment). `code-model=kernel` is x86_64 LLVM's dedicated model
         // for exactly this placement: it emits sign-extending `R_X86_64_32S` instead, correctly
         // representable for any address in the top 2 GiB (`0xffffffff80000000`-
@@ -3666,7 +3710,7 @@ fn extract_object_from_rlib(
 /// together), so referencing just one symbol from a bundled member can otherwise pull in
 /// everything else defined alongside it. This was discovered as a real, non-optional requirement
 /// (not the "nice to have, defer it" size optimization an earlier draft of this design assumed
-/// it'd be) when `modules/fat32/`'s very first boot attempt exhausted the kernel's small heap:
+/// it'd be) when `fat32`'s (a module long since removed) very first boot attempt exhausted the kernel's small heap:
 /// referencing `core::panicking::panic_bounds_check` (reachable from any ordinary slice
 /// indexing) alone pulled in most of `core::fmt`'s numeric/Unicode tables, ballooning that one
 /// module to 3+ MB across ~2900 sections. `-u module_init` marks every module's sole real entry
@@ -3740,7 +3784,7 @@ fn partial_link(
 /// substring of the mangled name (Rust's v0 mangling spells out path components as length-prefixed
 /// text), so a substring search is enough to find it reliably. Returns `None` if the module's code
 /// never actually references it (e.g. no panicking-capable operations survived optimization) --
-/// that's fine, `src/module.rs`'s resolver only needs entries for symbols a module actually uses.
+/// that's fine, `sys/module.rs`'s resolver only needs entries for symbols a module actually uses.
 fn discover_panic_symbol(llvm_bin: &Path, object: &Path) -> Option<String> {
     let nm = llvm_bin.join("llvm-nm");
     let output = Command::new(&nm)
@@ -3760,11 +3804,11 @@ fn discover_panic_symbol(llvm_bin: &Path, object: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Mirrors `modules/oxfs/src/lib.rs`'s own on-disk block-layout constants (see that file's "Real
+/// Mirrors `sys/modules/oxfs/src/lib.rs`'s own on-disk block-layout constants (see that file's "Real
 /// disk persistence" section) -- duplicated here, not imported, since a `build.rs` can't depend on
 /// a `#![no_std]` module crate. Must be kept in sync by hand if oxfs's own constants ever change --
 /// the same "two things that must agree, flagged rather than shared" duplication this codebase
-/// already accepts elsewhere (e.g. `Cargo.toml`'s `test-success-exit-code` vs. `src/qemu.rs`'s
+/// already accepts elsewhere (e.g. `Cargo.toml`'s `test-success-exit-code` vs. `sys/qemu.rs`'s
 /// `QemuExitCode`).
 const OXFS_BLOCK_SIZE: u64 = 4096;
 // 16384 -> 65536 (64 -> 256 MiB) and 2048 -> 8192 inodes: the POSIX pilot corpus grew from a
@@ -3776,14 +3820,14 @@ const OXFS_BLOCK_SIZE: u64 = 4096;
 // not a guess.
 //
 // 65536 -> 262144 (256 MiB -> 1 GiB) alongside the real max-file-size redesign (`Inode::
-// double_indirect` in `modules/oxfs/src/lib.rs`, see that field's own doc comment) -- see that
+// double_indirect` in `sys/modules/oxfs/src/lib.rs`, see that field's own doc comment) -- see that
 // constant's own doc comment for why 1 GiB, not something bigger or smaller.
 const OXFS_NUM_BLOCKS: u64 = 262144;
 const OXFS_MAX_INODES: u64 = 8192;
 const OXFS_INODE_STRIDE: u64 = 128;
 /// 1 superblock + inode-table blocks (`OXFS_MAX_INODES` inodes at `OXFS_INODE_STRIDE` bytes each,
 /// rounded up to a whole block) + `OXFS_BITMAP_BLOCKS` block-used bitmap blocks -- computed from
-/// the same real inputs `modules/oxfs/src/lib.rs`'s own `INODE_TABLE_BLOCKS`/`BITMAP_BLOCKS` are,
+/// the same real inputs `sys/modules/oxfs/src/lib.rs`'s own `INODE_TABLE_BLOCKS`/`BITMAP_BLOCKS` are,
 /// not separately hand-picked numbers.
 /// **Found live as a real, hand-duplicated staleness bug, not just a theoretical risk this comment
 /// warns about**: this constant was left at its old value (a literal `18`, correct only for a
@@ -3795,13 +3839,13 @@ const OXFS_INODE_STRIDE: u64 = 128;
 /// predating this fix: `mount_from_disk`'s own per-block data read failed partway through (the
 /// last ~16 real data blocks physically don't exist in a file sized this way), which is what first
 /// surfaced this bug — see `reset_real_pool_for_fresh_format`'s own doc comment in
-/// `modules/oxfs/src/lib.rs` for the *other* real bug that same failure mode exposed.
+/// `sys/modules/oxfs/src/lib.rs` for the *other* real bug that same failure mode exposed.
 ///
 /// **A second, real instance of this exact staleness class, found alongside the max-file-size
 /// redesign**: this hardcoded a flat `1` block for the bitmap, correct only while `OXFS_NUM_BLOCKS`
 /// fit within `OXFS_BLOCK_SIZE * 8` (32768) bits -- already silently wrong the moment
 /// `OXFS_NUM_BLOCKS` first passed that (65536, well before this pass's own further bump to
-/// 262144). Fixed the same way `modules/oxfs/src/lib.rs`'s own `BITMAP_BLOCKS` was: a real,
+/// 262144). Fixed the same way `sys/modules/oxfs/src/lib.rs`'s own `BITMAP_BLOCKS` was: a real,
 /// computed span, not a hand-picked one.
 const OXFS_BITMAP_BLOCKS: u64 = (OXFS_NUM_BLOCKS * 8).div_ceil(OXFS_BLOCK_SIZE * 8);
 const OXFS_METADATA_BLOCKS: u64 =
@@ -3809,7 +3853,7 @@ const OXFS_METADATA_BLOCKS: u64 =
 const OXFS_DISK_IMAGE_BYTES: u64 = (OXFS_METADATA_BLOCKS + OXFS_NUM_BLOCKS) * OXFS_BLOCK_SIZE;
 
 /// Writes the two raw disk images `Cargo.toml`'s `run-args`/`test-args` attach to QEMU as
-/// `src/drivers/ata.rs`'s fixed data-disk target (see that module's own doc comment for why secondary
+/// `sys/drivers/ata.rs`'s fixed data-disk target (see that module's own doc comment for why secondary
 /// channel/master specifically).
 ///
 /// `oxfs_disk.img` is the real, persistent dev disk `cargo run` uses -- created **only if it
@@ -3852,7 +3896,7 @@ fn write_data_disk_images() {
             // `OXFS_METADATA_BLOCKS`/`NUM_BLOCKS`/`MAX_INODES`) -- grow it in place by appending
             // zeros rather than truncating/rewriting, so real existing content stays intact for
             // `mount_from_disk`'s own superblock-layout check (see that function's doc comment in
-            // `modules/oxfs/src/lib.rs`) to accept or reject on its own terms. A superblock that
+            // `sys/modules/oxfs/src/lib.rs`) to accept or reject on its own terms. A superblock that
             // no longer matches this build's layout still cleanly falls back to reformatting; a
             // file left too small would instead fail with a real, physical out-of-bounds read
             // before that check ever gets the chance to run.

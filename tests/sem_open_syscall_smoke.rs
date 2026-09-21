@@ -5,11 +5,11 @@
 //! (`SYS_SIGPROCMASK` -- real `fork()` unconditionally blocks/restores signals around the fork
 //! transition), `posix_compat` (`SYS_FUTEX` -- what real `sem_wait`/`sem_post` are actually built
 //! on), and `oxfs` (serving `/sem-open-smoke.elf` and real `/dev/shm`), then spawns
-//! `userland/sem-open-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
-//! full fork+execve+wait4 scenario, and `userland/sem-open-smoke/main.c`'s own doc comment for
+//! `regress/sem-open-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
+//! full fork+execve+wait4 scenario, and `regress/sem-open-smoke/main.c`'s own doc comment for
 //! what the executed fixture itself proves: real cross-process named-semaphore coordination
 //! (`sem_open()`+`fork()`), which needs `process::limits::futex_key`'s real physical-address-keyed
-//! `FUTEX_WAIT`/`FUTEX_WAKE` (`src/process/limits.rs`) -- a bare `(tgid, addr)` key can't work
+//! `FUTEX_WAIT`/`FUTEX_WAKE` (`sys/process/limits.rs`) -- a bare `(tgid, addr)` key can't work
 //! here since the two processes map the same `/dev/shm`-backed `MAP_SHARED` file at their own,
 //! generally different, virtual addresses.
 //!
@@ -30,8 +30,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sem-open-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/sem-open-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -81,7 +81,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
     // Populates SYS_SIGPROCMASK -- real fork() unconditionally blocks/restores signals around the
-    // fork transition (__block_app_sigs/__restore_sigs in third_party/musl/src/process/fork.c).
+    // fork transition (__block_app_sigs/__restore_sigs in external/mit/musl/src/process/fork.c).
     const SIGNAL_MOD: &[u8] = include_bytes!(env!("SIGNAL_MOD_PATH"));
     const SIGNAL_PANIC_SYMBOL: &str = env!("SIGNAL_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

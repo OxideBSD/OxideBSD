@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit/write/getpid's own syscall
 //! registration path) and `posix_compat` (`SYS_SETSID`/`SYS_GETSID`/`SYS_IOCTL`'s new
 //! `TIOCSCTTY`/`TIOCNOTTY`/`TIOCGPGRP`/`TIOCSPGRP` requests), then spawns
-//! `userland/session-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
+//! `regress/session-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
 //! full scenario (a forked child claiming its own session/controlling-tty/foreground-group state
 //! from scratch, matching the real `sulogin`/`getty` startup sequence this pass exists to unblock).
 //!
@@ -22,8 +22,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/session-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/session-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

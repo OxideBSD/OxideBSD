@@ -1,5 +1,5 @@
 //! Boots the full kernel, loads `native_abi` (write's own syscall registration path) and
-//! `posix_compat` (`SYS_GET_KEYEVENT = 558`), then spawns `userland/keyevent-syscall-smoke/` as
+//! `posix_compat` (`SYS_GET_KEYEVENT = 558`), then spawns `regress/keyevent-syscall-smoke/` as
 //! pid 1 -- see that crate's own module doc comment for the full scenario (1000 tight-loop
 //! non-blocking polls, all expected `Ok(0)` with nothing pressed).
 //!
@@ -20,8 +20,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/keyevent-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/keyevent-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

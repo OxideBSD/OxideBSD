@@ -1,4 +1,4 @@
-//! Smoke test for `SYS_POLL = 148` (`src/net/mod.rs`'s `oxidebsd_sys_poll`) -- added to unblock a
+//! Smoke test for `SYS_POLL = 148` (`sys/net/mod.rs`'s `oxidebsd_sys_poll`) -- added to unblock a
 //! real DNS resolver (musl's own stub resolver multiplexes nameserver retries with a real
 //! `poll()`; see that function's own doc comment for why `__NR_poll`'s real, unremapped value
 //! couldn't be used as-is). Two halves:

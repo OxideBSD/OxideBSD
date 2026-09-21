@@ -2,7 +2,7 @@
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
-//! `userland/poll-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`poll` entirely
+//! `regress/poll-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`poll` entirely
 //! through real `SYSCALL`/`SYSRETQ`.
 //!
 //! Same test-only-syscall seam as `tests/udp_syscall_smoke.rs` (see that file's own module doc
@@ -23,7 +23,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/poll-syscall-smoke/src/main.rs`'s own constants.
+/// Must match `regress/poll-syscall-smoke/src/main.rs`'s own constants.
 const SYS_TEST_EXIT: u64 = 9999;
 const SYS_TEST_INJECT_UDP_FRAME: u64 = 9998;
 const LOCAL_PORT: u16 = 34567;

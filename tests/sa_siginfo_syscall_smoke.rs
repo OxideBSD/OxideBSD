@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (`SYS_EXIT`/`SYS_WRITE`/`SYS_GETPID`'s own syscall
 //! registration path) and `signal` (`SYS_SIGACTION`/`SYS_SIGPENDING`/`SYS_TKILL`, the syscalls
-//! this test actually exercises), then spawns `userland/sa-siginfo-syscall-smoke/` as pid 1 -- see
+//! this test actually exercises), then spawns `regress/sa-siginfo-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full scenario (a real `SA_SIGINFO` handler
 //! invocation + `sigreturn` round trip, driven through genuine `SYSCALL`/`SYSRETQ`).
 //!
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sa-siginfo-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
-/// no shared crate across this ABI boundary, same convention every other userland/kernel pair
+/// Must match `regress/sa-siginfo-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
+/// no shared crate across this ABI boundary, same convention every other regress/kernel pair
 /// here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

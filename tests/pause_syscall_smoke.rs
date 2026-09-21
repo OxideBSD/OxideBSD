@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (write/exit/fork/wait4/getpid's own syscall
 //! registration path) and `signal` (`SYS_SIGACTION`/`SYS_KILL`/`SYS_PAUSE`), then spawns
-//! `userland/pause-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
+//! `regress/pause-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
 //! full fork+pause+wake+reap scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -20,8 +20,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/pause-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/pause-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

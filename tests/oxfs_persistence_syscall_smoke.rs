@@ -1,7 +1,7 @@
 //! Boots the full kernel with `src/ata.rs`'s data disk attached (`Cargo.toml`'s `test-args` point
 //! this test at `target/oxfs_test_disk.img`, always freshly zeroed by `build.rs` -- so `oxfs`'s
 //! `module_init` takes the format-then-flush path, not mount), loads `native_abi` + `oxfs`, then
-//! spawns `userland/oxfs-persistence-syscall-smoke/` as pid 1 -- see that crate's own module doc
+//! spawns `regress/oxfs-persistence-syscall-smoke/` as pid 1 -- see that crate's own module doc
 //! comment for the full scenario (create+write+close through the real write-through persistence
 //! path, then a read-back).
 //!
@@ -22,7 +22,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/oxfs-persistence-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
+/// Must match `regress/oxfs-persistence-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
 /// constant -- no shared crate across this ABI boundary, same convention every other userland/
 /// kernel pair here uses.
 const SYS_TEST_EXIT: u64 = 9999;

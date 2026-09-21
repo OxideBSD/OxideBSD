@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (exit/write/getpid's own syscall registration path),
 //! `signal` (`SYS_SIGACTION`/`SYS_SIGPROCMASK`), and `clock` (`SYS_CLOCK_GETTIME`/
 //! `SYS_TIMER_CREATE`/`SYS_TIMER_SETTIME`/`SYS_TIMER_GETTIME`/`SYS_TIMER_GETOVERRUN`/
-//! `SYS_TIMER_DELETE`), then spawns `userland/posix-timer-syscall-smoke/` as pid 1 -- see that
+//! `SYS_TIMER_DELETE`), then spawns `regress/posix-timer-syscall-smoke/` as pid 1 -- see that
 //! crate's own module doc comment for the full eight-part POSIX-per-process-timer scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/posix-timer-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
-/// no shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/posix-timer-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
+/// no shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

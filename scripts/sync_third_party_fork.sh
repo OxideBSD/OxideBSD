@@ -1,5 +1,5 @@
 #!/bin/sh
-# Resyncs one of this project's vendored `third_party/*` forks (musl, busybox,
+# Resyncs one of this project's vendored `external/*` forks (musl, busybox,
 # posixtestsuite, doomgeneric, and now rust) against a newer point in its real upstream history.
 #
 # Every fork here is pinned deliberately, not tracked continuously (see CLAUDE.md's own notes on
@@ -20,13 +20,13 @@
 #      caution applies to any of these forks over a big enough time gap).
 #
 # Usage: scripts/sync_third_party_fork.sh <submodule-path> <upstream-git-url> <new-upstream-ref>
-# Example: scripts/sync_third_party_fork.sh third_party/musl https://github.com/kraj/musl.git v1.2.7
+# Example: scripts/sync_third_party_fork.sh external/mit/musl https://github.com/kraj/musl.git v1.2.7
 #
 # Does NOT commit anything in the outer repo -- after the rebase lands and the fork's own build/
 # tests pass, `git add <submodule-path>` here and commit that pointer bump yourself, same as any
 # other submodule update.
 #
-# Not for `third_party/limine`: that one isn't a patched fork at all (confirmed live, 2026-09-17 --
+# Not for `external/bsd/limine`: that one isn't a patched fork at all (confirmed live, 2026-09-17 --
 # its `oxidebsd` branch is byte-identical to upstream's old `v11.x-binary` release branch, zero
 # local commits), and upstream's own binary-distribution convention changed at v12.x (GitHub
 # Release assets, not a dedicated branch) -- resyncing it is a `build.rs` plumbing change
@@ -77,7 +77,7 @@ echo "sync_third_party_fork.sh: then rebuild/retest before pointing the outer re
 git rebase FETCH_HEAD
 
 # Harmless no-op for a fork with no nested submodules (musl/busybox/posixtestsuite/
-# doomgeneric); real and necessary for third_party/rust, whose own library/backtrace submodule
+# doomgeneric); real and necessary for external/mit/rust, whose own library/backtrace submodule
 # is pinned to a commit that moves independently as upstream rust-lang/rust evolves -- a rebase
 # onto a newer point can leave it checked out at a now-stale (or simply uninitialized after the
 # rebase touched .gitmodules-adjacent state) commit otherwise.

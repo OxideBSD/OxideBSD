@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (write/exit/fork/wait4/getpid's own syscall
 //! registration path) and `signal` (`SYS_KILL`/`SYS_SIGACTION`/`SYS_SIGPROCMASK`/`SYS_SIGPENDING`/
-//! `SYS_SIGTIMEDWAIT`/`SYS_SIGQUEUE`), then spawns `userland/rt-signal-syscall-smoke/` as pid 1 --
+//! `SYS_SIGTIMEDWAIT`/`SYS_SIGQUEUE`), then spawns `regress/rt-signal-syscall-smoke/` as pid 1 --
 //! see that crate's own module doc comment for the full five-part real-time-signal-queuing
 //! scenario.
 //!
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/rt-signal-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/rt-signal-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

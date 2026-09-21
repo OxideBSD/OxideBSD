@@ -1,5 +1,5 @@
 //! Boots the full kernel, loads `native_abi` (write/exit's own syscall registration path) and
-//! `posix_compat` (`SYS_GETRANDOM`), then spawns `userland/getrandom-syscall-smoke/` as pid 1 --
+//! `posix_compat` (`SYS_GETRANDOM`), then spawns `regress/getrandom-syscall-smoke/` as pid 1 --
 //! see that crate's own module doc comment for the full four-part scenario (a real 32-byte
 //! request, two consecutive requests differing, `len == 0` as a no-op, and
 //! `GRND_NONBLOCK`/`GRND_RANDOM`/an-invalid-flag's `EINVAL`).
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/getrandom-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/getrandom-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

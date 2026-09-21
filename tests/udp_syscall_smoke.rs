@@ -2,14 +2,14 @@
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
-//! `userland/udp-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`sendto`/`recvfrom`
+//! `regress/udp-syscall-smoke/` as pid 1 and lets it drive `socket`/`bind`/`sendto`/`recvfrom`
 //! entirely through real `SYSCALL`/`SYSRETQ`.
 //!
 //! Since `main()` can't run again once `scheduler::start` hands control to the child, the
 //! synthetic-inbound-frame half of the original test (previously injected directly from this
 //! file's own linear code) is instead triggered by a **test-only** syscall
 //! (`SYS_TEST_INJECT_UDP_FRAME = 9998`) the child calls right after `bind()` -- see
-//! `userland/udp-syscall-smoke/src/main.rs`'s own module doc comment for why this doesn't
+//! `regress/udp-syscall-smoke/src/main.rs`'s own module doc comment for why this doesn't
 //! reintroduce the blind spot being closed here.
 #![no_std]
 #![no_main]
@@ -25,7 +25,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/udp-syscall-smoke/src/main.rs`'s own constants.
+/// Must match `regress/udp-syscall-smoke/src/main.rs`'s own constants.
 const SYS_TEST_EXIT: u64 = 9999;
 const SYS_TEST_INJECT_UDP_FRAME: u64 = 9998;
 const LOCAL_PORT: u16 = 23456;

@@ -11,7 +11,7 @@
 #      and reaches the scheduler, with the freshly built roster embedded in oxfs.
 #
 # What this script deliberately does NOT do: drive the interactive hush prompt. OxideBSD's stdin
-# is real PS/2 keyboard input only (src/stdin.rs) -- there is no serial or other channel a
+# is real PS/2 keyboard input only (sys/console/stdin.rs) -- there is no serial or other channel a
 # backgrounded QEMU process exposes that a script can inject keystrokes into. Verifying individual
 # applet behavior (`ls`, `cat`, pipes, ...) needs a human at a real `cargo run` window; this script
 # only proves the roster builds and the kernel boots cleanly with it embedded.

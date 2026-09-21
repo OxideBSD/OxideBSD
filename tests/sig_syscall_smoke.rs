@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (write/exit/fork/wait4/getpid's own syscall
 //! registration path), `signal` (`SYS_KILL`/`SYS_SIGACTION`/`SYS_SIGTIMEDWAIT`/`SYS_SIGQUEUE`),
 //! and `posix_compat` (`SYS_SETUID`, needed for part 8's real cross-uid EPERM check), then spawns
-//! `userland/sig-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
+//! `regress/sig-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the full
 //! eight-part scenario.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sig-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/sig-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

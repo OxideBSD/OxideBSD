@@ -6,7 +6,7 @@
 #
 # What's shared here, and why: the never-`-M q35` constraint and the fixed IDE topology (real ATA
 # disk on ide.1/unit0, boot medium on ide.0/unit0) are properties of *this kernel's own driver*
-# (src/drivers/ata.rs), not of any one bootloader -- every boot path needs the identical topology.
+# (sys/drivers/ata.rs), not of any one bootloader -- every boot path needs the identical topology.
 # Firmware/OVMF selection and the isa-debug-exit wedge-guard/exit-code translation are QEMU/host
 # concerns, equally loader-agnostic. Deliberately NOT here: ISO staging (Limine's own ISO layout
 # and GRUB's are unrelated) and any bootloader-specific config-file content -- those stay in each
@@ -34,7 +34,7 @@ if [ -n "${OXIDEBSD_QEMU_MONITOR:-}" ]; then
     set -- "$@" -monitor "tcp:127.0.0.1:${OXIDEBSD_QEMU_MONITOR},server,nowait"
 fi
 
-# Real emulated xHCI controller + USB keyboard, opt-in only -- see src/drivers/usb's own module
+# Real emulated xHCI controller + USB keyboard, opt-in only -- see sys/drivers/usb's own module
 # doc comment. Off by default: QEMU's default i440fx machine already wires up a PS/2 keyboard, so
 # an always-on USB one would double-push every keystroke.
 if [ "${OXIDEBSD_QEMU_USB:-0}" = 1 ]; then
@@ -100,7 +100,7 @@ fi
 # timeout, in seconds), waits for it to exit on its own -- killing it and exiting 124 if it doesn't
 # (the same "kill QEMU from the host, since nothing inside a genuinely stuck guest can rescue
 # itself" idiom scripts/run_posix_pilot_supervised.sh already uses) -- then translates the real
-# isa-debug-exit code (src/qemu.rs's QemuExitCode) into a plain pass/fail exit status.
+# isa-debug-exit code (sys/qemu.rs's QemuExitCode) into a plain pass/fail exit status.
 qemu_common_run_test_and_translate_exit() {
     timeout_secs="$1"
     shift

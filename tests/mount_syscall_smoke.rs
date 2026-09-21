@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit/read/write's own syscall
 //! registration path) and `oxfs` (`SYS_OPEN`/`SYS_CLOSE`/`SYS_MKDIR`/`SYS_STAT`/`SYS_GETDENTS`,
 //! plus this pass's `SYS_MOUNT_BIND`/`SYS_MOUNT_TMPFS`/`SYS_UMOUNT2` and the mount-table redirect
-//! `resolve_path_impl` now performs), then spawns `userland/mount-syscall-smoke/` as pid 1 -- see
+//! `resolve_path_impl` now performs), then spawns `regress/mount-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full scenario (tmpfs mount read/write/getdents/
 //! st_dev, a bind mount exposing a real applet, and both reverting cleanly on `umount`).
 //!
@@ -22,8 +22,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/mount-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/mount-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

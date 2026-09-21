@@ -4,9 +4,9 @@
 //! unconditionally calls `rt_sigprocmask` to set up each new thread's own signal mask, and once,
 //! process-wide, to unblock its internal `SIGPT_SET` the first time any thread is ever created),
 //! `posix_compat` (`SYS_FUTEX` -- what real `pthread_join` is actually built on), and `oxfs`
-//! (serving `/pthread-smoke.elf`), then spawns `userland/pthread-syscall-smoke/` as pid 1 -- see
+//! (serving `/pthread-smoke.elf`), then spawns `regress/pthread-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full fork+execve+wait4 scenario, and
-//! `userland/pthread-smoke/main.c`'s own doc comment for what the executed fixture itself proves
+//! `regress/pthread-smoke/main.c`'s own doc comment for what the executed fixture itself proves
 //! (a real, unmodified musl `pthread_create()`/`pthread_join()` round trip -- "Real threading"
 //! phases 1-5's own finish line).
 //!
@@ -27,8 +27,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/pthread-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/pthread-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

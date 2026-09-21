@@ -1,0 +1,19 @@
+[package]
+name = "multiboot2-boot-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The one dedicated smoke test for the Multiboot2 boot path (see CLAUDE.md's Multiboot2 section).
+# Unlike a plain `regress/*` crate, this links the real `oxidebsd` lib itself (with its
+# `multiboot2` feature) rather than being a freestanding syscall client -- the whole point is to
+# prove the real trampoline/`oxidebsd::init()` path, not exercise it from ring 3.
+[dependencies]
+oxidebsd = { path = "../..", features = ["multiboot2"] }
+
+# Reuses `tests/multiboot2_boot_smoke.rs` as this crate's own binary source, keeping the file
+# visually grouped with every other `tests/*.rs` smoke test even though its compilation unit lives
+# in a separate package (needed so it can get its own linker script -- see this crate's build.rs).
+[[bin]]
+name = "multiboot2-boot-smoke"
+path = "../../tests/multiboot2_boot_smoke.rs"

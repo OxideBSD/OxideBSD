@@ -17,7 +17,7 @@
 //!   There's no destination address that makes SLIRP just silently ignore an unsolicited SYN-ACK
 //!   the way it does for ARP/ICMP. So this test doesn't use the real NIC at all -- it installs a
 //!   trivial no-op `NicDriver` (`nic::NIC` is a `pub static` precisely so a second driver can be
-//!   swapped in; see `src/net/nic.rs`'s own doc comment on why the trait exists) whose `send`
+//!   swapped in; see `sys/net/nic.rs`'s own doc comment on why the trait exists) whose `send`
 //!   always succeeds without touching real hardware, so nothing this test's stack transmits can
 //!   ever reach SLIRP to be misinterpreted as a real connection attempt.
 //!
@@ -109,7 +109,7 @@ fn build_arp_reply(
 }
 
 /// Ten parameters, one per real field this test needs to vary across the SYN/ACK/data segments
-/// it builds -- see `src/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
+/// it builds -- see `sys/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn build_tcp_frame(
     dest_mac: [u8; 6],
@@ -156,7 +156,7 @@ fn build_tcp_frame(
     }
 
     // TCP checksum: a 12-byte pseudo-header (src/dst IP, zero, protocol, TCP length) prepended to
-    // the segment itself, checksum field zeroed while summing -- matches src/net/tcp.rs's own
+    // the segment itself, checksum field zeroed while summing -- matches sys/net/tcp.rs's own
     // `tcp_checksum` exactly, duplicated here on purpose (this test builds wire bytes
     // independently, not by calling into the implementation it's verifying).
     let mut pseudo = [0u8; 12 + 128];
@@ -330,7 +330,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     );
 
     // --- read() on an empty-but-still-open connection: with O_NONBLOCK set, must return EAGAIN
-    // immediately, not spin forever (see src/net/tcp.rs's own tcp_read doc comment -- there's
+    // immediately, not spin forever (see sys/net/tcp.rs's own tcp_read doc comment -- there's
     // nothing else in this single-process test that would ever call poll() again on our behalf,
     // so a real hang here would mean the fix regressed, not just a slow test). ---
     let rc = oxidebsd_sys_fcntl(accepted as u64, F_SETFL, O_NONBLOCK);

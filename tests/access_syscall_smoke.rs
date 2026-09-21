@@ -1,6 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (fork/wait4/exit/write/open/close's own syscall
 //! registration path), `posix_compat` (`SYS_SETUID`), and `oxfs` (`SYS_ACCESS`/`SYS_CHMOD`/
-//! `SYS_CHOWN`), then spawns `userland/access-syscall-smoke/` as pid 1 -- see that crate's own
+//! `SYS_CHOWN`), then spawns `regress/access-syscall-smoke/` as pid 1 -- see that crate's own
 //! module doc comment for the full three-part scenario (root `F_OK`/`R_OK` checks against a real
 //! seeded file plus `ENOENT` on a missing one, a chmod/chown setup, then a real `setuid`-driven
 //! privilege drop followed by a real `EACCES` denial on `R_OK` while `F_OK` still succeeds).
@@ -22,8 +22,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/access-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/access-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

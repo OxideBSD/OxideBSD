@@ -1,11 +1,11 @@
 //! Smoke test for real userland `ping` support (a `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`
-//! socket, see `src/net/icmp.rs`'s own doc comment) -- the syscall-level counterpart to
+//! socket, see `sys/net/icmp.rs`'s own doc comment) -- the syscall-level counterpart to
 //! `tests/icmp_smoke.rs`, which only exercises `icmp::send_echo_request`/`take_echo_reply`
 //! directly, a kernel-internal hook no real userland program ever touches.
 //!
 //! This test instead calls `oxidebsd_sys_socket`/`_sendto`/`_recvfrom` (the same handlers
-//! `modules/net`'s syscall shims and, ultimately, a real BusyBox `ping` process reach), building
-//! the ICMP echo request by hand the same way `third_party/busybox`'s vendored `ping.c` does
+//! `sys/modules/net`'s syscall shims and, ultimately, a real BusyBox `ping` process reach), building
+//! the ICMP echo request by hand the same way `external/gpl2/busybox`'s vendored `ping.c` does
 //! (type/code/checksum/id/seq filled in by the caller, not the kernel -- a raw socket's whole
 //! point). A real round trip against SLIRP's self-answering gateway (same target
 //! `tests/icmp_smoke.rs` uses, for the same host-privilege reasons -- see that file's own doc

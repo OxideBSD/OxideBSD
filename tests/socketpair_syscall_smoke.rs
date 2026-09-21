@@ -2,7 +2,7 @@
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
-//! `userland/socketpair-syscall-smoke/` as pid 1 (same shape `tests/fork_wait.rs` already
+//! `regress/socketpair-syscall-smoke/` as pid 1 (same shape `tests/fork_wait.rs` already
 //! established for `fork`/`wait4`/`exit`) and lets it drive `socketpair`/`fcntl`/`shutdown`/
 //! `read`/`write`/`close`/`set_tid_address` entirely through real `SYSCALL`/`SYSRETQ`.
 //!
@@ -23,7 +23,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/socketpair-syscall-smoke/src/main.rs`'s own constant.
+/// Must match `regress/socketpair-syscall-smoke/src/main.rs`'s own constant.
 const SYS_TEST_EXIT: u64 = 9999;
 /// The real ABI number -- see this test's own module doc comment for why it's registered
 /// directly here instead of by loading the full `oxfs` module.
@@ -42,7 +42,7 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
     oxidebsd::hlt_loop();
 }
 
-/// `SYS_CLOSE`'s real handler (registered by `modules/oxfs` at real boot) is pure
+/// `SYS_CLOSE`'s real handler (registered by `sys/modules/oxfs` at real boot) is pure
 /// filesystem-agnostic delegation to this same function -- see this test's own module doc comment
 /// for why loading all of `oxfs` isn't worth it just for this one generic close path.
 extern "C" fn test_close_handler(fd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

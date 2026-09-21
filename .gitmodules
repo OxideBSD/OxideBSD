@@ -1,26 +1,26 @@
-[submodule "third_party/musl"]
-	path = third_party/musl
+[submodule "external/mit/musl"]
+	path = external/mit/musl
 	url = https://github.com/OxideBSD/musl-oxidebsd.git
-[submodule "third_party/busybox"]
-	path = third_party/busybox
+[submodule "external/gpl2/busybox"]
+	path = external/gpl2/busybox
 	url = https://github.com/Pomsky2011/busybox-oxidebsd.git
-[submodule "third_party/posixtestsuite"]
-	path = third_party/posixtestsuite
+[submodule "external/gpl2/posixtestsuite"]
+	path = external/gpl2/posixtestsuite
 	url = https://github.com/Pomsky2011/posixtestsuite.git
 	branch = oxidebsd
-[submodule "third_party/limine"]
-	path = third_party/limine
+[submodule "external/bsd/limine"]
+	path = external/bsd/limine
 	url = https://github.com/Pomsky2011/limine-oxidebsd.git
 	branch = oxidebsd
-[submodule "third_party/doomgeneric"]
-	path = third_party/doomgeneric
+[submodule "external/gpl2/doomgeneric"]
+	path = external/gpl2/doomgeneric
 	url = https://github.com/Pomsky2011/doomgeneric-oxidebsd.git
 	branch = oxidebsd
-[submodule "third_party/rust"]
-	path = third_party/rust
+[submodule "external/mit/rust"]
+	path = external/mit/rust
 	url = https://github.com/OxideBSD/rust-oxidebsd.git
 	branch = oxidebsd
-[submodule "third_party/llvm-project"]
-	path = third_party/llvm-project
+[submodule "external/apache2/llvm"]
+	path = external/apache2/llvm
 	url = https://github.com/OxideBSD/llvm-project-oxidebsd.git
 	branch = oxidebsd

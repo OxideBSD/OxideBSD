@@ -1,5 +1,5 @@
 //! Boots the full kernel, loads `native_abi` (write/exit's own syscall registration path) and
-//! `signal` (`SYS_SIGALTSTACK`), then spawns `userland/sigaltstack-syscall-smoke/` as pid 1 -- see
+//! `signal` (`SYS_SIGALTSTACK`), then spawns `regress/sigaltstack-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full five-part scenario (initial disabled state,
 //! installing a real alt stack, reading it back, a combined set+read-old call, and `EINVAL`/
 //! disable handling).
@@ -21,8 +21,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/sigaltstack-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
-/// no shared crate across this ABI boundary, same convention every other userland/kernel pair
+/// Must match `regress/sigaltstack-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant --
+/// no shared crate across this ABI boundary, same convention every other regress/kernel pair
 /// here uses.
 const SYS_TEST_EXIT: u64 = 9999;
 

@@ -2,7 +2,7 @@
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
-//! `userland/ping-syscall-smoke/` as pid 1 and lets it drive `socket`/`sendto`/`recvfrom` entirely
+//! `regress/ping-syscall-smoke/` as pid 1 and lets it drive `socket`/`sendto`/`recvfrom` entirely
 //! through real `SYSCALL`/`SYSRETQ` against QEMU SLIRP's real self-answering gateway.
 //!
 //! No test-only "advance a synthetic peer" syscall is needed here (unlike the UDP/TCP/poll
@@ -21,7 +21,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/ping-syscall-smoke/src/main.rs`'s own constant.
+/// Must match `regress/ping-syscall-smoke/src/main.rs`'s own constant.
 const SYS_TEST_EXIT: u64 = 9999;
 
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {

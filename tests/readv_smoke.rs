@@ -1,6 +1,6 @@
-//! Smoke test for `SYS_READV = 153` (`src/syscall.rs`'s `sys_readv`) -- added because musl's
+//! Smoke test for `SYS_READV = 153` (`sys/syscall.rs`'s `sys_readv`) -- added because musl's
 //! entire stdio *read* path goes through `readv`, not plain `read`, whenever a `FILE*` has real
-//! internal buffering (`third_party/musl/src/stdio/__stdio_read.c`). Found live: BusyBox's `wget`
+//! internal buffering (`external/mit/musl/src/stdio/__stdio_read.c`). Found live: BusyBox's `wget`
 //! completed a real HTTPS download (the TLS/TCP fix chain all worked, real response bytes came
 //! through) and then failed on the very next buffered read -- see CLAUDE.md's "Real networking"
 //! known-gaps entry for the full trace.

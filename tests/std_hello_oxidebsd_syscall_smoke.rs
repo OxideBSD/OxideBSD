@@ -1,10 +1,10 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write), `posix_compat`
 //! (ioctl/fcntl), `signal`/`clock` (real `std`'s runtime init touches both), and `oxfs`
-//! (open/close/stat -- `/bin/std-hello-oxidebsd`, seeded by `modules/oxfs`'s `module_init`), then
-//! spawns `userland/std-hello-oxidebsd-syscall-smoke/` as pid 1 -- see that crate's own module
+//! (open/close/stat -- `/bin/std-hello-oxidebsd`, seeded by `sys/modules/oxfs`'s `module_init`), then
+//! spawns `regress/std-hello-oxidebsd-syscall-smoke/` as pid 1 -- see that crate's own module
 //! doc comment for the full scenario (real `fork`+`execve` of `std` genuinely compiled with
 //! `target_os = "oxidebsd"`, via OxideBSD's own real `x86_64-unknown-oxidebsd` target -- see
-//! `x86_64-unknown-oxidebsd.json`, `third_party/rust`'s `oxidebsd` branch, and `build.rs`'s
+//! `x86_64-unknown-oxidebsd.json`, `external/mit/rust`'s `oxidebsd` branch, and `build.rs`'s
 //! `build_std_oxidebsd_userland_crate`).
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established.
@@ -21,7 +21,7 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/std-hello-oxidebsd-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
+/// Must match `regress/std-hello-oxidebsd-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT`
 /// constant.
 const SYS_TEST_EXIT: u64 = 9999;
 

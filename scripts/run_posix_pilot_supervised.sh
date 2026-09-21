@@ -2,7 +2,7 @@
 # Host-side supervisor for the POSIX conformance pilot (tests/posix_conformance_smoke.rs).
 #
 # Why this exists: the pilot's own userspace timeout (`t0`, a real `alarm(40)` per test file, see
-# modules/oxfs/src/posix_conformance.sh) can only rescue a test that's merely *slow* -- it can't
+# sys/modules/oxfs/src/posix_conformance.sh) can only rescue a test that's merely *slow* -- it can't
 # rescue a genuine kernel-level wedge, where the stuck process is blocked somewhere no wake hook
 # ever re-checks it (an unhandled BlockReason, a stale scheduler entry, a deadlocked futex chain --
 # see CLAUDE.md's own history of exactly this bug class). When that happens, `t0`'s own alarm
@@ -187,7 +187,7 @@ while [ "$MAX_ITERATIONS" -eq 0 ] || [ "$iteration" -lt "$MAX_ITERATIONS" ]; do
     sort -u -o "$RESULTS_FILE" "$RESULTS_FILE"
 
     # Real, found-live gap this defends against even after fixing the driver's own wait4 status
-    # check (userland/posix-conformance-driver): "driver reported PASS" only ever meant "wait4
+    # check (regress/posix-conformance-driver): "driver reported PASS" only ever meant "wait4
     # returned", not "the shell's own posix_conformance.sh for-loop actually reached its own
     # `echo === summary ===`. Require the real total too, matching *this iteration's own* manifest
     # line count -- since that manifest already excludes every already-verified file, a full match

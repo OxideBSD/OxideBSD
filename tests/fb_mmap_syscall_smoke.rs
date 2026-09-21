@@ -1,7 +1,7 @@
 //! Boots the full kernel, loads `native_abi` (open/close/write/mmap/munmap's own syscall
 //! registration path), `posix_compat` (`SYS_IOCTL`, backing the new `FBIOGET_OXIDEBSD` request),
 //! and `oxfs` (the real `/dev/fb0` device inode seeded at format time, plus `SYS_OPEN`/
-//! `SYS_CLOSE`), then spawns `userland/fb-mmap-syscall-smoke/` as pid 1 -- see that crate's own
+//! `SYS_CLOSE`), then spawns `regress/fb-mmap-syscall-smoke/` as pid 1 -- see that crate's own
 //! module doc comment for the full four-part scenario (open, ioctl geometry, mmap read/write
 //! round trip, munmap/close).
 //!
@@ -22,8 +22,8 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
-/// Must match `userland/fb-mmap-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
-/// shared crate across this ABI boundary, same convention every other userland/kernel pair here
+/// Must match `regress/fb-mmap-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
+/// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
