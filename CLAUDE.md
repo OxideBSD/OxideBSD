@@ -1317,10 +1317,17 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   them out of the roster — deliberately *not* by deleting their tuples from `build_busybox.rs`,
   which would force a ~1h full BusyBox rebuild (the inert tuples can go with the next unrelated
   edit there). `usr.bin/lsoxmod` is PIE too.
-- Behavior notes: flags are `-n` echo, `-a -l` ls (sorted; `-l` has aligned columns, a `total`
-  line, owner/group names from `/etc/passwd`+`/etc/group`, UTC mtime, ` -> target`), `-p` mkdir,
-  `-r -f` rm, `-r` cp, `-s` ln, `-c` touch (really updates mtime); short-flag clusters (`-rf`)
-  work. `lib/oxlibc` has `time` (`clock_gettime` + epoch→UTC civil date). `cat` with no
+- Behavior notes: flags are `-n` echo, `-a -l -1 -C --color=…` ls (sorted; on a tty a plain `ls`
+  is column-major and colored — dirs bold blue, symlinks cyan, executables green; off a tty, i.e.
+  redirected/piped, it's one-per-line and plain, since `tty_size()`/`TIOCGWINSZ` only succeeds on
+  the console; `-l` has aligned columns, a `total` line, owner/group names from `/etc/passwd`+
+  `/etc/group`, UTC mtime, ` -> target`), `-p` mkdir, `-r -f` rm, `-r` cp, `-s` ln, `-c` touch
+  (really updates mtime); short-flag clusters (`-rf`) work. `lib/oxlibc` has `time`
+  (`clock_gettime` + epoch→UTC civil date) and `io::BufWriter`.
+- **A console `write` costs ~1 ms** (framebuffer render + serial mirror): `ls /bin` took 770 ms to
+  the console but 30 ms to `/dev/null`, `ls -l /bin` 3.25 s vs 70 ms. Any utility that prints many
+  small pieces must batch through `BufWriter`, not `print`. `TIOCGWINSZ` still reports a fixed
+  24x80, not the framebuffer's real grid, so column layouts use 80 columns. `cat` with no
   file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
   `cat` just exits). `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
   counts *used* records, so deleting under a live cursor skips entries.

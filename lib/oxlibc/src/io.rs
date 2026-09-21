@@ -88,3 +88,74 @@ pub fn eprint_errno(prog: &[u8], path: &[u8], errno: u64) {
     eprint(errno_str(errno));
     eprint(b"\n");
 }
+
+const SYS_IOCTL: u64 = 124;
+const TIOCGWINSZ: u64 = 0x5413;
+
+/// `(rows, columns)` if `fd` is a terminal, `None` otherwise -- i.e. this doubles as `isatty()`.
+/// This kernel only answers `TIOCGWINSZ` for the real console (and follows `dup2`, so a redirected
+/// stdout correctly reports "not a terminal").
+pub fn tty_size(fd: u64) -> Option<(u16, u16)> {
+    let mut ws = [0u16; 4]; // struct winsize { ws_row, ws_col, ws_xpixel, ws_ypixel }
+    unsafe { syscall3(SYS_IOCTL, fd, TIOCGWINSZ, ws.as_mut_ptr() as u64) }.ok()?;
+    Some((ws[0], ws[1]))
+}
+
+const BUF_CAP: usize = 4096;
+
+/// A buffered writer. A `write` syscall to the console is expensive -- `ls /bin` (~260 entries,
+/// two writes each) took 770 ms to the console but 30 ms to `/dev/null`, i.e. ~1 ms per write -- so
+/// a utility that prints many small pieces should batch them. Flushes when full, on `flush()`, and
+/// on drop; errors are ignored, like `print`.
+pub struct BufWriter {
+    fd: u64,
+    buf: [u8; BUF_CAP],
+    len: usize,
+}
+
+impl BufWriter {
+    pub fn new(fd: u64) -> BufWriter {
+        BufWriter {
+            fd,
+            buf: [0; BUF_CAP],
+            len: 0,
+        }
+    }
+
+    pub fn write(&mut self, s: &[u8]) {
+        if s.len() >= BUF_CAP {
+            self.flush();
+            let _ = write_all(self.fd, s);
+            return;
+        }
+        if self.len + s.len() > BUF_CAP {
+            self.flush();
+        }
+        self.buf[self.len..self.len + s.len()].copy_from_slice(s);
+        self.len += s.len();
+    }
+
+    /// `n` spaces.
+    pub fn spaces(&mut self, n: usize) {
+        const SPACES: &[u8] = b"                ";
+        let mut left = n;
+        while left > 0 {
+            let k = left.min(SPACES.len());
+            self.write(&SPACES[..k]);
+            left -= k;
+        }
+    }
+
+    pub fn flush(&mut self) {
+        if self.len > 0 {
+            let _ = write_all(self.fd, &self.buf[..self.len]);
+            self.len = 0;
+        }
+    }
+}
+
+impl Drop for BufWriter {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}

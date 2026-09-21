@@ -34,6 +34,7 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
 
 pub const DT_DIR: u8 = 4;
+pub const DT_LNK: u8 = 10;
 
 pub fn open(path: &[u8], flags: u64, mode: u64) -> Result<u64, u64> {
     unsafe {

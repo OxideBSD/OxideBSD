@@ -448,6 +448,57 @@ pub extern "C" fn _start() -> ! {
         b"ls -a lists at least everything ls does"
     );
 
+    // ls off a terminal stays one-per-line and uncolored (stdout is a file here); -1 and
+    // --color=never agree with that, while -C and --color=always force the tty behavior on so the
+    // exact bytes can be checked.
+    expect_out(
+        b"/bin/ls",
+        &[b"ls", b"-1", b"/t"],
+        b"a\na2\nf1\nhard\nsoft\nsrc.txt\n",
+        b"ls -1",
+    );
+    expect_out(
+        b"/bin/ls",
+        &[b"ls", b"--color=never", b"/t"],
+        b"a\na2\nf1\nhard\nsoft\nsrc.txt\n",
+        b"ls --color=never",
+    );
+    expect_out(
+        b"/bin/ls",
+        &[b"ls", b"-C", b"/t"],
+        b"a        a2       f1       hard     soft     src.txt\n",
+        b"ls -C lays names out in columns",
+    );
+    expect_out(
+        b"/bin/ls",
+        &[b"ls", b"--color=always", b"/t"],
+        b"\x1b[1;34ma\x1b[0m\n\x1b[1;34ma2\x1b[0m\nf1\nhard\n\x1b[1;36msoft\x1b[0m\nsrc.txt\n",
+        b"ls --color: dirs blue, symlinks cyan, plain files uncolored",
+    );
+    expect_out(
+        b"/bin/ls",
+        &[b"ls", b"--color=always", b"/bin/true"],
+        b"\x1b[1;32m/bin/true\x1b[0m\n",
+        b"ls --color: executables green",
+    );
+    // A big directory really does pack into fewer lines than entries.
+    let (mut plain, mut cols) = ([0u8; 4096], [0u8; 4096]);
+    check!(
+        run(b"/bin/ls", &[b"ls", b"/bin"], Some(OUT)) == 0,
+        b"ls /bin"
+    );
+    let plain_len = read_file(OUT, &mut plain).unwrap_or(0);
+    check!(
+        run(b"/bin/ls", &[b"ls", b"-C", b"/bin"], Some(OUT)) == 0,
+        b"ls -C /bin"
+    );
+    let cols_len = read_file(OUT, &mut cols).unwrap_or(0);
+    let lines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
+    check!(
+        lines(&cols[..cols_len]) > 0 && lines(&cols[..cols_len]) * 2 < lines(&plain[..plain_len]),
+        b"ls -C /bin packs many names per line"
+    );
+
     // pwd
     unsafe {
         let _ = syscall(SYS_CHDIR, b"/t".as_ptr() as u64, 2, 0);
