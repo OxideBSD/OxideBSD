@@ -21,6 +21,7 @@ const SYS_WAIT4: u64 = 7;
 const SYS_CHDIR: u64 = 12;
 const SYS_EXECVE: u64 = 59;
 const SYS_DUP2: u64 = 106;
+const SYS_IOCTL: u64 = 124;
 const SYS_UTIMENSAT: u64 = 167;
 /// Not a real syscall number anything else registers -- `tests/native_bin_syscall_smoke.rs`
 /// registers it against a handler that calls `exit_qemu`.
@@ -231,6 +232,15 @@ fn expect_fail(path: &[u8], args: &[&[u8]], label: &[u8]) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     say(b"native-bin-syscall-smoke: starting\n");
+
+    // The console reports its real grid (not a fixed 24x80): a nonzero rows x cols pair.
+    let mut ws = [0u16; 4]; // struct winsize { ws_row, ws_col, ws_xpixel, ws_ypixel }
+    check!(
+        unsafe { syscall(SYS_IOCTL, 1, 0x5413, ws.as_mut_ptr() as u64) }.is_ok()
+            && ws[0] > 0
+            && ws[1] > 0,
+        b"TIOCGWINSZ on the console reports a nonzero size"
+    );
 
     // echo: words joined by spaces, -n suppresses the newline, only an exact leading -n is a flag.
     expect_out(
@@ -498,6 +508,41 @@ pub extern "C" fn _start() -> ! {
         lines(&cols[..cols_len]) > 0 && lines(&cols[..cols_len]) * 2 < lines(&plain[..plain_len]),
         b"ls -C /bin packs many names per line"
     );
+
+    // Seeded permissions: executable only if the kernel could run it (a loadable ELF or a `#!`
+    // script); data, headers, archives and relocatable objects are 0644.
+    for (path, mode, label) in [
+        (
+            &b"/bin/true"[..],
+            &b"-rwxr-xr-x"[..],
+            &b"seeded ELF executable is 0755"[..],
+        ),
+        (
+            b"/usr/lib/libc.so",
+            b"-rwxr-xr-x",
+            b"seeded shared object is 0755",
+        ),
+        (
+            b"/test_busybox.sh",
+            b"-rwxr-xr-x",
+            b"seeded #! script is 0755",
+        ),
+        (b"/hello.txt", b"-rw-r--r--", b"seeded data file is 0644"),
+        (b"/etc/passwd", b"-rw-r--r--", b"seeded /etc/passwd is 0644"),
+        (
+            b"/usr/lib/crt1.o",
+            b"-rw-r--r--",
+            b"seeded relocatable object is 0644",
+        ),
+        (
+            b"/usr/include/stdio.h",
+            b"-rw-r--r--",
+            b"seeded header is 0644",
+        ),
+    ] {
+        let n = ls_l(path, &mut buf);
+        check!(n >= mode.len() && buf.starts_with(mode), label);
+    }
 
     // pwd
     unsafe {

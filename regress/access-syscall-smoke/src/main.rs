@@ -10,7 +10,7 @@
 //!
 //! Three parts, all through `tests/access_syscall_smoke.rs` spawning this binary as pid 1:
 //! 1. As root: `F_OK`/`R_OK` (singly and combined with `W_OK`/`X_OK`) against `/hello.txt` (a
-//!    real seeded file, mode `0o755`) all succeed -- root bypasses every bit. `F_OK` against a
+//!    real seeded data file, mode `0o644`) all succeed -- root bypasses every bit, `X_OK` included. `F_OK` against a
 //!    nonexistent path fails real `ENOENT`.
 //! 2. Still as root: create `/accesstest`, `chmod` it to `0o600`, `chown` it to uid `99`.
 //! 3. `fork()`, then in the child: `setuid(1)` (a real non-root uid), then `access(/accesstest,

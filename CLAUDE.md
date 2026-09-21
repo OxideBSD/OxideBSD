@@ -591,7 +591,7 @@ history for its design if ever needed again). Its influence remains in how stdin
 - `sys/console/vga.rs`'s `Writer` is a true 2D-addressable console with a minimal ANSI/VT100 CSI
   escape parser so full-screen applets (`vi`, `clear`, `reset`) render correctly.
 - Real `SYS_IOCTL=124` (`sys/console/stdin.rs`'s `RawTermios`, a single **global**, not
-  per-session, `TERMIOS`) implements `TCGETS`/`TCSETS*`/`TIOCGWINSZ` (fixed `24x80`)/`TIOCSWINSZ`;
+  per-session, `TERMIOS`) implements `TCGETS`/`TCSETS*`/`TIOCGWINSZ` (the console's real grid)/`TIOCSWINSZ`;
   else `ENOTTY`. Only succeeds against the real console — load-bearing for `isatty()`.
 - No pty/foreground-process-group layer at this file's level — `tcsetpgrp`/`bg`/`fg` are driven
   entirely by the real session/controlling-tty model at the process level (see "Session,
@@ -1326,11 +1326,15 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   (`clock_gettime` + epoch→UTC civil date) and `io::BufWriter`.
 - **A console `write` costs ~1 ms** (framebuffer render + serial mirror): `ls /bin` took 770 ms to
   the console but 30 ms to `/dev/null`, `ls -l /bin` 3.25 s vs 70 ms. Any utility that prints many
-  small pieces must batch through `BufWriter`, not `print`. `TIOCGWINSZ` still reports a fixed
-  24x80, not the framebuffer's real grid, so column layouts use 80 columns. `cat` with no
-  file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
+  small pieces must batch through `BufWriter`, not `print`. `TIOCGWINSZ` reports the console's
+  real grid (`console::vga::width()/height()`, framebuffer ÷ 8x16, e.g. 160x50 at 1280x800) — it
+  used to be a fixed 24x80, which left `ls` columns and `hush` wrapping on half the screen. `cat`
+  with no file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
   `cat` just exits). `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
   counts *used* records, so deleting under a live cursor skips entries.
+- Seeded file modes (`oxfs`'s `seed_mode`): `0755` only for what the kernel could execute — a
+  `#!` script or an `ET_EXEC`/`ET_DYN` ELF (static binaries, PIEs, `libc.so`) — else `0644` (data,
+  headers, `.a`, relocatable `.o`); `/etc/shadow` stays `0600`. It used to be `0755` for everything.
 - **Gotcha**: a persistent `target/oxfs_disk.img` keeps its old seeded binaries — the native
   utilities only appear after a fresh format (delete the image; formatting takes ~10 min).
 - Verified by `tests/pie_aslr_smoke.rs` (real per-exec randomization, fork inherits),

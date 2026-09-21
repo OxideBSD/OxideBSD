@@ -6177,8 +6177,30 @@ fn seed_file(parent: u32, name: &[u8], content: &[u8]) -> bool {
     let Some(inode) = alloc_inode() else {
         return false;
     };
-    write_inode(inode, Inode::new(InodeKind::File));
+    let mut node = Inode::new(InodeKind::File);
+    node.mode = seed_mode(content);
+    write_inode(inode, node);
     write_inode_data(inode, content) && dir_insert(parent, name, inode).is_ok()
+}
+
+/// The permission bits a seeded file starts with: `0o755` if this kernel could actually execute it
+/// -- a `#!` script, or an ELF that's `ET_EXEC` (static) or `ET_DYN` (a PIE, or `libc.so`) -- and
+/// `0o644` for everything else (data, headers, `.a` archives, and relocatable `.o` files, which are
+/// ELF but not loadable). Every seeded file used to get `FIXED_PERM` (`0o755`) regardless, so
+/// `/etc/passwd`, headers and the WAD all looked executable (and `ls --color` painted them green).
+fn seed_mode(content: &[u8]) -> u16 {
+    const ET_EXEC: u16 = 2;
+    const ET_DYN: u16 = 3;
+    if content.starts_with(b"#!") {
+        return 0o755;
+    }
+    if content.len() >= 18 && content.starts_with(b"\x7fELF") {
+        let e_type = u16::from_le_bytes([content[16], content[17]]);
+        if e_type == ET_EXEC || e_type == ET_DYN {
+            return 0o755;
+        }
+    }
+    0o644
 }
 
 /// `seed_file`'s symlink counterpart -- allocates a fresh `InodeKind::Symlink` inode under
@@ -6957,8 +6979,8 @@ fn format_fresh_filesystem() -> bool {
     // Both passwords equal the account's own username (`root`/`user`) -- fine for a kernel with no
     // external network exposure and no real multi-user threat model, but real enough that `su`/
     // `login`'s own crypt() comparison genuinely succeeds or fails on the actual input, not a
-    // hardcoded stub. Locked to 0600 immediately after seeding, since `seed_file` always creates at
-    // the default `FIXED_PERM=0o755` and a real shadow file must not be world-readable.
+    // hardcoded stub. Locked to 0600 immediately after seeding (`seed_file` would otherwise give it
+    // the data-file default `0o644`, and a real shadow file must not be world-readable).
     ok &= seed_file(
         etc,
         b"shadow",
@@ -7910,6 +7932,7 @@ fn format_fresh_filesystem() -> bool {
     // rules this exercises only the always-allowed side of. ---
     if let Some(hello) = dir_lookup(ROOT_INODE, b"hello.txt") {
         let path = b"hello.txt";
+        let seeded_mode = read_inode(hello).mode;
         if oxfs_chmod(path.as_ptr() as u64, path.len() as u64, 0o600, 0) != 0 {
             ok = false;
             log("[oxfs] self-check FAILED: chmod hello.txt failed\n");
@@ -7948,7 +7971,7 @@ fn format_fresh_filesystem() -> bool {
         // Restore hello.txt's original ownership/mode so later checks in this self-check (and any
         // real process that opens it after boot) see the same seeded state every other file has.
         let mut inode = read_inode(hello);
-        inode.mode = FIXED_PERM as u16;
+        inode.mode = seeded_mode;
         inode.uid = 0;
         inode.gid = 0;
         write_inode(hello, inode);

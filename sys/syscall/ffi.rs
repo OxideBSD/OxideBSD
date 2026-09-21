@@ -892,12 +892,35 @@ struct RawWinsize {
     ws_xpixel: u16,
     ws_ypixel: u16,
 }
-const FIXED_WINSIZE: RawWinsize = RawWinsize {
+/// The classic 24x80 -- only ever reported if the console somehow claims a zero-sized grid (it
+/// can't: `console::vga`'s own grid is clamped to at least 1x1, and falls back to 80x25 with no
+/// framebuffer). Used to be the only answer, reported no matter how big the screen really was.
+const FALLBACK_WINSIZE: RawWinsize = RawWinsize {
     ws_row: 24,
     ws_col: 80,
     ws_xpixel: 0,
     ws_ypixel: 0,
 };
+
+/// The console's real, current grid -- `console::vga`'s own `width()`/`height()`, the exact values
+/// its writer wraps at and scrolls by (as many 8x16 cells as the real framebuffer fits, e.g.
+/// 160x50 at 1280x800), so a program laying out to this size (`ls` columns, `hush`'s line editor,
+/// a full-screen `vi`) lines up with what the screen really does.
+fn console_winsize() -> RawWinsize {
+    let (rows, cols) = (
+        crate::console::vga::height() as u16,
+        crate::console::vga::width() as u16,
+    );
+    if rows == 0 || cols == 0 {
+        return FALLBACK_WINSIZE;
+    }
+    RawWinsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
+}
 
 /// `FBIOGET_OXIDEBSD`'s own wire struct -- real, runtime-queried framebuffer geometry (see
 /// `drivers::fbdev::FbGeometry`, which this mirrors exactly, minus `phys_base`/`len`: a userland
@@ -960,7 +983,7 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         }
         TIOCGWINSZ => {
             // SAFETY: same known pointer-validation gap as above.
-            unsafe { *(argp as *mut RawWinsize) = FIXED_WINSIZE };
+            unsafe { *(argp as *mut RawWinsize) = console_winsize() };
             Ok(0)
         }
         TIOCSWINSZ => Ok(0), // accepted, silently discarded -- nothing reads window size back out
