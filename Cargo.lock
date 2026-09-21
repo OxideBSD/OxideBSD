@@ -294,6 +294,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73c53b65bbadd653c9d125e745d2659a3a060539b17d96ab1c59f9f5bfdacce5"
 
 [[package]]
+name = "pie-aslr-driver"
+version = "0.1.0"
+
+[[package]]
+name = "pie-aslr-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "ping-syscall-smoke"
 version = "0.1.0"
 

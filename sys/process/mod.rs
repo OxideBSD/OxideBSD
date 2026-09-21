@@ -1226,6 +1226,7 @@ pub mod timers;
 // -- unlike the seven above, these were never part of process.rs's own namespace, so they keep
 // their own explicit submodule path (`crate::process::scheduler::X`, not flattened into
 // `crate::process::X`) rather than being re-exported.
+pub mod aslr;
 pub mod context_switch;
 pub mod elf;
 pub mod fault_trampoline;

@@ -36,13 +36,22 @@ const PAGE_SIZE: u64 = 4096;
 /// `(Page, PhysFrame)` map `elf::load`'s own BSS-zeroing loop builds — see `process.rs`'s
 /// `map_user_stack`), via the phys-offset technique used throughout this codebase for writing into
 /// a not-necessarily-active address space. `interp_base`, when `Some`, is a `PT_INTERP`
-/// interpreter's own real runtime bias (`src/process.rs`'s `INTERP_LOAD_BASE`, the same value
+/// interpreter's own real runtime bias (`sys/process.rs`'s `INTERP_LOAD_BASE`, the same value
 /// passed as `elf::load`'s own `bias` parameter when loading it) and becomes `AT_BASE`; `None` for
-/// every static binary (today's only case), which keeps `AT_BASE`
-/// at `0`. This isn't just "no bias to report" — musl's own dynamic-linker bootstrap treats
-/// `AT_BASE == 0` as "I was invoked directly as the main program, not as someone else's
-/// interpreter," so passing a real base here is required, not cosmetic, once a caller starts
-/// loading an interpreter. Returns the final, 16-byte-aligned `RSP`.
+/// every binary with no interpreter (a fixed-address `ET_EXEC`, or a no-`PT_INTERP` PIE main
+/// binary), which keeps `AT_BASE` at `0`. This isn't just "no bias to report" — musl's own
+/// dynamic-linker bootstrap treats `AT_BASE == 0` as "I was invoked directly as the main program,
+/// not as someone else's interpreter," so passing a real base here is required, not cosmetic,
+/// once a caller starts loading an interpreter.
+///
+/// `main_bias` is entirely separate from `interp_base`: it's the *main binary's own* real runtime
+/// bias (`0` for a fixed-address `ET_EXEC`, or `process::aslr::pick_bias()`'s real random value
+/// for a PIE main binary — see `do_execve`), and must be added to `AT_PHDR`/`AT_ENTRY` below.
+/// `elf.phdr_vaddr()`/`elf.entry_point()` report unbiased, file-relative values — a real bug this
+/// codebase hit and fixed: before `main_bias` existed, these were silently correct only because
+/// the main binary's bias was always `0`.
+///
+/// Returns the final, 16-byte-aligned `RSP`.
 ///
 /// # Panics
 ///
@@ -59,8 +68,9 @@ pub fn build(
     mapped_pages: &BTreeMap<Page<Size4KiB>, PhysFrame<Size4KiB>>,
     physical_memory_offset: VirtAddr,
     interp_base: Option<u64>,
+    main_bias: u64,
 ) -> VirtAddr {
-    let phdr_vaddr = elf.phdr_vaddr();
+    let phdr_vaddr = elf.phdr_vaddr() + main_bias;
 
     // Deliberately NOT cryptographically random -- musl only requires that AT_RANDOM point at 16
     // present bytes (it uses them for the stack-protector canary and as an arc4random seed); this
@@ -94,7 +104,7 @@ pub fn build(
         (AT_PHNUM, elf.phnum()),
         (AT_PAGESZ, PAGE_SIZE),
         (AT_BASE, interp_base.unwrap_or(0)),
-        (AT_ENTRY, elf.entry_point().as_u64()),
+        (AT_ENTRY, elf.entry_point().as_u64() + main_bias),
         (AT_UID, 0),
         (AT_EUID, 0),
         (AT_GID, 0),

@@ -19,6 +19,8 @@ members = [
   "regress/access-syscall-smoke",
   "regress/pipe-backpressure-syscall-smoke",
   "regress/dynlink-syscall-smoke",
+  "regress/pie-aslr-smoke",
+  "regress/pie-aslr-driver",
   "regress/sa-siginfo-syscall-smoke",
   "regress/getrandom-syscall-smoke",
   "regress/sysinfo-syscall-smoke",
@@ -198,6 +200,10 @@ harness = false
 
 [[test]]
 name = "dynlink_syscall_smoke"
+harness = false
+
+[[test]]
+name = "pie_aslr_smoke"
 harness = false
 
 [[test]]

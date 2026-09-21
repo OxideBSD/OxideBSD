@@ -7039,6 +7039,18 @@ fn format_fresh_filesystem() -> bool {
         include_bytes!(env!("OXFS_DYNLINK_SMOKE_ELF_PATH")),
     );
 
+    // A real, no-`PT_INTERP` PIE main binary (`regress/pie-aslr-smoke/`) proving the PIE/ASLR
+    // loading model (see `sys/process/aslr.rs`'s own doc comment) -- real `fork`+`execve` of this
+    // path, driven by `regress/pie-aslr-driver/` (spawned as pid 1 by `tests/pie_aslr_smoke.rs`),
+    // is what actually exercises `process::aslr::pick_bias()`; unlike every other fixture here,
+    // this one's own `build.rs` deliberately has no linker script at all (see that crate's own
+    // doc comment).
+    ok &= seed_file(
+        root,
+        b"pie-aslr-probe.elf",
+        include_bytes!(env!("OXFS_PIE_ASLR_PROBE_ELF_PATH")),
+    );
+
     // "Real threading" phases 1-5's own finish line -- a genuine, unmodified musl
     // pthread_create()/pthread_join() round trip (`regress/pthread-smoke/main.c`'s own doc
     // comment has the full scenario), driven by `tests/pthread_syscall_smoke.rs` via a real

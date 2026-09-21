@@ -88,6 +88,7 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
         &mapped_pages,
         phys_offset,
         None,
+        0, // boot spawn always loads pid 1 at bias 0 -- see this file's own elf::load call above
     );
 
     let pid = alloc_pid();
@@ -284,11 +285,17 @@ fn user_stack_bottom(stack_top: VirtAddr) -> VirtAddr {
 /// (`context_switch::seed_fork_frame`), and enqueues it `Ready`. The parent's own return value
 /// (the child's pid) flows back through the completely ordinary `Ok(child_pid)` -> `frame.rax`
 /// path — no special-casing needed on the parent side.
+///
+/// **A forked child's PIE ASLR bias, if any, is never re-picked here** — this function (and
+/// everything `fork_impl` calls) contains no `elf::load` call anywhere; `AddressSpace::fork` deep-
+/// copies the parent's already-mapped, already-biased pages verbatim. A process's `process::aslr`
+/// bias is decided exactly once, by whichever `execve()` last loaded its current image — `fork()`
+/// only ever duplicates whatever is already there.
 pub fn do_fork_from_current() -> Result<u64, u64> {
     fork_impl(None)
 }
 
-/// Real vfork-via-`clone(2)`: `musl`'s own `posix_spawn()` (`third_party/musl/src/process/
+/// Real vfork-via-`clone(2)`: `musl`'s own `posix_spawn()` (`external/mit/musl/src/process/
 /// posix_spawn.c`) issues `clone(child_fn, stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)` to launch
 /// its helper, not a plain `fork()`+`execve()` -- found live via the real on-target Clang/LLVM
 /// port, whose driver uses `posix_spawn()` to launch every subprocess tool (`ld.lld`, `clang -cc1`
@@ -1042,22 +1049,39 @@ pub fn do_execve(
     // SAFETY: phys_offset is the bootloader's phys-memory mapping; this is the only live view of
     // new_address_space's own (not-yet-active) level 4 table right now.
     let mut mapper = unsafe { new_address_space.mapper(phys_offset) };
-    let entry = with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, 0))
-        .map_err(|_| ENOEXEC)?;
+
+    // Checked once, before the main binary's own load, so both the bias decision below and the
+    // interpreter-loading branch reuse the same parse instead of scanning PT_INTERP twice.
+    let interp_path = elf.interpreter().map_err(|_| ENOEXEC)?;
+
+    // A real PIE main binary: ET_DYN, but with no PT_INTERP of its own (that combination is the
+    // no-`ld.so`, kernel-loaded-directly case -- see `process::aslr`'s own doc comment). Everyone
+    // else (a fixed-address ET_EXEC, or an ET_DYN binary that *does* carry a PT_INTERP, i.e. a
+    // real musl-linked dynamic executable) keeps bias `0` for the main image exactly as before.
+    let main_bias: u64 = if elf.is_dynamic() && interp_path.is_none() {
+        crate::process::aslr::pick_bias()
+    } else {
+        0
+    };
+    let entry =
+        with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, main_bias))
+            .map_err(|_| ENOEXEC)?;
 
     // A real PT_INTERP dynamic linker, if the binary carries one, gets loaded into the same
     // not-yet-active address space right here, immediately after the main binary's own segments --
     // `SYSRETQ` needs to land in the interpreter's own entry, not the main binary's (the
     // interpreter relocates/resolves itself, then jumps to the main binary's real entry on its
     // own, via AT_ENTRY -- see `user_stack.rs`). `jump_entry`/`interp_base` stay `entry`/`None`
-    // (today's only case, unchanged) when there's no interpreter. `INTERP_LOAD_BASE` is a real,
-    // kernel-chosen runtime bias applied by `elf::load` itself, not a link-time address the
-    // interpreter file assumes -- see that function's own doc comment for the real bug (a wild
-    // pointer inside the interpreter's own relocation self-processing) a fixed-link-time-base
-    // interpreter caused, and why this bias has to be applied here instead.
+    // when there's no interpreter (true for both a fixed-address main binary and a no-PT_INTERP
+    // PIE main binary -- `main_bias` above already covers the latter's own real bias, entirely
+    // independent of `interp_base`, which is the *interpreter's* bias, not the main binary's).
+    // `INTERP_LOAD_BASE` is a real, kernel-chosen runtime bias applied by `elf::load` itself, not
+    // a link-time address the interpreter file assumes -- see that function's own doc comment for
+    // the real bug (a wild pointer inside the interpreter's own relocation self-processing) a
+    // fixed-link-time-base interpreter caused, and why this bias has to be applied here instead.
     let mut jump_entry = entry;
     let mut interp_base: Option<u64> = None;
-    if let Some(interp_path) = elf.interpreter().map_err(|_| ENOEXEC)? {
+    if let Some(interp_path) = interp_path {
         let interp_bytes =
             read_file_via_syscall(interp_path.as_ptr() as u64, interp_path.len() as u64)?;
         let interp_elf = Elf::parse(&interp_bytes).map_err(|_| ENOEXEC)?;
@@ -1106,6 +1130,7 @@ pub fn do_execve(
         &mapped_pages,
         phys_offset,
         interp_base,
+        main_bias,
     );
 
     // ---- commit point: nothing above may fail past here ----

@@ -5,15 +5,18 @@
 //! `ET_DYN` binary with a handful of `PT_LOAD` segments, optionally one `PT_INTERP`, and nothing
 //! else — which is small and mechanical enough to own outright. Still no real *relocation
 //! processing* here (no `R_X86_64_RELATIVE`/GOT/PLT patching) — `load()` does support a real,
-//! caller-chosen additive `bias` applied to every segment's `p_vaddr`, needed for a `PT_INTERP`
-//! interpreter loaded at a kernel-chosen runtime address (see `load()`'s own doc comment for why
-//! this is real, necessary arithmetic, not optional): a naturally-linked `ET_DYN` image's own
-//! `.dynamic`/`.rela.dyn` entries are stored *as if* loaded at bias `0`, and it's the loaded
-//! image's own userspace bootstrap code (real musl `ldso/dlstart.c`, in this codebase's case) that
-//! applies the real runtime bias to them at startup, reading it back from `AT_BASE` — this file's
-//! only job is to place the image correctly and report that same bias truthfully, never to touch
-//! the relocation table itself. Every other caller (every `ET_EXEC` main binary) passes `bias: 0`,
-//! matching each one's own fixed `linker.ld` load address unchanged.
+//! caller-chosen additive `bias` applied to every segment's `p_vaddr`. Three real callers exist:
+//! every fixed-address `ET_EXEC` main binary passes `bias: 0` (matching its own `linker.ld` load
+//! address); a `PT_INTERP` interpreter is loaded at the fixed `INTERP_LOAD_BASE` bias (see
+//! `load()`'s own doc comment for why this arithmetic is real and necessary — a naturally-linked
+//! `ET_DYN` image's own `.dynamic`/`.rela.dyn` entries are stored *as if* loaded at bias `0`, and
+//! it's the loaded image's own userspace bootstrap code, real musl `ldso/dlstart.c`, that applies
+//! the real runtime bias at startup, reading it back from `AT_BASE`); and a no-`PT_INTERP` `ET_DYN`
+//! main binary (a real PIE) is loaded at a real, kernel-chosen bias randomized fresh on every
+//! `execve()` (see `process::aslr::pick_bias`) — no userspace bootstrap exists for this third case
+//! (no `ld.so`), so it relies instead on the build-time zero-relocation guarantee
+//! (`build.rs`'s `assert_zero_relocations`): this file's only job in every case is to place the
+//! image correctly and report that same bias truthfully, never to touch a relocation table itself.
 //!
 //! Multi-byte fields are read via explicit `from_le_bytes` on byte slices rather than casting the
 //! input to a `#[repr(C)]` struct: `include_bytes!` output has no alignment guarantee, and an
@@ -59,6 +62,7 @@ pub enum ElfError {
 pub struct Elf<'a> {
     bytes: &'a [u8],
     entry: u64,
+    e_type: u16,
     phoff: usize,
     phnum: usize,
     phentsize: usize,
@@ -88,11 +92,14 @@ impl<'a> Elf<'a> {
             return Err(ElfError::UnsupportedEndianness);
         }
         let e_type = read_u16(bytes, 16);
-        // ET_DYN is accepted alongside ET_EXEC solely for a PT_INTERP dynamic-linker image, which
-        // is always ET_DYN — never a real position-independent load: this kernel does no
-        // relocation-at-arbitrary-base anywhere, so any ET_DYN image handed to `load()` must
-        // already be linked at a fixed, correct address (matching every userland crate's own
-        // `linker.ld`-fixed load base), not actually relocated by the kernel.
+        // ET_DYN covers two real, distinct cases today: a PT_INTERP dynamic-linker image (always
+        // ET_DYN, loaded at the fixed `INTERP_LOAD_BASE` bias — see `load()`'s own doc comment),
+        // and a no-PT_INTERP main executable built as a genuine PIE (loaded at a real, kernel-
+        // chosen, per-`execve()`-randomized bias — see `process::aslr`). Neither case involves the
+        // kernel processing any relocation table itself: both rely on the disciplined "never store
+        // an address as data" coding style (verified at build time — see `build.rs`'s
+        // `assert_zero_relocations`) that makes a plain bias-and-map load correct with zero
+        // `R_X86_64_RELATIVE` fixups needed.
         if e_type != TYPE_EXEC && e_type != TYPE_DYN {
             return Err(ElfError::UnsupportedType);
         }
@@ -118,6 +125,7 @@ impl<'a> Elf<'a> {
         Ok(Elf {
             bytes,
             entry: e_entry,
+            e_type,
             phoff: e_phoff,
             phnum: e_phnum,
             phentsize: e_phentsize,
@@ -126,6 +134,12 @@ impl<'a> Elf<'a> {
 
     pub fn entry_point(&self) -> VirtAddr {
         VirtAddr::new(self.entry)
+    }
+
+    /// `true` for a real `ET_DYN` image — either a `PT_INTERP` interpreter or a no-`PT_INTERP`
+    /// PIE main binary (see `do_execve`, which distinguishes the two via `interpreter()`).
+    pub fn is_dynamic(&self) -> bool {
+        self.e_type == TYPE_DYN
     }
 
     /// The raw `e_phoff`/`e_phnum`/`e_phentsize` header fields — needed for `AT_PHDR`/`AT_PHENT`/
@@ -225,13 +239,17 @@ impl<'a> Elf<'a> {
 /// real runtime entry point (`elf.entry_point() + bias`). `physical_memory_offset` is used to
 /// write segment bytes into freshly allocated frames directly (rather than through `mapper`'s own
 /// mapping, which may be read-only, and which may belong to an address space that isn't active
-/// yet) — the same technique used throughout `src/memory.rs` and `src/address_space.rs`.
+/// yet) — the same technique used throughout `sys/memory.rs` and `src/address_space.rs`.
 ///
 /// `bias` is added to every segment's `p_vaddr` (and to the returned entry point) before mapping —
-/// `0` for every `ET_EXEC` main binary (its own `p_vaddr`s already *are* its real, fixed runtime
-/// addresses, matching its own `linker.ld`), a real, kernel-chosen nonzero value for a `PT_INTERP`
-/// interpreter (`src/process.rs`'s `do_execve`). **Found the hard way, via a real page fault, why
-/// this can't just be `0` for the interpreter case too** (which was this file's original
+/// `0` for every fixed-address `ET_EXEC` main binary (its own `p_vaddr`s already *are* its real,
+/// fixed runtime addresses, matching its own `linker.ld`); a real, kernel-chosen nonzero value for
+/// a `PT_INTERP` interpreter (`lifecycle.rs`'s `do_execve`, fixed `INTERP_LOAD_BASE`); and a real,
+/// per-`execve()`-randomized nonzero value for a no-`PT_INTERP` PIE main binary (same `do_execve`,
+/// `process::aslr::pick_bias()` — note that whoever builds this binary's own initial stack, i.e.
+/// `user_stack::build`, must also add this same bias to `AT_PHDR`/`AT_ENTRY`, since `Elf::
+/// phdr_vaddr()`/`entry_point()` report unbiased file-relative values). **Found the hard way, via
+/// a real page fault, why the interpreter case can't just use bias `0` too** (which was this file's original
 /// milestone-1 design): a naturally-linked `ET_DYN` shared object's own `.rela.dyn`/`DT_RELA`
 /// table already stores addresses "as if loaded at bias `0`" — its own userspace bootstrap
 /// (`ldso/dlstart.c`, real musl) computes `real_addr = AT_BASE + stored_value`, so mapping it at a

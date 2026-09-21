@@ -254,6 +254,16 @@ fn gather_seed() -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// One real random `u64` for a kernel-internal caller that just needs a number, not a
+/// user-buffer write (e.g. `process::aslr::pick_bias`'s per-`execve()` PIE load-bias
+/// randomization) -- reuses `gather_seed()` directly rather than duplicating any RNG logic or
+/// going through `oxidebsd_random_bytes`'s pointer/len C-ABI shape, which has no natural
+/// "just give me a u64" calling convention. `pub(crate)`, not `pub`: unlike `mix_entropy`/
+/// `entropy_pool_snapshot`, no test needs this directly today.
+pub(crate) fn kernel_random_u64() -> u64 {
+    u64::from_le_bytes(gather_seed()[0..8].try_into().unwrap())
+}
+
 /// Fills `[ptr, ptr+len)` with real, cryptographically-mixed random bytes -- backs oxfs's
 /// synthetic `/dev/random`/`/dev/urandom` (see this module's own doc comment for the full design).
 ///

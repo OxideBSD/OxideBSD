@@ -178,6 +178,7 @@ fn main() {
         "PIPE_BACKPRESSURE_SYSCALL_SMOKE_ELF_PATH",
     );
     build_userland_crate("dynlink-syscall-smoke", "DYNLINK_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("pie-aslr-driver", "PIE_ASLR_DRIVER_ELF_PATH");
     build_userland_crate(
         "sa-siginfo-syscall-smoke",
         "SA_SIGINFO_SYSCALL_SMOKE_ELF_PATH",
@@ -235,7 +236,7 @@ fn main() {
     // loaded kernel modules by reading the real /proc/modules this pass added to sys/modules/oxfs.
     // Lives at `usr.bin/lsoxmod`, not `regress/`, like every other userland crate -- it's a real
     // BSD-shaped utility, not test infrastructure.
-    let lsoxmod_elf_path = build_crate_at("usr.bin/lsoxmod", "LSOXMOD_ELF_PATH");
+    let lsoxmod_elf_path = build_pie_crate_at("usr.bin/lsoxmod", "LSOXMOD_ELF_PATH");
 
     build_module_crate("hello", "HELLO", &[]);
     build_module_crate("native_abi", "NATIVE_ABI", &[]);
@@ -354,6 +355,14 @@ fn main() {
     let dynlink_musl_sysroot = build_musl_sysroot_shared();
     let dynlink_libc_so_path = dynlink_musl_sysroot.join("lib/libc.so");
     let dynlink_smoke_elf_path = build_dynlink_smoke(&dynlink_musl_sysroot, dynlink_fixture_base);
+
+    // A real, no-`PT_INTERP` PIE main binary proving the PIE/ASLR loading model -- see
+    // `sys/process/aslr.rs`'s own doc comment and `regress/pie-aslr-smoke/src/main.rs`'s module
+    // doc comment for the full scenario. `build_pie_crate_at`, not `build_userland_crate`: this
+    // one needs the real zero-relocation build gate, not the plain fixed-`ET_EXEC` path every
+    // other `regress/*` crate here uses.
+    let pie_aslr_probe_elf_path =
+        build_pie_crate_at("regress/pie-aslr-smoke", "PIE_ASLR_SMOKE_ELF_PATH");
 
     let busybox_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("external/gpl2/busybox");
     println!("cargo:rerun-if-changed={}", busybox_dir.display());
@@ -477,6 +486,10 @@ fn main() {
         (
             "OXFS_DYNLINK_SMOKE_ELF_PATH",
             dynlink_smoke_elf_path.to_str().unwrap(),
+        ),
+        (
+            "OXFS_PIE_ASLR_PROBE_ELF_PATH",
+            pie_aslr_probe_elf_path.to_str().unwrap(),
         ),
     ];
     oxfs_extra_env.extend(
@@ -3286,6 +3299,13 @@ fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
 /// why this exists as a separate, explicit-path function rather than folding a parent-directory
 /// parameter into every one of that function's ~49 call sites.
 fn build_crate_at(relative_dir: &str, env_var: &str) -> PathBuf {
+    build_crate_at_with_rustflags(relative_dir, env_var, "")
+}
+
+/// `build_crate_at`, plus caller-chosen extra `RUSTFLAGS` -- see `build_pie_crate_at`'s own doc
+/// comment for the one real caller today (`-C panic=immediate-abort`/`-Z location-detail=none`,
+/// needed to reach genuinely zero relocations under real PIE codegen).
+fn build_crate_at_with_rustflags(relative_dir: &str, env_var: &str, extra_rustflags: &str) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let userland_dir = Path::new(manifest_dir).join(relative_dir);
     let crate_name = Path::new(relative_dir)
@@ -3342,8 +3362,9 @@ fn build_crate_at(relative_dir: &str, env_var: &str) -> PathBuf {
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         // No userland crate needs the kernel's `chacha20_backend` cfg, so blanking `RUSTFLAGS`
         // entirely (matching `build_module_crate`'s own precedent) is correct, not just a
-        // workaround.
-        .env("RUSTFLAGS", "")
+        // workaround -- `extra_rustflags` is the one deliberate exception, threaded through by
+        // `build_pie_crate_at`.
+        .env("RUSTFLAGS", extra_rustflags)
         .status()
         .unwrap_or_else(|e| panic!("failed to run cargo for {crate_name}: {e}"));
 
@@ -3359,6 +3380,73 @@ fn build_crate_at(relative_dir: &str, env_var: &str) -> PathBuf {
     );
     println!("cargo:rustc-env={env_var}={}", elf_path.display());
     elf_path
+}
+
+/// `build_crate_at`, plus a real build-time gate for the PIE/ASLR loading model (see
+/// `sys/process/aslr.rs`'s own doc comment): a no-`PT_INTERP` PIE main binary is loaded by a
+/// plain bias-and-map (no in-kernel relocation processor), which is only correct if the binary
+/// genuinely carries zero relocations -- a disciplined "never store an address as data" coding
+/// style, verified here rather than trusted. The crate's own `build.rs` is what actually produces
+/// a real `ET_DYN` (via `-pie`/`--no-dynamic-linker` link args, no `-T<linker.ld>` -- letting
+/// `rust-lld`'s own default script run is *required*, not just simpler: it's what places the ELF
+/// header/program-header table inside the first `PT_LOAD` segment, which a custom minimal
+/// `regress/*`-style script deliberately does not do, per `elf.rs`'s own `phdr_vaddr()` doc
+/// comment -- without it, a real dynamic-linker/PIE-model consumer's `AT_PHDR` would point at
+/// unmapped memory).
+///
+/// **A real, confirmed-live gap found migrating `usr.bin/lsoxmod`**: completely ordinary,
+/// disciplined Rust code (no explicit `static X: &[u8] = ...`, no pointer tables) still produced
+/// real `R_X86_64_RELATIVE` relocations under genuine PIE codegen -- Rust's own `#[track_caller]`
+/// bounds-check machinery embeds a `core::panic::Location` (a `&str` file-path pointer + line/col)
+/// at every slice/array indexing site that isn't provably in-bounds, and a fixed-address `ET_EXEC`
+/// link had silently hidden this (a link-time-fixed address needs no relocation at all, PIE or
+/// not) -- confirmed by the exact same source producing zero relocations as `ET_EXEC` and four as
+/// `ET_DYN`. `-Z location-detail=none` alone still left one relocation (a cross-object reference
+/// to `core`'s own internal `"<redacted>"` fallback string); `-C panic=immediate-abort` (a real,
+/// distinct panic strategy from this target's own `panic-strategy: "abort"`) closes the gap
+/// completely, since it compiles every panic site to a bare trap instruction with no location
+/// data, no formatting machinery, and no `#[panic_handler]` call at all -- confirmed empirically
+/// (`readelf -r`: zero relocations) before wiring in here, not assumed from the flag's own name.
+fn build_pie_crate_at(relative_dir: &str, env_var: &str) -> PathBuf {
+    let elf_path = build_crate_at_with_rustflags(
+        relative_dir,
+        env_var,
+        "-Z unstable-options -C panic=immediate-abort -Z location-detail=none",
+    );
+    assert_zero_relocations(relative_dir, &elf_path);
+    elf_path
+}
+
+/// Panics the build if `elf_path` carries any real ELF relocation -- see `build_pie_crate_at`'s
+/// own doc comment for why this is load-bearing, not a style nit. A `.dynamic` section itself
+/// (real `-pie` output always has one, describing zero relocations) is harmless and expected --
+/// only warned about, not failed on, since nothing on this kernel's no-`PT_INTERP` PIE path ever
+/// reads `DT_*` entries (only a real `PT_INTERP` interpreter's own userspace `ld.so` does that,
+/// out of scope here).
+fn assert_zero_relocations(crate_name: &str, elf_path: &Path) {
+    let out = Command::new("readelf")
+        .args(["-r", "-d"])
+        .arg(elf_path)
+        .output()
+        .unwrap_or_else(|e| panic!("readelf failed for {crate_name}: {e}"));
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("There are no relocations in this file") {
+        panic!(
+            "PIE zero-relocation gate FAILED for {crate_name} ({}).\n\
+             This binary is loaded via a plain bias-and-map with no in-kernel relocation \
+             processor -- a real R_X86_64_RELATIVE entry here would silently produce a \
+             wrong-at-runtime binary once loaded at a randomized ASLR bias.\n\
+             This almost always means a static/global item now stores another item's address as \
+             data (a global array of &str/fn-pointers, a vtable, `dyn Trait`, ...) -- restructure \
+             to compute that address at its use site (a RIP-relative `lea`) instead.\n\n{text}",
+            elf_path.display()
+        );
+    }
+    if !text.contains("There is no dynamic section in this file") {
+        println!(
+            "cargo:warning={crate_name}: PIE binary carries a non-empty .dynamic section (zero relocations already confirmed above)"
+        );
+    }
 }
 
 /// Cross-builds the Multiboot2 boot-path smoke test (`regress/multiboot2-boot-smoke/`, wrapping
