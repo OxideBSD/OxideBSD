@@ -483,7 +483,9 @@ future syscall port, so re-check these when adding one:
   arch-specific asm stub needs this same direct-patch treatment, not just a header remap** — bit
   again later for `clone.s`/`__unmapself.s` (see "Real threading").
 - `utimensat` drops the always-`AT_FDCWD` `fd` arg, passes `(path_ptr, path_len, times_ptr,
-  flags)`. Kernel side gained real mtime/ctime tracking (`oxidebsd_unix_time`) later.
+  flags)`. Kernel side gained real mtime/ctime tracking (`oxidebsd_unix_time`) later, and
+  `oxfs_utimensat` now genuinely sets atime/mtime (null `times` = now; `UTIME_NOW`/`UTIME_OMIT`;
+  `EINVAL` on bad `tv_nsec`; explicit times need owner-or-root, "now" also allows write access).
 - `SYS_MMAP=100` is `(addr_hint, len, prot)` originally, later gained real `flags` (packed into
   `prot`'s unused high bits) and real `MAP_FIXED`/`MAP_PRIVATE` handling. `SYS_BRK=102`
   grows/shrinks `Process.brk`, no reclaim on shrink.
@@ -1315,12 +1317,13 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   them out of the roster — deliberately *not* by deleting their tuples from `build_busybox.rs`,
   which would force a ~1h full BusyBox rebuild (the inert tuples can go with the next unrelated
   edit there). `usr.bin/lsoxmod` is PIE too.
-- Behavior notes: flags are `-n` echo, `-a -l` ls (sorted; no timestamps/symlink targets), `-p`
-  mkdir, `-r -f` rm, `-r` cp, `-s` ln, `-c` touch; short-flag clusters (`-rf`) work. `cat` with no
+- Behavior notes: flags are `-n` echo, `-a -l` ls (sorted; `-l` has aligned columns, a `total`
+  line, owner/group names from `/etc/passwd`+`/etc/group`, UTC mtime, ` -> target`), `-p` mkdir,
+  `-r -f` rm, `-r` cp, `-s` ln, `-c` touch (really updates mtime); short-flag clusters (`-rf`)
+  work. `lib/oxlibc` has `time` (`clock_gettime` + epoch→UTC civil date). `cat` with no
   file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
   `cat` just exits). `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
-  counts *used* records, so deleting under a live cursor skips entries. `touch` on an existing
-  file is only an existence check (`oxfs_utimensat` doesn't move timestamps).
+  counts *used* records, so deleting under a live cursor skips entries.
 - **Gotcha**: a persistent `target/oxfs_disk.img` keeps its old seeded binaries — the native
   utilities only appear after a fresh format (delete the image; formatting takes ~10 min).
 - Verified by `tests/pie_aslr_smoke.rs` (real per-exec randomization, fork inherits),

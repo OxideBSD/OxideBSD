@@ -1,7 +1,6 @@
-//! `touch` -- makes sure each named file exists. `-c` doesn't create a missing file. On an
-//! existing file it issues a real `utimensat` (this kernel's handler is currently an existence
-//! check that doesn't move timestamps -- see `sys/modules/oxfs`'s `oxfs_utimensat` -- so an existing
-//! file's mtime isn't actually advanced yet); on `ENOENT` it creates the file via `open(O_CREAT)`.
+//! `touch` -- sets each named file's access and modification times to now, creating it (empty) if
+//! it doesn't exist. `-c` doesn't create a missing file. `utimensat` reports `ENOENT` for a
+//! missing path, which is how this knows to fall back to `open(O_CREAT)`.
 #![no_std]
 #![no_main]
 

@@ -1,5 +1,6 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write), `posix_compat`
-//! (`dup2`, for redirecting each utility's stdout into a file the way a shell does), and `oxfs`
+//! (`dup2`, for redirecting each utility's stdout into a file the way a shell does), `clock`
+//! (`clock_gettime`, for `ls -l`'s timestamps), and `oxfs`
 //! (open/close/stat/getdents/mkdir/rename/link/... and the seeded `/bin/<name>` binaries), then
 //! spawns `regress/native-bin-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
 //! for the scenario: all 12 native utilities (`bin/echo`, `bin/cat`, `bin/ls`, ...) run through a
@@ -64,6 +65,19 @@ fn main(boot_info: &'static BootInfo) -> ! {
         &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
+
+    // `clock_gettime`, which `ls -l` uses to pick between a time of day and a year.
+    const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
+    const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "clock",
+        CLOCK_MOD,
+        CLOCK_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");

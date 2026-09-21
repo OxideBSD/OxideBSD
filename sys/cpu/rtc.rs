@@ -80,7 +80,12 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let year_of_era = (y - era * 400) as u64;
-    let month_index = (month + 10) % 12;
+    // March-based month index (Mar=0 .. Feb=11): Hinnant's `mp = (m + 9) % 12`. Was `+ 10` -- a
+    // silent off-by-one that pushed *every* date forward by one month's length (30 days in
+    // September, 31 in most others, and -337 for a February date), found when `ls -l` showed
+    // "Oct 21" on Sep 21; BusyBox's own `date -u` in the guest agreed with `ls`, so the kernel
+    // clock itself was wrong, not the formatters.
+    let month_index = (month + 9) % 12;
     let day_of_year = (153 * month_index as u64 + 2) / 5 + day as u64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era as i64 - 719_468
@@ -178,4 +183,18 @@ pub fn set_unix_epoch(sec: i64, nsec: i64) {
     let now_ticks = crate::cpu::interrupts::ticks() as i64;
     let target_total_ticks = sec * hz + (nsec * hz) / 1_000_000_000;
     *REALTIME_BASE_TICKS.lock() = Some(target_total_ticks - now_ticks);
+}
+
+#[cfg(test)]
+#[test_case]
+fn test_days_from_civil_known_dates() {
+    // Reference values from `date -u -d <date> +%s`, divided by 86400 -- one per shape of month
+    // (the Jan/Feb year-shift, a leap day, a 30-day month, year end) so an off-by-one in the
+    // month index can't hide behind a coincidence.
+    assert_eq!(days_from_civil(1970, 1, 1), 0);
+    assert_eq!(days_from_civil(2001, 9, 9), 11_574);
+    assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+    assert_eq!(days_from_civil(2026, 1, 1), 20_454);
+    assert_eq!(days_from_civil(2026, 9, 21), 20_717);
+    assert_eq!(days_from_civil(2026, 12, 31), 20_818);
 }

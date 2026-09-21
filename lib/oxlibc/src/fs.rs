@@ -8,6 +8,7 @@ const SYS_READ: u64 = 3;
 const SYS_WRITE: u64 = 4;
 const SYS_OPEN: u64 = 5;
 const SYS_CLOSE: u64 = 6;
+const SYS_READLINK: u64 = 154;
 const SYS_GETCWD: u64 = 108;
 const SYS_UNLINK: u64 = 109;
 const SYS_RMDIR: u64 = 110;
@@ -86,6 +87,8 @@ struct RawStat {
 pub struct Stat {
     pub mode: u32,
     pub size: u64,
+    /// `st_blocks`, in 512-byte units.
+    pub blocks: u64,
     pub nlink: u64,
     pub uid: u32,
     pub gid: u32,
@@ -120,6 +123,7 @@ fn stat_via(number: u64, path: &[u8]) -> Result<Stat, u64> {
         Ok(Stat {
             mode: raw.st_mode,
             size: raw.st_size as u64,
+            blocks: raw.st_blocks as u64,
             nlink: raw.st_nlink,
             uid: raw.st_uid,
             gid: raw.st_gid,
@@ -163,6 +167,20 @@ pub fn rename(old: &[u8], new: &[u8]) -> Result<(), u64> {
     .map(|_| ())
 }
 
+/// Copies a symlink's target into `buf` (no NUL terminator), returning its length.
+pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, u64> {
+    unsafe {
+        syscall4(
+            SYS_READLINK,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
+    .map(|n| n as usize)
+}
+
 /// Hard link: `new` becomes another name for `existing`.
 pub fn link(existing: &[u8], new: &[u8]) -> Result<(), u64> {
     unsafe {
@@ -192,9 +210,8 @@ pub fn symlink(target: &[u8], linkpath: &[u8]) -> Result<(), u64> {
 }
 
 /// `utimensat(AT_FDCWD, path, NULL, 0)`'s shape on this ABI (the `fd` argument is dropped -- see
-/// `sys/modules/oxfs`'s `oxfs_utimensat`). Today that handler is a real existence check (`ENOENT`
-/// for a missing path) and a no-op otherwise, which is exactly what `touch` needs to decide
-/// whether to create the file.
+/// `sys/modules/oxfs`'s `oxfs_utimensat`): sets the file's access and modification times to now.
+/// `ENOENT` for a missing path, which is how `touch` knows to create it instead.
 pub fn utimensat(path: &[u8]) -> Result<(), u64> {
     unsafe { syscall4(SYS_UTIMENSAT, path.as_ptr() as u64, path.len() as u64, 0, 0) }.map(|_| ())
 }

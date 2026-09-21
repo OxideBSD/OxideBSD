@@ -20,6 +20,7 @@ pub mod fs;
 pub mod io;
 pub mod path;
 pub mod syscall;
+pub mod time;
 
 pub use exit::exit;
 pub use syscall::{syscall3, syscall4};

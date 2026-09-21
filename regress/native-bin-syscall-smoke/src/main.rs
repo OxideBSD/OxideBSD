@@ -21,6 +21,7 @@ const SYS_WAIT4: u64 = 7;
 const SYS_CHDIR: u64 = 12;
 const SYS_EXECVE: u64 = 59;
 const SYS_DUP2: u64 = 106;
+const SYS_UTIMENSAT: u64 = 167;
 /// Not a real syscall number anything else registers -- `tests/native_bin_syscall_smoke.rs`
 /// registers it against a handler that calls `exit_qemu`.
 const SYS_TEST_EXIT: u64 = 9999;
@@ -181,6 +182,32 @@ fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
         let _ = syscall(SYS_CLOSE, fd, 0, 0);
     }
     Some(len)
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Raw `utimensat(path, times, 0)`: `times` is `[atime_sec, atime_nsec, mtime_sec, mtime_nsec]`.
+fn utimensat_raw(path: &[u8], times: &[i64; 4]) -> Result<u64, u64> {
+    unsafe {
+        syscall4(
+            SYS_UTIMENSAT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            times.as_ptr() as u64,
+            0,
+        )
+    }
+}
+
+/// Runs `ls -l <path>` capturing stdout into `buf`; returns the captured length.
+fn ls_l(path: &[u8], buf: &mut [u8]) -> usize {
+    check!(
+        run(b"/bin/ls", &[b"ls", b"-l", path], Some(OUT)) == 0,
+        b"ls -l runs"
+    );
+    read_file(OUT, buf).unwrap_or(0)
 }
 
 /// Runs a utility with stdout redirected to `OUT`, requiring exit `0` and exactly `expected` bytes.
@@ -361,12 +388,58 @@ pub extern "C" fn _start() -> ! {
         b"a\na2\nf1\nhard\nsoft\nsrc.txt\n",
         b"ls lists sorted entries",
     );
-    let code = run(b"/bin/ls", &[b"ls", b"-l", b"/t"], Some(OUT));
     let mut buf = [0u8; 1024];
-    let n = read_file(OUT, &mut buf);
+    let n = ls_l(b"/t", &mut buf);
     check!(
-        code == 0 && n.is_some() && buf.starts_with(b"d"),
+        buf.starts_with(b"total "),
+        b"ls -l starts a directory listing with a total line"
+    );
+    check!(
+        contains(&buf[..n], b"\nd"),
         b"ls -l marks a directory with d"
+    );
+    check!(
+        contains(&buf[..n], b"root root"),
+        b"ls -l shows owner and group names"
+    );
+    let n = ls_l(b"/t/soft", &mut buf);
+    check!(
+        contains(&buf[..n], b" -> /t/src.txt"),
+        b"ls -l shows a symlink's target"
+    );
+
+    // Real timestamps: set an explicit mtime (2001-09-09 01:46:40 UTC) with a raw utimensat, see
+    // it in ls -l, then let `touch` bring it back to now. Also the error paths.
+    check!(
+        utimensat_raw(b"/t/f1", &[0, 0, 1_000_000_000, 0]).is_ok(),
+        b"utimensat with explicit times"
+    );
+    let n = ls_l(b"/t/f1", &mut buf);
+    check!(
+        contains(&buf[..n], b"Sep  9  2001"),
+        b"ls -l shows the explicitly set mtime"
+    );
+    expect_ok(
+        b"/bin/touch",
+        &[b"touch", b"/t/f1"],
+        b"touch an existing file",
+    );
+    let n = ls_l(b"/t/f1", &mut buf);
+    check!(
+        !contains(&buf[..n], b"2001"),
+        b"touch moved the mtime off 2001"
+    );
+    check!(
+        contains(&buf[..n], b":"),
+        b"touch set a recent mtime (shown as HH:MM)"
+    );
+    check!(
+        utimensat_raw(b"/t/f1", &[0, 2_000_000_000, 0, 0]) == Err(22),
+        b"utimensat rejects an out-of-range tv_nsec with EINVAL"
+    );
+    check!(
+        utimensat_raw(b"/t/nope", &[0, 0, 0, 0]) == Err(2),
+        b"utimensat on a missing path is ENOENT"
     );
     let code = run(b"/bin/ls", &[b"ls", b"-a", b"/t"], Some(OUT));
     let all_len = read_file(OUT, &mut buf);

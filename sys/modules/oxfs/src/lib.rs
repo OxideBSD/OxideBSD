@@ -4998,24 +4998,32 @@ extern "C" fn oxfs_fchdir(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     0
 }
 
-/// Registered for `SYS_UTIMENSAT`. `(path_ptr, path_len, _times_ptr, _flags)` -- see
-/// `external/mit/musl/src/stat/utimensat.c`'s own patch comment for the real wire-format story
-/// (dropped the always-`AT_FDCWD` `fd` argument, computed `path_len` explicitly). This filesystem
-/// has no real per-inode timestamp fields at all yet (`write_stat`'s own `st_*time*` fields are
-/// still fixed placeholders) -- so this is a real existence check (`ENOENT` for a path that
-/// doesn't resolve, matching real `utimensat(2)`) with a no-op success otherwise, not a real
-/// timestamp update. That's the one thing BusyBox's `touch.c` actually needs from this call
-/// working correctly: it treats `ENOENT` specifically as "the file doesn't exist yet" and falls
-/// back to `open(O_CREAT)` to create it (already fully working) -- an unconditional success here
-/// (with no existence check at all) would have broken that fallback by making `touch newfile`
-/// silently do nothing instead of creating `newfile`. `_times_ptr`/`_flags` are read by nothing
-/// here (no timestamps to set), but still accepted in the wire format for a future real
-/// implementation to use.
-extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, _times_ptr: u64, _flags: u64) -> i64 {
+/// Registered for `SYS_UTIMENSAT`. `(path_ptr, path_len, times_ptr, flags)` -- see
+/// `external/mit/musl/src/stat/utimensat.c`'s own patch comment for the wire-format story (dropped
+/// the always-`AT_FDCWD` `fd` argument, computed `path_len` explicitly). Real, not a stub: sets
+/// `Inode::atime`/`mtime` (and `ctime`, which real POSIX also bumps on any timestamp change) and
+/// persists them via `write_inode`.
+///
+/// `times_ptr == 0` means "both now"; otherwise it points at two `struct timespec`s
+/// (`{tv_sec: i64, tv_nsec: i64}`, atime then mtime), each of which may instead carry the real
+/// `UTIME_NOW`/`UTIME_OMIT` sentinel in `tv_nsec` (`(1<<30)-1`/`(1<<30)-2`). Timestamps here are
+/// whole-second (see `Inode::atime`/`mtime`), so a real `tv_nsec` is validated but not stored.
+/// `AT_SYMLINK_NOFOLLOW` (`0x100`) stamps a final symlink itself instead of its target.
+///
+/// Real POSIX permission rules: explicit times (anything other than "now"/omit) need the caller to
+/// own the file or be root (`EPERM`); "now" alone also allows anyone with write access
+/// (`EACCES` otherwise). A missing path is `ENOENT` -- the distinction BusyBox's and this
+/// project's own native `touch` use to decide whether to create the file with `open(O_CREAT)`.
+extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, times_ptr: u64, flags: u64) -> i64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
+        // Synthetic /proc entries have no real inode to stamp -- existence check only.
         return match proc_kind(&path[5..]) {
             Some(_) => 0,
             None => -ENOENT,
@@ -5024,18 +5032,71 @@ extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, _times_ptr: u64, _fla
 
     let cwd = match current_cwd() {
         Cwd::Real(inode) => inode,
-        // cwd inside /proc, and a *relative* (non-`/`-leading) target: no real caller in this
-        // port's roster does this (touch.c always operates on a real filesystem path), so this
-        // deliberately doesn't grow a dedicated proc-relative-existence helper just for it --
-        // ENOENT is the honest, real POSIX answer for "this doesn't resolve to anything," not a
-        // dodge for something the ELF-loading-relevant paths above still handle for real.
+        // cwd inside /proc and a *relative* (non-`/`-leading) target: nothing real to resolve
+        // against, and no caller here does this -- ENOENT is the honest POSIX answer.
         Cwd::Proc(_) if path.first() != Some(&b'/') => return -ENOENT,
         Cwd::Proc(_) => ROOT_INODE,
     };
-    match resolve_path(cwd, path) {
-        Ok(_) => 0,
-        Err(e) => errno_for(e),
+    let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        resolve_path_nofollow_last(cwd, path)
+    } else {
+        resolve_path(cwd, path)
+    };
+    let inode_num = match resolved {
+        Ok(v) => v,
+        Err(e) => return errno_for(e),
+    };
+
+    let now = unsafe { oxidebsd_unix_time() };
+    let (mut new_atime, mut new_mtime) = (Some(now), Some(now));
+    let mut explicit = false;
+    if times_ptr != 0 {
+        // SAFETY: same trust boundary as elsewhere -- caller-owned pointer to two timespecs.
+        let t = unsafe { (times_ptr as *const [i64; 4]).read_unaligned() };
+        let mut resolve = |sec: i64, nsec: i64| -> Result<Option<i64>, i64> {
+            if nsec == UTIME_NOW {
+                Ok(Some(now))
+            } else if nsec == UTIME_OMIT {
+                Ok(None)
+            } else if !(0..1_000_000_000).contains(&nsec) {
+                Err(-EINVAL)
+            } else {
+                explicit = true;
+                Ok(Some(sec))
+            }
+        };
+        new_atime = match resolve(t[0], t[1]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        new_mtime = match resolve(t[2], t[3]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
     }
+    if new_atime.is_none() && new_mtime.is_none() {
+        return 0;
+    }
+
+    let mut inode = read_inode(inode_num);
+    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if uid != 0 && uid != inode.uid as u64 {
+        if explicit {
+            return -EPERM;
+        }
+        if !check_access(&inode, uid, gid, W_OK) {
+            return -EACCES;
+        }
+    }
+    if let Some(a) = new_atime {
+        inode.atime = a;
+    }
+    if let Some(m) = new_mtime {
+        inode.mtime = m;
+    }
+    inode.ctime = now;
+    write_inode(inode_num, inode);
+    0
 }
 
 /// Copies `src` into a fixed `[u8; MAX_MOUNT_PATH]` for `MountEntry`'s own display-only `path`/
