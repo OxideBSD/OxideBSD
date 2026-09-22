@@ -1279,66 +1279,64 @@ libc++) → ninja/cmake → rebuild clang; nano (+ vendored ncurses) is next.
   `configure` scripts (`as_fn_error`'s `>&$4`). Not a bug to patch in BusyBox — routed around by
   running `configure`/`make-bootstrap.sh` under `/bin/ash` instead (`CONFIG_SHELL=/bin/ash ... ash
   configure ...`), already in the seeded roster.
-- **A real, confirmed full-kernel freeze, found live attempting to self-host bmake's own build
-  on-target** (`ash configure` driving real on-target `clang`, which forks its own `cc1`, inside
-  nested shell subshells/redirects — exactly autoconf's own `(eval "$ac_link") 2>&5` /
-  `(eval "$ac_try") 2>&5` compile-check shape). Confirmed genuinely frozen, not just slow: QEMU
-  pinned near 100% CPU with zero new serial output; a *separate* background progress-reporter
-  process also stopped producing output (a whole-scheduler freeze, not one wedged process); the
-  QEMU monitor's own `sendkey` confirmed a keystroke was sent successfully, yet the guest never
-  echoed it (console-IRQ-level echo happens independent of scheduling, so this rules out "just a
-  busy foreground process"). **Root-caused far enough via live `gdbserver` attach** (QEMU monitor
-  command `gdbserver tcp::<port>`, then `gdb -ex "target remote localhost:<port>"`) to identify the
-  bug class, not the exact trigger: caught mid-freeze inside `cpu::rtc::cmos_read`'s raw `in al,
-  dx` (port 0x71, called via `read_datetime` → `unix_epoch_seconds` → `oxidebsd_unix_time`, reached
-  from oxfs module code — almost certainly its real mtime-stamping on every write, see
-  "Filesystem: oxfs" above), with **`RSP` holding `0x44444472a1d4`** — a repeating-nibble pattern,
-  not a plausible `KernelStack::new`-allocated (`alloc_zeroed`, an ordinary heap address) stack
-  pointer — and the backtrace turning to unresolvable garbage a few frames up. `cmos_read`/
-  `read_datetime` (`sys/cpu/rtc.rs`) have **no loop at all** (a single `in`/`out` pair), ruling out
-  a legitimate retry-until-stable RTC read spinning forever — this is the signature of a real
-  kernel-stack overflow corrupting adjacent memory and wandering execution somewhere nonsensical,
-  not a genuine infinite loop in the RTC code itself.
-  - **Mitigated, not fixed**: `process::KERNEL_STACK_SIZE_CEILING` raised `512 KiB → 4 MiB` (see
-    its own doc comment in `sys/process/mod.rs`). Load-bearing detail: this dev/test boot
-    (`-m 8192`) was already pinned at the *old* 512 KiB ceiling before the bump
-    (`usable_ram_bytes() / 256` at 8 GiB usable RAM is tens of MiB, clamped down to the ceiling) —
-    so every process here already had the maximum the old code allowed, and it still overflowed.
-    That's real evidence the old ceiling was genuinely too small for this call depth, not an
-    untested guess. Confirmed live: the exact repro that used to freeze around line ~50 of a real
-    `ash -x configure` trace now completes clean through **12,441 traced lines** (`configure`'s own
-    `exit 0`) with the new ceiling, and the subsequent real bootstrap compile+link also completed.
-    **Still no guard page** (`KernelStack::new` is a plain `alloc_zeroed`, see "User-mode execution"
-    above) — a call chain deeper than 4 MiB still corrupts silently instead of failing cleanly with
-    a clean fault. **Backported to the `v0.2.x` maintenance branch** (commit `6621ef6`, not pushed)
-    — same 512 KiB ceiling existed there unchanged (pre-reorg path `src/process/mod.rs`).
-  - **Real root cause still open**: what's actually recursing/nesting this deep was never
-    identified (needs a disassembly around the freeze `RIP`/stack-bounds check against the actual
-    `KernelStack` allocation for the thread involved, and a way to reproduce faster than a full
-    `ash -x configure` run — every isolated, smaller repro attempt during this investigation
-    (bare `(cmd) 2>&5` subshells with `echo`/`true`/`cat`/`clang -o conftest conftest.c`, tried in
-    every combination that could be reproduced quickly) completed instantly with no freeze, so
-    whatever triggers it needs either the full real depth of `configure`'s own call chain or some
-    combination not yet isolated). A guard page (or a bounded/iterative rewrite of whatever's
-    recursing) is the real fix; the ceiling bump only buys headroom.
-- **A second, separate, real bug found continuing past the freeze**: with the stack ceiling raised,
-  `configure` completes and `make-bootstrap.sh` runs, but the real on-target `clang` compile of
-  bmake's own `main.c` fails: `error: use of undeclared identifier 'WAIT_T'` (and cascading
-  `'status'` errors from the same missing declaration). Root cause, confirmed via the compiler's
-  own diagnostic: `main.c`'s **quote-form** `#include "wait.h"` (bmake's *own* `wait.h`, sitting
-  directly next to `main.c` in `/home/user/src/bmake/`) resolves instead to **musl's system**
-  `/usr/include/wait.h` (a real, intentional musl compatibility shim — `#warning redirecting
-  incorrect #include <wait.h> to <sys/wait.h>` then `#include <sys/wait.h>` — correct behavior for
-  an *angle-bracket* `#include <wait.h>`, wrong here since bmake's own is a *quote* include).
-  **Per the C standard, a quote-form include must check the including file's own directory before
-  any `-I` path or the system default**, and it does under this same build's host-side cross-build
-  (`musl-gcc`, used for `build_bmake` in `build.rs` — that one links against the correct local
-  `wait.h` with zero issue). This is real evidence the **on-target Clang toolchain's own
-  quote-include search order is wrong** (likely a `HeaderSearchOptions`/`-I` wiring gap specific to
-  the on-target-executable `clang`+`ld.lld` build, distinct from `OxideBSD::OxideBSD()`'s already-
-  documented `crt1.o` search-path gap under "Clang/LLVM port" above — same toolchain, a different
-  search-order concern). **Not yet root-caused or fixed** — found at the very end of this
-  investigation, real work for a future session.
+- **The real bug: `NAME_MAX=40` was too short, and the over-length check returned the wrong
+  errno**, found self-hosting bmake's own build on-target. Symptom chain, each link confirmed
+  directly rather than assumed: BusyBox `tar` extracting bmake's own real source tree silently
+  dropped exactly 3 files (`util.c`/`var.c`/`wait.h` — the archive's *last* 3 members, out of 985)
+  even on a freshly-formatted disk with hundreds of MiB and thousands of free inodes to spare
+  (`statfs()` confirmed real headroom on both counts, ruling out `ENOSPC`); a **host-native build
+  of the identical vendored BusyBox source** (`make O=... allnoconfig` + flip `CONFIG_TAR`, run
+  directly on the host, no OxideBSD involved at all) extracted all 985 members correctly, ruling
+  out a BusyBox-source bug; capturing `tar`'s own stderr on-target (every earlier attempt had
+  discarded it) surfaced the real error directly: `tar: can't remove old file
+  bmake/unit-tests/varname-dot-make-meta-ignore_patterns.exp: Invalid argument` — a 41-byte
+  filename, one byte past oxfs's `NAME_MAX = 40`. `dir_insert`'s own length check returned
+  `OxfsError::InvalidPath` (`EINVAL`) for an over-length name instead of the semantically-correct,
+  already-defined `OxfsError::NameTooLong` (`ENAMETOOLONG`) — `EINVAL` is what BusyBox `tar`
+  doesn't tolerate, aborting the whole archive instead of continuing past one bad name.
+  **Fixed**: `NAME_MAX` raised `40 → 255` (matching musl's own compiled-in `NAME_MAX`,
+  `external/mit/musl/include/limits.h` — closes the mismatch for real, not just this one filename),
+  both wrong-errno call sites (`dir_insert`, `resolve_parent`) now return `NameTooLong` correctly,
+  `SUPERBLOCK_VERSION` bumped `2 → 3` (`DIR_RECORD_SIZE` changed, `6 + NAME_MAX`: 46 → 261 bytes —
+  a real on-disk layout change, needs the same automatic-reformat treatment every prior
+  `SUPERBLOCK_VERSION` bump got). Verified end-to-end: a full, genuine self-hosted build —
+  `configure` (under `ash`, see above) + `make-bootstrap.sh`, both `rc=0`, real on-target `clang`
+  compiling `var.c`/`util.c`/the `wait.h`-dependent code that used to be missing, linking a real,
+  working `bmake` binary that reports its own correct version string. **Accepted tradeoff**:
+  `RECORDS_PER_BLOCK` drops `89 → 15` (more real directory blocks needed for the same content), a
+  real, meaningfully slower format/flush and heavier ongoing directory-write I/O — see the
+  freeze-that-wasn't below for why this matters.
+- **A real, documented misdiagnosis along the way, corrected rather than left standing**: the
+  above investigation's early attempts (before stderr was captured) looked like a genuine
+  full-kernel freeze — QEMU pinned near 100% CPU, zero new serial output, and the QEMU monitor's
+  own `sendkey` confirmed a keystroke was sent successfully yet the guest never echoed it
+  (console-IRQ-level echo happens independent of scheduling, which is why this looked like more
+  than "just a busy foreground process"). `gdbserver`-attached (QEMU monitor `gdbserver
+  tcp::<port>`, then `gdb -ex "target remote localhost:<port>"`) at freeze time: caught inside
+  `cpu::rtc::cmos_read`'s raw `in al, dx`, with **`RSP` reading `0x44444472a1d4`** — read at the
+  time as a corrupted/poisoned stack pointer (a suspicious repeating-nibble pattern), which is what
+  motivated a `process::KERNEL_STACK_SIZE_CEILING` bump (`512 KiB → 4 MiB`) as a stack-overflow
+  mitigation, briefly landed and even backported to `v0.2.x`. **That reading was wrong**:
+  `allocator::HEAP_START = 0x_4444_4444_0000` — `0x444444...` is this kernel's own real heap base
+  address, not corruption; an ordinary `KernelStack::new` (`alloc_zeroed`) stack legitimately lands
+  there. Confirmed directly: re-running the identical repro (stack ceiling still raised) hit the
+  identical symptom again — and this time, instead of assuming it was dead, it was left running far
+  longer. It completed cleanly on its own (`configure`'s real `exit 0`, then a real bootstrap
+  compile+link). Repeated `gdbserver` sampling a few seconds apart during the "freeze" showed `RIP`
+  genuinely moving between real functions (`cpu::rtc::cmos_read`, `drivers::ata::outsw`), not
+  stuck at one instruction — consistent with real, if slow, ongoing work, not a hang. **What
+  actually explains the symptom**: a real, syscall-scoped stretch of heavy disk I/O (many real ATA
+  block writes, each preceded by a real RTC read for mtime-stamping — see "Filesystem: oxfs"
+  above), run with interrupts masked for that syscall's duration (`SFMASK` clears `IF`, see the
+  syscall-ABI section), made meaningfully worse by this same investigation's own `NAME_MAX` fix
+  (more, smaller directory records → more real per-block ATA writes for the same directory
+  content) — long enough, with interrupts genuinely off, to look indistinguishable from a hang.
+  **The stack-ceiling bump has been reverted** (`sys/process/mod.rs`, back to 512 KiB — see its own
+  doc comment) on master and via a follow-up revert commit on `v0.2.x`, since there was never real
+  evidence it needed to move. Kept in this file specifically so a future investigation hitting the
+  same "everything just stopped" symptom on a real slow-I/O stretch doesn't retread the same false
+  trail: verify `RIP` is genuinely stuck (not just sampled once) and check whether the address in
+  question is a real, named constant (like `HEAP_START`) before concluding "corruption."
 
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`sys/process/elf.rs`, `sys/process/lifecycle.rs`, `build.rs`, `sys/modules/oxfs`)
 

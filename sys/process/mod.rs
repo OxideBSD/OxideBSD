@@ -39,24 +39,26 @@ pub type Pid = u64;
 /// rather than shrinking further (see `kernel_stack_size` below).
 const KERNEL_STACK_SIZE_FLOOR: usize = 128 * 1024;
 /// Ceiling: purely a bound on how much a RAM-rich boot hands each process for free (more headroom
-/// against deeper call chains, at essentially no cost against a multi-GiB usable-RAM pool).
-/// **Bumped 512 KiB -> 4 MiB 2026-09-21, mitigation for a real, confirmed bug, not yet fully
-/// root-caused**: a full-kernel freeze found live self-hosting bmake on-target (real `clang`
-/// forking `cc1`/`ld.lld`, inside nested shell subshells/redirects, each write hitting oxfs's real
-/// mtime-stamping via `cpu::rtc::oxidebsd_unix_time`). `gdbserver`-attached at freeze time: `RSP`
-/// held an implausible value (`0x44444472a1d4` -- a repeating-nibble pattern, not a real
-/// `alloc_zeroed` heap address this stack type ever gets), and the backtrace turned to garbage a
-/// few frames up -- the signature of a real stack overflow smashing adjacent memory, not a genuine
-/// infinite loop (`cmos_read`/`read_datetime`, sys/cpu/rtc.rs, have no loop at all). **The dev/test
-/// boot (`-m 8192`) was already at this ceiling before the bump** -- `usable_ram_bytes() / 256` at
-/// 8 GiB usable RAM is tens of MiB, so every process here already got the old 512 KiB max, and it
-/// still overflowed; this is real evidence the old ceiling was genuinely too small for this call
-/// depth, not just an untested theory. **This raises the odds of surviving without fixing the
-/// underlying issue** -- there's still no guard page (`KernelStack::new` is a plain
-/// `alloc_zeroed`), so a deeper call chain than this new ceiling covers still corrupts silently
-/// instead of failing cleanly. A real fix (a guard page, or a bounded/iterative rewrite of
-/// whatever's recursing this deep) is still open; see CLAUDE.md's own writeup of this bug.
-const KERNEL_STACK_SIZE_CEILING: usize = 4 * 1024 * 1024;
+/// against deeper call chains, at essentially no cost against a multi-GiB usable-RAM pool) -- not
+/// something any code path has been observed to need.
+///
+/// **Briefly bumped 512 KiB -> 4 MiB 2026-09-21, then reverted -- a real, documented misdiagnosis,
+/// not a bug here.** Self-hosting bmake on-target hit what looked like a full-kernel freeze (zero
+/// serial output, zero response to injected keystrokes for minutes). `gdbserver`-attached, `RSP`
+/// read `0x44444472a1d4` -- mistaken at the time for a corrupted/poisoned stack pointer (a
+/// repeating-nibble pattern), which is what motivated this bump as a stack-overflow mitigation.
+/// **That reading was wrong**: `allocator::HEAP_START = 0x_4444_4444_0000` -- `0x444444...` is
+/// this kernel's own real heap base address, not corruption; a `KernelStack::new`-allocated stack
+/// legitimately lands there. Re-running the *exact* same repro (with this bump still in place) hit
+/// the identical symptom again, and this time was left running far longer instead of assumed dead
+/// -- it completed cleanly on its own. The real cause was unrelated and has since been fixed (see
+/// `sys/modules/oxfs`'s `NAME_MAX`/`dir_insert` -- a wrong errno on an over-length name aborted a
+/// `tar` extraction, and the resulting long real-disk-I/O + RTC-mtime-stamping stretch, run with
+/// interrupts masked for a syscall's duration, was slow enough to look identical to a hang).
+/// Kept at 512 KiB since there was never real evidence this needed to move; see CLAUDE.md's bmake
+/// section for the full corrected writeup, including the backport this same correction needed on
+/// `v0.2.x`.
+const KERNEL_STACK_SIZE_CEILING: usize = 512 * 1024;
 
 /// Scales the per-process kernel stack size to `memory::usable_ram_bytes()`, clamped to
 /// `[KERNEL_STACK_SIZE_FLOOR, KERNEL_STACK_SIZE_CEILING]`. `spin::Lazy` (not a plain `const`)

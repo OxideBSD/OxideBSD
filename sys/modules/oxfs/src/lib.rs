@@ -572,7 +572,11 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// a crash or silent misread. Any content on an existing `target/oxfs_disk.img` besides the
 /// seeded-at-boot roster (BusyBox/musl/Clang/LLVM/POSIX corpus, all reseeded fresh on format) is
 /// lost.
-const SUPERBLOCK_VERSION: u32 = 2;
+///
+/// Bumped 2 -> 3 for `NAME_MAX` 40 -> 255 (see that constant's own doc comment) -- `DIR_RECORD_SIZE`
+/// changed (`6 + NAME_MAX`, 46 -> 261 bytes), so every existing directory record's on-disk stride
+/// is wrong under the old layout. Same automatic-reformat treatment as the 1 -> 2 bump.
+const SUPERBLOCK_VERSION: u32 = 3;
 
 const INODE_TABLE_START: u32 = 1;
 /// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
@@ -625,7 +629,18 @@ fn block_device_present() -> bool {
 // bytes (`pthread_mutexattr_setprioceiling`/`pthread_mutexattr_getprioceiling`) -- found live as a
 // real `module_init` panic when the pilot corpus expanded past the old 488-file curated subset
 // (which happened to never include a name that long).
-const NAME_MAX: usize = 40;
+//
+// 40 -> 255 (real musl `NAME_MAX`, `external/mit/musl/include/limits.h`) -- found live
+// self-hosting bmake's own build (see CLAUDE.md's bmake section): `dir_insert`'s own length check
+// silently rejected `varname-dot-make-meta-ignore_patterns.exp` (41 bytes, one past the old
+// limit), and returning `EINVAL` for it (see that check's own fix, `NameTooLong` not
+// `InvalidPath`) was enough to abort BusyBox tar's whole extraction rather than being skipped or
+// reported as `ENAMETOOLONG`. Matching musl's own compiled-in `NAME_MAX` closes the mismatch for
+// real, not just this one filename -- any future seeded/user-created name up to what musl itself
+// tells userland is legal should actually be legal here too. `RECORDS_PER_BLOCK` drops from 89 to
+// 15 as a result (`DIR_RECORD_SIZE` growing 46 -> 261) -- a real, accepted directory-density
+// tradeoff for genuinely supporting POSIX's real name-length ceiling, not a bug.
+const NAME_MAX: usize = 255;
 const DIR_RECORD_SIZE: usize = 6 + NAME_MAX;
 const RECORDS_PER_BLOCK: usize = BLOCK_SIZE / DIR_RECORD_SIZE;
 
@@ -1715,8 +1730,11 @@ fn errno_for(e: OxfsError) -> i64 {
 /// block via `inode_ensure_block_at` if every existing block is full. This is the "a directory can
 /// grow past its first cluster" fix over `modules/fat32`'s own `DirectoryFull`/`ENOSPC` dead end.
 fn dir_insert(dir_inode: u32, name: &[u8], target_inode: u32) -> Result<(), OxfsError> {
+    // Real `ENAMETOOLONG`, not `EINVAL` -- see `NAME_MAX`'s own doc comment above for the real bug
+    // this was: BusyBox tar's own extraction loop aborted the whole archive on the wrong errno for
+    // a too-long name instead of skipping/reporting just that one file.
     if name.len() > NAME_MAX {
-        return Err(OxfsError::InvalidPath);
+        return Err(OxfsError::NameTooLong);
     }
     let inode = read_inode(dir_inode);
     let mut i = 0;
@@ -2021,8 +2039,14 @@ fn resolve_parent(cwd_inode: u32, path: &[u8]) -> Result<(u32, &[u8]), OxfsError
     let head = &path[..end];
     let leaf_start = head.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
     let leaf = &head[leaf_start..];
-    if leaf == b"." || leaf == b".." || leaf.len() > NAME_MAX {
+    if leaf == b"." || leaf == b".." {
         return Err(OxfsError::InvalidPath);
+    }
+    // Real `ENAMETOOLONG`, not `EINVAL` -- same fix as `dir_insert`'s own identical check above,
+    // split out from the `.`/`..` case (a genuinely different error: that's an invalid *use*, this
+    // is a name that's simply too long).
+    if leaf.len() > NAME_MAX {
+        return Err(OxfsError::NameTooLong);
     }
     // Includes the trailing '/' when leaf_start > 0 (e.g. head = "/foo" -> parent_path = "/",
     // head = "sub/foo" -> parent_path = "sub/") -- harmless, resolve_path treats a trailing
