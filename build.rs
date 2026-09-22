@@ -328,6 +328,8 @@ fn main() {
     let clang_elf_path = llvm_target_build.join("bin/clang-23");
     let lld_elf_path = llvm_target_build.join("bin/lld");
     let clang_runtime_manifest_path = write_clang_runtime_manifest(&llvm_target_build);
+    let bmake_elf_path = build_bmake(&musl_sysroot);
+    let bmake_mk_manifest_path = write_bmake_mk_manifest();
 
     // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
     // comment for the source list, and `external/gpl2/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
@@ -477,6 +479,11 @@ fn main() {
         ("OXFS_LSOXMOD_ELF_PATH", lsoxmod_elf_path.to_str().unwrap()),
         ("OXFS_CLANG_ELF_PATH", clang_elf_path.to_str().unwrap()),
         ("OXFS_LLD_ELF_PATH", lld_elf_path.to_str().unwrap()),
+        ("OXFS_BMAKE_ELF_PATH", bmake_elf_path.to_str().unwrap()),
+        (
+            "BMAKE_MK_MANIFEST_PATH",
+            bmake_mk_manifest_path.to_str().unwrap(),
+        ),
         ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
         ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
@@ -2192,6 +2199,101 @@ fn write_clang_runtime_manifest(target_build: &Path) -> PathBuf {
     files.sort();
 
     let mut src = String::from("pub static CLANG_RESOURCE_FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, abs) in &files {
+        src.push_str(&format!(
+            "    ({rel:?}, include_bytes!({:?})),\n",
+            abs.display()
+        ));
+    }
+    src.push_str("];\n");
+
+    std::fs::write(&out_path, src)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    out_path
+}
+
+/// Cross-builds `usr.bin/make` (Simon Gerraty's portable bmake, vendored as a plain committed
+/// tree, not a submodule) into a static `ET_EXEC` against `musl_sysroot`. Not built through
+/// `configure`'s own `make` step: `make-bootstrap.sh` (which `configure` emits) needs no working
+/// `make` on the build machine and produces the same binary. `configure` itself is fine
+/// cross-compiling -- `--host=` makes it skip every run-test, which matters since this musl fork's
+/// output can't execute on the build host (native OxideBSD syscall ABI).
+/// `load_addr` (`0x18000000`) must stay clear of every other userland binary's slot; see
+/// `build_busybox_applet`'s own doc comment for the convention.
+fn build_bmake(musl_sysroot: &Path) -> PathBuf {
+    const BMAKE_LOAD_ADDR: u64 = 0x1800_0000;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("usr.bin/make");
+    let out_dir = Path::new(manifest_dir).join("target/bmake");
+    let bin = out_dir.join("bmake");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let src_mtime = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    let floor = musl_mtime.max(src_mtime);
+    if std::fs::metadata(&bin)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= floor)
+    {
+        return bin;
+    }
+
+    // Same reasoning as `build_busybox_applet`: a musl header change isn't tracked by the
+    // object files' own dependency info, so rebuild from scratch rather than trust incremental.
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/bmake");
+    let cc = musl_sysroot.join("bin/musl-gcc");
+    let ldflags = format!("-static -no-pie -Wl,-Ttext-segment={BMAKE_LOAD_ADDR:#x}");
+    // MACHINE/MACHINE_ARCH forced: bmake's own probe would otherwise `uname -m` the *build host*.
+    let status = Command::new(src.join("configure"))
+        .current_dir(&out_dir)
+        .env("CC", &cc)
+        .env("LDFLAGS", &ldflags)
+        .args([
+            "--prefix=/usr",
+            "--host=x86_64-unknown-linux-musl",
+            "--with-default-sys-path=/usr/share/mk",
+            "--without-makefile",
+            "--with-machine=x86_64",
+            "--with-machine_arch=x86_64",
+            "--with-force-machine=x86_64",
+            "--with-force-machine_arch=x86_64",
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run bmake configure: {e}"));
+    assert!(status.success(), "bmake configure failed: {status}");
+    let status = Command::new("sh")
+        .current_dir(&out_dir)
+        .arg("./make-bootstrap.sh")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run bmake make-bootstrap.sh: {e}"));
+    assert!(status.success(), "bmake make-bootstrap.sh failed: {status}");
+    assert!(bin.exists(), "bmake build produced no binary");
+    bin
+}
+
+/// Generates `BMAKE_MK_FILES` (every `*.mk` under `usr.bin/make/mk`, including `sys/*.mk`),
+/// seeded by `sys/modules/oxfs` at `/usr/share/mk` -- same generated-`include!` idiom as
+/// `write_clang_runtime_manifest`.
+fn write_bmake_mk_manifest() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let out_path = out_dir.join("bmake_mk_manifest.rs");
+
+    let mut files = collect_dir_files(&Path::new(manifest_dir).join("usr.bin/make/mk"));
+    files.retain(|(rel, _)| rel.ends_with(".mk"));
+    files.sort();
+
+    let mut src = String::from("pub static BMAKE_MK_FILES: &[(&str, &[u8])] = &[\n");
     for (rel, abs) in &files {
         src.push_str(&format!(
             "    ({rel:?}, include_bytes!({:?})),\n",

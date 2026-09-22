@@ -39,9 +39,24 @@ pub type Pid = u64;
 /// rather than shrinking further (see `kernel_stack_size` below).
 const KERNEL_STACK_SIZE_FLOOR: usize = 128 * 1024;
 /// Ceiling: purely a bound on how much a RAM-rich boot hands each process for free (more headroom
-/// against deeper call chains, at essentially no cost against a multi-GiB usable-RAM pool) -- not
-/// something any code path has been observed to need.
-const KERNEL_STACK_SIZE_CEILING: usize = 512 * 1024;
+/// against deeper call chains, at essentially no cost against a multi-GiB usable-RAM pool).
+/// **Bumped 512 KiB -> 4 MiB 2026-09-21, mitigation for a real, confirmed bug, not yet fully
+/// root-caused**: a full-kernel freeze found live self-hosting bmake on-target (real `clang`
+/// forking `cc1`/`ld.lld`, inside nested shell subshells/redirects, each write hitting oxfs's real
+/// mtime-stamping via `cpu::rtc::oxidebsd_unix_time`). `gdbserver`-attached at freeze time: `RSP`
+/// held an implausible value (`0x44444472a1d4` -- a repeating-nibble pattern, not a real
+/// `alloc_zeroed` heap address this stack type ever gets), and the backtrace turned to garbage a
+/// few frames up -- the signature of a real stack overflow smashing adjacent memory, not a genuine
+/// infinite loop (`cmos_read`/`read_datetime`, sys/cpu/rtc.rs, have no loop at all). **The dev/test
+/// boot (`-m 8192`) was already at this ceiling before the bump** -- `usable_ram_bytes() / 256` at
+/// 8 GiB usable RAM is tens of MiB, so every process here already got the old 512 KiB max, and it
+/// still overflowed; this is real evidence the old ceiling was genuinely too small for this call
+/// depth, not just an untested theory. **This raises the odds of surviving without fixing the
+/// underlying issue** -- there's still no guard page (`KernelStack::new` is a plain
+/// `alloc_zeroed`), so a deeper call chain than this new ceiling covers still corrupts silently
+/// instead of failing cleanly. A real fix (a guard page, or a bounded/iterative rewrite of
+/// whatever's recursing this deep) is still open; see CLAUDE.md's own writeup of this bug.
+const KERNEL_STACK_SIZE_CEILING: usize = 4 * 1024 * 1024;
 
 /// Scales the per-process kernel stack size to `memory::usable_ram_bytes()`, clamped to
 /// `[KERNEL_STACK_SIZE_FLOOR, KERNEL_STACK_SIZE_CEILING]`. `spin::Lazy` (not a plain `const`)

@@ -1262,6 +1262,84 @@ Verified end to end via `tests/clang_syscall_smoke.rs`: a real `clang -static -o
 which printed its own output and exited `0`. Closes this port's own headline subprocess-pipeline
 milestone.
 
+## bmake (`usr.bin/make`, `build.rs`'s `build_bmake`) — self-hosting stage 1
+
+Upstream portable bmake 20260912, vendored as a plain committed tree (tarball from crufty.net; no
+git mirror exists, no fork). Cross-built by `configure --host=…` (skips run-tests) +
+`make-bootstrap.sh` into a static `ET_EXEC` at `0x18000000`; `/bin/bmake` (+ `/bin/make` symlink),
+`*.mk` seeded at `/usr/share/mk` (`BMAKE_MK_FILES`). Verified live (headless `sendkey`): bmake
+drives on-target `clang -c` + link + run, incremental rebuilds/`touch` dependency tracking correct.
+Editing `build.rs` does *not* stale BusyBox (only `build_busybox.rs` does). Known: `gettid` (186)
+is unrecognized — clang logs it once per compile, harmless so far. Staged plan: C → C++ (seed
+libc++) → ninja/cmake → rebuild clang; nano (+ vendored ncurses) is next.
+
+- **`hush` can't parse `>&$var`** (redirect to a variable file descriptor, e.g. `>&$4`) — real
+  BusyBox `shell/hush.c` parser limitation (`redirect_opt_num`'s own `//TODO: this is the place to
+  catch ">&file" bashism` comment, "ambiguous redirect"), hit immediately by autoconf-generated
+  `configure` scripts (`as_fn_error`'s `>&$4`). Not a bug to patch in BusyBox — routed around by
+  running `configure`/`make-bootstrap.sh` under `/bin/ash` instead (`CONFIG_SHELL=/bin/ash ... ash
+  configure ...`), already in the seeded roster.
+- **A real, confirmed full-kernel freeze, found live attempting to self-host bmake's own build
+  on-target** (`ash configure` driving real on-target `clang`, which forks its own `cc1`, inside
+  nested shell subshells/redirects — exactly autoconf's own `(eval "$ac_link") 2>&5` /
+  `(eval "$ac_try") 2>&5` compile-check shape). Confirmed genuinely frozen, not just slow: QEMU
+  pinned near 100% CPU with zero new serial output; a *separate* background progress-reporter
+  process also stopped producing output (a whole-scheduler freeze, not one wedged process); the
+  QEMU monitor's own `sendkey` confirmed a keystroke was sent successfully, yet the guest never
+  echoed it (console-IRQ-level echo happens independent of scheduling, so this rules out "just a
+  busy foreground process"). **Root-caused far enough via live `gdbserver` attach** (QEMU monitor
+  command `gdbserver tcp::<port>`, then `gdb -ex "target remote localhost:<port>"`) to identify the
+  bug class, not the exact trigger: caught mid-freeze inside `cpu::rtc::cmos_read`'s raw `in al,
+  dx` (port 0x71, called via `read_datetime` → `unix_epoch_seconds` → `oxidebsd_unix_time`, reached
+  from oxfs module code — almost certainly its real mtime-stamping on every write, see
+  "Filesystem: oxfs" above), with **`RSP` holding `0x44444472a1d4`** — a repeating-nibble pattern,
+  not a plausible `KernelStack::new`-allocated (`alloc_zeroed`, an ordinary heap address) stack
+  pointer — and the backtrace turning to unresolvable garbage a few frames up. `cmos_read`/
+  `read_datetime` (`sys/cpu/rtc.rs`) have **no loop at all** (a single `in`/`out` pair), ruling out
+  a legitimate retry-until-stable RTC read spinning forever — this is the signature of a real
+  kernel-stack overflow corrupting adjacent memory and wandering execution somewhere nonsensical,
+  not a genuine infinite loop in the RTC code itself.
+  - **Mitigated, not fixed**: `process::KERNEL_STACK_SIZE_CEILING` raised `512 KiB → 4 MiB` (see
+    its own doc comment in `sys/process/mod.rs`). Load-bearing detail: this dev/test boot
+    (`-m 8192`) was already pinned at the *old* 512 KiB ceiling before the bump
+    (`usable_ram_bytes() / 256` at 8 GiB usable RAM is tens of MiB, clamped down to the ceiling) —
+    so every process here already had the maximum the old code allowed, and it still overflowed.
+    That's real evidence the old ceiling was genuinely too small for this call depth, not an
+    untested guess. Confirmed live: the exact repro that used to freeze around line ~50 of a real
+    `ash -x configure` trace now completes clean through **12,441 traced lines** (`configure`'s own
+    `exit 0`) with the new ceiling, and the subsequent real bootstrap compile+link also completed.
+    **Still no guard page** (`KernelStack::new` is a plain `alloc_zeroed`, see "User-mode execution"
+    above) — a call chain deeper than 4 MiB still corrupts silently instead of failing cleanly with
+    a clean fault. **Backported to the `v0.2.x` maintenance branch** (commit `6621ef6`, not pushed)
+    — same 512 KiB ceiling existed there unchanged (pre-reorg path `src/process/mod.rs`).
+  - **Real root cause still open**: what's actually recursing/nesting this deep was never
+    identified (needs a disassembly around the freeze `RIP`/stack-bounds check against the actual
+    `KernelStack` allocation for the thread involved, and a way to reproduce faster than a full
+    `ash -x configure` run — every isolated, smaller repro attempt during this investigation
+    (bare `(cmd) 2>&5` subshells with `echo`/`true`/`cat`/`clang -o conftest conftest.c`, tried in
+    every combination that could be reproduced quickly) completed instantly with no freeze, so
+    whatever triggers it needs either the full real depth of `configure`'s own call chain or some
+    combination not yet isolated). A guard page (or a bounded/iterative rewrite of whatever's
+    recursing) is the real fix; the ceiling bump only buys headroom.
+- **A second, separate, real bug found continuing past the freeze**: with the stack ceiling raised,
+  `configure` completes and `make-bootstrap.sh` runs, but the real on-target `clang` compile of
+  bmake's own `main.c` fails: `error: use of undeclared identifier 'WAIT_T'` (and cascading
+  `'status'` errors from the same missing declaration). Root cause, confirmed via the compiler's
+  own diagnostic: `main.c`'s **quote-form** `#include "wait.h"` (bmake's *own* `wait.h`, sitting
+  directly next to `main.c` in `/home/user/src/bmake/`) resolves instead to **musl's system**
+  `/usr/include/wait.h` (a real, intentional musl compatibility shim — `#warning redirecting
+  incorrect #include <wait.h> to <sys/wait.h>` then `#include <sys/wait.h>` — correct behavior for
+  an *angle-bracket* `#include <wait.h>`, wrong here since bmake's own is a *quote* include).
+  **Per the C standard, a quote-form include must check the including file's own directory before
+  any `-I` path or the system default**, and it does under this same build's host-side cross-build
+  (`musl-gcc`, used for `build_bmake` in `build.rs` — that one links against the correct local
+  `wait.h` with zero issue). This is real evidence the **on-target Clang toolchain's own
+  quote-include search order is wrong** (likely a `HeaderSearchOptions`/`-I` wiring gap specific to
+  the on-target-executable `clang`+`ld.lld` build, distinct from `OxideBSD::OxideBSD()`'s already-
+  documented `crt1.o` search-path gap under "Clang/LLVM port" above — same toolchain, a different
+  search-order concern). **Not yet root-caused or fixed** — found at the very end of this
+  investigation, real work for a future session.
+
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`sys/process/elf.rs`, `sys/process/lifecycle.rs`, `build.rs`, `sys/modules/oxfs`)
 
 A real, working `fork`+`execve` of a genuinely dynamically-linked ELF, resolved/relocated by
