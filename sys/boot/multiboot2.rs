@@ -167,9 +167,17 @@ fn kernel_virt_to_phys(virt: u64) -> u64 {
 // rather than a direct `jmp sel:label` immediate -- LLVM's integrated assembler (Intel dialect)
 // rejects the latter's `sel:label` operand syntax outright ("unexpected token in argument list").
 global_asm!(
+    // `.pushsection` here, `.popsection` at the very end: every later `.section` switch in this
+    // block (bss/data/text) only rewrites the pushed entry, and the pop restores whatever section
+    // was active before. rustc concatenates a codegen unit's `global_asm!` blocks, so without this
+    // the block ended in `.boot32.text` and any section-less asm after it inherited that --
+    // found live: the syscall entry stub (`sys/syscall/mod.rs`) landed in `.boot32.text`, 2 GiB
+    // from the higher-half kernel, and `multiboot2-boot-smoke` failed to link with
+    // `R_X86_64_PLT32 out of range` as soon as an unrelated code change reshuffled the CGUs.
+    //
     // Must land within the file's first 32 KiB and be 8-byte aligned -- guaranteed here by
     // x86_64-oxidebsd-multiboot2.ld placing .multiboot_header first, right after `. = 0x100000`.
-    ".section .multiboot_header, \"a\"",
+    ".pushsection .multiboot_header, \"a\"",
     ".align 8",
     "mb2_header_start:",
     ".long 0xe85250d6",                        // magic
@@ -496,6 +504,7 @@ global_asm!(
     "mov eax, offset temp_pml4",
     "mov cr3, rax",
     "jmp mb2_enter_rust",
+    ".popsection",
 );
 
 /// Stage B: validates the Multiboot2 handoff, parses the memory map, builds and installs the real
