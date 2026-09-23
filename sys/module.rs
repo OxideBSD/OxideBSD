@@ -780,6 +780,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_clone" => Some(crate::syscall::oxidebsd_sys_clone as *const () as u64),
         "oxidebsd_sys_wait4" => Some(crate::syscall::oxidebsd_sys_wait4 as *const () as u64),
         "oxidebsd_sys_execve" => Some(crate::syscall::oxidebsd_sys_execve as *const () as u64),
+        "oxidebsd_sys_execveat" => {
+            Some(crate::syscall::oxidebsd_sys_execveat as *const () as u64)
+        }
         "oxidebsd_sys_getpid" => Some(crate::syscall::oxidebsd_sys_getpid as *const () as u64),
         "oxidebsd_sys_getppid" => Some(crate::syscall::oxidebsd_sys_getppid as *const () as u64),
         "oxidebsd_sys_mmap" => Some(crate::syscall::oxidebsd_sys_mmap as *const () as u64),

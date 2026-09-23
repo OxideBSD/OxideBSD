@@ -309,6 +309,26 @@ const SYS_FSTATFS: u64 = 477;
 const SYS_LINK: u64 = 488;
 const SYS_MKNOD: u64 = 489;
 const SYS_CHROOT: u64 = 490;
+/// The `*at()` family -- see the "`*at()` family" section below for the shared `RawAtPath` wire
+/// format. Continues past `SYS_GETSOCKNAME=559`, the highest number assigned before these; `574`
+/// (`SYS_EXECVEAT`) lives in `native_abi`, next to `execve`. musl remaps each real Linux name
+/// (`openat`, `newfstatat`, ...) to these in `arch/x86_64/bits/syscall.h.in`. `SYS_UTIMENSAT_AT` is
+/// a separate number (musl's `utimensat` name now maps to it) because the older path-only
+/// `SYS_UTIMENSAT` (167) is still called directly by `lib/oxlibc`.
+const SYS_OPENAT: u64 = 560;
+const SYS_MKDIRAT: u64 = 561;
+const SYS_MKNODAT: u64 = 562;
+const SYS_FCHOWNAT: u64 = 563;
+const SYS_NEWFSTATAT: u64 = 564;
+const SYS_UNLINKAT: u64 = 565;
+const SYS_RENAMEAT: u64 = 566;
+const SYS_LINKAT: u64 = 567;
+const SYS_SYMLINKAT: u64 = 568;
+const SYS_READLINKAT: u64 = 569;
+const SYS_FCHMODAT: u64 = 570;
+const SYS_FACCESSAT: u64 = 571;
+const SYS_UTIMENSAT_AT: u64 = 572;
+const SYS_RENAMEAT2: u64 = 573;
 
 /// Same real POSIX value FAT32's own `O_CREAT` already uses (`0o100`, not an arbitrary bit) --
 /// see `modules/fat32`'s own doc comment for why matching the real bit matters (musl's real
@@ -344,6 +364,13 @@ const O_APPEND: u64 = 0o2000;
 /// shm_open.c`) always passes this to `open()` directly, not through a separate `fcntl()` call --
 /// `oxfs_open`'s own tail (see below) is what actually marks the returned fd.
 const O_CLOEXEC: u64 = 0o2000000;
+/// Real `O_DIRECTORY`/`O_NOFOLLOW` (x86_64/generic musl values). Honored by `oxfs_open` for an
+/// existing path: `ENOTDIR` if the target isn't a directory, `ELOOP` if the final component is a
+/// symlink. Found needed by libc++'s `std::filesystem::remove_all`, which `openat(O_DIRECTORY|
+/// O_NOFOLLOW)`s every entry and relies on exactly those two errors to tell "recurse" from
+/// "unlink" -- both used to be silently ignored.
+const O_DIRECTORY: u64 = 0o200000;
+const O_NOFOLLOW: u64 = 0o400000;
 
 /// Real POSIX `st_mode` file-type bits (`S_IFREG`/`S_IFDIR`/`S_IFLNK`) -- these are the type bits
 /// only, ORed with an inode's own real `mode` field (permission bits) when building a `stat`
@@ -385,6 +412,9 @@ const ENOSPC: i64 = 28;
 const EIO: i64 = 5;
 const EINVAL: i64 = 22;
 const ERANGE: i64 = 34;
+/// musl's real value -- `fchmodat(AT_SYMLINK_NOFOLLOW)` on a symlink (symlink permission bits
+/// don't exist here, matching Linux), and unsupported `renameat2` flags.
+const EOPNOTSUPP: i64 = 95;
 /// musl's real compiled value (`external/mit/musl/arch/generic/bits/errno.h`, `29` -- same on
 /// FreeBSD, no divergence to worry about here). Returned by `oxfs_lseek` for a fd this filesystem
 /// has no real position to seek within (an in-progress `Write`, or a synthetic `/dev/*` node).
@@ -2145,7 +2175,38 @@ fn encode_proc_cwd(kind: ProcDirKind) -> u64 {
     }
 }
 
+/// The `*at()` family's directory-fd base -- see `AtBaseGuard`. `Some` only for the duration of one
+/// `*at()` handler, while it delegates to an ordinary path handler; encoded exactly like
+/// `Process::cwd` (`decode_cwd`), so a `/proc` directory fd works as a base for free.
+static mut AT_BASE_OVERRIDE: Option<u64> = None;
+
+/// Swaps what `current_cwd()` reports for one `*at()` call, restoring it on drop. This is how every
+/// existing path handler (`oxfs_open`/`oxfs_stat`/`oxfs_unlink`/...) becomes dirfd-relative
+/// without threading a base inode through each of them: they all start resolution from
+/// `current_cwd()`/`real_cwd_for_mutation()` already.
+///
+/// Sound only because a syscall here runs start to finish with interrupts masked (`SFMASK`) on a
+/// single core -- no other syscall can observe the override mid-flight. Same assumption as the
+/// stdin ring buffer's lock (see CLAUDE.md's "Interactive shell"); SMP breaks both.
+struct AtBaseGuard;
+
+impl AtBaseGuard {
+    fn set(raw_cwd: u64) -> Self {
+        unsafe { *core::ptr::addr_of_mut!(AT_BASE_OVERRIDE) = Some(raw_cwd) };
+        AtBaseGuard
+    }
+}
+
+impl Drop for AtBaseGuard {
+    fn drop(&mut self) {
+        unsafe { *core::ptr::addr_of_mut!(AT_BASE_OVERRIDE) = None };
+    }
+}
+
 fn current_cwd() -> Cwd {
+    if let Some(raw) = unsafe { *core::ptr::addr_of!(AT_BASE_OVERRIDE) } {
+        return decode_cwd(raw);
+    }
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     decode_cwd(unsafe { oxidebsd_get_cwd() })
 }
@@ -3504,10 +3565,13 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
             // `open`/`getdents` on the mountpoint's own path would see the real, shadowed
             // directory instead of the mounted one. Found live via `tests/mount_syscall_smoke.rs`.
             let inode_num = active_mount_for(inode_num).map_or(inode_num, |m| m.target_root_inode);
-            // Real open() follows a final symlink component by default (no O_NOFOLLOW in this
-            // ABI to opt out) -- resolve_path already knows how, so hand it the symlink's own
-            // stored target relative to its own parent directory. A dangling target surfaces as
-            // the same -ENOENT any other failed resolve_path call already returns.
+            // Real open() follows a final symlink component by default -- resolve_path already
+            // knows how, so hand it the symlink's own stored target relative to its own parent
+            // directory. A dangling target surfaces as the same -ENOENT any other failed
+            // resolve_path call already returns. O_NOFOLLOW refuses instead (real ELOOP).
+            if flags & O_NOFOLLOW != 0 && read_inode(inode_num).kind == InodeKind::Symlink {
+                return -ELOOP;
+            }
             let resolved = if read_inode(inode_num).kind == InodeKind::Symlink {
                 let mut target = [0u8; MAX_CWD_PATH];
                 let n = read_inode_at(inode_num, 0, &mut target);
@@ -3526,6 +3590,9 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
             // while every seeded file's default mode 0o755 sets both bits identically) is
             // unaffected by this.
             let inode = read_inode(resolved);
+            if flags & O_DIRECTORY != 0 && inode.kind != InodeKind::Dir {
+                return -ENOTDIR;
+            }
             let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
             // Real O_RDONLY is 0 -- "anything but that" in the low two bits means O_WRONLY/O_RDWR.
             let want_write = flags & O_ACCMODE != 0;
@@ -4562,13 +4629,37 @@ extern "C" fn oxfs_link(existing_ptr: u64, existing_len: u64, new_ptr: u64, new_
         Ok(v) => v,
         Err(e) => return e,
     };
+    // Plain link(2) keeps its existing follow-the-symlink behavior (POSIX leaves it
+    // implementation-defined); `linkat(2)` defaults to not following, see `oxfs_linkat`.
+    link_impl(existing_cwd, existing_path, new_cwd, new_path, true)
+}
 
-    let existing_inode = match resolve_path(existing_cwd, existing_path) {
+/// Shared body of `link(2)`/`linkat(2)`, with each side's base directory already resolved (the two
+/// can differ for `linkat`). `follow` is whether a symlink `existing_path` is followed to its
+/// target; when it isn't, the symlink itself gains the new name (real Linux behavior).
+fn link_impl(
+    existing_cwd: u32,
+    existing_path: &[u8],
+    new_cwd: u32,
+    new_path: &[u8],
+    follow: bool,
+) -> i64 {
+    let resolved = if follow {
+        resolve_path(existing_cwd, existing_path)
+    } else {
+        resolve_path_nofollow_last(existing_cwd, existing_path)
+    };
+    let existing_inode = match resolved {
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
     let mut inode = read_inode(existing_inode);
-    if !matches!(inode.kind, InodeKind::File | InodeKind::Device) {
+    let linkable = match inode.kind {
+        InodeKind::File | InodeKind::Device => true,
+        InodeKind::Symlink => !follow,
+        _ => false,
+    };
+    if !linkable {
         return -EPERM;
     }
 
@@ -4718,7 +4809,15 @@ extern "C" fn oxfs_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64
         Ok(v) => v,
         Err(e) => return e,
     };
+    rename_impl(old_cwd, old_path, new_cwd, new_path, false)
+}
 
+/// Shared body of `rename(2)`/`renameat(2)`/`renameat2(2)`, with each side's base directory already
+/// resolved. `noreplace` is `renameat2`'s `RENAME_NOREPLACE`: fail `EEXIST` instead of replacing.
+///
+/// Known, pre-existing gap (not new here): moving a directory to a different parent never rewrites
+/// its own `..` record, so `cd ..` from inside it afterwards still lands in the old parent.
+fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], noreplace: bool) -> i64 {
     let (old_parent, old_leaf) = match resolve_parent(old_cwd, old_path) {
         Ok(v) => v,
         Err(e) => return errno_for(e),
@@ -4731,6 +4830,15 @@ extern "C" fn oxfs_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64
         Err(e) => return errno_for(e),
     };
     if let Some(existing) = dir_lookup(new_parent, new_leaf) {
+        if noreplace {
+            return -EEXIST;
+        }
+        // Real POSIX: old and new naming the same file is a successful no-op. This used to remove
+        // the "destination" (i.e. the source itself) and then fail the source's own removal with
+        // EIO, losing the entry.
+        if existing == target {
+            return 0;
+        }
         if read_inode(existing).kind == InodeKind::Dir {
             return -EISDIR;
         }
@@ -5093,9 +5201,6 @@ extern "C" fn oxfs_fchdir(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 /// (`EACCES` otherwise). A missing path is `ENOENT` -- the distinction BusyBox's and this
 /// project's own native `touch` use to decide whether to create the file with `open(O_CREAT)`.
 extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, times_ptr: u64, flags: u64) -> i64 {
-    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-    const UTIME_NOW: i64 = (1 << 30) - 1;
-    const UTIME_OMIT: i64 = (1 << 30) - 2;
 
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
@@ -5124,6 +5229,15 @@ extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, times_ptr: u64, flags
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
+    utimens_inode(inode_num, times_ptr)
+}
+
+/// The timestamp-setting half of `oxfs_utimensat`, split out so `oxfs_utimensat_at` can also apply
+/// it straight to a dirfd's own inode -- real `utimensat(fd, NULL, ...)`, which is how musl
+/// implements `futimens(fd)` (that used to be a flat `ENOSYS` here).
+fn utimens_inode(inode_num: u32, times_ptr: u64) -> i64 {
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
 
     let now = unsafe { oxidebsd_unix_time() };
     let (mut new_atime, mut new_mtime) = (Some(now), Some(now));
@@ -5181,6 +5295,386 @@ extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, times_ptr: u64, flags
 /// `source` fields, truncating if `src` is longer -- these are never compared against (matching by
 /// inode, see `oxfs_umount2`), only ever formatted back out for `/proc/mounts`, so silent
 /// truncation of a pathologically long path is a cosmetic degradation, not a correctness bug.
+// --- The `*at()` family ----------------------------------------------------------------------
+//
+// Every `*at()` call resolves a path relative to a directory fd (`dirfd`) instead of the cwd;
+// `AT_FDCWD` or an absolute path makes it identical to the plain call. This ABI carries at most 4
+// register arguments and passes paths length-prefixed, so a `(dirfd, path)` pair can't ride in
+// registers for the two-path calls (`linkat`/`renameat2` need 2 dirfds + 2 paths + flags). Instead
+// each pair is one `RawAtPath` in the caller's memory -- the same "small struct in user memory"
+// convention `RawArgvEntry` already uses for `execve`'s argv. musl builds it
+// (`src/internal/oxidebsd_at.h` on the `oxidebsd` branch).
+//
+// Single-base calls delegate to the ordinary path handler under an `AtBaseGuard` (see its doc
+// comment), so `/proc`, mounts, chroot containment and every errno path behave exactly like the
+// plain call. `link`/`rename` take each side's base explicitly (`link_impl`/`rename_impl`).
+
+/// musl's `AT_*` values (`include/fcntl.h`). `AT_REMOVEDIR` and `AT_EACCESS` share `0x200` -- each
+/// is only meaningful to its own call (`unlinkat`/`faccessat`).
+const AT_FDCWD: i64 = -100;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+const AT_REMOVEDIR: u64 = 0x200;
+const AT_EACCESS: u64 = 0x200;
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
+const AT_NO_AUTOMOUNT: u64 = 0x800;
+const AT_EMPTY_PATH: u64 = 0x1000;
+/// `renameat2` flags (`include/stdio.h`).
+const RENAME_NOREPLACE: u64 = 1;
+const RENAME_EXCHANGE: u64 = 2;
+const RENAME_WHITEOUT: u64 = 4;
+
+/// One `(dirfd, path)` pair -- see this section's header. `ptr == 0` is a real NULL path (only
+/// `utimensat` accepts one: it means "the fd itself", which is how musl's `futimens` works).
+/// Must match `struct __oxidebsd_at` in musl's `src/internal/oxidebsd_at.h` byte for byte.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawAtPath {
+    dirfd: i64,
+    ptr: u64,
+    len: u64,
+}
+
+impl RawAtPath {
+    fn path(&self) -> &'static [u8] {
+        if self.ptr == 0 {
+            return &[];
+        }
+        // SAFETY: same trust boundary as every other path argument here -- caller-owned memory.
+        unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len as usize) }
+    }
+
+    /// Relative to `dirfd` for real, i.e. neither absolute nor `AT_FDCWD`.
+    fn uses_dirfd(&self) -> bool {
+        self.dirfd != AT_FDCWD && self.path().first() != Some(&b'/')
+    }
+}
+
+fn read_at(at_ptr: u64) -> RawAtPath {
+    // SAFETY: caller-owned pointer, same trust boundary as `execve`'s own `RawArgvEntry` array.
+    unsafe { (at_ptr as *const RawAtPath).read_unaligned() }
+}
+
+/// `dirfd` as a cwd-encoded base (see `decode_cwd`): a real directory fd, or a `/proc` directory
+/// fd. `EBADF` for a closed fd, `ENOTDIR` for any open fd that isn't a directory (including a
+/// pipe/socket owned by another module -- `real_fd`s come from one global counter, so it simply
+/// isn't in this module's table).
+fn dirfd_base(dirfd: i64) -> Result<u64, i64> {
+    if dirfd < 0 {
+        return Err(-EBADF);
+    }
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let real_fd = unsafe { oxidebsd_real_fd_of(dirfd as u64) };
+    if real_fd < 0 {
+        return Err(-EBADF);
+    }
+    match find_open_file(real_fd as u64) {
+        Some(OpenFile::DirListing { inode, .. }) => Ok(*inode as u64),
+        Some(OpenFile::ProcDir { kind, .. }) => Ok(encode_proc_cwd(*kind)),
+        _ => Err(-ENOTDIR),
+    }
+}
+
+/// Runs `f` (an ordinary path handler call on `at`'s own path) with `at.dirfd` as its base.
+/// An empty path is `ENOENT`, matching real Linux (every caller that accepts `AT_EMPTY_PATH`
+/// checks for it before getting here).
+fn with_at(at: &RawAtPath, f: impl FnOnce() -> i64) -> i64 {
+    if at.path().is_empty() {
+        return -ENOENT;
+    }
+    if !at.uses_dirfd() {
+        return f();
+    }
+    match dirfd_base(at.dirfd) {
+        Ok(base) => {
+            let _guard = AtBaseGuard::set(base);
+            f()
+        }
+        Err(e) => e,
+    }
+}
+
+/// `real_cwd_for_mutation`, relative to `at.dirfd` -- one side of `linkat`/`renameat2`.
+fn at_cwd_for_mutation(at: &RawAtPath) -> Result<u32, i64> {
+    let path = at.path();
+    if path.is_empty() {
+        return Err(-ENOENT);
+    }
+    if !at.uses_dirfd() {
+        return real_cwd_for_mutation(path);
+    }
+    let base = dirfd_base(at.dirfd)?;
+    let _guard = AtBaseGuard::set(base);
+    real_cwd_for_mutation(path)
+}
+
+/// Resolves `at`'s path without following a final symlink, relative to `at.dirfd` -- for the
+/// `AT_SYMLINK_NOFOLLOW` variants whose plain handler always follows (`fchownat`/`fchmodat`/
+/// `faccessat`).
+fn at_resolve_nofollow(at: &RawAtPath) -> Result<u32, i64> {
+    let cwd = at_cwd_for_mutation(at)?;
+    resolve_path_nofollow_last(cwd, at.path()).map_err(errno_for)
+}
+
+/// The inode behind an `AT_EMPTY_PATH` fd (or the cwd, for `AT_FDCWD`). `EPERM` when the fd is
+/// real but has no oxfs inode behind it (the console, `/proc`, `/dev/*`) -- nothing to change.
+fn at_empty_path_inode(dirfd: i64) -> Result<u32, i64> {
+    if dirfd == AT_FDCWD {
+        return match current_cwd() {
+            Cwd::Real(inode) => Ok(inode),
+            Cwd::Proc(_) => Err(-EPERM),
+        };
+    }
+    if dirfd < 0 {
+        return Err(-EBADF);
+    }
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let real_fd = unsafe { oxidebsd_real_fd_of(dirfd as u64) };
+    if real_fd < 0 {
+        return Err(-EBADF);
+    }
+    resolve_write_fd_inode(real_fd as u64).ok_or(-EPERM)
+}
+
+/// `oxfs_chown`'s own rules (root-only; `-1` leaves a field unchanged), applied to an already-
+/// resolved inode -- for `lchown`/`fchown` (`fchownat` with `AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`),
+/// both of which were flat `ENOSYS` before this.
+fn chown_inode(inode_num: u32, uid: u64, gid: u64) -> i64 {
+    if unsafe { oxidebsd_current_uid() } != 0 {
+        return -EPERM;
+    }
+    let mut inode = read_inode(inode_num);
+    if uid != u32::MAX as u64 {
+        inode.uid = uid as u32;
+    }
+    if gid != u32::MAX as u64 {
+        inode.gid = gid as u32;
+    }
+    write_inode(inode_num, inode);
+    0
+}
+
+/// Registered for `SYS_OPENAT`. `(at, flags, mode)`.
+extern "C" fn oxfs_openat(at_ptr: u64, flags: u64, mode: u64, _a3: u64) -> i64 {
+    let at = read_at(at_ptr);
+    with_at(&at, || oxfs_open(at.ptr, at.len, flags, mode))
+}
+
+/// Registered for `SYS_MKDIRAT`. `(at, mode)`. `mode` is passed through, but `oxfs_mkdir` itself
+/// still ignores it (pre-existing: every directory starts at `FIXED_PERM`).
+extern "C" fn oxfs_mkdirat(at_ptr: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
+    let at = read_at(at_ptr);
+    with_at(&at, || oxfs_mkdir(at.ptr, at.len, mode, 0))
+}
+
+/// Registered for `SYS_MKNODAT`. `(at, mode, dev)`.
+extern "C" fn oxfs_mknodat(at_ptr: u64, mode: u64, dev: u64, _a3: u64) -> i64 {
+    let at = read_at(at_ptr);
+    with_at(&at, || oxfs_mknod(at.ptr, at.len, mode, dev))
+}
+
+/// Registered for `SYS_FCHOWNAT`. `(at, uid, gid, flags)`. musl's `lchown` and `fchown` route
+/// here too (`AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`).
+extern "C" fn oxfs_fchownat(at_ptr: u64, uid: u64, gid: u64, flags: u64) -> i64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
+        return match at_empty_path_inode(at.dirfd) {
+            Ok(inode) => chown_inode(inode, uid, gid),
+            Err(e) => e,
+        };
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        return match at_resolve_nofollow(&at) {
+            Ok(inode) => chown_inode(inode, uid, gid),
+            Err(e) => e,
+        };
+    }
+    with_at(&at, || oxfs_chown(at.ptr, at.len, uid, gid))
+}
+
+/// Registered for `SYS_NEWFSTATAT` (musl's `SYS_fstatat`). `(at, statbuf, flags)`.
+extern "C" fn oxfs_fstatat(at_ptr: u64, buf_ptr: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT) != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
+        if at.dirfd == AT_FDCWD {
+            return oxfs_stat(b".".as_ptr() as u64, 1, buf_ptr, 0);
+        }
+        if at.dirfd < 0 {
+            return -EBADF;
+        }
+        return oxfs_fstat(at.dirfd as u64, buf_ptr, 0, 0);
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        with_at(&at, || oxfs_lstat(at.ptr, at.len, buf_ptr, 0))
+    } else {
+        with_at(&at, || oxfs_stat(at.ptr, at.len, buf_ptr, 0))
+    }
+}
+
+/// Registered for `SYS_UNLINKAT`. `(at, flags)` -- `AT_REMOVEDIR` makes it `rmdir`.
+extern "C" fn oxfs_unlinkat(at_ptr: u64, flags: u64, _a2: u64, _a3: u64) -> i64 {
+    if flags & !AT_REMOVEDIR != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if flags & AT_REMOVEDIR != 0 {
+        with_at(&at, || oxfs_rmdir(at.ptr, at.len, 0, 0))
+    } else {
+        with_at(&at, || oxfs_unlink(at.ptr, at.len, 0, 0))
+    }
+}
+
+/// Registered for `SYS_RENAMEAT2`. `(old_at, new_at, flags)`. `RENAME_NOREPLACE` is real;
+/// `RENAME_EXCHANGE`/`RENAME_WHITEOUT` are `EINVAL`, which is what real Linux returns for a flag
+/// the filesystem doesn't support.
+extern "C" fn oxfs_renameat2(old_at_ptr: u64, new_at_ptr: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT) != 0
+        || flags & (RENAME_EXCHANGE | RENAME_WHITEOUT) != 0
+    {
+        return -EINVAL;
+    }
+    let (old_at, new_at) = (read_at(old_at_ptr), read_at(new_at_ptr));
+    let old_cwd = match at_cwd_for_mutation(&old_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_cwd = match at_cwd_for_mutation(&new_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    rename_impl(
+        old_cwd,
+        old_at.path(),
+        new_cwd,
+        new_at.path(),
+        flags & RENAME_NOREPLACE != 0,
+    )
+}
+
+/// Registered for `SYS_RENAMEAT`. `(old_at, new_at)` -- `renameat2` with no flags.
+extern "C" fn oxfs_renameat(old_at_ptr: u64, new_at_ptr: u64, _a2: u64, _a3: u64) -> i64 {
+    oxfs_renameat2(old_at_ptr, new_at_ptr, 0, 0)
+}
+
+/// Registered for `SYS_LINKAT`. `(old_at, new_at, flags)`. Unlike plain `link`, doesn't follow a
+/// symlink `old` unless `AT_SYMLINK_FOLLOW`. `AT_EMPTY_PATH` (link the fd's own inode) needs
+/// `CAP_DAC_READ_SEARCH` on Linux; with no capability model here it's the unprivileged `ENOENT`.
+extern "C" fn oxfs_linkat(old_at_ptr: u64, new_at_ptr: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let (old_at, new_at) = (read_at(old_at_ptr), read_at(new_at_ptr));
+    let old_cwd = match at_cwd_for_mutation(&old_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_cwd = match at_cwd_for_mutation(&new_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    link_impl(
+        old_cwd,
+        old_at.path(),
+        new_cwd,
+        new_at.path(),
+        flags & AT_SYMLINK_FOLLOW != 0,
+    )
+}
+
+/// Registered for `SYS_SYMLINKAT`. `(target_ptr, target_len, linkpath_at)` -- the target is the
+/// link's stored content, never resolved here, so only the new link's own path is dirfd-relative.
+extern "C" fn oxfs_symlinkat(target_ptr: u64, target_len: u64, at_ptr: u64, _a3: u64) -> i64 {
+    let at = read_at(at_ptr);
+    with_at(&at, || oxfs_symlink(target_ptr, target_len, at.ptr, at.len))
+}
+
+/// Registered for `SYS_READLINKAT`. `(at, buf, bufsize)`.
+extern "C" fn oxfs_readlinkat(at_ptr: u64, buf_ptr: u64, buf_cap: u64, _a3: u64) -> i64 {
+    let at = read_at(at_ptr);
+    with_at(&at, || oxfs_readlink(at.ptr, at.len, buf_ptr, buf_cap))
+}
+
+/// Registered for `SYS_FCHMODAT`. `(at, mode, flags)` -- real `fchmodat2` semantics: a symlink
+/// with `AT_SYMLINK_NOFOLLOW` is `EOPNOTSUPP` (no symlink permission bits, same as Linux).
+extern "C" fn oxfs_fchmodat(at_ptr: u64, mode: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
+        if at.dirfd == AT_FDCWD {
+            return oxfs_chmod(b".".as_ptr() as u64, 1, mode, 0);
+        }
+        if at.dirfd < 0 {
+            return -EBADF;
+        }
+        return oxfs_fchmod(at.dirfd as u64, mode, 0, 0);
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        match at_resolve_nofollow(&at) {
+            Ok(inode) if read_inode(inode).kind == InodeKind::Symlink => return -EOPNOTSUPP,
+            Ok(_) => {}
+            Err(e) => return e,
+        }
+    }
+    with_at(&at, || oxfs_chmod(at.ptr, at.len, mode, 0))
+}
+
+/// Registered for `SYS_FACCESSAT`. `(at, amode, flags)`. `AT_EACCESS` changes nothing: there's no
+/// separate real/effective id pair here (see CLAUDE.md's "Permission model"). With
+/// `AT_SYMLINK_NOFOLLOW`, a symlink itself always passes (its own permissions are `0777`).
+extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
+        let inode_num = match at_empty_path_inode(at.dirfd) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        if amode == 0 {
+            return 0;
+        }
+        let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+        return if check_access(&read_inode(inode_num), uid, gid, amode as u8) {
+            0
+        } else {
+            -EACCES
+        };
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0
+        && let Ok(inode) = at_resolve_nofollow(&at)
+        && read_inode(inode).kind == InodeKind::Symlink
+    {
+        return 0;
+    }
+    with_at(&at, || oxfs_access(at.ptr, at.len, amode, 0))
+}
+
+/// Registered for `SYS_UTIMENSAT_AT` -- real, dirfd-aware `utimensat(2)`: `(at, times, flags)`.
+/// A NULL path (`at.ptr == 0`, or empty with `AT_EMPTY_PATH`) stamps `dirfd`'s own inode -- musl's
+/// `futimens(fd)`. The older path-only `SYS_UTIMENSAT` (167) stays registered as-is: `lib/oxlibc`'s
+/// native `touch` calls it directly.
+extern "C" fn oxfs_utimensat_at(at_ptr: u64, times_ptr: u64, flags: u64, _a3: u64) -> i64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let at = read_at(at_ptr);
+    if at.ptr == 0 || (at.path().is_empty() && flags & AT_EMPTY_PATH != 0) {
+        return match at_empty_path_inode(at.dirfd) {
+            Ok(inode) => utimens_inode(inode, times_ptr),
+            Err(e) => e,
+        };
+    }
+    with_at(&at, || oxfs_utimensat(at.ptr, at.len, times_ptr, flags))
+}
+
 fn copy_mount_path(src: &[u8]) -> ([u8; MAX_MOUNT_PATH], u8) {
     let mut buf = [0u8; MAX_MOUNT_PATH];
     let n = src.len().min(MAX_MOUNT_PATH);
@@ -7282,6 +7776,12 @@ fn format_fresh_filesystem() -> bool {
         b"pthread-smoke.elf",
         include_bytes!(env!("OXFS_PTHREAD_SMOKE_ELF_PATH")),
     );
+    // `*at()` family coverage, run by `tests/at_syscall_smoke.rs` -- see `regress/at-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"at-smoke.elf",
+        include_bytes!(env!("OXFS_AT_SMOKE_ELF_PATH")),
+    );
 
     // Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) via the real
     // `/dev/shm`-backed `MAP_SHARED` mmap two independent processes each map at their own,
@@ -8197,6 +8697,20 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_FCHMOD, oxfs_fchmod);
         oxidebsd_register_syscall(SYS_FCHDIR, oxfs_fchdir);
         oxidebsd_register_syscall(SYS_UTIMENSAT, oxfs_utimensat);
+        oxidebsd_register_syscall(SYS_OPENAT, oxfs_openat);
+        oxidebsd_register_syscall(SYS_MKDIRAT, oxfs_mkdirat);
+        oxidebsd_register_syscall(SYS_MKNODAT, oxfs_mknodat);
+        oxidebsd_register_syscall(SYS_FCHOWNAT, oxfs_fchownat);
+        oxidebsd_register_syscall(SYS_NEWFSTATAT, oxfs_fstatat);
+        oxidebsd_register_syscall(SYS_UNLINKAT, oxfs_unlinkat);
+        oxidebsd_register_syscall(SYS_RENAMEAT, oxfs_renameat);
+        oxidebsd_register_syscall(SYS_LINKAT, oxfs_linkat);
+        oxidebsd_register_syscall(SYS_SYMLINKAT, oxfs_symlinkat);
+        oxidebsd_register_syscall(SYS_READLINKAT, oxfs_readlinkat);
+        oxidebsd_register_syscall(SYS_FCHMODAT, oxfs_fchmodat);
+        oxidebsd_register_syscall(SYS_FACCESSAT, oxfs_faccessat);
+        oxidebsd_register_syscall(SYS_UTIMENSAT_AT, oxfs_utimensat_at);
+        oxidebsd_register_syscall(SYS_RENAMEAT2, oxfs_renameat2);
         oxidebsd_register_syscall(SYS_MOUNT_BIND, oxfs_mount_bind);
         oxidebsd_register_syscall(SYS_MOUNT_TMPFS, oxfs_mount_tmpfs);
         oxidebsd_register_syscall(SYS_UMOUNT2, oxfs_umount2);

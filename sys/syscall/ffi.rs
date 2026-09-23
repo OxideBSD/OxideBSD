@@ -2295,6 +2295,22 @@ pub(crate) extern "C" fn oxidebsd_sys_sysinfo(info_ptr: u64) -> i64 {
     result_to_ffi(sys_sysinfo(info_ptr))
 }
 
+/// `execveat(2)` -- `at_ptr` is a `RawAtPath`, see `process::do_execveat`.
+pub(crate) extern "C" fn oxidebsd_sys_execveat(
+    at_ptr: u64,
+    argv_ptr: u64,
+    envp_ptr: u64,
+    flags: u64,
+) -> i64 {
+    result_to_ffi(crate::process::do_execveat(
+        crate::process::scheduler::current_pid(),
+        at_ptr,
+        argv_ptr,
+        envp_ptr,
+        flags,
+    ))
+}
+
 pub(crate) extern "C" fn oxidebsd_sys_execve(
     path_ptr: u64,
     path_len: u64,

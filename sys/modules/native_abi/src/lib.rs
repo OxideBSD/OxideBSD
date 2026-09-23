@@ -72,6 +72,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_fork() -> i64;
     fn oxidebsd_sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage_ptr: u64) -> i64;
     fn oxidebsd_sys_execve(path_ptr: u64, path_len: u64, argv_ptr: u64, envp_ptr: u64) -> i64;
+    fn oxidebsd_sys_execveat(at_ptr: u64, argv_ptr: u64, envp_ptr: u64, flags: u64) -> i64;
     fn oxidebsd_sys_getpid() -> i64;
     fn oxidebsd_sys_getppid() -> i64;
     fn oxidebsd_sys_mmap(addr_hint: u64, len: u64, prot: u64, packed: u64) -> i64;
@@ -103,6 +104,9 @@ const SYS_PWRITE: u64 = 18;
 const SYS_WAIT4: u64 = 7;
 const SYS_GETPID: u64 = 20;
 const SYS_EXECVE: u64 = 59;
+/// `execveat(2)` -- the one `*at()` call that isn't a filesystem op (`sys/modules/oxfs` owns
+/// `560`-`573`). musl reaches it through `fexecve()`.
+const SYS_EXECVEAT: u64 = 574;
 const SYS_MMAP: u64 = 100;
 const SYS_MUNMAP: u64 = 101;
 const SYS_BRK: u64 = 102;
@@ -178,6 +182,10 @@ extern "C" fn handle_execve(path_ptr: u64, path_len: u64, argv_ptr: u64, envp_pt
     unsafe { oxidebsd_sys_execve(path_ptr, path_len, argv_ptr, envp_ptr) }
 }
 
+extern "C" fn handle_execveat(at_ptr: u64, argv_ptr: u64, envp_ptr: u64, flags: u64) -> i64 {
+    unsafe { oxidebsd_sys_execveat(at_ptr, argv_ptr, envp_ptr, flags) }
+}
+
 extern "C" fn handle_getpid(_arg0: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
     unsafe { oxidebsd_sys_getpid() }
 }
@@ -248,6 +256,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_CLONE, handle_clone);
         oxidebsd_register_syscall(SYS_WAIT4, handle_wait4);
         oxidebsd_register_syscall(SYS_EXECVE, handle_execve);
+        oxidebsd_register_syscall(SYS_EXECVEAT, handle_execveat);
         oxidebsd_register_syscall(SYS_GETPID, handle_getpid);
         oxidebsd_register_syscall(SYS_GETPPID, handle_getppid);
         oxidebsd_register_syscall(SYS_MMAP, handle_mmap);

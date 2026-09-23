@@ -15,7 +15,9 @@ use crate::memory::address_space::AddressSpace;
 use crate::memory::{self, with_frame_allocator};
 use crate::process::elf::{self, Elf};
 use crate::process::scheduler;
-use crate::syscall::{self, ECHILD, EINVAL, ELOOP, ENOEXEC, ENOMEM, SyscallFrame};
+use crate::syscall::{
+    self, E2BIG, EACCES, EBADF, ECHILD, EINVAL, ELOOP, ENOENT, ENOEXEC, ENOMEM, SyscallFrame,
+};
 
 // Real FreeBSD syscall numbers, duplicated here rather than imported — same "no shared crate
 // across this internal ABI boundary" convention `modules/fat32`/`sys/modules/native_abi` already use
@@ -26,6 +28,10 @@ use crate::syscall::{self, ECHILD, EINVAL, ELOOP, ENOEXEC, ENOMEM, SyscallFrame}
 const SYS_OPEN: u64 = 5;
 const SYS_READ: u64 = 3;
 const SYS_CLOSE: u64 = 6;
+/// `execveat`'s reads -- see `do_execveat`. OxideBSD's own numbers (`sys/modules/oxfs`'s
+/// `SYS_OPENAT`, `sys/modules/native_abi`'s `SYS_PREAD`).
+const SYS_OPENAT: u64 = 560;
+const SYS_PREAD: u64 = 17;
 /// Builds a brand-new process from `elf_bytes`: a fresh `AddressSpace` (`AddressSpace::new`, same
 /// as the old one-shot demo path), the ELF loaded into it (`elf::load`), a mapped user stack, and
 /// a fresh kernel stack seeded (`context_switch::seed_spawn_frame`) so its first-ever run lands in
@@ -858,13 +864,22 @@ struct RawArgvEntry {
 /// insufficient for the simplest real case.
 const MAX_PTR_LEN_ENTRIES: usize = 256;
 
+/// Total bytes of argv + envp strings one `execve` may carry -- Linux's effective limit (a quarter
+/// of an 8 MiB stack), not musl's advertised `ARG_MAX` (128 KiB), which a real `ld.lld` link line
+/// for a large project can exceed. Past it is a real `E2BIG`. Found live: before this cap, a
+/// garbage `len` (a `char **` argv passed where this ABI expects `RawArgvEntry`s -- an early
+/// `fexecve` patch did exactly that) went straight into an allocation and panicked the kernel
+/// (`memory allocation of 4923351820889817167 bytes failed`) -- any process could take the whole
+/// VM down with one bad `execve`.
+const MAX_EXEC_ARG_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Reads the `RawArgvEntry` array `ptr` describes, if any -- shared by `argv_ptr` (argv[1..]) and
 /// `envp_ptr` (envp[]), which use the exact same wire format (see `RawArgvEntry`'s own doc
-/// comment).
-fn read_ptr_len_array(ptr: u64) -> Vec<Vec<u8>> {
+/// comment). `budget` is the remaining `MAX_EXEC_ARG_BYTES`, shared across both arrays.
+fn read_ptr_len_array(ptr: u64, budget: &mut u64) -> Result<Vec<Vec<u8>>, u64> {
     let mut entries_out = Vec::new();
     if ptr == 0 {
-        return entries_out;
+        return Ok(entries_out);
     }
     for i in 0..MAX_PTR_LEN_ENTRIES {
         // SAFETY: same known pointer-validation gap every other user-memory read in this file
@@ -873,11 +888,12 @@ fn read_ptr_len_array(ptr: u64) -> Vec<Vec<u8>> {
         if entry.ptr == 0 {
             break;
         }
+        *budget = budget.checked_sub(entry.len).ok_or(E2BIG)?;
         let bytes =
             unsafe { core::slice::from_raw_parts(entry.ptr as *const u8, entry.len as usize) };
         entries_out.push(bytes.to_vec());
     }
-    entries_out
+    Ok(entries_out)
 }
 
 /// Tail of `path` after its last `/` (the whole slice if there's none) -- used to derive
@@ -911,6 +927,39 @@ fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
 /// `AddressSpace::fork`/`new_excluding_user` still shallow-copy the kernel's own high entries).
 fn read_file_via_syscall(path_ptr: u64, path_len: u64) -> Result<Vec<u8>, u64> {
     let fd = syscall::dispatch(SYS_OPEN, path_ptr, path_len, 0, 0)?;
+    read_fd_to_end_and_close(fd)
+}
+
+/// `read_file_via_syscall`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
+/// `execveat`'s dirfd-relative (and `AT_SYMLINK_NOFOLLOW`) target.
+fn read_file_via_openat(at_ptr: u64, nofollow: bool) -> Result<Vec<u8>, u64> {
+    const O_NOFOLLOW: u64 = 0o400000;
+    let flags = if nofollow { O_NOFOLLOW } else { 0 };
+    let fd = syscall::dispatch(SYS_OPENAT, at_ptr, flags, 0, 0)?;
+    read_fd_to_end_and_close(fd)
+}
+
+/// A whole file through an fd the *caller* already holds (`fexecve`'s `AT_EMPTY_PATH` case) --
+/// `pread` from offset 0, so the caller's own file offset is untouched if the exec then fails.
+fn pread_fd_to_end(fd: u64) -> Result<Vec<u8>, u64> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = syscall::dispatch(
+            SYS_PREAD,
+            fd,
+            chunk.as_mut_ptr() as u64,
+            chunk.len() as u64,
+            bytes.len() as u64,
+        )?;
+        if n == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..n as usize]);
+    }
+}
+
+fn read_fd_to_end_and_close(fd: u64) -> Result<Vec<u8>, u64> {
     let mut bytes: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 512];
     loop {
@@ -1004,8 +1053,86 @@ pub fn do_execve(
     // pointer-validation gap sys_write/sys_read already have for user pointers.
     let path_bytes: Vec<u8> =
         unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) }.to_vec();
-    let raw_argv = read_ptr_len_array(argv_ptr);
-    let envp = read_ptr_len_array(envp_ptr);
+    exec_image(caller_pid, path_bytes, None, true, argv_ptr, envp_ptr)
+}
+
+/// Real `execveat(2)`: `at_ptr` is a `RawAtPath` (`{dirfd, path_ptr, path_len}`, see
+/// `sys/modules/oxfs`'s "`*at()` family" section), `flags` takes `AT_EMPTY_PATH`/
+/// `AT_SYMLINK_NOFOLLOW`. musl uses it for `fexecve(fd)` (`AT_EMPTY_PATH`, empty path).
+///
+/// `AT_FDCWD`/absolute without `AT_SYMLINK_NOFOLLOW` is exactly `execve`. Anything else reads the
+/// first image up front -- through `SYS_OPENAT`, or `pread` on the fd itself for `AT_EMPTY_PATH`.
+/// Known limit: when that image is a `#!` script reached through a dirfd or an fd, there's no path
+/// the interpreter could reopen it by (Linux hands it `/dev/fd/N`, which doesn't exist here), so
+/// it's `ENOENT` -- the same error real Linux gives when that fd is close-on-exec.
+pub fn do_execveat(
+    caller_pid: Pid,
+    at_ptr: u64,
+    argv_ptr: u64,
+    envp_ptr: u64,
+    flags: u64,
+) -> Result<u64, u64> {
+    const AT_FDCWD: i64 = -100;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(EINVAL);
+    }
+    // SAFETY: caller-owned pointer, same trust boundary as `path_ptr` in `do_execve`.
+    let [dirfd, path_ptr, path_len] = unsafe { (at_ptr as *const [u64; 3]).read_unaligned() };
+    let dirfd = dirfd as i64;
+    let path_bytes: Vec<u8> = if path_ptr == 0 {
+        Vec::new()
+    } else {
+        unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) }.to_vec()
+    };
+
+    if path_bytes.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(ENOENT);
+        }
+        // Real Linux: the cwd is a directory, and directories aren't executable.
+        if dirfd == AT_FDCWD {
+            return Err(EACCES);
+        }
+        if dirfd < 0 {
+            return Err(EBADF);
+        }
+        let image = pread_fd_to_end(dirfd as u64)?;
+        return exec_image(caller_pid, path_bytes, Some(image), false, argv_ptr, envp_ptr);
+    }
+
+    let path_is_cwd_relative = dirfd == AT_FDCWD || path_bytes[0] == b'/';
+    let nofollow = flags & AT_SYMLINK_NOFOLLOW != 0;
+    if path_is_cwd_relative && !nofollow {
+        return exec_image(caller_pid, path_bytes, None, true, argv_ptr, envp_ptr);
+    }
+    let image = read_file_via_openat(at_ptr, nofollow)?;
+    exec_image(
+        caller_pid,
+        path_bytes,
+        Some(image),
+        path_is_cwd_relative,
+        argv_ptr,
+        envp_ptr,
+    )
+}
+
+/// `execve`'s real work, shared with `execveat`. `path_bytes` names the program (argv fallback,
+/// `comm`, and the script path a `#!` interpreter reopens). `first_image`, when present, is the
+/// already-read first file (`execveat`); `path_reopenable` says whether `path_bytes` can still find
+/// that same file relative to the cwd, which a `#!` script needs.
+fn exec_image(
+    caller_pid: Pid,
+    path_bytes: Vec<u8>,
+    first_image: Option<Vec<u8>>,
+    path_reopenable: bool,
+    argv_ptr: u64,
+    envp_ptr: u64,
+) -> Result<u64, u64> {
+    let mut arg_budget = MAX_EXEC_ARG_BYTES;
+    let raw_argv = read_ptr_len_array(argv_ptr, &mut arg_budget)?;
+    let envp = read_ptr_len_array(envp_ptr, &mut arg_budget)?;
 
     // Real Unix `execve()` on a `#!`-prefixed file re-execs the named interpreter instead of
     // trying to load the script itself as an ELF (this kernel's own `elf::load` has no shebang
@@ -1021,11 +1148,23 @@ pub fn do_execve(
     let mut effective_path: Vec<u8> = path_bytes.clone();
     let mut shebang_argv_prefix: Option<Vec<Vec<u8>>> = None;
     let mut shebang_depth: u32 = 0;
+    let mut first_image = first_image;
     let elf_bytes: Vec<u8> = loop {
-        let bytes =
-            read_file_via_syscall(effective_path.as_ptr() as u64, effective_path.len() as u64)?;
+        let from_first_image = first_image.is_some();
+        let bytes = match first_image.take() {
+            Some(image) => image,
+            None => read_file_via_syscall(
+                effective_path.as_ptr() as u64,
+                effective_path.len() as u64,
+            )?,
+        };
         if bytes.len() < 2 || &bytes[0..2] != b"#!" {
             break bytes;
+        }
+        // See `do_execveat`'s doc comment: a script only reachable through a dirfd/fd has no path
+        // its interpreter could open.
+        if from_first_image && !path_reopenable {
+            return Err(ENOENT);
         }
         shebang_depth += 1;
         if shebang_depth > MAX_SHEBANG_DEPTH {

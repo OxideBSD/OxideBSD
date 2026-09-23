@@ -923,6 +923,36 @@ enforcement.
 - Verified via `tests/uid_syscall_smoke.rs`, `tests/needs_syscall2_smoke.rs`. **Not covered**:
   mutating `/etc/passwd`/`/etc/group` (applet-level gap), `lchown`/setuid/setgid/sticky bits.
 
+## The `*at()` family (`sys/modules/oxfs`, `sys/process/lifecycle.rs`, `external/mit/musl`)
+
+Every `*at()` call musl can issue: `openat`/`mkdirat`/`mknodat`/`fchownat`/`newfstatat`/`unlinkat`/
+`renameat`/`linkat`/`symlinkat`/`readlinkat`/`fchmodat`/`faccessat`/`utimensat`/`renameat2` =
+`560`-`573` (oxfs), `execveat` = `574` (`native_abi`). Not done: `statx` (musl falls back to
+`fstatat`), `name_to_handle_at`/`open_by_handle_at`, `RENAME_EXCHANGE`/`RENAME_WHITEOUT` (`EINVAL`).
+
+- **Wire format**: each `(dirfd, path)` is a pointer to `{dirfd: i64, ptr, len}` in caller memory
+  (`RawAtPath` / musl `src/internal/oxidebsd_at.h`) -- `linkat`/`renameat2` can't fit 2 dirfds + 2
+  length-prefixed paths + flags in 4 registers. `ptr == 0` is a real NULL path (`futimens`).
+- **Kernel design**: single-base calls set `AtBaseGuard` (a static override of `current_cwd()`) and
+  delegate to the plain handler, so `/proc`, mounts and chroot behave identically; relies on
+  syscalls being uninterruptible on one core (SMP breaks it, like the stdin ring lock). `link`/
+  `rename` take both bases explicitly (`link_impl`/`rename_impl`).
+- `execveat` pre-reads the image via `SYS_OPENAT`, or `pread` on the fd (`fexecve`). A `#!` script
+  reached through a dirfd/fd is `ENOENT` -- no `/dev/fd/N` to hand the interpreter.
+- `SYS_UTIMENSAT=167` (path-only) stays for `lib/oxlibc`'s `touch`; musl's `utimensat` name now
+  maps to `572`.
+- **Real bugs found/fixed alongside**: `open()` ignored `O_DIRECTORY`/`O_NOFOLLOW`; `rename(a, a)`
+  lost the entry (`EIO`); musl's `fstatat`/`remove`/`tmpfile`/`tmpnam`/`tempnam` passed upstream
+  arg shapes to this ABI's length-prefixed handlers; `lchown`/`fchown`/`futimens`/`utimensat(dirfd)`
+  were always `ENOSYS`; `execve` with a garbage argv length **panicked the kernel** (unbounded
+  allocation) -- now a 2 MiB total `E2BIG` cap (`MAX_EXEC_ARG_BYTES`); `sys/boot/multiboot2.rs`'s
+  `global_asm!` never restored its section, so a CGU reshuffle put the syscall entry stub in
+  `.boot32.text` (`multiboot2-boot-smoke` link failure) -- now `.pushsection`/`.popsection`.
+- Known, not fixed: moving a directory to a new parent doesn't rewrite its `..`; oxfs `ENOTEMPTY`
+  is FreeBSD's `66`, not musl's `39` (same deferred errno class as the net stack's).
+- Verified: `tests/at_syscall_smoke.rs` (`regress/at-smoke/main.c`, real musl API, PASS/FAIL per
+  check) and `std::filesystem::remove_all` in `tests/clangxx_syscall_smoke.rs`.
+
 ## Session, controlling-tty, and login authentication (`sys/process/`, `sys/console/stdin.rs`, `sys/cpu/interrupts.rs`, `sys/modules/posix_compat/`, `sys/modules/oxfs/`)
 
 Closes `su`/`login`/`sulogin`/`getty`.
@@ -1305,9 +1335,8 @@ and runs it (`sys/modules/oxfs/src/hello.cpp`: STL, exceptions across frames, RT
   -- fixed with a configure-args stamp (`oxidebsd-configure-args.stamp`) plus a direct
   `clang/lib/Driver` mtime floor. `build_llvm_target_runtimes` now bumps `libc++.a`'s mtime after a
   no-op ninja run (was permanently "stale" vs. a relinked host clang).
-- **Open**: `std::filesystem::remove_all` fails -- libc++ uses `openat`/`unlinkat`/`fdopendir`, and
-  the whole `*at()` family is unported (musl still issues raw Linux `257`/`263`). Needs a
-  design decision (dirfd-relative resolution in oxfs + new syscalls + musl patches).
+- `std::filesystem::remove_all` needed the whole `*at()` family (libc++ uses `openat`/`unlinkat`/
+  `fdopendir`) -- see "The `*at()` family" below.
 
 ## bmake (`usr.bin/make`, `build.rs`'s `build_bmake`) — self-hosting stage 1: **done**
 

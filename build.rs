@@ -223,6 +223,7 @@ fn main() {
     build_userland_crate("sched-syscall-smoke", "SCHED_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("clone-syscall-smoke", "CLONE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -297,6 +298,7 @@ fn main() {
     // "Real threading" phases 1-5's own finish line -- see regress/pthread-smoke/main.c's own
     // doc comment.
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
+    let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
 
     // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
@@ -482,6 +484,7 @@ fn main() {
             "OXFS_PTHREAD_SMOKE_ELF_PATH",
             pthread_smoke_elf_path.to_str().unwrap(),
         ),
+        ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
         (
             "OXFS_SEM_OPEN_SMOKE_ELF_PATH",
             sem_open_smoke_elf_path.to_str().unwrap(),
@@ -523,12 +526,12 @@ fn main() {
             clang_runtime_manifest_path.to_str().unwrap(),
         ),
         (
-            "POSIX_TEST_MANIFEST_PATH",
-            posix_test_manifest_path.to_str().unwrap(),
-        ),
-        (
             "LIBCXX_RUNTIME_MANIFEST_PATH",
             libcxx_runtime_manifest_path.to_str().unwrap(),
+        ),
+        (
+            "POSIX_TEST_MANIFEST_PATH",
+            posix_test_manifest_path.to_str().unwrap(),
         ),
         (
             "OXFS_DYNLINK_LIBC_SO_PATH",
@@ -1392,6 +1395,30 @@ fn build_pthread_smoke(sysroot: &Path) -> PathBuf {
     out
 }
 
+/// The `*at()` family's real musl-linked coverage -- see `regress/at-smoke/main.c`. Same recipe as
+/// `build_pthread_smoke`, at the next free slot (`0x8240000`, past `0x8200000`); fork+execve'd
+/// fresh by `regress/at-syscall-smoke/`, never co-resident with another fixed-base image.
+fn build_at_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/at-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/at-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/at-smoke");
+    let out = target_dir.join("at-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8240000", "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for at-smoke: {e}"));
+    if !status.success() {
+        panic!("building at-smoke failed: {status}");
+    }
+    out
+}
+
 /// Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) -- see
 /// `regress/sem-open-smoke/main.c`'s own doc comment for the scenario, and
 /// `process::limits::futex_key`'s own doc comment (`sys/process/limits.rs`) for the real
@@ -2228,6 +2255,8 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
         if !status.success() {
             panic!("cmake configure for llvm-target-build failed: {status}");
         }
+        std::fs::write(&configure_stamp, &configure_args_text)
+            .expect("failed to write llvm-target-build configure stamp");
     }
 
     let status = Command::new("ninja")
@@ -2269,8 +2298,6 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
         if !status.success() {
             panic!("stripping {} failed: {status}", bin.display());
         }
-        std::fs::write(&configure_stamp, &configure_args_text)
-            .expect("failed to write llvm-target-build configure stamp");
     }
 
     build_dir
