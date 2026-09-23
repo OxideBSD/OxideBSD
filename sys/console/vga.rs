@@ -425,6 +425,20 @@ impl Writer {
             }
             b'J' => self.erase_in_display(self.csi_param(0, 0)),
             b'K' => self.erase_in_line(self.csi_param(0, 0)),
+            // ECH: erase character -- clear `n` characters starting at the cursor, cursor
+            // position unchanged. A real, previously-unhit gap in the same class as VPA/CHA/HPA
+            // above -- found live via real nano's own `Write to File` prompt (`usr.bin/nano/src/
+            // winio.c`'s status-bar/shortcut-list redraw uses `ECH` to blank stale menu-item text
+            // before writing shorter replacement text over the same cells, e.g. switching between
+            // the main-menu footer and the write-prompt's own shorter one). Silently swallowed by
+            // the prior `_ => {}` catch-all meant old text was never actually cleared, so new text
+            // landed *on top of* it instead -- confirmed live via a real screendump showing
+            // garbled, overlapping footer fragments exactly where a shorter shortcut label
+            // replaced a longer one.
+            b'X' => {
+                let n = self.csi_param(0, 1) as usize;
+                self.clear_row_range(self.cursor_row, self.cursor_col, self.cursor_col + n);
+            }
             b'm' => self.apply_sgr(),
             // DECSTBM: set scroll margins.
             b'r' => self.set_scroll_region(),

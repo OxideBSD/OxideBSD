@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use pc_keyboard::layouts::Us104Key;
-use pc_keyboard::{DecodedKey, HandleControl, PS2Keyboard, ScancodeSet1};
+use pc_keyboard::{DecodedKey, HandleControl, KeyCode, PS2Keyboard, ScancodeSet1};
 use spin::{Lazy, Mutex};
 use x86_64::VirtAddr;
 use x86_64::instructions::port::Port;
@@ -812,6 +812,33 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
 /// has the identical latent hazard for the same reason; forcing an immediate, synchronous
 /// reschedule here closes all of them at the actual source, rather than auditing every blocking
 /// syscall to check `state == Zombie`/`Stopped` before overwriting it.
+/// Normalizes `pc-keyboard`'s own `Return`/`NumpadEnter` decode (`DecodedKey::Unicode('\n')`, LF)
+/// to the real terminal convention for the Enter key (`\r`, CR, `0x0D`) -- a real, genuine bug
+/// found live via nano's own save dialog silently never confirming (see CLAUDE.md's
+/// ncurses/nano/nvi section for the full writeup). Every real terminal and every curses/readline
+/// program's own shortcut table (nano's own `^M`/`\r` -> `do_enter` binding, `usr.bin/nano/src/
+/// global.c`) is built around a physical Enter key sending CR raw -- ICRNL-style translation to
+/// LF is a later, optional *tty-driver* step (real canonical mode only), never what the key
+/// itself produces. `pc-keyboard`'s own `Us104Key` layout collapses `Return` straight to Unicode
+/// LF instead, which broke exactly the code paths relying on the real `\r` convention (nano's own
+/// prompt-confirmation logic, `acquire_an_answer` in `usr.bin/nano/src/prompt.c`, checks only the
+/// shortcut table) -- masked in the main editor by its own separate, more permissive fallback
+/// (`nano.c`'s own `input == '\r' || input == '\n'` check for newline insertion specifically).
+///
+/// **Deliberately scoped to the `Return`/`NumpadEnter` key itself, not a blanket `\n` -> `\r`
+/// rewrite**: Ctrl+J legitimately decodes to the same Unicode LF via `pc-keyboard`'s own
+/// `HandleControl` mapping, and is a real, distinct keystroke (nano's own `^J` -> `do_justify`
+/// binding) that must stay LF -- a blanket rewrite would make the two indistinguishable.
+fn normalize_enter_key(code: KeyCode, key: DecodedKey) -> DecodedKey {
+    if matches!(code, KeyCode::Return | KeyCode::NumpadEnter)
+        && let DecodedKey::Unicode('\n') = key
+    {
+        DecodedKey::Unicode('\r')
+    } else {
+        key
+    }
+}
+
 fn handle_decoded_key(key: DecodedKey) -> bool {
     match key {
         DecodedKey::Unicode(character) => {
@@ -925,8 +952,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
             // Captured here, before `process_keyevent` below discards release information for
             // nearly every key -- see `console::keyevents`'s own doc comment.
             crate::console::keyevents::record_raw_key_event(&key_event);
+            let code = key_event.code;
             match keyboard.process_keyevent(key_event) {
-                Some(key) => handle_decoded_key(key),
+                Some(key) => handle_decoded_key(normalize_enter_key(code, key)),
                 None => false,
             }
         } else {
@@ -959,8 +987,9 @@ pub(crate) fn feed_synthetic_scancode(byte: u8) {
         let mut keyboard = KEYBOARD.lock();
         if let Ok(Some(key_event)) = keyboard.add_byte(byte) {
             crate::console::keyevents::record_raw_key_event(&key_event);
+            let code = key_event.code;
             match keyboard.process_keyevent(key_event) {
-                Some(key) => handle_decoded_key(key),
+                Some(key) => handle_decoded_key(normalize_enter_key(code, key)),
                 None => false,
             }
         } else {

@@ -1525,6 +1525,39 @@ licensed despite the "GNU" association, and its portable autotools build is exac
   save-prompt/`:q!` flows, and a plain `echo` at the `hush` prompt itself -- unaffected by any of
   this section's own changes on its face, but genuinely exercising the identical `poll`/`select`
   code path -- was retested and confirmed still correct.
+- **Two more real, user-reported bugs, found the same way**: "nano freezes" turned out to be three
+  kernel-level input bugs (above); once those were fixed, real interactive use surfaced two more,
+  narrower ones -- "can't save documents" and "kinda corrupted due to some unsupported tty
+  features."
+  1. **The real corruption**: `sys/console/vga.rs`'s `execute_csi` had no case for `X` (ECH,
+     "erase character", `ESC[NX]`) -- the same silently-swallowed-by-`_ => {}` shape as the earlier
+     VPA/CHA/HPA gaps. `nano`'s own status-bar/shortcut-list redraw (`usr.bin/nano/src/winio.c`)
+     uses `ECH` to blank stale menu-item text before writing shorter replacement text over the same
+     cells (e.g. switching between the main-menu footer and the write-prompt's own shorter one) --
+     without it, old text was never actually cleared, so new text landed *on top of* it. Confirmed
+     live via a real screendump showing garbled, overlapping footer fragments exactly where a
+     shorter label replaced a longer one; fixed and reconfirmed clean.
+  2. **The real save failure, root-caused precisely, not patched around**: pressing Enter to
+     confirm `nano`'s "Write to File" prompt did nothing -- the dialog just sat there forever, even
+     though the exact same physical Enter keystroke worked fine for inserting a newline in the main
+     editor. Traced to `pc-keyboard`'s own `Us104Key` layout (`lib.rs`'s `KeyCode::Return =>
+     DecodedKey::Unicode('\u{000A}')`, i.e. LF) -- every real terminal and every curses/readline
+     program's own shortcut table is built around a physical Enter key sending **CR** (`\r`,
+     `0x0D`) raw (ICRNL-style LF translation is a later, optional *tty-driver*-only step); `nano`'s
+     own prompt-confirmation logic (`acquire_an_answer`, `usr.bin/nano/src/prompt.c`) checks only
+     its shortcut table (`^M`/`\r` -> `do_enter`, `global.c`), which a raw LF byte never matches --
+     while the *main editor's* own newline handling happens to also accept `\n` as a permissive
+     fallback (`nano.c`'s own `input == '\r' || input == '\n'` check), which is exactly what masked
+     this in every earlier test in this same section. Fixed at the actual translation point
+     (`sys/cpu/interrupts.rs`'s new `normalize_enter_key`, called right after `process_keyevent` in
+     both the real PS/2 IRQ handler and the USB HID synthetic-scancode path): rewrites LF back to
+     CR specifically for the `Return`/`NumpadEnter` key, using the still-available raw `KeyCode`
+     rather than the already-collapsed `DecodedKey`. **Deliberately not a blanket `\n` -> `\r`
+     rewrite** -- Ctrl+J legitimately decodes to the same Unicode LF via `pc-keyboard`'s own
+     `HandleControl` mapping and is a real, distinct keystroke (`nano`'s own `^J` -> `do_justify`)
+     that must stay LF; a blanket rewrite would have made the two indistinguishable. Verified live
+     end to end: `nano`'s own "[ Wrote 1 line ]" confirmation, the "Modified" indicator correctly
+     clearing, and the real saved content confirmed via `cat` afterward.
 - **Known, disclosed gaps, not yet chased**: `nano` probes `ioctl(TIOCLINUX)` at startup (`0x5603`,
   a real Linux-console-specific request this kernel doesn't implement) -- logged as unrecognized,
   harmless, nano works fine without it. ncurses' own utility programs (`tic`/`tset`/`tput`/`clear`/
