@@ -79,7 +79,12 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
         &elf,
         &[b"(init)"],
         &[
-            b"PATH=/bin",
+            // `/usr/bin` added alongside `/bin` -- a real, previously-nonexistent gap surfaced the
+            // instant something actually got seeded there (`nano`, see CLAUDE.md's
+            // ncurses/nano/nvi section): `execvp()`'s real `$PATH` search only ever covered `/bin`
+            // before, so a bare `nano` (no full path) failed `ENOENT` despite the file genuinely
+            // existing at `/usr/bin/nano`.
+            b"PATH=/bin:/usr/bin",
             b"TERM=linux",
             b"PS1=\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
         ],

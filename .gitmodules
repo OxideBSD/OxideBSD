@@ -24,3 +24,11 @@
 	path = external/apache2/llvm
 	url = https://github.com/OxideBSD/llvm-project-oxidebsd.git
 	branch = oxidebsd
+[submodule "usr.bin/nano"]
+	path = usr.bin/nano
+	url = https://github.com/OxideBSD/nano-oxidebsd.git
+	branch = oxidebsd
+[submodule "usr.bin/vi"]
+	path = usr.bin/vi
+	url = https://github.com/OxideBSD/OpenVi-oxidebsd.git
+	branch = oxidebsd

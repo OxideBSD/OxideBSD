@@ -1363,6 +1363,109 @@ Staged plan for the rest of self-hosting: C → C++ (seed libc++) → ninja/cmak
   trail: verify `RIP` is genuinely stuck (not just sampled once) and check whether the address in
   question is a real, named constant (like `HEAP_START`) before concluding "corruption."
 
+## ncurses, nano, nvi: a real BSD-shaped curses/editor stack (`lib/ncurses`, `usr.bin/vi`, `usr.bin/nano`, `build.rs`, `sys/console/vga.rs`, `sys/process/lifecycle.rs`)
+
+The self-hosting plan's next stage after bmake (see that section above) -- a real curses library
+plus two real editors, matching how the actual BSDs split the role: `/bin/vi` (OpenVi, a portable
+extraction of OpenBSD's own vi/ex, BSD-3-Clause) is the essential, single-user-mode-capable editor;
+`/usr/bin/nano` (GNU nano, GPLv3+) is everything-else. ncurses itself mirrors FreeBSD's own choice
+to vendor it directly into base (`lib/ncurses`, not `external/`) -- permissively (X11/MIT-style)
+licensed despite the "GNU" association, and its portable autotools build is exactly the kind of
+`./configure && make` self-hosting story this stage is chasing.
+
+- **Vendoring**: ncurses is a plain committed tree (6.6, no submodule -- same reasoning as bmake,
+  no single canonical upstream git to fork, just versioned tarballs). `nano`/`vi` are submodules of
+  personal forks (`OxideBSD/nano-oxidebsd` from `ahjragaas/nano`, a fast-syncing unofficial mirror
+  of the real `git.sv.gnu.org/nano.git`; `OxideBSD/OpenVi-oxidebsd` from `johnsonjh/OpenVi`), each
+  pinned to an `oxidebsd` branch -- same convention as musl/busybox.
+- **`build_ncurses`**: cross-builds a real, wide-char (`ncursesw`, genuine UTF-8 support) static
+  `libncursesw.a`/`libpanelw.a`/`libmenuw.a`/`libformw.a` + headers against `musl_sysroot`,
+  installed to its own `target/ncurses-sysroot`. Library + headers only -- `tic`/`tset`/`tput`/...
+  are deliberately out of scope for now (each would need its own fixed load address like every
+  other `ET_EXEC` here); the one terminfo-compile step this build needs uses the *host's* own
+  `tic` instead (confirmed byte-version-identical to this vendored release), producing a
+  deliberately minimal compiled terminfo database (`linux`/`vt100`/`vt100-am`/`dumb` -- the only
+  `TERM` values this kernel's own console will ever report) seeded at `/usr/share/terminfo`.
+- **Two real musl gaps closed for OpenVi's own `cl/*.c`/`common/*.c`**: `<sys/queue.h>` and
+  `<bitstring.h>` (both real BSD-isms, not POSIX, so musl ships neither) -- vendored from real
+  FreeBSD (BSD-3-Clause, kept verbatim) into this project's own musl fork. `<sys/queue.h>` needed a
+  companion `<sys/cdefs.h>` shim too (`__containerof`/`__predict_false`/...) -- FreeBSD's own real
+  version isn't a clean standalone drop-in (cascades into further FreeBSD-internal headers), so
+  this one is a small, purpose-built reimplementation of just those macros, still tagged
+  BSD-3-Clause (its shape is FreeBSD's, not independently invented, even though the file itself
+  is). `<bitstring.h>` needed light patching too (`<stdlib.h>`/`<strings.h>` includes FreeBSD's own
+  build environment provides transitively but musl doesn't, `__builtin_popcountl` in place of
+  glibc's own internal `__bitcountl` alias). **A real location bug found live**: `bitstring.h`
+  belongs directly under `/usr/include`, not `/usr/include/sys/` -- confirmed via OpenVi's own
+  `#include <bitstring.h>` (no `sys/` prefix), matching real BSD's own `bitstring(3)` convention.
+- **`build_nvi`**: OpenVi's own plain `GNUmakefile` (no autotools) directly -- already portable,
+  ships its own BSD-compat shims (`openbsd/strlcpy.c`/`getopt_long.c`/`reallocarray.c`/...) for
+  exactly this kind of non-glibc/non-BSD target. **Two real GNU Make variable-precedence gotchas,
+  opposite directions, neither a bug in the Makefile itself**: `CURSESLIB`/`OS` are passed as
+  `make` command-line args (highest precedence) so the Makefile's own `ifndef CURSESLIB`
+  pkg-config-autodetect and `ifeq ($(OS), ...)` platform branches reliably short-circuit;
+  `CFLAGS`/`LDFLAGS` are passed as **environment** variables instead, since a command-line-origin
+  value would silently block the Makefile's own `CFLAGS += $(CSTD) $(INCLDS)` entirely (GNU Make
+  blocks *any* makefile-side assignment to a command-line-overridden variable, `+=` included) --
+  found live via every `cl/*.c` file failing `fatal error: bsd_stdlib.h: No such file or
+  directory` despite that header genuinely existing in `include/`, simply because `-Iinclude` had
+  been silently dropped.
+- **`build_nano`**: the bare git checkout deliberately ships no `configure` (upstream's own
+  `autogen.sh` clones a separate `gnulib` repo at `--depth=2222` and runs `gnulib-tool`+
+  `autoreconf` to produce one fresh) -- rather than replicate that heavy chain, the `oxidebsd`
+  branch overlays the exact generated output (`configure`/`config.h.in`/`m4/*`/the gnulib-derived
+  `lib/` shim) the official v9.2 release tarball already ships. Real, full-featured wide-char
+  build (`ncursesw`, not `--enable-tiny` -- this project's own ncurses has no narrow fallback, and
+  a stripped-down editor isn't the point). **A third real Make gotcha, the opposite precedence
+  choice from OpenVi's for a genuinely different reason**: automake substitutes `@LDFLAGS@` into
+  the generated `src/Makefile` *at configure time* as a hardcoded plain `=` assignment, which
+  always overrides an environment-origin value (unlike a command-line-origin one) -- an
+  environment `LDFLAGS` at `make` time was silently ignored entirely, producing a `nano` linked at
+  the linker's own default base (`0x402554`) squarely inside this kernel's reserved low-memory
+  region instead of a real, chosen `-Wl,-Ttext-segment=`. Fixed by passing `LDFLAGS` as a `make`
+  command-line argument at the final build step specifically (the one point after `configure` that
+  still has a chance to override it).
+- **A real BusyBox-applet env-var collision, found live via a real boot, not by inspection**:
+  BusyBox already ships its own compact `vi` applet, and `oxfs_env_var_name` derives an env var
+  name purely from the seeded filename with no notion of "already taken" -- both BusyBox's own `vi`
+  and this real OpenVi replacement produced an env var literally named `OXFS_VI_ELF_PATH`.
+  `Command::env`'s last-write-wins semantics meant OpenVi's real build was silently never actually
+  reaching the seeded filesystem at all; `ls -la /bin/vi` inside a real boot reported BusyBox's
+  much smaller size instead. Fixed the same way `NATIVE_BIN_UTILITIES` handles this class of
+  collision for the native `/bin` utilities -- a small, separate `REPLACED_BUSYBOX_APPLETS` list
+  (kept separate since `NATIVE_BIN_UTILITIES` also drives building each entry as a `bin/<name>`
+  oxlibc crate, which doesn't fit a real cross-compiled C program) filters BusyBox's own `vi` out
+  of the roster entirely.
+- **A real, previously-unhit gap in this kernel's own VT100/ANSI console parser, found live**:
+  `sys/console/vga.rs`'s `execute_csi` had no case for VPA (`ESC[Nd`, vertical position absolute)
+  -- nothing in the prior userland roster ever emitted it, so the pre-existing `_ => {}` catch-all
+  silently swallowed it instead of moving the cursor. OpenVi's own curses backend uses VPA for
+  nearly every row-only cursor move (its status-line/tilde-fill redraw is almost entirely `ESC[Nd`
+  sequences), so every subsequent write landed at whatever position the cursor was last left at
+  instead of where the program intended -- visually collapsing a full-screen redraw down to just
+  its own last line (confirmed via a real screendump showing only the status line, everything else
+  black, before the fix; a full, correct redraw -- real file content, tilde fills down the whole
+  screen, status line correctly on the last row -- after it). Fixed alongside its sibling gap, CHA
+  (`ESC[NG`)/HPA (`` ESC[N` ``), the same class even though not yet confirmed hit.
+- **A real `$PATH` gap, found live once something was actually seeded at `/usr/bin`**: pid 1's own
+  `envp` only ever set `PATH=/bin` (see "Real job control" above) -- nothing had ever needed
+  `/usr/bin` to exist until `nano` did. A bare `nano` invocation failed `ENOENT` via `execvp()`'s
+  real `$PATH` search despite the file genuinely existing at `/usr/bin/nano`. Fixed:
+  `PATH=/bin:/usr/bin`.
+- Verified end to end via a real, fresh-format boot, driven headlessly through the QEMU monitor's
+  own `sendkey`/`screendump` (`OXIDEBSD_QEMU_DISPLAY=none`, no window needed): `ls -la /bin/vi
+  /usr/bin/nano` reports the real sizes; a bare `vi /etc/passwd` and a bare `nano /etc/passwd` (the
+  latter only reachable at all once the `$PATH` fix landed) each produce a real, correct, full
+  curses render -- confirmed via `screendump`, not just raw escape-code inspection -- showing the
+  file's real content, `vi`'s tilde-filled empty lines and status line, and `nano`'s reverse-video
+  title/help-footer chrome, both exiting back to a clean `hush` prompt.
+- **Known, disclosed gaps, not yet chased**: `nano` probes `ioctl(TIOCLINUX)` at startup (`0x5603`,
+  a real Linux-console-specific request this kernel doesn't implement) -- logged as unrecognized,
+  harmless, nano works fine without it. ncurses' own utility programs (`tic`/`tset`/`tput`/`clear`/
+  `infocmp`) aren't built or seeded yet -- a real on-target self-hosting attempt (building ncurses/
+  nano from source under `ash`+on-target `clang`+`bmake`, the way bmake's own self-hosting was
+  proven, see that section above) is a natural next step, not yet attempted this session.
+
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`sys/process/elf.rs`, `sys/process/lifecycle.rs`, `build.rs`, `sys/modules/oxfs`)
 
 A real, working `fork`+`execve` of a genuinely dynamically-linked ELF, resolved/relocated by

@@ -331,6 +331,20 @@ fn main() {
     let bmake_elf_path = build_bmake(&musl_sysroot);
     let bmake_mk_manifest_path = write_bmake_mk_manifest();
 
+    // Real ncurses (vendored at `lib/ncurses`, matching FreeBSD's own base layout -- see
+    // CLAUDE.md's ncurses/nano/nvi section), the curses/terminfo library `nano`/`nvi` both link
+    // against. Library + headers only for now (see `build_ncurses`'s own doc comment), plus a
+    // deliberately minimal compiled terminfo database (`write_ncurses_terminfo_manifest`'s own
+    // doc comment).
+    let ncurses_sysroot = build_ncurses(&musl_sysroot);
+    let ncurses_runtime_manifest_path = write_ncurses_runtime_manifest(&ncurses_sysroot);
+    let ncurses_terminfo_manifest_path = write_ncurses_terminfo_manifest();
+
+    // OpenVi (`/bin/vi`) and GNU nano (`/usr/bin/nano`) -- OxideBSD's two real editors, see
+    // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
+    let vi_elf_path = build_nvi(&musl_sysroot, &ncurses_sysroot);
+    let nano_elf_path = build_nano(&musl_sysroot, &ncurses_sysroot);
+
     // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
     // comment for the source list, and `external/gpl2/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
     // for the backend. `doom1.wad` (the freely-redistributable shareware IWAD) is vendored
@@ -389,7 +403,9 @@ fn main() {
         .iter()
         .copied()
         .chain(BUSYBOX_APPLETS_PASS2.iter().copied())
-        .filter(|&(_, out_name, _)| !NATIVE_BIN_UTILITIES.contains(&out_name))
+        .filter(|&(_, out_name, _)| {
+            !NATIVE_BIN_UTILITIES.contains(&out_name) && !REPLACED_BUSYBOX_APPLETS.contains(&out_name)
+        })
         .collect();
     let jobs = build_jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -484,6 +500,16 @@ fn main() {
             "BMAKE_MK_MANIFEST_PATH",
             bmake_mk_manifest_path.to_str().unwrap(),
         ),
+        (
+            "NCURSES_RUNTIME_MANIFEST_PATH",
+            ncurses_runtime_manifest_path.to_str().unwrap(),
+        ),
+        (
+            "NCURSES_TERMINFO_MANIFEST_PATH",
+            ncurses_terminfo_manifest_path.to_str().unwrap(),
+        ),
+        ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
+        ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
         ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
         ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
@@ -579,6 +605,24 @@ fn main() {
 /// `/bin` utilities that are native OxideBSD binaries (`bin/<name>`, built by `build_pie_crate_at`
 /// against `lib/oxlibc`) instead of BusyBox applets -- the first batch of the userland replacement.
 /// See `main`'s `all_applets` filter for how BusyBox is kept from also building/embedding them.
+/// BusyBox applets excluded in favor of a real, distinct replacement that *isn't* a native oxlibc
+/// PIE crate (see `NATIVE_BIN_UTILITIES` just below for those) -- kept as its own list rather than
+/// folded into that one because `NATIVE_BIN_UTILITIES` also drives `build_pie_crate_at("bin/<name>",
+/// ...)` for every entry, and these replacements have no such crate.
+///
+/// Currently just `vi`, replaced by a real OpenVi cross-build (`build_nvi`, see CLAUDE.md's
+/// ncurses/nano/nvi section). **A real bug found live**: BusyBox's own `vi` applet and this
+/// replacement both produced an env var literally named `OXFS_VI_ELF_PATH` (`oxfs_env_var_name`
+/// derives the name purely from the seeded filename, with no notion of "already taken") --
+/// `Command::env`'s last-write-wins semantics silently let whichever one landed later in
+/// `oxfs_extra_env` clobber the other's *value* for that one shared key, so both of
+/// `sys/modules/oxfs`'s two `seed_file(bin, b"vi", ...)` call sites (one for each competing
+/// producer) ended up embedding the exact same (BusyBox's, since it happened to apply last) bytes
+/// -- OpenVi's own build was silently never actually reaching the seeded filesystem at all, only
+/// caught by `ls -la /bin/vi` inside a real boot reporting BusyBox's much smaller size instead of
+/// OpenVi's. Filtering the applet out here removes the second producer entirely.
+const REPLACED_BUSYBOX_APPLETS: &[&str] = &["vi"];
+
 const NATIVE_BIN_UTILITIES: &[&str] = &[
     "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "touch",
 ];
@@ -2305,6 +2349,416 @@ fn write_bmake_mk_manifest() -> PathBuf {
     std::fs::write(&out_path, src)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     out_path
+}
+
+/// Cross-builds `lib/ncurses` (vendored as a plain committed tree, not a submodule -- same
+/// reasoning as `build_bmake`'s own doc comment: no single canonical upstream git repo to fork,
+/// just versioned tarball releases from invisible-island.net -- into `lib/ncurses` rather than
+/// `external/mit/`, deliberately matching FreeBSD's own base `lib/ncurses` layout, see CLAUDE.md's
+/// ncurses/nano/nvi section) into a static `libncursesw.a`/`libpanelw.a`/`libmenuw.a`/`libformw.a`
+/// + headers against `musl_sysroot`, installed to its own `target/ncurses-sysroot` (kept separate
+/// from `musl_sysroot` itself -- ncurses is a real optional base component layered on musl, not
+/// part of musl's own libc).
+///
+/// **Library + headers only, deliberately** -- `--without-progs` skips `tic`/`tset`/`tput`/
+/// `clear`/`infocmp`/`toe`/`tabs`/`captoinfo`. Each of those would need its own fixed load
+/// address, same discipline as every other `ET_EXEC` this build produces (see
+/// `build_busybox_applet`'s own doc comment) -- and nothing needs a target-side `tic` yet: the one
+/// terminfo-compile step this build does (`write_ncurses_terminfo_manifest`, below) uses the
+/// *host's* own `tic` against this exact vendored `terminfo.src`, confirmed byte-version-identical
+/// (host `tic -V` reports `ncurses 6.6.20251230`, matching this vendored release exactly, so the
+/// compiled binary terminfo format is guaranteed to match what this library's own `libtinfo` calls
+/// expect). Revisit once on-target self-hosting of ncurses itself is attempted (see CLAUDE.md's
+/// bmake self-hosting section for the shape that took).
+///
+/// **`-static -no-pie` in `LDFLAGS` is load-bearing, not optional** -- found the same way
+/// `build_musl_sysroot`'s own doc comment describes: this host's `gcc` defaults to PIE, and
+/// musl's own crt objects were deliberately built `-fno-pie -fno-PIC` (see that section), so a
+/// PIE-mode link of `configure`'s own `conftest.c` fails outright (`relocation R_X86_64_32 ...
+/// can not be used when making a PIE object`) before any real ncurses code is even reached.
+/// Confirmed via a real trivial `initscr()`/`printw()`/`endwin()` program linking clean against
+/// the resulting `libncursesw.a` and producing a real `ET_EXEC` with a nonzero entry point.
+///
+/// Auto-detected wide-char (`ncursesw`, UTF-8-capable) support and built it rather than fighting
+/// configure back to narrow `ncurses` -- matches how most modern distros package it today, and
+/// there's no reason a real editor here should be UTF-8-illiterate. `--enable-overwrite` installs
+/// headers straight into `$prefix/include` (`curses.h` directly, not `include/ncurses/curses.h`)
+/// since this is the only curses this kernel will ever have -- no risk of colliding with a system
+/// one the way a Linux distro package has to guard against.
+fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("lib/ncurses");
+    let sysroot = Path::new(manifest_dir).join("target/ncurses-sysroot");
+    let lib = sysroot.join("lib/libncursesw.a");
+    println!("cargo:rerun-if-changed={}", src.join("ncurses").display());
+    println!("cargo:rerun-if-changed={}", src.join("include").display());
+    println!("cargo:rerun-if-changed={}", src.join("panel").display());
+    println!("cargo:rerun-if-changed={}", src.join("menu").display());
+    println!("cargo:rerun-if-changed={}", src.join("form").display());
+
+    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let src_mtime = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    let floor = musl_mtime.max(src_mtime);
+    if std::fs::metadata(&lib)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= floor)
+    {
+        return sysroot;
+    }
+
+    // Same reasoning as `build_musl_sysroot`/`build_bmake`: ncurses' own `config.cache`/generated
+    // `Makefile`s don't reliably notice a target sysroot change -- rebuild from scratch rather
+    // than trust incremental.
+    let build_dir = Path::new(manifest_dir).join("target/ncurses");
+    let _ = std::fs::remove_dir_all(&build_dir);
+    let _ = std::fs::remove_dir_all(&sysroot);
+    std::fs::create_dir_all(&build_dir).expect("failed to create target/ncurses");
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+
+    let status = Command::new(src.join("configure"))
+        .current_dir(&build_dir)
+        .env("CC", &musl_gcc)
+        .env("CFLAGS", "-Os")
+        .env("LDFLAGS", "-static -no-pie")
+        .args([
+            &format!("--prefix={}", sysroot.display()),
+            "--host=x86_64-unknown-linux-musl",
+            "--with-build-cc=cc",
+            "--without-shared",
+            "--with-normal",
+            "--without-debug",
+            "--without-cxx",
+            "--without-cxx-binding",
+            "--without-ada",
+            "--without-manpages",
+            "--without-tests",
+            "--without-progs",
+            "--disable-db-install",
+            "--disable-stripping",
+            "--enable-overwrite",
+            "--with-terminfo-dirs=/usr/share/terminfo",
+            "--with-default-terminfo-dir=/usr/share/terminfo",
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run ncurses configure: {e}"));
+    assert!(status.success(), "ncurses configure failed: {status}");
+
+    let jobs = build_jobs();
+    let status = Command::new("make")
+        .current_dir(&build_dir)
+        .args(["-j", &jobs.to_string()])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make for ncurses: {e}"));
+    assert!(status.success(), "ncurses build failed: {status}");
+
+    let status = Command::new("make")
+        .current_dir(&build_dir)
+        .arg("install")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make install for ncurses: {e}"));
+    assert!(status.success(), "ncurses install failed: {status}");
+
+    assert!(lib.exists(), "ncurses build produced no libncursesw.a");
+    sysroot
+}
+
+/// Generates `NCURSES_INCLUDE_FILES`/`NCURSES_LIB_FILES` -- same generated-`include!` idiom as
+/// `write_musl_runtime_manifest`, seeded on top of the same `/usr/include`/`/usr/lib` musl already
+/// populates (`format_fresh_filesystem`'s own `seed_tree` calls just run twice against the same
+/// directory inodes). Real on-target content: once a target-side ncurses/nano/nvi self-hosting
+/// attempt exists (see CLAUDE.md's bmake self-hosting section for the shape that took), it needs
+/// these headers/archives resident the same way musl's own runtime tree already is.
+fn write_ncurses_runtime_manifest(ncurses_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let out_path = out_dir.join("ncurses_runtime_manifest.rs");
+
+    let mut src = String::new();
+    let write_array = |src: &mut String, array_name: &str, files: &[(String, PathBuf)]| {
+        src.push_str(&format!("pub static {array_name}: &[(&str, &[u8])] = &[\n"));
+        for (rel, abs) in files {
+            src.push_str(&format!(
+                "    ({rel:?}, include_bytes!({:?})),\n",
+                abs.display()
+            ));
+        }
+        src.push_str("];\n\n");
+    };
+
+    let mut headers = collect_dir_files(&ncurses_sysroot.join("include"));
+    headers.sort();
+    write_array(&mut src, "NCURSES_INCLUDE_FILES", &headers);
+
+    let mut lib_files: Vec<(String, PathBuf)> = collect_dir_files(&ncurses_sysroot.join("lib"));
+    lib_files.sort();
+    write_array(&mut src, "NCURSES_LIB_FILES", &lib_files);
+
+    std::fs::write(&out_path, src)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    out_path
+}
+
+/// Compiles a deliberately minimal terminfo database (`linux`/`vt100`/`vt100-am`/`dumb` --
+/// see CLAUDE.md's ncurses/nano/nvi section) out of `lib/ncurses/misc/terminfo.src` using the
+/// *host's* own `tic`, generating `NCURSES_TERMINFO_FILES` for `format_fresh_filesystem`'s
+/// `seed_tree` to seed at `/usr/share/terminfo`. Just `linux` and `dumb` would cover what this
+/// kernel's own console ever reports (`TERM=linux`, see CLAUDE.md's "Real job control" section) --
+/// `vt100`/`vt100-am` are included too since they're the universal fallback almost every curses
+/// program's own terminfo-lookup chain assumes exists, at a cost of a few hundred more bytes.
+/// Deliberately not the full ~700-entry database: oxfs's own block/inode pools and format/flush
+/// time both scale with seeded content (see CLAUDE.md's `NAME_MAX` bump for a real example of that
+/// cost), and nothing on this kernel will ever report a `TERM` value outside this set.
+///
+/// `tic`'s own stderr (a long list of `unknown capability` warnings) is real but harmless noise --
+/// `tic` parses `terminfo.src` in full regardless of `-e`'s output filter, since entries reference
+/// each other via `use=` chains it has to resolve; the warnings are pre-existing quirks in
+/// upstream's own source entries unrelated to the four names actually selected here (confirmed via
+/// `infocmp` against the real compiled output, exit 0, exactly the expected entries).
+fn write_ncurses_terminfo_manifest() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("lib/ncurses/misc/terminfo.src");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let compiled_dir = Path::new(manifest_dir).join("target/ncurses-terminfo");
+    let out_path = out_dir.join("ncurses_terminfo_manifest.rs");
+
+    let src_mtime = std::fs::metadata(&src)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    if !std::fs::metadata(&out_path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= src_mtime)
+    {
+        let _ = std::fs::remove_dir_all(&compiled_dir);
+        std::fs::create_dir_all(&compiled_dir).expect("failed to create target/ncurses-terminfo");
+        let status = Command::new("tic")
+            .args([
+                "-e",
+                "linux,vt100,vt100-am,dumb",
+                "-o",
+                compiled_dir.to_str().unwrap(),
+                src.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to run host `tic` to compile the minimal terminfo db \
+                     (install ncurses-bin/ncurses-utils on the build host): {e}"
+                )
+            });
+        assert!(status.success(), "host tic failed: {status}");
+
+        let mut files = collect_dir_files(&compiled_dir);
+        files.sort();
+        let mut src_out =
+            String::from("pub static NCURSES_TERMINFO_FILES: &[(&str, &[u8])] = &[\n");
+        for (rel, abs) in &files {
+            src_out.push_str(&format!(
+                "    ({rel:?}, include_bytes!({:?})),\n",
+                abs.display()
+            ));
+        }
+        src_out.push_str("];\n");
+        std::fs::write(&out_path, src_out)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    }
+    out_path
+}
+
+/// Cross-builds OpenVi (vendored as `usr.bin/vi`, a submodule -- see CLAUDE.md's ncurses/nano/nvi
+/// section) into a static `bin/vi` against `musl_sysroot` + `ncurses_sysroot`. Uses OpenVi's own
+/// plain `GNUmakefile` directly (no autotools) -- already a genuinely portable, cross-platform
+/// build (its own `openbsd/` directory ships BSD-compat shims -- `strlcpy`/`getopt_long`/
+/// `reallocarray`/... -- for exactly this kind of non-glibc/non-BSD target). `-static` links
+/// against a matching real `sys/queue.h`/`sys/cdefs.h`/`bitstring.h` this project's own musl fork
+/// gained specifically for this port (see that fork's own commit history) -- musl ships none of
+/// the three (all real BSD-isms, not POSIX).
+///
+/// **Two real invocation gotchas, both about GNU Make variable precedence, not this Makefile's own
+/// bugs:**
+/// - `CURSESLIB`/`OS` are passed as `make` command-line args (highest precedence) *deliberately*
+///   -- the Makefile's own `ifndef CURSESLIB` pkg-config-autodetect block, and its `ifeq ($(OS),
+///   ...)` platform branches, both need a command-line-origin value to reliably short-circuit (an
+///   environment-origin value doesn't count as "defined" for `ifndef` purposes the same way).
+///   `OS=oxidebsd` matches none of the Makefile's special-cased platforms (`netbsd`/`aix`/
+///   `solaris`/`illumos`/`sunos`), so it safely falls through to the same generic-Unix flag set
+///   `linux` would.
+/// - `CFLAGS`/`LDFLAGS` are passed as **environment** variables instead, the opposite precedence
+///   choice, for the opposite reason: this Makefile's own `CFLAGS += $(CSTD) $(INCLDS)` (needed
+///   for `-Iinclude`, home to the `bsd_stdlib.h`/`bsd_string.h`/... headers OpenVi ships itself)
+///   is a plain in-makefile `+=`, which a command-line-origin `CFLAGS` value would silently block
+///   entirely (GNU Make blocks *any* makefile-side assignment to a command-line-overridden
+///   variable, `+=` included, unless the makefile itself uses `override`) -- found live: passing
+///   `CFLAGS=` on the `make` command line made every `cl/*.c`/`common/*.c` file fail with `fatal
+///   error: bsd_stdlib.h: No such file or directory` despite that header genuinely existing right
+///   there in `include/`. An environment-origin value doesn't have this problem; the makefile's
+///   own `+=` sees and extends it normally.
+///
+/// `-lncursesw`, not `-lncurses` -- this project's own ncurses build is wide-char-only (see
+/// `build_ncurses`'s own doc comment), and there is no `libncurses.a` to fall back to.
+fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
+    const VI_LOAD_ADDR: u64 = 0x1a00_0000;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("usr.bin/vi");
+    let bin = src.join("bin/vi");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let ncurses_mtime = std::fs::metadata(ncurses_sysroot.join("lib/libncursesw.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let src_mtime = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime);
+    if std::fs::metadata(&bin)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= floor)
+    {
+        return bin;
+    }
+
+    let _ = std::fs::remove_file(&bin);
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+    let jobs = build_jobs();
+    let status = Command::new("make")
+        .current_dir(&src)
+        .env(
+            "CFLAGS",
+            format!("-I{} -Os", ncurses_sysroot.join("include").display()),
+        )
+        .env(
+            "LDFLAGS",
+            format!(
+                "-static -no-pie -L{} -Wl,-Ttext-segment={VI_LOAD_ADDR:#x}",
+                ncurses_sysroot.join("lib").display()
+            ),
+        )
+        .args([
+            "-j",
+            &jobs.to_string(),
+            "bin/vi",
+            &format!("CC={}", musl_gcc.display()),
+            "OS=oxidebsd",
+            "CURSESLIB=-lncursesw",
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make for OpenVi: {e}"));
+    assert!(status.success(), "OpenVi build failed: {status}");
+    assert!(bin.exists(), "OpenVi build produced no bin/vi");
+    bin
+}
+
+/// Cross-builds GNU nano (vendored as `usr.bin/nano`, a submodule -- see CLAUDE.md's
+/// ncurses/nano/nvi section) into a static `src/nano` against `musl_sysroot` + `ncurses_sysroot`.
+///
+/// **The submodule's `oxidebsd` branch carries one real addition on top of the bare upstream git
+/// checkout**: the official v9.2 release tarball's own generated build files (`configure`,
+/// `config.h.in`, `m4/*`, the whole gnulib-derived `lib/` shim directory) overlaid on top -- the
+/// bare git checkout deliberately doesn't ship any of that (upstream's own `autogen.sh` clones a
+/// separate `gnulib` git repo at `--depth=2222` and runs `gnulib-tool`+`autoreconf` to produce it
+/// fresh), and replicating that heavy chain in this project's own build pipeline wasn't worth it
+/// when the exact same generated output already ships in every tagged release.
+///
+/// **Real, wide-char (`ncursesw`) build, deliberately not `--enable-tiny`** -- this project's own
+/// ncurses build has no narrow `libncurses.a` to fall back to (see `build_ncurses`'s own doc
+/// comment), and `--enable-tiny` strips real features from what's meant to be this kernel's
+/// primary, fully-featured editor.
+///
+/// **`LDFLAGS` is a `make` *command-line* argument at the final build step, the opposite
+/// precedence choice from `build_nvi`'s hand-written `GNUmakefile`, for a real, distinct reason**:
+/// automake substitutes `@LDFLAGS@` into the generated `src/Makefile` *at configure time*,
+/// producing a hardcoded plain `LDFLAGS = ...` assignment -- a plain makefile-side `=` always
+/// overrides an environment-origin value (unlike a command-line-origin one), so an environment
+/// `LDFLAGS` at `make` time is silently ignored entirely. Found live: the resulting `nano` linked
+/// with a default, unfixed entry point (`0x402554`) inside this kernel's own reserved low-memory
+/// region despite a real `-Wl,-Ttext-segment=` having been set via the environment at `make` time.
+/// `CFLAGS`/`CC` go through `./configure` itself (environment, standard autoconf convention) --
+/// that value does need to survive into the generated Makefile's own further `+=`-extended uses
+/// (`CFLAGS` also picks up nano's own warning/optimization flags this way), unlike `LDFLAGS`,
+/// which `configure` never touches again after baking its own copy in.
+fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
+    const NANO_LOAD_ADDR: u64 = 0x1c00_0000;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("usr.bin/nano");
+    let build_dir = Path::new(manifest_dir).join("target/nano");
+    let bin = build_dir.join("src/nano");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let musl_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let ncurses_mtime = std::fs::metadata(ncurses_sysroot.join("lib/libncursesw.a"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    let src_mtime = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime);
+    if std::fs::metadata(&bin)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= floor)
+    {
+        return bin;
+    }
+
+    let _ = std::fs::remove_dir_all(&build_dir);
+    std::fs::create_dir_all(&build_dir).expect("failed to create target/nano");
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+
+    let status = Command::new(src.join("configure"))
+        .current_dir(&build_dir)
+        .env("CC", &musl_gcc)
+        .env(
+            "CFLAGS",
+            format!("-I{} -Os", ncurses_sysroot.join("include").display()),
+        )
+        .env(
+            "LDFLAGS",
+            format!("-static -no-pie -L{}", ncurses_sysroot.join("lib").display()),
+        )
+        .args(["--host=x86_64-unknown-linux-musl", "--disable-nls"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run nano configure: {e}"));
+    assert!(status.success(), "nano configure failed: {status}");
+
+    let jobs = build_jobs();
+    let status = Command::new("make")
+        .current_dir(&build_dir)
+        .args([
+            "-j",
+            &jobs.to_string(),
+            &format!(
+                "LDFLAGS=-static -no-pie -L{} -Wl,-Ttext-segment={NANO_LOAD_ADDR:#x}",
+                ncurses_sysroot.join("lib").display()
+            ),
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make for nano: {e}"));
+    assert!(status.success(), "nano build failed: {status}");
+    assert!(bin.exists(), "nano build produced no src/nano");
+    bin
 }
 
 /// Two files, both under `sigwait`/`timer_settime`, **confirmed by direct testing** to hang

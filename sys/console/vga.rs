@@ -402,6 +402,26 @@ impl Writer {
                     .cursor_col
                     .saturating_sub(self.csi_param(0, 1) as usize)
             }
+            // VPA: vertical position absolute, 1-based row, column unchanged. A real, previously
+            // unhit gap -- found live via OpenVi (see CLAUDE.md's ncurses/nano/nvi section), whose
+            // curses backend uses this for every row-only cursor move (its own status-line/tilde-
+            // fill redraw is almost entirely `ESC[Nd` sequences). Nothing in the prior userland
+            // roster (BusyBox et al.) ever emitted it, so the pre-existing `_ => {}` catch-all
+            // silently swallowed it instead of moving the cursor -- every subsequent write landed
+            // at whatever position the cursor was last left at instead of where the program
+            // actually intended, visually collapsing a full-screen redraw down to its own last
+            // line.
+            b'd' => {
+                let row = self.csi_param(0, 1).saturating_sub(1) as usize;
+                self.cursor_row = row.min(self.height - 1);
+            }
+            // CHA/HPA: horizontal position absolute, 1-based column, row unchanged. Same real gap
+            // class as VPA above, `G` (CHA) or backtick (HPA) -- not confirmed hit yet, but cheap
+            // and correct to close alongside it rather than wait for a second live repro.
+            b'G' | b'`' => {
+                let col = self.csi_param(0, 1).saturating_sub(1) as usize;
+                self.cursor_col = col.min(self.width - 1);
+            }
             b'J' => self.erase_in_display(self.csi_param(0, 0)),
             b'K' => self.erase_in_line(self.csi_param(0, 0)),
             b'm' => self.apply_sgr(),
