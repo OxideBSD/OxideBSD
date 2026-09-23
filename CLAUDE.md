@@ -1283,7 +1283,7 @@ Verified end to end via `tests/clang_syscall_smoke.rs`: a real `clang -static -o
 which printed its own output and exited `0`. Closes this port's own headline subprocess-pipeline
 milestone.
 
-## bmake (`usr.bin/make`, `build.rs`'s `build_bmake`) — self-hosting stage 1
+## bmake (`usr.bin/make`, `build.rs`'s `build_bmake`) — self-hosting stage 1: **done**
 
 Upstream portable bmake 20260912, vendored as a plain committed tree (tarball from crufty.net; no
 git mirror exists, no fork). Cross-built by `configure --host=…` (skips run-tests) +
@@ -1291,8 +1291,12 @@ git mirror exists, no fork). Cross-built by `configure --host=…` (skips run-te
 `*.mk` seeded at `/usr/share/mk` (`BMAKE_MK_FILES`). Verified live (headless `sendkey`): bmake
 drives on-target `clang -c` + link + run, incremental rebuilds/`touch` dependency tracking correct.
 Editing `build.rs` does *not* stale BusyBox (only `build_busybox.rs` does). Known: `gettid` (186)
-is unrecognized — clang logs it once per compile, harmless so far. Staged plan: C → C++ (seed
-libc++) → ninja/cmake → rebuild clang; nano (+ vendored ncurses) is next.
+is unrecognized — clang logs it once per compile, harmless so far. **Genuinely self-hosts on
+target now, not just pre-built**: bmake's own `configure` + `make-bootstrap.sh`, run on-target
+under `/bin/ash` driving on-target `clang`, both exit `0` and produce a real, working `bmake`
+binary built entirely from its own source (see the `NAME_MAX` bug below for what blocked this).
+Staged plan for the rest of self-hosting: C → C++ (seed libc++) → ninja/cmake → rebuild clang;
+**nano (+ vendored ncurses) is next, planned for a separate session.**
 
 - **`hush` can't parse `>&$var`** (redirect to a variable file descriptor, e.g. `>&$4`) — real
   BusyBox `shell/hush.c` parser limitation (`redirect_opt_num`'s own `//TODO: this is the place to
