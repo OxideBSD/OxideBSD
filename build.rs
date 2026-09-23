@@ -224,6 +224,7 @@ fn main() {
     build_userland_crate("clone-syscall-smoke", "CLONE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -299,6 +300,7 @@ fn main() {
     // doc comment.
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
+    let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
 
     // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
@@ -485,6 +487,7 @@ fn main() {
             pthread_smoke_elf_path.to_str().unwrap(),
         ),
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         (
             "OXFS_SEM_OPEN_SMOKE_ELF_PATH",
             sem_open_smoke_elf_path.to_str().unwrap(),
@@ -1419,6 +1422,29 @@ fn build_at_smoke(sysroot: &Path) -> PathBuf {
     out
 }
 
+/// `ppoll(2)`'s real musl-linked coverage -- see `regress/ppoll-smoke/main.c`. Same recipe as
+/// `build_at_smoke`, next slot (`0x8280000`).
+fn build_ppoll_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/ppoll-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/ppoll-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/ppoll-smoke");
+    let out = target_dir.join("ppoll-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8280000", "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for ppoll-smoke: {e}"));
+    if !status.success() {
+        panic!("building ppoll-smoke failed: {status}");
+    }
+    out
+}
+
 /// Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) -- see
 /// `regress/sem-open-smoke/main.c`'s own doc comment for the scenario, and
 /// `process::limits::futex_key`'s own doc comment (`sys/process/limits.rs`) for the real
@@ -1903,15 +1929,26 @@ fn build_llvm_host_toolchain() -> PathBuf {
         return build_dir;
     }
 
-    if !build_dir.join("build.ninja").exists() {
-        std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-host-build");
-        let status = Command::new("cmake")
-            .args(["-G", "Ninja", "-S"])
-            .arg(llvm_root.join("llvm"))
-            .arg("-B")
-            .arg(&build_dir)
-            .args([
-                "-DLLVM_ENABLE_PROJECTS=clang;lld",
+    // Same configure-args stamp as `build_llvm_target_toolchain` (see there): a flag added to this
+    // list must actually reach an existing build dir.
+    let mut configure_args: Vec<String> = vec![
+        "-G".into(),
+        "Ninja".into(),
+        "-S".into(),
+        llvm_root.join("llvm").display().to_string(),
+        "-B".into(),
+        build_dir.display().to_string(),
+    ];
+    configure_args.extend(
+        [
+            // Keeps a commit to the LLVM fork from changing the host compiler's identity. clang
+            // embeds the repo revision in its version string, and a precompiled header built by
+            // a different revision is rejected outright -- found live: committing the fork's own
+            // driver change broke the next target-clang rebuild with "PCH file ... built from a
+            // different branch ... than the compiler". See also the stale-PCH sweep in
+            // `build_llvm_target_toolchain`, for real compiler changes.
+            "-DLLVM_APPEND_VC_REV=OFF",
+            "-DLLVM_ENABLE_PROJECTS=clang;lld",
                 "-DLLVM_TARGETS_TO_BUILD=X86",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLVM_ENABLE_EH=OFF",
@@ -1931,14 +1968,27 @@ fn build_llvm_host_toolchain() -> PathBuf {
                 "-DLLVM_ENABLE_TERMINFO=OFF",
                 "-DLLVM_ENABLE_LIBPFM=OFF",
                 "-DLLVM_ENABLE_LIBEDIT=OFF",
-                "-DLLVM_CCACHE_BUILD=ON",
-                "-DLLVM_PARALLEL_LINK_JOBS=2",
-            ])
+            "-DLLVM_CCACHE_BUILD=ON",
+            "-DLLVM_PARALLEL_LINK_JOBS=2",
+        ]
+        .map(String::from),
+    );
+    let configure_stamp = build_dir.join("oxidebsd-configure-args.stamp");
+    let configure_args_text = configure_args.join("\n");
+    let configure_changed = std::fs::read_to_string(&configure_stamp)
+        .map(|old| old != configure_args_text)
+        .unwrap_or(true);
+    if configure_changed || !build_dir.join("build.ninja").exists() {
+        std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-host-build");
+        let status = Command::new("cmake")
+            .args(&configure_args)
             .status()
             .unwrap_or_else(|e| panic!("failed to run cmake for llvm-host-build: {e}"));
         if !status.success() {
             panic!("cmake configure for llvm-host-build failed: {status}");
         }
+        std::fs::write(&configure_stamp, &configure_args_text)
+            .expect("failed to write llvm-host-build configure stamp");
     }
 
     let status = Command::new("ninja")
@@ -2257,6 +2307,23 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
         }
         std::fs::write(&configure_stamp, &configure_args_text)
             .expect("failed to write llvm-target-build configure stamp");
+    }
+
+    // Precompiled headers are only valid for the exact compiler that built them (clang rejects a
+    // PCH from a different compiler revision outright), but ninja has no edge from the host
+    // compiler binary to them. Any PCH older than the current host clang is swept so ninja
+    // regenerates it -- found live, see `build_llvm_host_toolchain`'s `LLVM_APPEND_VC_REV`.
+    let host_clang_mtime = std::fs::metadata(host_build.join("bin/clang-23"))
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for (_, pch) in collect_dir_files(&build_dir) {
+        let is_stale_pch = pch.extension().is_some_and(|e| e == "pch")
+            && std::fs::metadata(&pch)
+                .and_then(|m| m.modified())
+                .is_ok_and(|m| m < host_clang_mtime);
+        if is_stale_pch {
+            let _ = std::fs::remove_file(&pch);
+        }
     }
 
     let status = Command::new("ninja")
