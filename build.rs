@@ -2687,9 +2687,11 @@ fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
 /// automake substitutes `@LDFLAGS@` into the generated `src/Makefile` *at configure time*,
 /// producing a hardcoded plain `LDFLAGS = ...` assignment -- a plain makefile-side `=` always
 /// overrides an environment-origin value (unlike a command-line-origin one), so an environment
-/// `LDFLAGS` at `make` time is silently ignored entirely. Found live: the resulting `nano` linked
-/// with a default, unfixed entry point (`0x402554`) inside this kernel's own reserved low-memory
-/// region despite a real `-Wl,-Ttext-segment=` having been set via the environment at `make` time.
+/// `LDFLAGS` at `make` time is silently ignored entirely. Found live, and yes, this earned a real
+/// "you have got to be fucking kidding me" out loud: the resulting `nano` linked with a default,
+/// unfixed entry point (`0x402554`) inside this kernel's own reserved low-memory region *despite*
+/// a real `-Wl,-Ttext-segment=` having been set via the environment at `make` time -- the exact
+/// same flag, the exact same mechanism, that worked one function up for `build_nvi`.
 /// `CFLAGS`/`CC` go through `./configure` itself (environment, standard autoconf convention) --
 /// that value does need to survive into the generated Makefile's own further `+=`-extended uses
 /// (`CFLAGS` also picks up nano's own warning/optimization flags this way), unlike `LDFLAGS`,

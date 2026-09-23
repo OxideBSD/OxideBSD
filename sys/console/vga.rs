@@ -410,7 +410,8 @@ impl Writer {
             // silently swallowed it instead of moving the cursor -- every subsequent write landed
             // at whatever position the cursor was last left at instead of where the program
             // actually intended, visually collapsing a full-screen redraw down to its own last
-            // line.
+            // line. Nothing swallows a cursor-positioning escape code on this console and gets
+            // away with it -- not on my watch.
             b'd' => {
                 let row = self.csi_param(0, 1).saturating_sub(1) as usize;
                 self.cursor_row = row.min(self.height - 1);
