@@ -80,6 +80,10 @@ name = "clock"
 version = "0.1.0"
 
 [[package]]
+name = "clangxx-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "clock-syscall-smoke"
 version = "0.1.0"
 

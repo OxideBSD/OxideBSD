@@ -29,6 +29,7 @@ members = [
   "regress/needs-syscall-smoke",
   "regress/needs-syscall2-smoke",
   "regress/clang-syscall-smoke",
+  "regress/clangxx-syscall-smoke",
   "regress/access-syscall-smoke",
   "regress/pipe-backpressure-syscall-smoke",
   "regress/dynlink-syscall-smoke",
@@ -210,6 +211,10 @@ harness = false
 
 [[test]]
 name = "clang_syscall_smoke"
+harness = false
+
+[[test]]
+name = "clangxx_syscall_smoke"
 harness = false
 
 [[test]]

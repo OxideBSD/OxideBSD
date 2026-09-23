@@ -156,6 +156,7 @@ fn main() {
     build_userland_crate("needs-syscall-smoke", "NEEDS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("needs-syscall2-smoke", "NEEDS_SYSCALL2_SMOKE_ELF_PATH");
     build_userland_crate("clang-syscall-smoke", "CLANG_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("clangxx-syscall-smoke", "CLANGXX_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "std-hello-syscall-smoke",
         "STD_HELLO_SYSCALL_SMOKE_ELF_PATH",
@@ -328,6 +329,7 @@ fn main() {
     let clang_elf_path = llvm_target_build.join("bin/clang-23");
     let lld_elf_path = llvm_target_build.join("bin/lld");
     let clang_runtime_manifest_path = write_clang_runtime_manifest(&llvm_target_build);
+    let libcxx_runtime_manifest_path = write_libcxx_runtime_manifest(&llvm_host_build);
     let bmake_elf_path = build_bmake(&musl_sysroot);
     let bmake_mk_manifest_path = write_bmake_mk_manifest();
 
@@ -523,6 +525,10 @@ fn main() {
         (
             "POSIX_TEST_MANIFEST_PATH",
             posix_test_manifest_path.to_str().unwrap(),
+        ),
+        (
+            "LIBCXX_RUNTIME_MANIFEST_PATH",
+            libcxx_runtime_manifest_path.to_str().unwrap(),
         ),
         (
             "OXFS_DYNLINK_LIBC_SO_PATH",
@@ -1930,7 +1936,7 @@ fn build_llvm_host_toolchain() -> PathBuf {
 /// flags** -- found live: setting only `LIBCXX_ENABLE_STATIC_ABI_LIBRARY` (whose doc text implies
 /// it controls this) merges libc++abi's own symbols into `libc++.a` but leaves libunwind's
 /// (`_Unwind_Resume`, etc.) undefined at final link time. Without both, a real link against
-/// `libc++.a` alone (as OxideBSD's own Clang driver does -- see `OxideBSD::AddCXXStdlibLibArgs`)
+/// `libc++.a` alone (what the OxideBSD driver's inherited generic `-lc++` link line does)
 /// fails with undefined `__cxa_throw`/`_Unwind_Resume`/exception-class vtable symbols.
 fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -2058,6 +2064,15 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     if !status.success() {
         panic!("building target runtimes (libc++/libc++abi/libunwind) failed: {status}");
     }
+    // ninja leaves `libc++.a` untouched when nothing it depends on changed (e.g. a driver-only
+    // edit relinked the host clang) -- but the freshness check above compares it against the
+    // host clang's mtime, so without this it reads "stale" forever and every build re-runs the
+    // runtimes reconfigure. It *is* up to date as of right now.
+    std::fs::File::options()
+        .write(true)
+        .open(&libcxx_out)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+        .unwrap_or_else(|e| panic!("failed to bump {} mtime: {e}", libcxx_out.display()));
 }
 
 /// Builds the real, on-target-executable clang+lld (this port's actual deliverable) using
@@ -2068,10 +2083,15 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
 /// binaries can't run on this host during a `cmake`/`try_compile` step). `CMAKE_FIND_ROOT_PATH*`
 /// is load-bearing, not boilerplate: without it, CMake's own `find_package(Backtrace)` (and
 /// similar) search the *host's* `/usr/include` and incorrectly find host-only glibc headers musl
-/// doesn't provide (`execinfo.h` is the real one that broke this live). `-DCLANG_DEFAULT_SYSROOT=
-/// /usr` bakes in oxfs's real on-target musl layout (`/usr/include`, `/usr/lib` -- see
+/// doesn't provide (`execinfo.h` is the real one that broke this live). `-DDEFAULT_SYSROOT=/usr`
+/// bakes in oxfs's real on-target musl layout (`/usr/include`, `/usr/lib` -- see
 /// `format_fresh_filesystem`'s own seeding) so on-target invocations need no extra `--sysroot`
-/// flag.
+/// flag. **It was `-DCLANG_DEFAULT_SYSROOT` for the whole original port -- not a real cmake
+/// variable** (cached as `UNINITIALIZED`, `config.h` got `DEFAULT_SYSROOT ""`), so the on-target
+/// sysroot was silently empty. C compiles hid it: cc1's own `InitHeaderSearch` falls back to
+/// `/usr/include` for triples the driver doesn't claim, and `OxideBSD::OxideBSD` registers
+/// `/usr/lib` explicitly. libc++ headers have no such fallback -- found by the first on-target
+/// `clang++` run.
 fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let llvm_src = Path::new(manifest_dir).join("external/apache2/llvm/llvm");
@@ -2089,93 +2109,120 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
     // `MAX_EXECVE_ENTRIES` truncating a real `clang -cc1` subprocess's own argv) never actually
     // took effect in the seeded `/bin/clang` until this was fixed, even though the fresh musl
     // source was rebuilt correctly every time.
+    let host_clang = host_build.join("bin/clang");
+    let host_clangxx = host_build.join("bin/clang++");
+    let mut configure_args: Vec<String> = vec![
+        "-G".into(),
+        "Ninja".into(),
+        "-S".into(),
+        llvm_src.display().to_string(),
+        "-B".into(),
+        build_dir.display().to_string(),
+        "-DCMAKE_SYSTEM_NAME=Linux".into(),
+        "-DCMAKE_SYSTEM_PROCESSOR=x86_64".into(),
+        format!("-DCMAKE_C_COMPILER={}", host_clang.display()),
+        format!("-DCMAKE_CXX_COMPILER={}", host_clangxx.display()),
+        format!("-DCMAKE_ASM_COMPILER={}", host_clang.display()),
+        format!("-DCMAKE_C_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"),
+        format!("-DCMAKE_CXX_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"),
+        format!("-DCMAKE_ASM_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"),
+        format!("-DCMAKE_SYSROOT={}", musl_sysroot.display()),
+        "-DCMAKE_C_FLAGS=-static -fuse-ld=lld".into(),
+        "-DCMAKE_CXX_FLAGS=-static -fuse-ld=lld".into(),
+        "-DCMAKE_EXE_LINKER_FLAGS=-static -fuse-ld=lld".into(),
+        "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY".into(),
+        "-DCMAKE_CROSSCOMPILING=TRUE".into(),
+        format!("-DCMAKE_FIND_ROOT_PATH={}", musl_sysroot.display()),
+        format!("-DLLVM_NATIVE_BUILD={}", host_build.display()),
+        format!("-DCLANG_NATIVE_BUILD={}", host_build.display()),
+        // Without this the on-target clang bakes in the build's own guessed host triple
+        // (`x86_64-unknown-linux-gnu`), so every on-target invocation needed an explicit
+        // `--target=`. Touches `llvm-config.h` -- changing it is a near-full rebuild.
+        format!("-DLLVM_DEFAULT_TARGET_TRIPLE={CLANG_TARGET_TRIPLE}"),
+    ];
+    configure_args.extend(
+        [
+            "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+            "-DLLVM_ENABLE_PROJECTS=clang;lld",
+            "-DLLVM_TARGETS_TO_BUILD=X86",
+            "-DCMAKE_BUILD_TYPE=MinSizeRel",
+            "-DLLVM_ENABLE_EH=OFF",
+            "-DLLVM_ENABLE_RTTI=OFF",
+            "-DLLVM_ENABLE_THREADS=OFF",
+            "-DLLVM_INCLUDE_TESTS=OFF",
+            "-DLLVM_INCLUDE_EXAMPLES=OFF",
+            "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+            "-DLLVM_INCLUDE_DOCS=OFF",
+            "-DLLVM_BUILD_TOOLS=ON",
+            "-DCLANG_INCLUDE_TESTS=OFF",
+            "-DCLANG_ENABLE_ARCMT=OFF",
+            "-DCLANG_ENABLE_STATIC_ANALYZER=OFF",
+            "-DCLANG_BUILD_TOOLS=ON",
+            "-DDEFAULT_SYSROOT=/usr",
+            "-DLLVM_ENABLE_ZLIB=OFF",
+            "-DLLVM_ENABLE_ZSTD=OFF",
+            "-DLLVM_ENABLE_LIBXML2=OFF",
+            "-DLLVM_ENABLE_TERMINFO=OFF",
+            "-DLLVM_ENABLE_LIBPFM=OFF",
+            "-DLLVM_ENABLE_LIBEDIT=OFF",
+            "-DLLVM_CCACHE_BUILD=ON",
+            "-DLLVM_PARALLEL_LINK_JOBS=2",
+        ]
+        .map(String::from),
+    );
+    // The configure args themselves are a staleness input: a cmake cache variable added to the
+    // list above must force a reconfigure + rebuild. Found live -- `LLVM_DEFAULT_TARGET_TRIPLE`
+    // was added here and silently never applied (the build dir was only ever configured once,
+    // and mtimes alone called the binaries fresh).
+    let configure_stamp = build_dir.join("oxidebsd-configure-args.stamp");
+    let configure_args_text = configure_args.join("\n");
+    let configure_changed = std::fs::read_to_string(&configure_stamp)
+        .map(|old| old != configure_args_text)
+        .unwrap_or(true);
+
     let musl_libc_mtime = std::fs::metadata(musl_sysroot.join("lib/libc.a"))
         .and_then(|m| m.modified())
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    // The patched driver sources compile into this clang too, not just the host one. Depending
+    // on them only transitively (host clang -> runtimes -> libc++.a) was a real gap, found live:
+    // a driver edit relinks the host clang, but libc++ doesn't depend on the driver, so the
+    // no-op runtimes rebuild never moved libc++.a's mtime and this binary was judged fresh.
+    let driver_mtime =
+        latest_mtime(&Path::new(manifest_dir).join("external/apache2/llvm/clang/lib/Driver"));
     let freshness_floor =
         std::fs::metadata(host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a")))
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::now())
-            .max(musl_libc_mtime);
-    let already_fresh = [&clang_bin, &lld_bin].into_iter().all(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .map(|m| m >= freshness_floor)
-            .unwrap_or(false)
-    });
+            .max(musl_libc_mtime)
+            .max(driver_mtime);
+    let already_fresh = !configure_changed
+        && [&clang_bin, &lld_bin].into_iter().all(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .map(|m| m >= freshness_floor)
+                .unwrap_or(false)
+        });
     if already_fresh {
         return build_dir;
     }
 
-    if build_dir.join("build.ninja").exists() {
-        // `ninja` has no dependency edge from `musl_sysroot`'s own libraries to this build's
-        // *link* steps (they're resolved by the linker via `-DCMAKE_SYSROOT=`, never recorded as
-        // ninja-tracked inputs) -- so if `clang_bin`/`lld_bin` are merely musl-stale (already
-        // compiled, just linked against an old `libc.a`), plain `ninja clang lld` below would
-        // see its own build graph as fully satisfied and do nothing at all. Deleting just the
-        // final output binaries forces ninja to consider those two link edges outstanding and
-        // redo them -- a real relink using already-compiled object files, not a full rebuild.
-        for bin in [&clang_bin, &lld_bin] {
-            let _ = std::fs::remove_file(bin);
-        }
-    } else {
+    // `ninja` has no dependency edge from `musl_sysroot`'s own libraries to this build's *link*
+    // steps (they're resolved by the linker via `-DCMAKE_SYSROOT=`, never recorded as
+    // ninja-tracked inputs) -- so if `clang_bin`/`lld_bin` are merely musl-stale (already
+    // compiled, just linked against an old `libc.a`), plain `ninja clang lld` below would see its
+    // own build graph as fully satisfied and do nothing at all. Deleting just the final output
+    // binaries forces ninja to consider those two link edges outstanding and redo them -- a real
+    // relink using already-compiled object files, not a full rebuild.
+    for bin in [&clang_bin, &lld_bin] {
+        let _ = std::fs::remove_file(bin);
+    }
+    if configure_changed || !build_dir.join("build.ninja").exists() {
         std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-target-build");
-        let host_clang = host_build.join("bin/clang");
-        let host_clangxx = host_build.join("bin/clang++");
         let status = Command::new("cmake")
-            .args(["-G", "Ninja", "-S"])
-            .arg(&llvm_src)
-            .arg("-B")
-            .arg(&build_dir)
-            .arg("-DCMAKE_SYSTEM_NAME=Linux")
-            .arg("-DCMAKE_SYSTEM_PROCESSOR=x86_64")
-            .arg(format!("-DCMAKE_C_COMPILER={}", host_clang.display()))
-            .arg(format!("-DCMAKE_CXX_COMPILER={}", host_clangxx.display()))
-            .arg(format!("-DCMAKE_ASM_COMPILER={}", host_clang.display()))
-            .arg(format!("-DCMAKE_C_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
-            .arg(format!("-DCMAKE_CXX_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
-            .arg(format!("-DCMAKE_ASM_COMPILER_TARGET={CLANG_TARGET_TRIPLE}"))
-            .arg(format!("-DCMAKE_SYSROOT={}", musl_sysroot.display()))
-            .arg("-DCMAKE_C_FLAGS=-static -fuse-ld=lld")
-            .arg("-DCMAKE_CXX_FLAGS=-static -fuse-ld=lld")
-            .arg("-DCMAKE_EXE_LINKER_FLAGS=-static -fuse-ld=lld")
-            .arg("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")
-            .arg("-DCMAKE_CROSSCOMPILING=TRUE")
-            .arg(format!("-DCMAKE_FIND_ROOT_PATH={}", musl_sysroot.display()))
-            .args([
-                "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
-                "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
-                "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
-                "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
-            ])
-            .arg(format!("-DLLVM_NATIVE_BUILD={}", host_build.display()))
-            .arg(format!("-DCLANG_NATIVE_BUILD={}", host_build.display()))
-            .args([
-                "-DLLVM_ENABLE_PROJECTS=clang;lld",
-                "-DLLVM_TARGETS_TO_BUILD=X86",
-                "-DCMAKE_BUILD_TYPE=MinSizeRel",
-                "-DLLVM_ENABLE_EH=OFF",
-                "-DLLVM_ENABLE_RTTI=OFF",
-                "-DLLVM_ENABLE_THREADS=OFF",
-                "-DLLVM_INCLUDE_TESTS=OFF",
-                "-DLLVM_INCLUDE_EXAMPLES=OFF",
-                "-DLLVM_INCLUDE_BENCHMARKS=OFF",
-                "-DLLVM_INCLUDE_DOCS=OFF",
-                "-DLLVM_BUILD_TOOLS=ON",
-                "-DCLANG_INCLUDE_TESTS=OFF",
-                "-DCLANG_ENABLE_ARCMT=OFF",
-                "-DCLANG_ENABLE_STATIC_ANALYZER=OFF",
-                "-DCLANG_BUILD_TOOLS=ON",
-                "-DCLANG_DEFAULT_SYSROOT=/usr",
-                "-DLLVM_ENABLE_ZLIB=OFF",
-                "-DLLVM_ENABLE_ZSTD=OFF",
-                "-DLLVM_ENABLE_LIBXML2=OFF",
-                "-DLLVM_ENABLE_TERMINFO=OFF",
-                "-DLLVM_ENABLE_LIBPFM=OFF",
-                "-DLLVM_ENABLE_LIBEDIT=OFF",
-                "-DLLVM_CCACHE_BUILD=ON",
-                "-DLLVM_PARALLEL_LINK_JOBS=2",
-            ])
+            .args(&configure_args)
             .status()
             .unwrap_or_else(|e| panic!("failed to run cmake for llvm-target-build: {e}"));
         if !status.success() {
@@ -2222,6 +2269,8 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
         if !status.success() {
             panic!("stripping {} failed: {status}", bin.display());
         }
+        std::fs::write(&configure_stamp, &configure_args_text)
+            .expect("failed to write llvm-target-build configure stamp");
     }
 
     build_dir
@@ -2231,7 +2280,7 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
 /// own resource-dir intrinsic headers (`stddef.h`/`stdarg.h`/x86 intrinsics/...) plus the
 /// compiler-rt builtins archive `build_llvm_target_runtimes` installs, seeded on-target under
 /// `/lib/clang/23` -- clang's own binary-relative default resource-dir location (`<bindir>/../lib/
-/// clang/<ver>`), distinct from `--sysroot`/`CLANG_DEFAULT_SYSROOT` (which only governs
+/// clang/<ver>`), distinct from `--sysroot`/`DEFAULT_SYSROOT` (which only governs
 /// `/usr/include`+`/usr/lib`).
 fn write_clang_runtime_manifest(target_build: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -2250,6 +2299,56 @@ fn write_clang_runtime_manifest(target_build: &Path) -> PathBuf {
         ));
     }
     src.push_str("];\n");
+
+    std::fs::write(&out_path, src)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    out_path
+}
+
+/// Generates `LIBCXX_INCLUDE_FILES`/`LIBCXX_TARGET_INCLUDE_FILES`/`LIBCXX_LIB_FILES` (same idiom as
+/// `write_musl_runtime_manifest`): the C++ runtime `build_llvm_target_runtimes` already builds for
+/// the target clang's *own* link, now seeded on-target too so `clang++` can use it. FreeBSD's
+/// layout: generic headers at `/usr/include/c++/v1`, the per-triple `__config_site` at
+/// `/usr/include/<triple>/c++/v1` (where the fork's `OxideBSD::addLibCxxIncludePaths` looks), and
+/// the archives in `/usr/lib` beside `libc.a`. `libc++.a` already has libc++abi+libunwind merged
+/// in (see `build_llvm_target_runtimes`); the standalone archives ride along for anyone linking
+/// `-lc++abi`/`-lunwind` explicitly. `libc++.modules.json` (C++20 `import std;` metadata, whose
+/// module sources were never installed) is skipped.
+fn write_libcxx_runtime_manifest(host_build: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let out_path = out_dir.join("libcxx_runtime_manifest.rs");
+
+    let mut src = String::new();
+    let mut write_array = |array_name: &str, mut files: Vec<(String, PathBuf)>| {
+        files.sort();
+        src.push_str(&format!("pub static {array_name}: &[(&str, &[u8])] = &[\n"));
+        for (rel, abs) in &files {
+            src.push_str(&format!(
+                "    ({rel:?}, include_bytes!({:?})),\n",
+                abs.display()
+            ));
+        }
+        src.push_str("];\n\n");
+    };
+
+    write_array(
+        "LIBCXX_INCLUDE_FILES",
+        collect_dir_files(&host_build.join("include/c++/v1")),
+    );
+    write_array(
+        "LIBCXX_TARGET_INCLUDE_FILES",
+        collect_dir_files(&host_build.join(format!("include/{CLANG_TARGET_TRIPLE}/c++/v1"))),
+    );
+    let lib_dir = host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}"));
+    write_array(
+        "LIBCXX_LIB_FILES",
+        ["libc++.a", "libc++abi.a", "libc++experimental.a", "libunwind.a"]
+            .into_iter()
+            .map(|name| (name.to_string(), lib_dir.join(name)))
+            .collect(),
+    );
 
     std::fs::write(&out_path, src)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));

@@ -1291,6 +1291,24 @@ Verified end to end via `tests/clang_syscall_smoke.rs`: a real `clang -static -o
 which printed its own output and exited `0`. Closes this port's own headline subprocess-pipeline
 milestone.
 
+**C++ stage (self-hosting clang, step 2)**: libc++/abi/unwind seeded FreeBSD-style
+(`/usr/include/c++/v1`, per-triple `__config_site` under `/usr/include/<triple>/c++/v1`, archives in
+`/usr/lib`; `write_libcxx_runtime_manifest`), `/bin/clang++ -> clang`, the LLVM fork's
+`OxideBSD::addLibCxxIncludePaths`, and `LLVM_DEFAULT_TARGET_TRIPLE` (no `--target=` needed any
+more). `tests/clangxx_syscall_smoke.rs` does a bare `clang++ -static -o /hello-cpp.elf /hello.cpp`
+and runs it (`sys/modules/oxfs/src/hello.cpp`: STL, exceptions across frames, RTTI, 4x
+`std::thread`+mutex, `std::filesystem`). Real bugs found:
+- **`-DCLANG_DEFAULT_SYSROOT` was never a real cmake variable** (it's `DEFAULT_SYSROOT`) -- the
+  on-target sysroot was silently empty for the whole port. C hid it (cc1's own `InitHeaderSearch`
+  falls back to `/usr/include` for driver-unclaimed triples; `/usr/lib` was registered explicitly).
+- `build_llvm_target_toolchain` only configured once and never tracked the patched driver sources
+  -- fixed with a configure-args stamp (`oxidebsd-configure-args.stamp`) plus a direct
+  `clang/lib/Driver` mtime floor. `build_llvm_target_runtimes` now bumps `libc++.a`'s mtime after a
+  no-op ninja run (was permanently "stale" vs. a relinked host clang).
+- **Open**: `std::filesystem::remove_all` fails -- libc++ uses `openat`/`unlinkat`/`fdopendir`, and
+  the whole `*at()` family is unported (musl still issues raw Linux `257`/`263`). Needs a
+  design decision (dirfd-relative resolution in oxfs + new syscalls + musl patches).
+
 ## bmake (`usr.bin/make`, `build.rs`'s `build_bmake`) — self-hosting stage 1: **done**
 
 Upstream portable bmake 20260912, vendored as a plain committed tree (tarball from crufty.net; no
