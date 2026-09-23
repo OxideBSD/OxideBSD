@@ -398,6 +398,10 @@ name = "posix_compat"
 version = "0.1.0"
 
 [[package]]
+name = "ppoll-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "proc-smoke"
 version = "0.1.0"
 

@@ -29,6 +29,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
     fn oxidebsd_sys_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
     fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) -> i64;
+    fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, mask_ptr: u64) -> i64;
     fn oxidebsd_sys_select(req_ptr: u64) -> i64;
 }
 
@@ -53,6 +54,9 @@ const SYS_SELECT: u64 = 23;
 /// real `std::net` consumer calls `local_addr()` (see `sys/net/udp.rs`'s
 /// `oxidebsd_sys_getsockname`/`sys/net/tcp.rs`'s `getsockname`).
 const SYS_GETSOCKNAME: u64 = 559;
+/// Real `ppoll(2)` -- see `crate::net::oxidebsd_sys_ppoll`. Continues past the `*at()` family's
+/// `560`-`574`, the highest numbers assigned before it.
+const SYS_PPOLL: u64 = 575;
 
 extern "C" fn handle_socket(domain: u64, ty: u64, protocol: u64, _r10: u64) -> i64 {
     unsafe { oxidebsd_sys_socket(domain, ty, protocol) }
@@ -94,6 +98,10 @@ extern "C" fn handle_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _r10: u64) -
     unsafe { oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms) }
 }
 
+extern "C" fn handle_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, mask_ptr: u64) -> i64 {
+    unsafe { oxidebsd_sys_ppoll(fds_ptr, nfds, timeout_ptr, mask_ptr) }
+}
+
 extern "C" fn handle_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     unsafe { oxidebsd_sys_select(req_ptr) }
 }
@@ -111,6 +119,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_ACCEPT, handle_accept);
         oxidebsd_register_syscall(SYS_GETSOCKNAME, handle_getsockname);
         oxidebsd_register_syscall(SYS_POLL, handle_poll);
+        oxidebsd_register_syscall(SYS_PPOLL, handle_ppoll);
         oxidebsd_register_syscall(SYS_SELECT, handle_select);
     }
     log(

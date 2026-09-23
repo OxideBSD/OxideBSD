@@ -76,7 +76,15 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
     // ever carries its raw bit pattern, so reinterpret it here rather than truncating it to an
     // always-positive u64.
     let timeout_ms = timeout_ms as i32 as i64;
-    let entries = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds as usize) };
+    // `poll(NULL, 0, timeout)` -- the portable-sleep idiom -- is legal and common, but a slice may
+    // never be built from a null pointer, even with length 0. Found live via `ppoll(NULL, 0, ...)`
+    // in `regress/ppoll-smoke`: the kernel panicked on this precondition check, reachable from
+    // any process through plain `poll` too.
+    let entries: &mut [PollFd] = if nfds == 0 {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds as usize) }
+    };
 
     // `crate::tsc`, not `crate::cpu::interrupts::ticks()`: this is a real syscall handler, and
     // `ticks()` is driven entirely by the timer IRQ, which can't fire for the syscall's *entire*
@@ -181,6 +189,52 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
         } else {
             core::hint::spin_loop();
         }
+    }
+}
+
+/// `SYS_PPOLL = 575` -- real `ppoll(2)`: `oxidebsd_sys_poll` with a `struct timespec` timeout
+/// (`NULL` = forever) and an optional signal mask installed atomically for the wait. musl's call
+/// passes `_NSIG/8` as a 5th argument (`R8`), which this ABI never reads, so it's simply ignored.
+/// Needed by ninja (`src/subprocess-posix.cc`, `USE_PPOLL`), which relies on the mask swap to
+/// handle `SIGINT`/`SIGTERM`/`SIGCHLD` without a race against its child-output wait.
+///
+/// The mask swap reuses `do_sigsuspend`'s machinery (`process::begin_temporary_sigmask`/
+/// `end_temporary_sigmask`), so a signal caught during the call runs its handler under the
+/// temporary mask and `sigreturn` restores the original. Known limit, inherited from
+/// `oxidebsd_sys_poll` itself: a signal arriving *while* the wait is genuinely blocked doesn't cut
+/// it short -- it's only noticed before and after the wait. Never a hang for fds this kernel
+/// reports as always-ready (pipes, regular files), which is ninja's case.
+pub extern "C" fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, mask_ptr: u64) -> i64 {
+    let timeout_ms: i64 = if timeout_ptr == 0 {
+        -1
+    } else {
+        // SAFETY: caller-owned `struct timespec { tv_sec: i64, tv_nsec: i64 }`, same trust
+        // boundary as every other user pointer here.
+        let [sec, nsec] = unsafe { (timeout_ptr as *const [i64; 2]).read_unaligned() };
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            return -(EINVAL as i64);
+        }
+        // Rounded up, so a nonzero sub-millisecond timeout never becomes a zero-timeout poll.
+        sec.saturating_mul(1000)
+            .saturating_add((nsec + 999_999) / 1_000_000)
+            .min(i32::MAX as i64)
+    };
+    if mask_ptr == 0 {
+        return oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms as u64);
+    }
+    let pid = crate::process::scheduler::current_pid();
+    let original = crate::process::begin_temporary_sigmask(pid, mask_ptr);
+    // Already deliverable under the new mask: real ppoll returns EINTR without waiting at all.
+    if crate::process::has_interrupting_signal_now(pid) {
+        crate::process::end_temporary_sigmask(pid, original);
+        return -(EINTR as i64);
+    }
+    let ready = oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms as u64);
+    let deferred = crate::process::end_temporary_sigmask(pid, original);
+    if deferred && ready == 0 {
+        -(EINTR as i64)
+    } else {
+        ready
     }
 }
 

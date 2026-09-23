@@ -854,6 +854,50 @@ pub fn do_sigsuspend(pid: Pid, mask_ptr: u64) -> Result<u64, u64> {
     }
 }
 
+/// `ppoll(2)`'s atomic mask swap, the same one `do_sigsuspend` does: installs `*mask_ptr` (minus
+/// `SIGKILL`/`SIGSTOP`) as the blocked mask and returns the caller's original, for
+/// `end_temporary_sigmask`. Atomic for the same reason `do_sigsuspend`'s is: single core, no
+/// preemption inside a syscall.
+pub fn begin_temporary_sigmask(pid: Pid, mask_ptr: u64) -> u64 {
+    let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+    // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
+    let requested = unsafe { (mask_ptr as *const u64).read() };
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .expect("ppoll: current process missing from table");
+    let original = proc.blocked_signals;
+    proc.blocked_signals = requested & !unblockable;
+    original
+}
+
+/// Whether a signal that will actually invoke a handler or terminate is deliverable to `pid` right
+/// now, under whatever mask is currently installed.
+pub fn has_interrupting_signal_now(pid: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .is_some_and(|proc| has_interrupting_signal(proc))
+}
+
+/// Undoes `begin_temporary_sigmask`. If a signal became deliverable under the temporary mask, the
+/// restore is deferred exactly like `do_sigsuspend`'s (`sigsuspend_restore_mask`, consumed by
+/// `deliver_pending_signal`): the handler must run under the temporary mask, and `sigreturn`
+/// restores the original afterward -- real `ppoll` semantics. Returns whether it deferred.
+pub fn end_temporary_sigmask(pid: Pid, original: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    if has_interrupting_signal(proc) {
+        proc.sigsuspend_restore_mask = Some(original);
+        true
+    } else {
+        proc.blocked_signals = original;
+        false
+    }
+}
+
 /// Consumes `Process::sigsuspend_restore_mask` -- `None` unless the process currently finishing a
 /// syscall is doing so via a freshly-woken `do_sigsuspend` above. Called once, by
 /// `deliver_pending_signal` (`sys/syscall.rs`), immediately after `take_deliverable_signal`.

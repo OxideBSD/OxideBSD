@@ -7782,6 +7782,12 @@ fn format_fresh_filesystem() -> bool {
         b"at-smoke.elf",
         include_bytes!(env!("OXFS_AT_SMOKE_ELF_PATH")),
     );
+    // `ppoll(2)` coverage, run by `tests/ppoll_syscall_smoke.rs` -- see `regress/ppoll-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"ppoll-smoke.elf",
+        include_bytes!(env!("OXFS_PPOLL_SMOKE_ELF_PATH")),
+    );
 
     // Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) via the real
     // `/dev/shm`-backed `MAP_SHARED` mmap two independent processes each map at their own,
