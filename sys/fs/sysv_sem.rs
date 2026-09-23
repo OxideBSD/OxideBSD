@@ -321,7 +321,7 @@ pub(crate) fn do_semget(key: u64, nsems: u64, flag: u64) -> Result<u64, u64> {
     for _ in 0..nsems {
         semas.push(Semaphore { val: 0, sempid: 0 });
     }
-    let now = crate::cpu::rtc::unix_epoch_seconds();
+    let now = crate::cpu::rtc::unix_epoch_now_precise().0;
     sets.insert(
         semid,
         SemSet {
@@ -437,7 +437,7 @@ fn do_semop_impl(semid: i32, ops: &[RawSembuf], deadline: u64) -> Result<u64, u6
                 set.semas[idx].val = scratch[idx];
                 set.semas[idx].sempid = caller;
             }
-            set.otime = crate::cpu::rtc::unix_epoch_seconds();
+            set.otime = crate::cpu::rtc::unix_epoch_now_precise().0;
         } // sets lock dropped
 
         let mut touched: Vec<u16> = Vec::with_capacity(ops.len());
@@ -561,7 +561,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             s.uid = raw.sem_perm.uid;
             s.gid = raw.sem_perm.gid;
             s.mode = raw.sem_perm.mode & 0o777;
-            s.ctime = crate::cpu::rtc::unix_epoch_seconds();
+            s.ctime = crate::cpu::rtc::unix_epoch_now_precise().0;
             Ok(0)
         }
         IPC_RMID => {
@@ -608,7 +608,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             }
             sem.val = val;
             sem.sempid = caller;
-            s.ctime = crate::cpu::rtc::unix_epoch_seconds();
+            s.ctime = crate::cpu::rtc::unix_epoch_now_precise().0;
             drop(sets);
             wake_blocked_semop(semid, &[semnum as u16]);
             Ok(0)
@@ -647,7 +647,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
                 sem.val = v;
                 sem.sempid = caller;
             }
-            s.ctime = crate::cpu::rtc::unix_epoch_seconds();
+            s.ctime = crate::cpu::rtc::unix_epoch_now_precise().0;
             drop(sets);
             // Every semaphore in the set potentially changed -- the full 0..n range, not the
             // blanket wake_blocked_semop_all (which would also spuriously match on an already-

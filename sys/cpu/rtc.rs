@@ -112,8 +112,19 @@ pub fn current_month() -> u8 {
 /// can't call kernel functions directly, only through this hand-curated symbol table, the same
 /// shape `oxidebsd_current_uid`/`_gid` already established for identity. Whole-second precision,
 /// same tier `crate::fs::sysv_msg`'s own real `stime`/`rtime`/`ctime` already uses.
+///
+/// **Uses `unix_epoch_now_precise` (calibrated `ticks()`), not a fresh `unix_epoch_seconds()`
+/// hardware read** -- found live chasing real disk-I/O slowness (see CLAUDE.md's bmake section):
+/// oxfs calls this on *every* file write/touch for mtime/ctime/atime, and `unix_epoch_seconds()`
+/// is a real, trapped CMOS port round-trip (`cmos_read`, 7+ separate `out`/`in` pairs) each time --
+/// real, avoidable overhead under QEMU's TCG on a call this hot, when a calibrated-once, then
+/// pure-arithmetic path already existed for exactly this (`sys_clock_gettime`'s own
+/// `CLOCK_REALTIME` backend). Also a real *correctness* fix, not just speed: before this, a file's
+/// `st_mtime` (fresh RTC read) and `time(NULL)`/`CLOCK_REALTIME` (calibrated ticks) could disagree
+/// by however much the two independently-read clocks drift apart -- now both come from the same
+/// calibrated source.
 pub(crate) extern "C" fn oxidebsd_unix_time() -> i64 {
-    unix_epoch_seconds()
+    unix_epoch_now_precise().0
 }
 
 /// Real, calibrated mapping between `interrupts::ticks()` and this chip's own wall-clock reading --

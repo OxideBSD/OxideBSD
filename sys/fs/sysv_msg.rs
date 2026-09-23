@@ -98,10 +98,12 @@ struct MsgQueue {
     /// that is meaningful (no `SysV` "extra" mode bits this port interprets).
     mode: u32,
     qbytes: u64,
-    /// Real, not honest-zero: `crate::cpu::rtc::unix_epoch_seconds()` at creation/every successful
-    /// `msgsnd`/`msgrcv`/`msgctl(IPC_SET)` -- cheap (the same CMOS read `CLOCK_REALTIME` already
-    /// uses) and meaningfully more useful than a placeholder for a struct whose whole job is
-    /// reporting these three timestamps.
+    /// Real, not honest-zero: `crate::cpu::rtc::unix_epoch_now_precise().0` (the same calibrated,
+    /// `clock_settime`-aware clock `CLOCK_REALTIME` already reads, not a fresh CMOS hardware read
+    /// -- see that function's own doc comment for why the raw read is both slower and wrong once
+    /// `clock_settime` has adjusted the clock) at creation/every successful `msgsnd`/`msgrcv`/
+    /// `msgctl(IPC_SET)`, meaningfully more useful than a placeholder for a struct whose whole job
+    /// is reporting these three timestamps.
     stime: i64,
     rtime: i64,
     ctime: i64,
@@ -218,7 +220,7 @@ pub(crate) fn do_msgget(key: u64, flag: u64) -> Result<u64, u64> {
         *next += 1;
         v
     };
-    let now = crate::cpu::rtc::unix_epoch_seconds();
+    let now = crate::cpu::rtc::unix_epoch_now_precise().0;
     queues.insert(
         msqid,
         MsgQueue {
@@ -283,7 +285,7 @@ pub(crate) fn do_msgsnd(q: u64, m: u64, len: u64, flag: u64) -> Result<u64, u64>
                         .to_vec();
                 qref.messages.push(SysvMessage { mtype, data });
                 qref.lspid = caller;
-                qref.stime = crate::cpu::rtc::unix_epoch_seconds();
+                qref.stime = crate::cpu::rtc::unix_epoch_now_precise().0;
                 drop(queues);
                 wake_blocked_receivers(msqid);
                 return Ok(0);
@@ -330,7 +332,7 @@ pub(crate) fn do_msgrcv(q_and_flag: u64, m: u64, len: u64, msgtyp: u64) -> Resul
                 }
                 let msg = qref.messages.remove(idx);
                 qref.lrpid = caller;
-                qref.rtime = crate::cpu::rtc::unix_epoch_seconds();
+                qref.rtime = crate::cpu::rtc::unix_epoch_now_precise().0;
                 drop(queues);
                 let copy_len = (msg.data.len() as u64).min(len) as usize;
                 // SAFETY: same known pointer-validation gap every other user-memory write in
@@ -436,7 +438,7 @@ pub(crate) fn do_msgctl(q: u64, cmd: u64, buf_ptr: u64) -> Result<u64, u64> {
             qref.gid = raw.msg_perm.gid;
             qref.mode = raw.msg_perm.mode & 0o777;
             qref.qbytes = raw.msg_qbytes;
-            qref.ctime = crate::cpu::rtc::unix_epoch_seconds();
+            qref.ctime = crate::cpu::rtc::unix_epoch_now_precise().0;
             Ok(0)
         }
         IPC_RMID => {

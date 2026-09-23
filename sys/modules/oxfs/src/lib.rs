@@ -1028,6 +1028,41 @@ fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
     persist_data_block_if_ready(n, data);
 }
 
+/// Persists a real, physically-contiguous run `[run_start, run_start + run_len)` of already-
+/// in-memory-updated data blocks in one real ATA command (one real `CACHE FLUSH` covering the
+/// whole run), the same pattern `flush_all_to_disk`'s own bulk pass already uses (see that call
+/// site's own comment) -- used by `write_inode_at`'s live per-syscall write path below to batch
+/// whatever contiguous stretch of blocks a single write happens to touch, instead of persisting
+/// (and real-`CACHE-FLUSH`-ing) one block at a time. Found live chasing real disk-I/O slowness
+/// (see CLAUDE.md's bmake section): a real `tar` extraction of hundreds of small files, each
+/// several blocks, used to issue one real command *and* one real `CACHE FLUSH` per individual
+/// 4 KiB block -- the exact "fixed per-command overhead dominates, not transfer size" cost
+/// `oxidebsd_block_write_batch`'s own doc comment already documents for the bulk mount/format
+/// pass, just never extended to live writes until now. Block allocation is a forward-only bump
+/// allocator (see `NEXT_FREE_BLOCK`'s own doc comment), so a freshly-growing file's own blocks are
+/// very often genuinely contiguous in practice -- this only ever *helps* when they are, and is a
+/// correct no-op fallback (one run of length 1 per call) when they aren't. No-op for a tmpfs-pool
+/// run (`run_start >= NUM_BLOCKS`, no on-disk counterpart) or before persistence is ready, same
+/// guards `persist_data_block_if_ready` already has.
+fn persist_data_run_if_ready(run_start: u32, run_len: u32) {
+    if run_len == 0
+        || run_start >= NUM_BLOCKS as u32
+        || !persistence_ready()
+        || !block_device_present()
+    {
+        return;
+    }
+    let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
+    // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering [0, TOTAL_BLOCKS);
+    // run_start < NUM_BLOCKS was just checked above, and every caller only ever grows a run one
+    // already-in-memory-updated block at a time, so [run_start, run_start + run_len) is always a
+    // real, already-written slice of the pool.
+    let src = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
+    unsafe {
+        oxidebsd_block_write_batch(phys, run_len as u64, src);
+    }
+}
+
 fn block_used(n: u32) -> bool {
     unsafe { (*core::ptr::addr_of!(BLOCK_USED))[n as usize] }
 }
@@ -1400,20 +1435,39 @@ fn write_inode_at(inode_num: u32, position: usize, data: &[u8]) -> bool {
     }
     let mut pos = position;
     let mut written = 0;
+    // Real batching (see `persist_data_run_if_ready`'s own doc comment): the in-memory pool is
+    // always updated immediately below, same as `write_block` -- only the real, persisted write is
+    // deferred until the end of whatever contiguous run of physical blocks this call happens to
+    // touch. `run_len == 0` means "no pending run yet"; a block whose physical number doesn't
+    // extend the pending run flushes it first, same discipline `flush_all_to_disk`'s own bulk-pass
+    // run-scan already uses.
+    let mut run_start: u32 = 0;
+    let mut run_len: u32 = 0;
     while written < data.len() {
         let block_index = pos / BLOCK_SIZE;
         let in_block_off = pos % BLOCK_SIZE;
         let Some(blk) = inode_ensure_block_at(inode_num, block_index) else {
+            persist_data_run_if_ready(run_start, run_len);
             return false;
         };
         let mut block = read_block(blk);
         let chunk = (data.len() - written).min(BLOCK_SIZE - in_block_off);
         block[in_block_off..in_block_off + chunk]
             .copy_from_slice(&data[written..written + chunk]);
-        write_block(blk, &block);
+        // SAFETY: same as write_block's own in-memory half -- BLOCKS_PTR.add(blk) is a real,
+        // in-bounds slot for any block number this module ever hands out.
+        unsafe { *BLOCKS_PTR.add(blk as usize) = block };
+        if run_len > 0 && blk == run_start + run_len {
+            run_len += 1;
+        } else {
+            persist_data_run_if_ready(run_start, run_len);
+            run_start = blk;
+            run_len = 1;
+        }
         pos += chunk;
         written += chunk;
     }
+    persist_data_run_if_ready(run_start, run_len);
     let mut inode = read_inode(inode_num);
     if pos > inode.size as usize {
         inode.size = pos as u64;

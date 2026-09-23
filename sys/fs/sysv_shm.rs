@@ -226,7 +226,7 @@ pub(crate) fn do_shmget(key: u64, size: u64, shmflg: u64) -> Result<u64, u64> {
         *next += 1;
         v
     };
-    let now = crate::cpu::rtc::unix_epoch_seconds();
+    let now = crate::cpu::rtc::unix_epoch_now_precise().0;
     segs.insert(
         shmid,
         ShmSegment {
@@ -279,7 +279,7 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
         }
         seg.nattch += 1;
         seg.lpid = caller;
-        seg.atime = crate::cpu::rtc::unix_epoch_seconds();
+        seg.atime = crate::cpu::rtc::unix_epoch_now_precise().0;
         seg.frames.clone()
     };
 
@@ -389,7 +389,7 @@ pub(crate) fn do_shmdt(shmaddr: u64) -> Result<u64, u64> {
     let mut key_to_remove = None;
     if let Some(seg) = segs.get_mut(&shmid) {
         seg.nattch = seg.nattch.saturating_sub(1);
-        seg.dtime = crate::cpu::rtc::unix_epoch_seconds();
+        seg.dtime = crate::cpu::rtc::unix_epoch_now_precise().0;
         if seg.marked_for_removal && seg.nattch == 0 {
             key_to_remove = Some(seg.key);
         }
@@ -432,7 +432,7 @@ pub(crate) fn detach_all_for_exit(pid: Pid) {
         let mut key = IPC_PRIVATE;
         if let Some(seg) = segs.get_mut(shmid) {
             seg.nattch = seg.nattch.saturating_sub(1);
-            seg.dtime = crate::cpu::rtc::unix_epoch_seconds();
+            seg.dtime = crate::cpu::rtc::unix_epoch_now_precise().0;
             if seg.marked_for_removal && seg.nattch == 0 {
                 remove_now = true;
                 key = seg.key;
@@ -555,7 +555,7 @@ pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
             s.uid = raw.shm_perm.uid;
             s.gid = raw.shm_perm.gid;
             s.mode = raw.shm_perm.mode & 0o777;
-            s.ctime = crate::cpu::rtc::unix_epoch_seconds();
+            s.ctime = crate::cpu::rtc::unix_epoch_now_precise().0;
             Ok(0)
         }
         IPC_RMID => {

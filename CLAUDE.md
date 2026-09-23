@@ -812,6 +812,27 @@ layer.
   flush of this kernel's real seed content is still genuinely slow in absolute terms (tens of
   thousands of real blocks) — confirmed via direct baseline comparison to be pre-existing behavior,
   not a regression from either this change or oxfs's own kernel-allocated-pool refactor above.
+- **The same batching extended to live per-syscall writes, not just the bulk mount/format pass**
+  (`write_inode_at`'s own `persist_data_run_if_ready`, `sys/modules/oxfs`) — found live chasing
+  real disk-I/O slowness while self-hosting bmake (see the bmake section above): every real
+  `write()`/`close()` on a growing file used to persist (and real-`CACHE-FLUSH`) one block at a
+  time even when the underlying physical blocks were genuinely contiguous, which a forward-only
+  bump allocator (`NEXT_FREE_BLOCK`) makes the common case for a freshly-written file. Now tracks
+  a pending contiguous run across the write loop and flushes it in one real batched command,
+  falling back correctly (one run of length 1) whenever blocks genuinely aren't contiguous.
+  Verified via `tests/mmap_syscall_smoke.rs` (all 15 parts, including real mtime/ctime and
+  `MAP_SHARED` writeback) and `tests/oxfs_persistence_syscall_smoke.rs`.
+- **Every internal mtime/ctime/atime stamp used to do a fresh raw CMOS hardware read** (real
+  `sys/cpu/rtc.rs` `cmos_read`, 7+ separate trapped `out`/`in` port pairs) via
+  `oxidebsd_unix_time()`, called on *every* oxfs write/touch — found the same session, real,
+  avoidable overhead on a call this hot under QEMU's TCG. Fixed: uses `unix_epoch_now_precise()`
+  (the same calibrated-once, `ticks()`-derived clock `sys_clock_gettime`'s own `CLOCK_REALTIME`
+  already reads) instead — a real correctness fix too, not just speed, since a file's `st_mtime`
+  and `time(NULL)` could previously disagree by however much the two independently-read clocks
+  drifted apart. SysV IPC's own `stime`/`rtime`/`ctime`/`otime`/`dtime`/`atime` fields (`sys/fs/
+  sysv_{msg,sem,shm}.rs`, called directly, not through `oxidebsd_unix_time()`) had the identical
+  bug and got the identical fix, for the same reason `process::timers::abstime_to_ticks` already
+  needed it (see that function's own doc comment — same bug class, found once before).
 - **No raw block device is exposed to userland** — the disk is purely internal to oxfs's own
   persistence.
 - Verified via `tests/ata_smoke.rs`, `tests/oxfs_persistence_syscall_smoke.rs`. **Not covered**:
