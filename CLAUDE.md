@@ -51,7 +51,7 @@ Current state:
 Known, deliberate gaps: no pointer validation in `sys_read`/`sys_write`, no module unload/reload,
 no *kernel-mode* preemption (real ring-3/user-mode preemption exists), no copy-on-write fork
 (real per-address-space frame reclaim exists at exit, see "Real threading"/memory-reclaim notes
-below), `sys_read` on stdin is non-blocking (busy-polled by userland), no general
+below), no general
 block-device-agnostic VFS/mount-table layer (a real ATA disk driver + oxfs mount/format
 persistence + a scoped bind/tmpfs mount table exist now — see "Real disk persistence"/"Mount
 table" — but only for oxfs's own fixed backing store), no IPv6, no real routing table (one
@@ -442,8 +442,11 @@ tool for discovering what a ported program's startup still needs.
 - `sys_write`/`sys_read` don't validate `[ptr, ptr+len)` before dereferencing — a bad pointer
   page-faults (handled safely: log + reboot for ring-0, real signal delivery for ring-3 — see
   "Real ring-3 fault-to-signal delivery" below), not a soundness hole.
-- `sys_read` on stdin is non-blocking by design (returns `Ok(0)` on empty). Any other fd delegates
-  to `crate::fd`'s per-process `(Pid, fd)` registry.
+- `sys_read` delegates every fd, including 0/stdin, to `crate::fd`'s per-process `(Pid, fd)`
+  registry — stdin's own registered callback is a **real, genuine blocking read** (`console::
+  stdin::read`, see "Interactive shell" below), not a return-`0`-immediately one; corrected here
+  2026-09-22 after a real, previously-undiscovered input-hang investigation (see the ncurses/nano/
+  nvi section) found this file's own earlier claim to the contrary was stale.
 - `sys_write`'s `fd == 2` (stderr) is an alias for `fd == 1` — no real second sink exists.
 
 ## musl port (`external/mit/musl`, `regress/musl-smoke/`, `sys/process/user_stack.rs`, `sys/cpu/fpu.rs`)
@@ -587,7 +590,12 @@ history for its design if ever needed again). Its influence remains in how stdin
 - The `spin::Mutex` around the ring buffer can't deadlock between IRQ and syscall context
   specifically because `SFMASK` clears `IF` for a `SYSCALL`'s entire duration on this single core
   — breaks if SMP is ever added.
-- `sys_read` is non-blocking; `hush` busy-polls a byte at a time, same as `stsh` did.
+- `sys_read` on stdin is a real, genuine blocking read (`console::stdin::read` — `ProcState::
+  Blocked(BlockReason::WaitingForStdin)` + `scheduler::schedule()`, woken by the keyboard IRQ
+  handler's own `push_byte`/`wake_blocked_readers`); `hush` reads one byte at a time in its own
+  line-editing loop, same shape `stsh` used, but each individual read genuinely blocks rather than
+  busy-polling. (This file used to claim `sys_read` was non-blocking — stale, corrected
+  2026-09-22, see the ncurses/nano/nvi section's own real input-hang writeup for how that surfaced.)
 - `sys/console/vga.rs`'s `Writer` is a true 2D-addressable console with a minimal ANSI/VT100 CSI
   escape parser so full-screen applets (`vi`, `clear`, `reset`) render correctly.
 - Real `SYS_IOCTL=124` (`sys/console/stdin.rs`'s `RawTermios`, a single **global**, not
@@ -1452,19 +1460,81 @@ licensed despite the "GNU" association, and its portable autotools build is exac
   `/usr/bin` to exist until `nano` did. A bare `nano` invocation failed `ENOENT` via `execvp()`'s
   real `$PATH` search despite the file genuinely existing at `/usr/bin/nano`. Fixed:
   `PATH=/bin:/usr/bin`.
-- Verified end to end via a real, fresh-format boot, driven headlessly through the QEMU monitor's
-  own `sendkey`/`screendump` (`OXIDEBSD_QEMU_DISPLAY=none`, no window needed): `ls -la /bin/vi
-  /usr/bin/nano` reports the real sizes; a bare `vi /etc/passwd` and a bare `nano /etc/passwd` (the
-  latter only reachable at all once the `$PATH` fix landed) each produce a real, correct, full
-  curses render -- confirmed via `screendump`, not just raw escape-code inspection -- showing the
-  file's real content, `vi`'s tilde-filled empty lines and status line, and `nano`'s reverse-video
-  title/help-footer chrome, both exiting back to a clean `hush` prompt.
+- **A real, severe, three-layered keyboard-input hang, found live *after* the section above's own
+  original "verified" claim** (real rendering was genuinely confirmed; real interactive typing
+  wasn't tested until a live session tried it and reported "nano freezes the entire machine,
+  albeit it's still running") -- root-caused via `gdb`/`gdbserver` (the same live-debugging
+  approach used for bmake's own investigations), not guessed:
+  1. **`SYS_POLL`/`SYS_SELECT`'s generic "not a socket fd -> always ready" fallback (`sys/net/
+     mod.rs`) was wrong for the console specifically.** Correct for a regular oxfs file or a pipe
+     (this stack doesn't model real blocking for either), but stdin is genuinely, legitimately
+     empty whenever nobody's typing -- and a real curses program's own `nodelay()`-mode "drain any
+     further already-buffered keys without blocking" idiom (`nano`'s own `read_keys_from`,
+     `usr.bin/nano/src/winio.c`) depends on a zero-timeout `poll`/`select` honestly reporting
+     "nothing here yet" to know when to stop and hand a complete keystroke back to its own caller.
+     Fixed: a real `console::stdin::has_bytes_available()` check, special-cased for `real_fd == 0`
+     (a fixed, global mapping -- see `sys/fs/fd.rs`'s `init`) in both syscalls, instead of the
+     blind fallback.
+  2. **A real, separate, pre-existing bug that fix #1 newly exposed rather than caused**: `sys/net/
+     rtl8139.rs`'s `poll_recv` had no genuine iteration bound, unlike every other syscall-reachable
+     retry loop in this kernel (this section's own networking "architectural gotchas" already
+     establish `spin_loop()` not `hlt()`, always `tsc`-bounded). Before fix #1, `oxidebsd_sys_poll`
+     always returned "ready" on its own very first pass (stdin was unconditionally "ready"), so its
+     own NIC-drain call (`net::poll()`, already unconditionally reachable every loop pass) never
+     got a chance to iterate *internally* more than once either. A real `poll(stdin, timeout=-1)`
+     genuinely needing to retry (exactly what fix #1 correctly enables) is what finally exercised a
+     real, confirmed hang -- `gdb`'s own `RIP` sampling caught it stuck solid, several seconds
+     apart, inside `poll_recv`'s own `CR_BUFFER_EMPTY` port read, cycling through "not empty" +
+     "bad frame" forever. Root cause of *why* the ring gets stuck this way is still open; fixed the
+     blast radius instead (bounded to 64 frames per call, then gives up and returns `None`,
+     matching "ring empty," with a diagnostic log line if it ever fires) rather than claim to have
+     found that deeper cause too.
+  3. **The real, deepest root cause, found once #1 and #2 together still didn't fix a plain `echo`
+     at the `hush` prompt**: both `oxidebsd_sys_poll`/`_select`'s own retry loops used
+     `core::hint::spin_loop()` while genuinely waiting -- but this whole syscall runs with
+     interrupts masked for its *entire* duration (`SFMASK`, same fact this section's own
+     networking gotchas already document). Stdin's own readiness is **interrupt-driven** -- only
+     `keyboard_interrupt_handler`'s own `push_byte` call ever adds a byte -- unlike NIC readiness,
+     which the same loop's own `poll()` call discovers by directly reading hardware registers, no
+     interrupt required. A bare `spin_loop()` while waiting on stdin therefore doesn't just waste
+     cycles the way it might for a network fd -- it makes the one event being waited for
+     *structurally impossible*, since the interrupt that would ever deliver it can't fire while
+     this loop keeps spinning. Confirmed live end to end: real keystrokes genuinely reached the
+     kernel's own ring buffer the whole time (`gdb` memory dumps showed `head` correctly advancing
+     with every byte sent), so "blocked forever," not "lost," was always the right diagnosis --
+     `read_keys_from`/`get_kbinput` never returned because the syscall it was stuck in could
+     structurally never see its own wakeup condition become true. Fixed: when stdin is one of the
+     awaited fds, block via the exact same `WaitingForStdin` primitive `console::stdin::read`
+     itself already uses (a real context switch, which is what actually re-enables interrupts) --
+     scoped to "stdin is among the awaited fds" rather than every poll, since a poll that only
+     awaits network fds still needs the original spin-and-repoll behavior to keep actively pumping
+     a connection nothing else services, and no real caller in this kernel currently mixes stdin
+     with a socket fd in one call.
+- **This CLAUDE.md's own earlier "sys_read on stdin is non-blocking" claim (see the syscall-ABI
+  section above) is stale**, found live investigating this same bug: `console::stdin::read` is a
+  real, genuine blocking implementation (`ProcState::Blocked(BlockReason::WaitingForStdin)` +
+  `scheduler::schedule()`, woken by `push_byte`'s own `wake_blocked_readers`), not a
+  return-`0`-immediately one. Not yet corrected at that section -- flagged here so a future pass
+  doesn't trust it without checking the real source first.
+- Verified end to end via a real boot, driven headlessly through the QEMU monitor's own
+  `sendkey`/`screendump` (`OXIDEBSD_QEMU_DISPLAY=none`, no window needed): a bare `vi /etc/passwd`
+  and a bare `nano /etc/passwd` each produce a real, correct, full curses render *and* now
+  genuinely accept real keystrokes -- confirmed via `screendump` showing real inserted text
+  (`nano`'s own "Modified" indicator lighting up, `vi`'s own insert-mode text landing at the
+  cursor), not just rendering. Both exit cleanly back to a plain `hush` prompt through their real
+  save-prompt/`:q!` flows, and a plain `echo` at the `hush` prompt itself -- unaffected by any of
+  this section's own changes on its face, but genuinely exercising the identical `poll`/`select`
+  code path -- was retested and confirmed still correct.
 - **Known, disclosed gaps, not yet chased**: `nano` probes `ioctl(TIOCLINUX)` at startup (`0x5603`,
   a real Linux-console-specific request this kernel doesn't implement) -- logged as unrecognized,
   harmless, nano works fine without it. ncurses' own utility programs (`tic`/`tset`/`tput`/`clear`/
   `infocmp`) aren't built or seeded yet -- a real on-target self-hosting attempt (building ncurses/
   nano from source under `ash`+on-target `clang`+`bmake`, the way bmake's own self-hosting was
-  proven, see that section above) is a natural next step, not yet attempted this session.
+  proven, see that section above) is a natural next step, not yet attempted this session. The real
+  root cause of `rtl8139::poll_recv`'s own `CR_BUFFER_EMPTY`-never-resolves hang (item 2 above)
+  is still open -- the bound prevents a permanent freeze but doesn't explain *why* the ring gets
+  into that state, and could still degrade a real poll's latency by up to 64 wasted iterations
+  every retry pass until it's actually chased down.
 
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`sys/process/elf.rs`, `sys/process/lifecycle.rs`, `build.rs`, `sys/modules/oxfs`)
 
@@ -1533,8 +1603,18 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   small pieces must batch through `BufWriter`, not `print`. `TIOCGWINSZ` reports the console's
   real grid (`console::vga::width()/height()`, framebuffer ÷ 8x16, e.g. 160x50 at 1280x800) — it
   used to be a fixed 24x80, which left `ls` columns and `hush` wrapping on half the screen. `cat`
-  with no file args reads fd 0 (fine from a pipe; the console's stdin is non-blocking, so bare interactive
-  `cat` just exits). `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
+  with no file args reads fd 0 (fine from a pipe). **Corrected 2026-09-22** (this entry previously
+  claimed the console's stdin was non-blocking, so bare interactive `cat` "just exits" — stale,
+  see the ncurses/nano/nvi section's own real input-hang writeup for why): stdin is a real,
+  genuine blocking read, so a bare interactive `cat` now genuinely **blocks** waiting for input,
+  confirmed live — double-echoing each typed character (the kernel's own auto-echo plus `cat`'s
+  own read-then-write-to-stdout loop, both independently echoing the same bytes, a real and
+  expected effect against a program with no line-editing of its own). **Real, disclosed gap found
+  the same way**: this kernel has no canonical-mode (`ICANON`) EOF-character handling at all (see
+  the syscall-ABI section's own `ICANON` doc comment) — Ctrl+D lands as a plain byte `0x04`, not a
+  real end-of-file, so a bare interactive `cat` with no controlling-tty session established (the
+  common case; nothing here has called `setsid`/`TIOCSCTTY`) currently has no keyboard-reachable
+  way to end it at all. `rm -r` re-opens the directory after each batch: oxfs's `getdents` cursor
   counts *used* records, so deleting under a live cursor skips entries.
 - Seeded file modes (`oxfs`'s `seed_mode`): `0755` only for what the kernel could execute — a
   `#!` script or an `ET_EXEC`/`ET_DYN` ELF (static binaries, PIEs, `libc.so`) — else `0644` (data,

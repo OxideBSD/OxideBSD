@@ -291,6 +291,30 @@ fn wake_blocked_readers() {
     }
 }
 
+/// Whether a real byte is sitting in the ring buffer right now, with **no blocking, no side
+/// effects** — `poll`/`select`'s own real readiness check for the console (`real_fd == 0`,
+/// see `sys/fs/fd.rs`'s `init` -- a fixed, global mapping, never anything else), instead of the
+/// generic "not owned by udp/tcp/icmp -> always ready" fallback every other non-socket fd gets.
+///
+/// **A real, previously-undiscovered bug this closes**: that generic fallback is correct for an
+/// oxfs file or a pipe (this stack doesn't model real blocking for either, so "ready" is a
+/// reasonable stand-in) but is flatly wrong for stdin, which is genuinely, legitimately empty
+/// whenever nobody's typing. A real curses program's own "drain any further already-buffered
+/// keys without blocking" idiom (`nodelay(win, TRUE)`, real nano's own `read_keys_from` in
+/// `usr.bin/nano/src/winio.c`) depends on a *zero-timeout* `poll`/`select` check honestly
+/// reporting "nothing here yet" so it can stop looping and hand its caller back a complete
+/// keystroke -- with the old always-ready fallback, that check always claimed data was
+/// available, so `wgetch()` went ahead and called the real (unconditionally blocking, see
+/// `read` below) `read()` regardless. The whole function then never returned until *another*
+/// real keystroke arrived to satisfy that blocking read -- which itself immediately re-entered
+/// the exact same broken check and blocked again. Confirmed live: real nano appeared to "freeze"
+/// (each further keystroke was genuinely consumed -- the ring buffer's own `head` advanced,
+/// confirmed via a live `gdb`/`gdbserver` memory dump -- just never delivered back to nano's own
+/// editing logic, which was permanently stuck inside this one call).
+pub(crate) fn has_bytes_available() -> bool {
+    BUFFER.lock().len > 0
+}
+
 /// Drains up to `buf.len()` buffered bytes into `buf`, returning how many were actually
 /// available. Blocks (see this module's own doc comment) if nothing is buffered yet, rather than
 /// returning `0` immediately — returns as soon as at least one byte is available, possibly fewer

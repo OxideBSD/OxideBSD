@@ -287,7 +287,36 @@ impl NicDriver for Rtl8139 {
         // Loops past a dropped bad frame rather than returning `None` for it -- `None` here means
         // specifically "ring empty," which `net::poll()`'s own drain loop relies on to know
         // whether more frames are still queued behind the one it just got back.
+        //
+        // **A real, previously-undiscovered gap: this loop had no genuine iteration bound**,
+        // unlike every other syscall-reachable retry loop in this kernel (see the networking
+        // section's own "architectural gotchas" -- `spin_loop()` not `hlt()`, always TSC-bounded).
+        // Found live chasing a real, confirmed hang (`gdb`'s `RIP` genuinely stuck at this exact
+        // function's own `CR_BUFFER_EMPTY` port read across repeated samples, several seconds
+        // apart) once `oxidebsd_sys_poll`'s own stdin-readiness fix (see `console::stdin::
+        // has_bytes_available`'s doc comment) started actually letting its retry loop iterate more
+        // than once -- before that fix, `oxidebsd_sys_poll` always returned "ready" on its very
+        // first pass (stdin was unconditionally reported ready), so this NIC-drain call, though
+        // already reachable from every loop iteration, essentially never got a chance to iterate
+        // internally more than once itself either. A real `poll(stdin, -1)` (`hush`'s own blocking
+        // wait) genuinely needing to retry is what finally exercised it. **Root cause of the hang
+        // itself is still open** (something about repeated `CR_BUFFER_EMPTY`-false + bad-frame
+        // cycles never terminating) -- this bounds the blast radius (one call now gives up and
+        // returns `None`, matching "ring empty," instead of freezing the calling syscall, and by
+        // extension this single-core kernel, forever) without claiming to have found *that* root
+        // cause too.
+        const MAX_FRAMES_PER_CALL: u32 = 64;
+        let mut frames_seen = 0u32;
         loop {
+            frames_seen += 1;
+            if frames_seen > MAX_FRAMES_PER_CALL {
+                serial_println!(
+                    "[net] rtl8139: poll_recv gave up after {} frames in one call -- \
+                     real ring-drain hang, not a real burst (see this function's own doc comment)",
+                    MAX_FRAMES_PER_CALL
+                );
+                return None;
+            }
             unsafe {
                 if Port::<u8>::new(self.io_base + REG_CR).read() & CR_BUFFER_EMPTY != 0 {
                     return None;

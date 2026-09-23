@@ -61,8 +61,13 @@ struct PollFd {
 ///
 /// Only ever reports `POLLIN` -- the only event class any fd in this kernel has real blocking
 /// semantics for. A `real_fd` that doesn't belong to any protocol's socket table (a regular oxfs
-/// file, a pipe, stdin, ...) is treated as always-ready, matching real POSIX behavior for regular
-/// files and a reasonable stand-in for everything else this stack doesn't model blocking for.
+/// file, a pipe, ...) is treated as always-ready, matching real POSIX behavior for regular files
+/// and a reasonable stand-in for everything else this stack doesn't model blocking for --
+/// **except the console (`real_fd == 0`), which gets a real readiness check** (`console::stdin::
+/// has_bytes_available`) instead: unlike a regular file, stdin is genuinely, legitimately empty
+/// whenever nobody's typing, and a real curses program's own zero-timeout `nodelay`-mode check
+/// depends on that being reported honestly -- see that function's own doc comment for the real
+/// bug this closes.
 pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) -> i64 {
     if fds_ptr == 0 && nfds > 0 {
         return -(EINVAL as i64);
@@ -88,6 +93,7 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
             poll(); // drain the NIC / run the protocol stack once per pass, same as recvfrom's self-poll
         }
         let mut ready_count: i64 = 0;
+        let mut awaits_stdin = false;
         for entry in entries.iter_mut() {
             entry.revents = 0;
             if entry.fd < 0 {
@@ -98,10 +104,19 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
                 ready_count += 1;
                 continue;
             };
-            let ready = udp::has_data_ready(real_fd)
-                .or_else(|| tcp::has_data_ready(real_fd))
-                .or_else(|| icmp::has_data_ready(real_fd))
-                .unwrap_or(true);
+            // real_fd 0 is always the console (see `sys/fs/fd.rs`'s `init` -- a fixed, global
+            // mapping) -- a real readiness check, not the generic always-ready fallback below.
+            // See `console::stdin::has_bytes_available`'s own doc comment for the real bug this
+            // closes.
+            let ready = if real_fd == 0 {
+                awaits_stdin = true;
+                crate::console::stdin::has_bytes_available()
+            } else {
+                udp::has_data_ready(real_fd)
+                    .or_else(|| tcp::has_data_ready(real_fd))
+                    .or_else(|| icmp::has_data_ready(real_fd))
+                    .unwrap_or(true)
+            };
             if ready {
                 entry.revents = entry.events & POLLIN;
                 ready_count += 1;
@@ -130,7 +145,38 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
         // fd-readiness case must keep spinning (yielding here would stop this process from ever
         // pumping the NIC again for a connection nothing else services -- see this function's own
         // doc comment).
-        if nfds == 0 {
+        //
+        // **`awaits_stdin` is a real, separate exception to that spin-forever rule, found live
+        // chasing a real, confirmed total-input hang** (`gdb`'s own `RIP` sampling caught this
+        // exact `spin_loop()` stuck solid, `real nano`/`hush` both affected -- see
+        // `console::stdin::has_bytes_available`'s own doc comment for the first half of this same
+        // investigation). `spin_loop()` is a bare CPU hint, not a real yield -- and this whole
+        // syscall runs with interrupts masked for its entire duration (the same `SFMASK` fact the
+        // paragraph above already explains). Stdin's own readiness is **interrupt-driven** (only
+        // `keyboard_interrupt_handler`'s own `push_byte` call ever adds a byte) -- unlike NIC
+        // readiness, which this same loop's own `poll()` call above discovers by directly reading
+        // hardware registers, no interrupt required. A bare `spin_loop()` while waiting on stdin
+        // therefore can not just waste cycles the way it might for network fds -- it makes the one
+        // event being waited for *structurally impossible*, since the interrupt that would ever
+        // deliver it cannot fire while this loop keeps spinning. Blocking via the exact same
+        // `WaitingForStdin` primitive `console::stdin::read` itself already uses instead performs
+        // a real context switch, which is what actually lets interrupts run again (for whatever
+        // process gets scheduled next, and eventually this one once `push_byte`'s own
+        // `wake_blocked_readers` re-queues it) -- confirmed live: real keystrokes reached the
+        // kernel's own ring buffer throughout this bug (`gdb` dumps showed `head` correctly
+        // advancing), so blocked-forever, not lost, was always the right diagnosis. Scoped to
+        // "stdin is one of the awaited fds" rather than every poll -- a poll that only awaits
+        // network fds still needs the original spin-and-repoll behavior to keep actively pumping
+        // a connection nothing else services; no real caller in this kernel currently mixes stdin
+        // with a socket fd in one call, so this doesn't need to arbitrate between the two.
+        if awaits_stdin {
+            let caller = crate::process::scheduler::current_pid();
+            let mut table = crate::process::table().lock();
+            table.get_mut(&caller).unwrap().state =
+                crate::process::ProcState::Blocked(crate::process::BlockReason::WaitingForStdin);
+            drop(table);
+            crate::process::scheduler::schedule();
+        } else if nfds == 0 {
             crate::process::scheduler::schedule();
         } else {
             core::hint::spin_loop();
@@ -238,6 +284,7 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
             poll(); // drain the NIC / run the protocol stack once per pass, same as oxidebsd_sys_poll
         }
         let mut ready_count: i64 = 0;
+        let mut awaits_stdin = false;
         let mut rout = [0u64; FD_SET_WORDS];
         let mut wout = [0u64; FD_SET_WORDS];
         let mut eout = [0u64; FD_SET_WORDS];
@@ -253,10 +300,17 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
                 let Some(real_fd) = crate::fs::fd::real_fd_of(fd as u64) else {
                     continue; // no such fd -- never-ready, see this function's own doc comment
                 };
-                let ready = udp::has_data_ready(real_fd)
-                    .or_else(|| tcp::has_data_ready(real_fd))
-                    .or_else(|| icmp::has_data_ready(real_fd))
-                    .unwrap_or(true);
+                // Same real-readiness special case as `oxidebsd_sys_poll` -- see
+                // `console::stdin::has_bytes_available`'s own doc comment.
+                let ready = if real_fd == 0 {
+                    awaits_stdin = true;
+                    crate::console::stdin::has_bytes_available()
+                } else {
+                    udp::has_data_ready(real_fd)
+                        .or_else(|| tcp::has_data_ready(real_fd))
+                        .or_else(|| icmp::has_data_ready(real_fd))
+                        .unwrap_or(true)
+                };
                 if ready {
                     rout[fd / 64] |= 1u64 << (fd % 64);
                     ready_count += 1;
@@ -309,7 +363,19 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
         // unchanged -- see this function's own doc comment for why yielding there would stop
         // anything from ever pumping the NIC again) since those calls always carry a real deadline
         // in every pilot caller today, bounding the wait regardless.
-        if n == 0 {
+        //
+        // **`awaits_stdin` is the same real exception `oxidebsd_sys_poll` has, for the identical
+        // reason** -- see `console::stdin::has_bytes_available`'s own doc comment for the full
+        // real-hang writeup. A bare `spin_loop()` while genuinely waiting on stdin can't ever see
+        // a new byte arrive: this whole syscall runs with interrupts masked, and only the keyboard
+        // IRQ handler's own `push_byte` call ever adds one.
+        if awaits_stdin {
+            let mut table = crate::process::table().lock();
+            table.get_mut(&caller_pid).unwrap().state =
+                crate::process::ProcState::Blocked(crate::process::BlockReason::WaitingForStdin);
+            drop(table);
+            crate::process::scheduler::schedule();
+        } else if n == 0 {
             crate::process::scheduler::schedule();
         } else {
             core::hint::spin_loop();
