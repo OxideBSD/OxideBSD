@@ -1,0 +1,9 @@
+# Host-first development (INIT_SH.md §2.3): override the root config's kernel target.
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+# Cargo merges this array with the root config's `build-std = ["core", "compiler_builtins",
+# "alloc"]` rather than replacing it, so a host build can't opt out of build-std; add `std` so
+# the rebuilt sysroot is complete for a std program.
+[unstable]
+build-std = ["std", "panic_abort"]

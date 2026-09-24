@@ -1,0 +1,18 @@
+[package]
+name = "libsh"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+# The same libc fork OxideBSD's std is built with (external/mit/rust/library/Cargo.toml): upstream
+# libc plus target_os = "oxidebsd". A superset, so host builds are unaffected.
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+# Its own workspace: libsh must build and test on the development host (INIT_SH.md §2.3), which
+# the root workspace's no_std kernel target and build-std settings don't allow.
+[workspace]
