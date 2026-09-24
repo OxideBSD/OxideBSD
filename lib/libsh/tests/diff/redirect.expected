@@ -1,0 +1,17 @@
+one
+two
+via3
+2
+stdout
+a
+b
+literal $HOME `x`
+hello world cmd $v \
+tab stripped
+noclobber-refused
+y
+read: y
+fd4: y
+nf=127
+empty-file
+rc=0

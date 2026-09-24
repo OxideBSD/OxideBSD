@@ -1,0 +1,36 @@
+c d
+evaluated
+q u
+E1=exported
+readonly-ok
+E1=[unset]
+f-gone
+opt=a arg=
+opt=b arg=arg
+opt=c arg=
+opt=? arg=
+OPTIND=6
+silent opt=: arg=b
+1-2
+3-4
+5-
+007|+5| 5|ab   |    x|
+10 FF 0xff h %
+tab	here
+octA
+65
+1.234568e+04 0.0001 1.23457e+06 1E-10
+a	b c
+d
+no-newline
+via-command
+cd
+subst-status=1
+x=evaluated y=
+times-ok
+0027
+u=rwx,g=rx,o=
+[1][2][3 4]
+back\slash
+backslash continued
+rc=0

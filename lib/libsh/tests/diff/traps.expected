@@ -1,0 +1,7 @@
+got-usr1
+after-kill
+trap -- 'echo exit-trap $?' EXIT
+trap -- 'echo got-usr1' USR1
+0
+exit-trap 3
+rc=3

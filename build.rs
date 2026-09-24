@@ -226,6 +226,7 @@ fn main() {
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -271,7 +272,7 @@ fn main() {
     // for the real, disclosed ~40s-per-build cost (a genuine std/core/alloc recompile every time,
     // no prebuilt std exists for a brand-new custom target). Also embedded into oxfs below.
     let std_hello_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
-        "std-hello-oxidebsd",
+        "regress/std/std-hello-oxidebsd",
         "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
@@ -280,7 +281,7 @@ fn main() {
     // driving their own internal fork+execve+waitpid, not just runtime startup/shutdown. See
     // regress/std/std-process-fs-oxidebsd/src/main.rs's own doc comment.
     let std_process_fs_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
-        "std-process-fs-oxidebsd",
+        "regress/std/std-process-fs-oxidebsd",
         "OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
@@ -288,10 +289,25 @@ fn main() {
     // Extends the real std consumer proof into std::thread, signals, and std::net -- see
     // regress/std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
     let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
-        "std-thread-net-signal-oxidebsd",
+        "regress/std/std-thread-net-signal-oxidebsd",
         "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
         &musl_sysroot,
     );
+
+    // OxideBSD's own shell (lib/libsh, INIT_SH.md in OxideBSD-doc): /bin/sh, and /sbin/init_sh
+    // with the init dialect. Both are std programs over the same core, which neither crate's own
+    // directory contains -- watch it explicitly.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libsh/src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libsh/Cargo.toml").display()
+    );
+    let sh_elf_path = build_std_oxidebsd_userland_crate("bin/sh", "OXFS_SH_ELF_PATH", &musl_sysroot);
+    let init_sh_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/init_sh", "OXFS_INIT_SH_ELF_PATH", &musl_sysroot);
 
     // Derisk check for the fbdoom/doomgeneric port -- see regress/float-smoke/main.c's own doc
     // comment.
@@ -483,6 +499,8 @@ fn main() {
             "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
             std_thread_net_signal_oxidebsd_elf_path.to_str().unwrap(),
         ),
+        ("OXFS_SH_ELF_PATH", sh_elf_path.to_str().unwrap()),
+        ("OXFS_INIT_SH_ELF_PATH", init_sh_elf_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),
@@ -1053,14 +1071,15 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 /// (its `oxidebsd` branch reuses the real `linux`/musl cfg-gated code paths throughout, since our
 /// musl fork's public C ABI is unchanged from stock).
 fn build_std_oxidebsd_userland_crate(
-    crate_name: &str,
+    crate_path: &str,
     env_var: &str,
     musl_sysroot: &Path,
 ) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let crate_dir = Path::new(manifest_dir)
-        .join("regress/std")
-        .join(crate_name);
+    let crate_dir = Path::new(manifest_dir).join(crate_path);
+    // The package and binary name: the crate directory's last component (`regress/std/foo`,
+    // `bin/sh`).
+    let crate_name = crate_dir.file_name().unwrap().to_str().unwrap();
     let target_spec = Path::new(manifest_dir).join("x86_64-unknown-oxidebsd.json");
     let target_dir = Path::new(manifest_dir)
         .join("target/userland-std-oxidebsd")

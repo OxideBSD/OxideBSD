@@ -57,6 +57,7 @@ members = [
   "regress/at-syscall-smoke",
   "regress/ppoll-syscall-smoke",
   "regress/ninja-syscall-smoke",
+  "regress/sh-syscall-smoke",
   "regress/sem-open-syscall-smoke",
   "regress/pthread-cancel-crash-smoke",
   "regress/pshared-cond-crash-smoke",
@@ -322,6 +323,10 @@ harness = false
 
 [[test]]
 name = "ninja_syscall_smoke"
+harness = false
+
+[[test]]
+name = "sh_syscall_smoke"
 harness = false
 
 [[test]]

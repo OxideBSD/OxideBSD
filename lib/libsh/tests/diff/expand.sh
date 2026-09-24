@@ -16,8 +16,9 @@ e=""; echo "[${e-x}] [${e:-x}]"
 echo "${v%"*.gz"}" ${v%'.gz'}
 pat='*.gz'; echo ${v%$pat} "${v%"$pat"}"
 set --; printf '<%s>' "$@" x; echo
-echo ~root/x ~nosuchuserxyz
+HOME=/h; echo ~ ~/x ~nosuchuserxyz
 a=1 b=2; echo $a$b "$a"'$b' \$a
 echo "$(printf 'x\n\n\n')|"
 echo $((1+2*3)) $((10/3)) $((10%3)) $((1<<4)) $(( 7 > 3 && 2 )) $((0x10 + 010))
-i=5; : $((i+=2)); echo $i $((i++)) $i $((--i))
+i=5; : $((i+=2)); echo $i $((i*=2)) $i
+echo "${0##*/}" ${#0} | sed 's/[0-9][0-9]*$/N/'

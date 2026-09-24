@@ -14,4 +14,7 @@ mod sys;
 mod test;
 
 pub use parse::{ParseError, parse};
-pub use shell::{Shell, main};
+pub use shell::{Interactive, Shell, main, main_with};
+
+/// Whether this build accepts the init dialect (INIT_SH.md §4) -- `/sbin/init_sh` only.
+pub const INIT_DIALECT: bool = cfg!(feature = "init-dialect");

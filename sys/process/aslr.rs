@@ -26,7 +26,8 @@
 //! 0x0000400000000000  SHM_REGION_BASE        (fs/sysv_shm.rs)
 //! 0x0000444444440000  HEAP_START             (memory/allocator.rs)
 //! 0x0000500000000000  USER_STACK_TOP         (process/mod.rs)
-//! 0xffffffff90000000  MODULE_VA_BASE         (module.rs)
+//! 0xffffc00000000000  MODULE_DATA_BASE       (module.rs)
+//! 0xffffffffa0000000  MODULE_VA_BASE         (module.rs)
 //! 0xffffffffff000000  MODULE_REGION_CEILING  (module.rs)
 //! ```
 //!

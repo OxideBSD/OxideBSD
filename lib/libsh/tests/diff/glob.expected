@@ -1,0 +1,10 @@
+a.c b.c c d.c
+.hidden.c
+d1/ d2/
+d1/x.h
+*.nomatch
+*.c *.c *.c
+*.c
+a.c b.c b.c
+<a.c><b.c><c d.c>
+rc=0

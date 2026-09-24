@@ -504,7 +504,12 @@ impl Parser {
                     n.push(c);
                     self.pos += 1;
                 }
-                Param::Positional(n.parse().map_err(|_| self.error_at(start, "bad parameter"))?)
+                // `${0}` is the special parameter; `${00}`/`${012}` are positional, as in dash.
+                if n == "0" {
+                    Param::Special('0')
+                } else {
+                    Param::Positional(n.parse().map_err(|_| self.error_at(start, "bad parameter"))?)
+                }
             }
             Some(c @ ('@' | '*' | '#' | '?' | '-' | '$' | '!')) => {
                 self.pos += 1;

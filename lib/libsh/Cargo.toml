@@ -8,6 +8,10 @@ publish = false
 [dependencies]
 libc = "0.2"
 
+[features]
+# The init dialect (INIT_SH.md §4): on for /sbin/init_sh, never for /bin/sh (§2.2).
+init-dialect = []
+
 # The same libc fork OxideBSD's std is built with (external/mit/rust/library/Cargo.toml): upstream
 # libc plus target_os = "oxidebsd". A superset, so host builds are unaffected.
 [patch.crates-io]

@@ -153,7 +153,7 @@ Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine
   the old crate's two fields) and a `limine_entry_point!` macro replacing `entry_point!`.
 - **Higher-half kernel placement**: `x86_64-oxidebsd.ld` links the kernel into the top of the
   address space now, not identity-mapped low memory — this is *why* `module::MODULE_VA_BASE`
-  moved to `0xffff_ffff_9000_0000` (see "Dynamic kernel modules" below) and needed a matching
+  moved into the top 2 GiB (see "Dynamic kernel modules" below) and needed a matching
   `-C code-model=kernel` rustflag.
 - **No more direct `0xb8000` VGA text-mode access** — Limine doesn't guarantee that mapping.
   `sys/console/framebuffer.rs` is a from-scratch real framebuffer console (dynamic grid sizing off
@@ -681,8 +681,13 @@ non-relocatable `ET_EXEC` binary with zero relocations) — this is the largest 
   object files (once ballooned a module to 3+ MB/2900 sections, exhausting the boot-time heap).
 - `RUSTFLAGS="-C relocation-model=static -C code-model=kernel"` keeps relocations to absolute
   32-bit forms — every module maps inside the top-2GiB kernel region (`MODULE_VA_BASE=
-  0xffff_ffff_9000_0000`, `MODULE_REGION_CEILING=0xffff_ffff_f000_0000` — moved here from the low
+  0xffff_ffff_a000_0000`, `MODULE_REGION_CEILING=0xffff_ffff_ff00_0000` — moved here from the low
   2 GiB during the Limine migration's higher-half kernel placement, see "Boot: Limine" below).
+  **The kernel image must end below `MODULE_VA_BASE`** (512 MiB from `0xffff_ffff_8000_0000`) —
+  the debug image crossing the old `0x9000_0000` base surfaced as `MappingFailed` on the first
+  module load; check `readelf -lW` when embedding more. `oxidebsd_module_alloc_zeroed` pools
+  (oxfs's ~1.25 GiB) live in a separate window, `MODULE_DATA_BASE=0xffff_c000_0000_0000` (64 GiB,
+  L4 slot 384) — pointer-reached, so no `±2 GiB` constraint.
   `code-model=kernel` is required alongside `relocation-model=static` at this placement — LLVM's
   default `small` code model emits unsigned `R_X86_64_32` for function-pointer references,
   unrepresentable this high up; `kernel` emits sign-extending `R_X86_64_32S` instead. Found live:
@@ -1615,6 +1620,20 @@ licensed despite the "GNU" association, and its portable autotools build is exac
   is still open -- the bound prevents a permanent freeze but doesn't explain *why* the ring gets
   into that state, and could still degrade a real poll's latency by up to 64 wasted iterations
   every retry pass until it's actually chased down.
+
+## Shell: `lib/libsh`, `/bin/sh`, `/sbin/init_sh`
+
+From-scratch Rust POSIX shell core (spec: OxideBSD-doc `INIT_SH.md`); `bin/sh` and `sbin/init_sh`
+are std binaries over it (`init_sh` adds the `init-dialect` feature, still empty). `/bin/sh` is
+libsh now — bmake/ninja/`system()`/the POSIX pilot's driver all go through it; BusyBox hush is
+`/bin/hush` (still pid 1, still the interactive shell) and `/bin/sh` execs it for an interactive
+invocation until libsh has one.
+- `lib/libsh` is its own workspace targeting the host: `cargo test` there runs
+  `tests/differential.rs` (`tests/diff/*.sh` vs `dash`: stdout + status exact). Its
+  `.cargo/config.toml` adds `std` to `build-std`, since cargo merges that array with the root's.
+- `tests/sh_syscall_smoke.rs` runs the same corpus on target (`/sh-smoke/`) against the
+  checked-in `*.expected` (dash's host output) — regenerate those with dash when a script changes.
+- `build_std_oxidebsd_userland_crate` takes a crate path now (not just `regress/std/<name>`).
 
 ## ninja (`usr.bin/ninja`), `ppoll(2)`, and demand-grown user stacks
 

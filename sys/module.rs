@@ -92,10 +92,28 @@ const PAGE_SIZE: u64 = 4096;
 /// address is nowhere near representable as an unsigned 32-bit value either) -- not observed in
 /// practice for any module so far, but `apply_relocation`'s own overflow check would still catch
 /// it loudly rather than silently corrupt if one ever appears.
-const MODULE_VA_BASE: u64 = 0xffff_ffff_9000_0000;
-const MODULE_REGION_CEILING: u64 = 0xffff_ffff_f000_0000;
+///
+/// **Moved up from `0xffff_ffff_9000_0000` (and the ceiling from `0xffff_ffff_f000_0000`)** once
+/// the debug kernel image itself grew past 256 MiB (embedding `/bin/sh` and `/sbin/init_sh`) and
+/// overlapped the old base -- surfaced as `MappingFailed` on the very first module load. The
+/// kernel image can now reach 512 MiB. Module *data* pools no longer live here at all: see
+/// `MODULE_DATA_BASE`.
+const MODULE_VA_BASE: u64 = 0xffff_ffff_a000_0000;
+const MODULE_REGION_CEILING: u64 = 0xffff_ffff_ff00_0000;
 
 static NEXT_MODULE_PAGE: Mutex<u64> = Mutex::new(MODULE_VA_BASE);
+
+/// A separate kernel window for `oxidebsd_module_alloc_zeroed`'s large runtime pools (oxfs's
+/// ~1 GiB block pool and its write buffers). Those are reached only through pointers, never by a
+/// relocation, so they don't need the `+-2 GiB`-of-the-kernel placement module *code* does --
+/// sharing the code region with them left it within a few MiB of full. L4 slot 384, far from the
+/// HHDM (`0xffff_8000_0000_0000`, slot 256 up) and the kernel/module slot (511). Mapped at boot,
+/// before any process exists, so every address space (which aliases kernel-only L4 entries, see
+/// `memory::address_space`) sees it.
+const MODULE_DATA_BASE: u64 = 0xffff_c000_0000_0000;
+const MODULE_DATA_CEILING: u64 = MODULE_DATA_BASE + (64 << 30);
+
+static NEXT_MODULE_DATA_PAGE: Mutex<u64> = Mutex::new(MODULE_DATA_BASE);
 
 /// One entry per successfully relocated module, in load order -- backs `/proc/modules`
 /// (`oxidebsd_proc_modules` below, synthesized by `sys/modules/oxfs`) the same way real Linux's own
@@ -571,9 +589,9 @@ static mut CURRENT_LOAD_FRAME_ALLOCATOR: *mut BootInfoFrameAllocator = core::ptr
 
 /// Kernel API exposed to modules (resolved via `resolve_external_symbol`, called from a module's
 /// own `module_init`): hands back a fresh, zeroed, kernel-VA-mapped buffer of `size_bytes`, backed
-/// by real physical frames from the frame allocator -- exactly the `allocate_region`/`map_region`
-/// machinery `load` already uses for a module's own code/data, just reachable from *inside*
-/// `module_init` too. Exists so a module with a large runtime storage need (e.g. oxfs's own block
+/// by real physical frames from the frame allocator -- the same `map_region` machinery `load`
+/// uses for a module's own code/data, but in the separate `MODULE_DATA_BASE` window, reachable
+/// from *inside* `module_init`. Exists so a module with a large runtime storage need (e.g. oxfs's own block
 /// pool) doesn't have to declare that storage as a `static mut` array baked into its own object
 /// file -- see CLAUDE.md's oxfs section for why that was a real, measured problem (a single
 /// module's own mapped region reaching into the GiB range purely from empty, never-yet-written
@@ -590,7 +608,7 @@ pub(crate) extern "C" fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64 {
         return 0;
     };
     let region_size = align_up(size_bytes, PAGE_SIZE);
-    let base = match allocate_region(region_size) {
+    let base = match allocate_data_region(region_size) {
         Ok(base) => base,
         Err(_) => return 0,
     };
@@ -654,6 +672,18 @@ fn allocate_region(size: u64) -> Result<u64, ModuleError> {
     let base = *next;
     let end = base.checked_add(size).ok_or(ModuleError::RegionExhausted)?;
     if end > MODULE_REGION_CEILING {
+        return Err(ModuleError::RegionExhausted);
+    }
+    *next = end;
+    Ok(base)
+}
+
+/// `allocate_region` for the module data window (`MODULE_DATA_BASE`).
+fn allocate_data_region(size: u64) -> Result<u64, ModuleError> {
+    let mut next = NEXT_MODULE_DATA_PAGE.lock();
+    let base = *next;
+    let end = base.checked_add(size).ok_or(ModuleError::RegionExhausted)?;
+    if end > MODULE_DATA_CEILING {
         return Err(ModuleError::RegionExhausted);
     }
     *next = end;

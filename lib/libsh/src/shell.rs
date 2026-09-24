@@ -298,8 +298,34 @@ fn same_dir(a: &str, b: &str) -> bool {
     }
 }
 
+/// What to do when asked for an interactive shell, which this one doesn't implement yet.
+#[derive(Clone, Copy, Debug)]
+pub enum Interactive {
+    /// Exit with an error (`/sbin/init_sh`, INIT_SH.md §3.2).
+    Refuse,
+    /// Hand the whole invocation to another shell (`/bin/sh`, until it has interactive mode).
+    Exec(&'static str),
+}
+
 /// `sh [-abCefnuvx] [-o opt]... [-c command_string [command_name [arg...]] | script [arg...]]`
 pub fn main(args: Vec<String>) -> i32 {
+    main_with(args, Interactive::Refuse)
+}
+
+fn refuse_interactive(prog: &str, args: &[String], interactive: Interactive) -> i32 {
+    if let Interactive::Exec(path) = interactive {
+        let env: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, v)| Some(format!("{}={}", k.to_str()?, v.to_str()?)))
+            .collect();
+        let err = sys::execve(path, args, &env);
+        let _ = sys::write_all(2, format!("{prog}: interactive mode: cannot run {path}: {}\n", sys::strerror(&err)).as_bytes());
+        return 127;
+    }
+    let _ = sys::write_all(2, format!("{prog}: interactive mode is not supported\n").as_bytes());
+    2
+}
+
+pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
     // Rust ignores SIGPIPE at startup; a shell must not pass that on to what it runs.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -331,8 +357,7 @@ pub fn main(args: Vec<String>) -> i32 {
             } else if c == 's' || c == 'i' {
                 // -s: read from stdin (the default without a script); -i is not supported.
                 if c == 'i' {
-                    let _ = sys::write_all(2, format!("{prog}: interactive mode is not supported\n").as_bytes());
-                    return 2;
+                    return refuse_interactive(&prog, &args, interactive);
                 }
             } else if let Some(f) = opts.flag_mut(c) {
                 *f = on;
@@ -361,8 +386,7 @@ pub fn main(args: Vec<String>) -> i32 {
         }
     } else {
         if unsafe { libc::isatty(0) } == 1 {
-            let _ = sys::write_all(2, format!("{prog}: interactive mode is not supported\n").as_bytes());
-            return 2;
+            return refuse_interactive(&prog, &args, interactive);
         }
         match sys::read_to_end(0) {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), prog.clone(), Vec::new()),

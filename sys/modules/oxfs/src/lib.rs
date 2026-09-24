@@ -7004,7 +7004,10 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"true", include_bytes!(env!("OXFS_TRUE_ELF_PATH")));
     ok &= seed_file(bin, b"echo", include_bytes!(env!("OXFS_ECHO_ELF_PATH")));
     ok &= seed_file(bin, b"cat", include_bytes!(env!("OXFS_CAT_ELF_PATH")));
-    ok &= seed_file(bin, b"sh", include_bytes!(env!("OXFS_HUSH_ELF_PATH")));
+    // /bin/sh is OxideBSD's own shell (lib/libsh). BusyBox hush stays as /bin/hush: it's pid 1's
+    // interactive shell, and /bin/sh hands interactive invocations to it until it has its own.
+    ok &= seed_file(bin, b"sh", include_bytes!(env!("OXFS_SH_ELF_PATH")));
+    ok &= seed_file(bin, b"hush", include_bytes!(env!("OXFS_HUSH_ELF_PATH")));
     ok &= seed_file(bin, b"false", include_bytes!(env!("OXFS_FALSE_ELF_PATH")));
     ok &= seed_file(bin, b"yes", include_bytes!(env!("OXFS_YES_ELF_PATH")));
     ok &= seed_file(bin, b"more", include_bytes!(env!("OXFS_MORE_ELF_PATH")));
@@ -7671,6 +7674,10 @@ fn format_fresh_filesystem() -> bool {
     // see `build_llvm_target_toolchain`'s own doc comment in build.rs), so no extra `--sysroot`
     // flag is needed to invoke `clang` on target. Originally built for TinyCC (this project's
     // first on-target C compiler, since removed once Clang/LLVM superseded it).
+    // /sbin: system programs. init_sh (lib/libsh with the init dialect) runs /etc/rc and rc.d.
+    let sbin = ensure_dir(root, b"sbin");
+    ok &= seed_file(sbin, b"init_sh", include_bytes!(env!("OXFS_INIT_SH_ELF_PATH")));
+
     let usr = ensure_dir(root, b"usr");
     let usr_include = ensure_dir(usr, b"include");
     ok &= seed_tree(usr_include, MUSL_INCLUDE_FILES);
@@ -7845,6 +7852,27 @@ fn format_fresh_filesystem() -> bool {
     // `tests/clangxx_syscall_smoke.rs`): STL, exceptions/RTTI, std::thread, std::filesystem.
     ok &= seed_file(root, b"hello.cpp", include_bytes!("hello.cpp"));
     // A tiny real ninja project (`ninja -C /ninja-demo`, or `tests/ninja_syscall_smoke.rs`).
+    // lib/libsh's differential corpus plus dash's output for each, for tests/sh_syscall_smoke.rs
+    // (`run.sh <shell>` runs every script under that shell and compares).
+    let sh_smoke = ensure_dir(root, b"sh-smoke");
+    ok &= seed_file(sh_smoke, b"run.sh", include_bytes!("../../../../lib/libsh/tests/run-on-target.sh"));
+    ok &= seed_file(sh_smoke, b"builtins.sh", include_bytes!("../../../../lib/libsh/tests/diff/builtins.sh"));
+    ok &= seed_file(sh_smoke, b"builtins.expected", include_bytes!("../../../../lib/libsh/tests/diff/builtins.expected"));
+    ok &= seed_file(sh_smoke, b"control.sh", include_bytes!("../../../../lib/libsh/tests/diff/control.sh"));
+    ok &= seed_file(sh_smoke, b"control.expected", include_bytes!("../../../../lib/libsh/tests/diff/control.expected"));
+    ok &= seed_file(sh_smoke, b"dot.sh", include_bytes!("../../../../lib/libsh/tests/diff/dot.sh"));
+    ok &= seed_file(sh_smoke, b"dot.expected", include_bytes!("../../../../lib/libsh/tests/diff/dot.expected"));
+    ok &= seed_file(sh_smoke, b"errexit.sh", include_bytes!("../../../../lib/libsh/tests/diff/errexit.sh"));
+    ok &= seed_file(sh_smoke, b"errexit.expected", include_bytes!("../../../../lib/libsh/tests/diff/errexit.expected"));
+    ok &= seed_file(sh_smoke, b"expand.sh", include_bytes!("../../../../lib/libsh/tests/diff/expand.sh"));
+    ok &= seed_file(sh_smoke, b"expand.expected", include_bytes!("../../../../lib/libsh/tests/diff/expand.expected"));
+    ok &= seed_file(sh_smoke, b"glob.sh", include_bytes!("../../../../lib/libsh/tests/diff/glob.sh"));
+    ok &= seed_file(sh_smoke, b"glob.expected", include_bytes!("../../../../lib/libsh/tests/diff/glob.expected"));
+    ok &= seed_file(sh_smoke, b"redirect.sh", include_bytes!("../../../../lib/libsh/tests/diff/redirect.sh"));
+    ok &= seed_file(sh_smoke, b"redirect.expected", include_bytes!("../../../../lib/libsh/tests/diff/redirect.expected"));
+    ok &= seed_file(sh_smoke, b"traps.sh", include_bytes!("../../../../lib/libsh/tests/diff/traps.sh"));
+    ok &= seed_file(sh_smoke, b"traps.expected", include_bytes!("../../../../lib/libsh/tests/diff/traps.expected"));
+
     let ninja_demo = ensure_dir(root, b"ninja-demo");
     ok &= seed_file(ninja_demo, b"build.ninja", include_bytes!("ninja-demo/build.ninja"));
     ok &= seed_file(ninja_demo, b"main.c", include_bytes!("ninja-demo/main.c"));
