@@ -2770,7 +2770,7 @@ fn write_ncurses_terminfo_manifest() -> PathBuf {
     out_path
 }
 
-/// Cross-builds OpenVi (vendored as `usr.bin/vi`, a submodule -- see CLAUDE.md's ncurses/nano/nvi
+/// Cross-builds OpenVi (vendored as `bin/vi`, a submodule -- see CLAUDE.md's ncurses/nano/nvi
 /// section) into a static `bin/vi` against `musl_sysroot` + `ncurses_sysroot`. Uses OpenVi's own
 /// plain `GNUmakefile` directly (no autotools) -- already a genuinely portable, cross-platform
 /// build (its own `openbsd/` directory ships BSD-compat shims -- `strlcpy`/`getopt_long`/
@@ -2804,7 +2804,7 @@ fn write_ncurses_terminfo_manifest() -> PathBuf {
 fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
     const VI_LOAD_ADDR: u64 = 0x1a00_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("usr.bin/vi");
+    let src = Path::new(manifest_dir).join("bin/vi");
     let bin = src.join("bin/vi");
     println!("cargo:rerun-if-changed={}", src.display());
 

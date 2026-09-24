@@ -29,6 +29,6 @@
 	url = https://github.com/OxideBSD/nano-oxidebsd.git
 	branch = oxidebsd
 [submodule "usr.bin/vi"]
-	path = usr.bin/vi
+	path = bin/vi
 	url = https://github.com/OxideBSD/OpenVi-oxidebsd.git
 	branch = oxidebsd

@@ -1418,7 +1418,7 @@ Staged plan for the rest of self-hosting: C → C++ (seed libc++) → ninja/cmak
   trail: verify `RIP` is genuinely stuck (not just sampled once) and check whether the address in
   question is a real, named constant (like `HEAP_START`) before concluding "corruption."
 
-## ncurses, nano, nvi: a real BSD-shaped curses/editor stack (`lib/ncurses`, `usr.bin/vi`, `usr.bin/nano`, `build.rs`, `sys/console/vga.rs`, `sys/process/lifecycle.rs`)
+## ncurses, nano, nvi: a real BSD-shaped curses/editor stack (`lib/ncurses`, `bin/vi`, `usr.bin/nano`, `build.rs`, `sys/console/vga.rs`, `sys/process/lifecycle.rs`)
 
 The self-hosting plan's next stage after bmake (see that section above) -- a real curses library
 plus two real editors, matching how the actual BSDs split the role: `/bin/vi` (OpenVi, a portable
