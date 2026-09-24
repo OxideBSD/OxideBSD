@@ -2955,7 +2955,7 @@ fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
 /// `NINJA_SRC_FILES` (same idiom as `write_musl_runtime_manifest`): ninja's own source, seeded at
 /// `/usr/src/ninja` for the on-target self-hosted build (`bmake -f Makefile.oxidebsd`). Only what
 /// that build reads -- `src/*.{cc,h,c}` minus the re2c inputs (`*.in.cc`, their generated `.cc`
-/// ships) -- plus the Makefile and license.
+/// ships), `src/third_party/` (header-only deps), the Makefile and license.
 fn write_ninja_src_manifest() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("usr.bin/ninja");
@@ -2966,9 +2966,12 @@ fn write_ninja_src_manifest() -> PathBuf {
     let mut files: Vec<(String, PathBuf)> = collect_dir_files(&src.join("src"))
         .into_iter()
         .filter(|(rel, _)| {
-            !rel.contains('/')
-                && !rel.ends_with(".in.cc")
-                && (rel.ends_with(".cc") || rel.ends_with(".h") || rel.ends_with(".c"))
+            // `third_party/` holds header-only deps ninja's own sources include (emhash's
+            // hash_table8.hpp, rapidhash.h) -- found missing on the first on-target build.
+            rel.starts_with("third_party/")
+                || (!rel.contains('/')
+                    && !rel.ends_with(".in.cc")
+                    && [".cc", ".h", ".c"].iter().any(|ext| rel.ends_with(ext)))
         })
         .map(|(rel, abs)| (format!("src/{rel}"), abs))
         .collect();

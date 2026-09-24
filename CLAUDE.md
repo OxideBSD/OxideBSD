@@ -1621,7 +1621,9 @@ licensed despite the "GNU" association, and its portable autotools build is exac
 - **ninja**: submodule of `OxideBSD/ninja-oxidebsd` (`oxidebsd` branch, v1.13.2). Built with the
   fork's own `Makefile.oxidebsd` -- plain POSIX make, no Python (`configure.py`) or CMake -- by both
   `build.rs`'s `build_ninja` (host cross-build, static `ET_EXEC` at `0x1e000000`, seeded
-  `/usr/bin/ninja`) and on-target bmake + `clang++` from the seeded `/usr/src/ninja`.
+  `/usr/bin/ninja`) and on-target bmake + `clang++` from the seeded `/usr/src/ninja` -- **self-hosts**:
+  `cd /usr/src/ninja && bmake -f Makefile.oxidebsd && ./ninja --version` builds all 32 files and
+  prints `1.13.2` (verified headless; needs `src/third_party/` seeded, header-only deps).
   `tests/ninja_syscall_smoke.rs`: on-target `ninja -C /ninja-demo` (2 `clang -c` jobs + link via
   `/bin/sh`), then runs the result.
 - **`SYS_PPOLL=575`** (`sys/net/mod.rs`, net module): `poll` + atomic sigmask swap, reusing
