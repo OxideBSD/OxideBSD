@@ -64,7 +64,7 @@ members = [
   "regress/fb-mmap-syscall-smoke",
   "regress/keyevent-syscall-smoke",
   "regress/posix-conformance-driver",
-  "usr.bin/lsoxmod",
+  "sbin/lsoxmod",
   "regress/std-hello-syscall-smoke",
   "regress/std-hello-oxidebsd-syscall-smoke",
   "regress/std-process-fs-oxidebsd-syscall-smoke",

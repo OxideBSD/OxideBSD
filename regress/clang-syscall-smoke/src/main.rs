@@ -212,7 +212,7 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 /// Debug-only: isolates whether clang can even start up and print something trivial, before
 /// blaming the real compile+link path.
 fn check_version() -> bool {
-    let ok = run_and_wait(b"/bin/clang", &[b"/bin/clang", b"--version"]);
+    let ok = run_and_wait(b"/usr/bin/clang", &[b"/usr/bin/clang", b"--version"]);
     write_bytes(if ok {
         b"clang-syscall-smoke: --version OK\n"
     } else {
@@ -224,9 +224,9 @@ fn check_version() -> bool {
 /// Debug-only: isolates cc1 (compile) from ld.lld (link) -- does `-c` alone (no link) succeed?
 fn check_compile_object_only() -> bool {
     let ok = run_and_wait(
-        b"/bin/clang",
+        b"/usr/bin/clang",
         &[
-            b"/bin/clang",
+            b"/usr/bin/clang",
             b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-c",
@@ -247,9 +247,9 @@ fn check_compile_object_only() -> bool {
 /// `check_compile_object_only`) directly, skipping the driver's own compile+link orchestration.
 fn check_link_only() -> bool {
     let ok = run_and_wait(
-        b"/bin/clang",
+        b"/usr/bin/clang",
         &[
-            b"/bin/clang",
+            b"/usr/bin/clang",
             b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
@@ -271,9 +271,9 @@ fn check_link_only() -> bool {
 /// a real reason" from "diagnostic output never reaches this console for any clang/lld invocation".
 fn check_deliberately_broken_link() -> bool {
     let ok = run_and_wait(
-        b"/bin/clang",
+        b"/usr/bin/clang",
         &[
-            b"/bin/clang",
+            b"/usr/bin/clang",
             b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
@@ -296,9 +296,9 @@ fn check_deliberately_broken_link() -> bool {
 /// arbitrary oxfs files (see CLAUDE.md's "Real /tmp, /dev/shm, fd-backed mmap" section).
 fn check_link_to_tmp() -> bool {
     let ok = run_and_wait(
-        b"/bin/clang",
+        b"/usr/bin/clang",
         &[
-            b"/bin/clang",
+            b"/usr/bin/clang",
             b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
@@ -359,9 +359,9 @@ fn check_access_x_ok(path: &[u8]) {
 /// Part 1 -- see this file's own module doc comment.
 fn check_compile() -> bool {
     let ok = run_and_wait(
-        b"/bin/clang",
+        b"/usr/bin/clang",
         &[
-            b"/bin/clang",
+            b"/usr/bin/clang",
             b"--target=x86_64-unknown-oxidebsd-musl",
             b"-v",
             b"-static",
@@ -393,17 +393,17 @@ fn check_run_compiled_output() -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"clang-syscall-smoke: starting\n");
 
-    check_file_openable(b"/bin/ld.lld");
-    check_file_openable(b"/lib/clang/23/lib/x86_64-unknown-oxidebsd-musl/libclang_rt.builtins.a");
+    check_file_openable(b"/usr/bin/ld.lld");
+    check_file_openable(b"/usr/lib/clang/23/lib/x86_64-unknown-oxidebsd-musl/libclang_rt.builtins.a");
     check_file_openable(b"/usr/lib/libc.a");
     check_file_openable(b"/usr/lib/crt1.o");
     check_file_openable(b"/usr/lib/crti.o");
     check_file_openable(b"/usr/lib/crtn.o");
-    check_file_openable(b"/bin/x86_64-unknown-oxidebsd-musl-ld.lld");
-    check_access_x_ok(b"/bin/ld.lld");
-    check_access_x_ok(b"/bin/clang");
+    check_file_openable(b"/usr/bin/x86_64-unknown-oxidebsd-musl-ld.lld");
+    check_access_x_ok(b"/usr/bin/ld.lld");
+    check_access_x_ok(b"/usr/bin/clang");
     {
-        let ok = run_and_wait(b"/bin/ld.lld", &[b"ld.lld", b"--version"]);
+        let ok = run_and_wait(b"/usr/bin/ld.lld", &[b"ld.lld", b"--version"]);
         write_bytes(if ok {
             b"clang-syscall-smoke: ld.lld --version OK\n"
         } else {

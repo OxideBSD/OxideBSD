@@ -243,9 +243,9 @@ fn main() {
     // A real standalone userland utility (embedded into oxfs's own /bin below, not a test) --
     // same category as ring3-smoke/musl-smoke above, not a BusyBox applet. Lists OxideBSD's own
     // loaded kernel modules by reading the real /proc/modules this pass added to sys/modules/oxfs.
-    // Lives at `usr.bin/lsoxmod`, not `regress/`, like every other userland crate -- it's a real
+    // Lives at `sbin/lsoxmod`, not `regress/`, like every other userland crate -- it's a real
     // BSD-shaped utility, not test infrastructure.
-    let lsoxmod_elf_path = build_pie_crate_at("usr.bin/lsoxmod", "LSOXMOD_ELF_PATH");
+    let lsoxmod_elf_path = build_pie_crate_at("sbin/lsoxmod", "LSOXMOD_ELF_PATH");
 
     build_module_crate("hello", "HELLO", &[]);
     build_module_crate("native_abi", "NATIVE_ABI", &[]);
@@ -419,20 +419,10 @@ fn main() {
     // comment) -- a plain work-stealing pool over a shared atomic index, not a thread per applet
     // (~300 of those would vastly oversubscribe an 8-core host) and not a chunked static split
     // (uneven applet build times would leave some workers idle while others queue up).
-    // The 12 names in `NATIVE_BIN_UTILITIES` are filtered out here, so BusyBox neither builds nor
-    // embeds them -- their `/bin/<name>` is a native `bin/<name>` crate instead (see below). Done
-    // as a filter, not by deleting their tuples from `BUSYBOX_APPLETS`/`BUSYBOX_APPLETS_PASS2`,
-    // on purpose: every applet's staleness check watches `build_busybox.rs`'s own mtime, so
-    // editing that file forces a full ~256-applet BusyBox rebuild (roughly an hour) for a change
-    // that alters no applet's binary. The now-inert tuples there can be deleted whenever that file
-    // next needs an unrelated edit anyway.
     let all_applets: Vec<(&str, &str, u64)> = BUSYBOX_APPLETS
         .iter()
         .copied()
         .chain(BUSYBOX_APPLETS_PASS2.iter().copied())
-        .filter(|&(_, out_name, _)| {
-            !NATIVE_BIN_UTILITIES.contains(&out_name) && !REPLACED_BUSYBOX_APPLETS.contains(&out_name)
-        })
         .collect();
     let jobs = build_jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -644,24 +634,8 @@ fn main() {
 
 /// `/bin` utilities that are native OxideBSD binaries (`bin/<name>`, built by `build_pie_crate_at`
 /// against `lib/oxlibc`) instead of BusyBox applets -- the first batch of the userland replacement.
-/// See `main`'s `all_applets` filter for how BusyBox is kept from also building/embedding them.
-/// BusyBox applets excluded in favor of a real, distinct replacement that *isn't* a native oxlibc
-/// PIE crate (see `NATIVE_BIN_UTILITIES` just below for those) -- kept as its own list rather than
-/// folded into that one because `NATIVE_BIN_UTILITIES` also drives `build_pie_crate_at("bin/<name>",
-/// ...)` for every entry, and these replacements have no such crate.
-///
-/// Currently just `vi`, replaced by a real OpenVi cross-build (`build_nvi`, see CLAUDE.md's
-/// ncurses/nano/nvi section). **A real bug found live**: BusyBox's own `vi` applet and this
-/// replacement both produced an env var literally named `OXFS_VI_ELF_PATH` (`oxfs_env_var_name`
-/// derives the name purely from the seeded filename, with no notion of "already taken") --
-/// `Command::env`'s last-write-wins semantics silently let whichever one landed later in
-/// `oxfs_extra_env` clobber the other's *value* for that one shared key, so both of
-/// `sys/modules/oxfs`'s two `seed_file(bin, b"vi", ...)` call sites (one for each competing
-/// producer) ended up embedding the exact same (BusyBox's, since it happened to apply last) bytes
-/// -- OpenVi's own build was silently never actually reaching the seeded filesystem at all, only
-/// caught by `ls -la /bin/vi` inside a real boot reporting BusyBox's much smaller size instead of
-/// OpenVi's. Filtering the applet out here removes the second producer entirely.
-const REPLACED_BUSYBOX_APPLETS: &[&str] = &["vi"];
+/// Their BusyBox tuples are gone from `build_busybox.rs`, as is BusyBox's `vi` (OpenVi replaces
+/// it) -- two producers for one `OXFS_<NAME>_ELF_PATH` once silently seeded the wrong binary.
 
 const NATIVE_BIN_UTILITIES: &[&str] = &[
     "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "touch",
@@ -673,7 +647,8 @@ fn oxfs_env_var_name(out_name: &str) -> String {
     } else {
         out_name.to_uppercase()
     };
-    format!("OXFS_{suffix}_ELF_PATH")
+    // `run-parts` -> `OXFS_RUN_PARTS_ELF_PATH`.
+    format!("OXFS_{}_ELF_PATH", suffix.replace('-', "_"))
 }
 
 /// Each `BUSYBOX_APPLETS` entry's own out-of-tree build directory follows a fixed, predictable
@@ -4203,7 +4178,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
 /// need the raw bytes on the host side (`main`, for embedding `ring3-smoke` into the FAT32 image)
 /// don't have to re-derive it. Thin wrapper around `build_crate_at` below -- every call site here
 /// wants the same `regress/` parent; `build_crate_at` exists directly for the rare crate (real
-/// BSD-shaped utilities like `usr.bin/lsoxmod`, eventually `usr.bin/make`) that doesn't.
+/// BSD-shaped utilities like `sbin/lsoxmod`, eventually `usr.bin/make`) that doesn't.
 fn build_userland_crate(crate_name: &str, env_var: &str) -> PathBuf {
     build_crate_at(&format!("regress/{crate_name}"), env_var)
 }
@@ -4308,7 +4283,7 @@ fn build_crate_at_with_rustflags(relative_dir: &str, env_var: &str, extra_rustfl
 /// comment -- without it, a real dynamic-linker/PIE-model consumer's `AT_PHDR` would point at
 /// unmapped memory).
 ///
-/// **A real, confirmed-live gap found migrating `usr.bin/lsoxmod`**: completely ordinary,
+/// **A real, confirmed-live gap found migrating `sbin/lsoxmod`**: completely ordinary,
 /// disciplined Rust code (no explicit `static X: &[u8] = ...`, no pointer tables) still produced
 /// real `R_X86_64_RELATIVE` relocations under genuine PIE codegen -- Rust's own `#[track_caller]`
 /// bounds-check machinery embeds a `core::panic::Location` (a `&str` file-path pointer + line/col)

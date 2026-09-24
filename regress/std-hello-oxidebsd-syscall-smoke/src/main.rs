@@ -137,7 +137,7 @@ pub extern "C" fn _start() -> ! {
 
     match fork() {
         Ok(0) => {
-            let _ = execve(b"/bin/std-hello-oxidebsd", &[b"std-hello-oxidebsd"]);
+            let _ = execve(b"/usr/tests/std-hello-oxidebsd", &[b"std-hello-oxidebsd"]);
             // execve only returns on failure.
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);

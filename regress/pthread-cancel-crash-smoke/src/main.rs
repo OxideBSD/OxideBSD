@@ -189,7 +189,7 @@ pub extern "C" fn _start() -> ! {
     // real bug under investigation reproduces, this wait4 call itself never returns.
     let child2 = match fork() {
         Ok(0) => {
-            let _ = execve(b"/bin/musl", &[b"musl"]);
+            let _ = execve(b"/usr/tests/musl", &[b"musl"]);
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);
             }
@@ -212,7 +212,7 @@ pub extern "C" fn _start() -> ! {
     );
     check!(
         status2 == 0,
-        b"/bin/musl didn't exit cleanly after the crash -- system health regression"
+        b"/usr/tests/musl didn't exit cleanly after the crash -- system health regression"
     );
     write_bytes(b"pthread-cancel-crash-smoke: part 2 (system still healthy after the crash) OK\n");
 

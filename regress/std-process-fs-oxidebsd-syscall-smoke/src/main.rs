@@ -136,7 +136,7 @@ pub extern "C" fn _start() -> ! {
     match fork() {
         Ok(0) => {
             let _ = execve(
-                b"/bin/std-process-fs-oxidebsd",
+                b"/usr/tests/std-process-fs-oxidebsd",
                 &[b"std-process-fs-oxidebsd"],
             );
             // execve only returns on failure.

@@ -28,12 +28,11 @@ Current state:
   `argv`/`envp` passthrough, blocking pipes, per-process signal delivery, real ring-3 preemption
   (see "Real preemptive scheduling"), and real threading (`clone(2)`/`pthread_create`, see "Real
   threading").
-- pid 1 is BusyBox's `hush`, built against a patched musl fork — superseded the original
-  hand-written `stsh` shell, since removed entirely (v0.2.0 cleanup). 256 BusyBox applets run as
-  standalone static binaries, `execve`'d individually (not a multi-call `busybox` binary
-  dispatching on `argv[0]` — that passthrough exists now, but the roster hasn't been rebuilt to
-  use it). 12 of them (`echo true false pwd cat ls mkdir rm cp mv ln touch`) are now native
-  `bin/<name>` PIE binaries over `lib/oxlibc` instead — see "Real PIE/ASLR loading" below.
+- pid 1 is BusyBox's `hush` (`/bin/hush`), built against a patched musl fork; `/bin/sh` is
+  OxideBSD's own shell (`lib/libsh`, see "Shell"). 195 BusyBox applets run as standalone static
+  binaries, `execve`'d individually (not a multi-call `busybox` binary), placed per HIER.md (see
+  "Filesystem layout"). 12 utilities (`echo true false pwd cat ls mkdir rm cp mv ln touch`) are
+  native `bin/<name>` PIE binaries over `lib/oxlibc` — see "Real PIE/ASLR loading" below.
 - A real networking stack (`sys/drivers/pci.rs`, `sys/net/*`, `sys/modules/net/`): PCI + an rtl8139
   driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP/raw-ICMP sockets, `poll(2)`, and real hostname
   resolution over musl's own DNS stub resolver (no DNS protocol code of its own) — see "Real
@@ -1635,6 +1634,16 @@ invocation until libsh has one.
   checked-in `*.expected` (dash's host output) — regenerate those with dash when a script changes.
 - `build_std_oxidebsd_userland_crate` takes a crate path now (not just `regress/std/<name>`).
 
+## Filesystem layout (OxideBSD-doc `HIER.md`)
+
+oxfs seeds the BSD hierarchy HIER.md defines, not a flat `/bin`: `/bin` (44, single-user
+essentials) / `/sbin` / `/usr/bin` (clang, ld.lld, bmake, nano, ninja, most applets) / `/usr/sbin`
+/ `/usr/libexec/getty` / `/usr/games/doom` / `/usr/tests` (regress fixtures: `musl`, `smoke`,
+`std-*`). Clang's resource dir follows the binary: `/usr/lib/clang/23`. Root PATH (pid 1, POSIX
+driver) is `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin`. 48 BusyBox applets were
+cut outright (2026-09-23); `build_busybox.rs` no longer carries the native-utility/`vi` tuples, so
+there's no roster filter any more. Older sections below still say `/bin/clang` etc.
+
 ## ninja (`usr.bin/ninja`), `ppoll(2)`, and demand-grown user stacks
 
 - **ninja**: submodule of `OxideBSD/ninja-oxidebsd` (`oxidebsd` branch, v1.13.2). Built with the
@@ -1713,7 +1722,7 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   `sys/modules/oxfs`'s `seed_file` calls are unchanged. `NATIVE_BIN_UTILITIES` in `build.rs` filters
   them out of the roster — deliberately *not* by deleting their tuples from `build_busybox.rs`,
   which would force a ~1h full BusyBox rebuild (the inert tuples can go with the next unrelated
-  edit there). `usr.bin/lsoxmod` is PIE too.
+  edit there). `sbin/lsoxmod` is PIE too.
 - Behavior notes: flags are `-n` echo, `-a -l -1 -C --color=…` ls (sorted; on a tty a plain `ls`
   is column-major and colored — dirs bold blue, symlinks cyan, executables green; off a tty, i.e.
   redirected/piped, it's one-per-line and plain, since `tty_size()`/`TIOCGWINSZ` only succeeds on

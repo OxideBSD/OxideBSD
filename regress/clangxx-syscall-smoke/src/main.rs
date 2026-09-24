@@ -170,9 +170,9 @@ pub extern "C" fn _start() -> ! {
     // Part 1: bare compile+link. `-v` puts the resolved triple and #include search list in the
     // serial log, which is the first thing to read if this fails.
     let compiled = run_and_wait(
-        b"/bin/clang++",
+        b"/usr/bin/clang++",
         &[
-            b"/bin/clang++",
+            b"/usr/bin/clang++",
             b"-v",
             b"-static",
             b"-o",

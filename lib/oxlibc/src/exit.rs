@@ -1,6 +1,6 @@
 //! `exit()` and the crate graph's one `#[panic_handler]` -- Rust requires exactly one, not
 //! necessarily in the final binary crate, so no `bin/<name>` utility needs its own (a real
-//! simplification over `usr.bin/lsoxmod`'s own hand-rolled copy, which predates this crate).
+//! simplification over `sbin/lsoxmod`'s own hand-rolled copy, which predates this crate).
 
 use crate::syscall::syscall3;
 

@@ -137,7 +137,7 @@ pub extern "C" fn _start() -> ! {
 
     match fork() {
         Ok(0) => {
-            let _ = execve(b"/bin/std-hello", &[b"std-hello"]);
+            let _ = execve(b"/usr/tests/std-hello", &[b"std-hello"]);
             // execve only returns on failure.
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);

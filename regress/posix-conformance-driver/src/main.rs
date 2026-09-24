@@ -119,7 +119,7 @@ fn execve(path: &[u8], argv: &[&[u8]]) -> Result<u64, u64> {
         };
     }
     let argv_ptr = entries.as_ptr() as u64;
-    const ENVP: &[u8] = b"PATH=/bin";
+    const ENVP: &[u8] = b"PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin";
     let envp_entries = [
         RawArgvEntry {
             ptr: ENVP.as_ptr() as u64,

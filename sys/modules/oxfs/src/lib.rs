@@ -6935,30 +6935,40 @@ fn format_fresh_filesystem() -> bool {
     dir_insert(bin, b"..", root).expect("oxfs: failed to seed /bin's .. entry");
     dir_insert(root, b"bin", bin).expect("oxfs: failed to insert /bin into root");
 
-    ok &= seed_file(bin, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
-    ok &= seed_file(bin, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
+    // The rest of the program hierarchy (OxideBSD-doc HIER.md): /bin and /sbin are what
+    // single-user repair needs, /usr/bin and /usr/sbin everything else.
+    let sbin = ensure_dir(root, b"sbin");
+    let usr = ensure_dir(root, b"usr");
+    let usr_bin = ensure_dir(usr, b"bin");
+    let usr_sbin = ensure_dir(usr, b"sbin");
+    let usr_libexec = ensure_dir(usr, b"libexec");
+    let usr_games = ensure_dir(usr, b"games");
+    let usr_tests = ensure_dir(usr, b"tests");
+
+    ok &= seed_file(usr_tests, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
+    ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_tests,
         b"std-hello",
         include_bytes!(env!("OXFS_STD_HELLO_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_tests,
         b"std-hello-oxidebsd",
         include_bytes!(env!("OXFS_STD_HELLO_OXIDEBSD_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_tests,
         b"std-process-fs-oxidebsd",
         include_bytes!(env!("OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_tests,
         b"std-thread-net-signal-oxidebsd",
         include_bytes!(env!("OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_tests,
         b"float-smoke",
         include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
     );
@@ -6967,9 +6977,9 @@ fn format_fresh_filesystem() -> bool {
     // d_iwad.c always searches "." first, and root's own $HOME (see /etc/passwd) is "/" -- the
     // ordinary hush prompt's default cwd -- so a bare `doom` invocation finds it with no `-iwad`
     // argument needed.
-    ok &= seed_file(bin, b"doom", include_bytes!(env!("OXFS_DOOM_ELF_PATH")));
+    ok &= seed_file(usr_games, b"doom", include_bytes!(env!("OXFS_DOOM_ELF_PATH")));
     ok &= seed_file(root, b"doom1.wad", include_bytes!(env!("OXFS_DOOM1_WAD_PATH")));
-    // lsoxmod: a real standalone Rust userland ELF (usr.bin/lsoxmod/, same "freestanding,
+    // lsoxmod: a real standalone Rust userland ELF (sbin/lsoxmod/, same "freestanding,
     // raw-SYSCALL, no musl/BusyBox involved" category as regress/musl-smoke above), not a BusyBox applet
     // -- lists OxideBSD's own dynamically loaded kernel modules by reading the real /proc/modules
     // this pass added, the same "port real format, read real data" approach the rest of this
@@ -6979,11 +6989,11 @@ fn format_fresh_filesystem() -> bool {
     // Linux kernel modules, not this kernel's own module system, so the name is intentionally
     // pointed at the OxideBSD-native tool instead of BusyBox's applet of the same name.
     ok &= seed_file(
-        bin,
+        sbin,
         b"lsoxmod",
         include_bytes!(env!("OXFS_LSOXMOD_ELF_PATH")),
     );
-    ok &= seed_symlink(bin, b"lsmod", b"lsoxmod");
+    ok &= seed_symlink(sbin, b"lsmod", b"lsoxmod");
     // clang/ld.lld: OxideBSD's real on-target C/C++ compiler (see CLAUDE.md's Clang/LLVM port
     // section -- TinyCC, this project's earlier, simpler on-target compiler, served as an early
     // proof that a real on-target compile+link was even possible, and was removed once Clang/LLVM
@@ -6993,14 +7003,14 @@ fn format_fresh_filesystem() -> bool {
     // `argv[0]`, and `ld.lld` is exactly what `OxideBSD::getDefaultLinker()` (the Clang driver)
     // looks for by that literal name. `/lib/clang/23`'s own resource-dir tree (intrinsic headers +
     // compiler-rt builtins) is seeded separately, near `/lib/ld-musl-x86_64.so.1` below.
-    ok &= seed_file(bin, b"clang", include_bytes!(env!("OXFS_CLANG_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"clang", include_bytes!(env!("OXFS_CLANG_ELF_PATH")));
     // The driver picks C++ mode (libc++ headers, `-lc++` link line) off argv[0]'s basename.
-    ok &= seed_symlink(bin, b"clang++", b"clang");
-    ok &= seed_file(bin, b"ld.lld", include_bytes!(env!("OXFS_LLD_ELF_PATH")));
+    ok &= seed_symlink(usr_bin, b"clang++", b"clang");
+    ok &= seed_file(usr_bin, b"ld.lld", include_bytes!(env!("OXFS_LLD_ELF_PATH")));
     // bmake (`usr.bin/make`, build.rs's `build_bmake`) -- `/usr/share/mk` is seeded below, next to
     // the rest of `/usr`.
-    ok &= seed_file(bin, b"bmake", include_bytes!(env!("OXFS_BMAKE_ELF_PATH")));
-    ok &= seed_symlink(bin, b"make", b"/bin/bmake");
+    ok &= seed_file(usr_bin, b"bmake", include_bytes!(env!("OXFS_BMAKE_ELF_PATH")));
+    ok &= seed_symlink(usr_bin, b"make", b"/usr/bin/bmake");
     ok &= seed_file(bin, b"true", include_bytes!(env!("OXFS_TRUE_ELF_PATH")));
     ok &= seed_file(bin, b"echo", include_bytes!(env!("OXFS_ECHO_ELF_PATH")));
     ok &= seed_file(bin, b"cat", include_bytes!(env!("OXFS_CAT_ELF_PATH")));
@@ -7009,8 +7019,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"sh", include_bytes!(env!("OXFS_SH_ELF_PATH")));
     ok &= seed_file(bin, b"hush", include_bytes!(env!("OXFS_HUSH_ELF_PATH")));
     ok &= seed_file(bin, b"false", include_bytes!(env!("OXFS_FALSE_ELF_PATH")));
-    ok &= seed_file(bin, b"yes", include_bytes!(env!("OXFS_YES_ELF_PATH")));
-    ok &= seed_file(bin, b"more", include_bytes!(env!("OXFS_MORE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"yes", include_bytes!(env!("OXFS_YES_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"more", include_bytes!(env!("OXFS_MORE_ELF_PATH")));
     ok &= seed_file(bin, b"mkdir", include_bytes!(env!("OXFS_MKDIR_ELF_PATH")));
     ok &= seed_file(bin, b"rmdir", include_bytes!(env!("OXFS_RMDIR_ELF_PATH")));
     ok &= seed_file(bin, b"rm", include_bytes!(env!("OXFS_RM_ELF_PATH")));
@@ -7020,24 +7030,24 @@ fn format_fresh_filesystem() -> bool {
     // OpenVi -- real BSD's own editor, `/bin` (not `/usr/bin`) since it's the essential,
     // single-user-mode-capable editor -- see CLAUDE.md's ncurses/nano/nvi section.
     ok &= seed_file(bin, b"vi", include_bytes!(env!("OXFS_VI_ELF_PATH")));
-    ok &= seed_file(bin, b"head", include_bytes!(env!("OXFS_HEAD_ELF_PATH")));
-    ok &= seed_file(bin, b"tail", include_bytes!(env!("OXFS_TAIL_ELF_PATH")));
-    ok &= seed_file(bin, b"wc", include_bytes!(env!("OXFS_WC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"head", include_bytes!(env!("OXFS_HEAD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tail", include_bytes!(env!("OXFS_TAIL_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"wc", include_bytes!(env!("OXFS_WC_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"basename",
         include_bytes!(env!("OXFS_BASENAME_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"dirname",
         include_bytes!(env!("OXFS_DIRNAME_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"printf", include_bytes!(env!("OXFS_PRINTF_ELF_PATH")));
-    ok &= seed_file(bin, b"seq", include_bytes!(env!("OXFS_SEQ_ELF_PATH")));
-    ok &= seed_file(bin, b"cut", include_bytes!(env!("OXFS_CUT_ELF_PATH")));
-    ok &= seed_file(bin, b"sort", include_bytes!(env!("OXFS_SORT_ELF_PATH")));
-    ok &= seed_file(bin, b"uniq", include_bytes!(env!("OXFS_UNIQ_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"printf", include_bytes!(env!("OXFS_PRINTF_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"seq", include_bytes!(env!("OXFS_SEQ_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"cut", include_bytes!(env!("OXFS_CUT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"sort", include_bytes!(env!("OXFS_SORT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"uniq", include_bytes!(env!("OXFS_UNIQ_ELF_PATH")));
     ok &= seed_file(bin, b"kill", include_bytes!(env!("OXFS_KILL_ELF_PATH")));
 
     // Second pass: every applet build.rs's own second-pass probe found buildable against this
@@ -7047,307 +7057,221 @@ fn format_fresh_filesystem() -> bool {
     // seed_file(...) call the first 24 applets above use) purely because there are ~300 of these --
     // no behavioral difference.
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"addgroup",
         include_bytes!(env!("OXFS_ADDGROUP_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"adduser",
         include_bytes!(env!("OXFS_ADDUSER_ELF_PATH")),
     );
-    ok &= seed_file(
-        bin,
-        b"adjtimex",
-        include_bytes!(env!("OXFS_ADJTIMEX_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"ar", include_bytes!(env!("OXFS_AR_ELF_PATH")));
-    ok &= seed_file(bin, b"arp", include_bytes!(env!("OXFS_ARP_ELF_PATH")));
-    ok &= seed_file(bin, b"arping", include_bytes!(env!("OXFS_ARPING_ELF_PATH")));
-    ok &= seed_file(bin, b"ascii", include_bytes!(env!("OXFS_ASCII_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ar", include_bytes!(env!("OXFS_AR_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ascii", include_bytes!(env!("OXFS_ASCII_ELF_PATH")));
     ok &= seed_file(bin, b"ash", include_bytes!(env!("OXFS_ASH_ELF_PATH")));
-    ok &= seed_file(bin, b"awk", include_bytes!(env!("OXFS_AWK_ELF_PATH")));
-    ok &= seed_file(bin, b"base32", include_bytes!(env!("OXFS_BASE32_ELF_PATH")));
-    ok &= seed_file(bin, b"base64", include_bytes!(env!("OXFS_BASE64_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"awk", include_bytes!(env!("OXFS_AWK_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"base32", include_bytes!(env!("OXFS_BASE32_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"base64", include_bytes!(env!("OXFS_BASE64_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"arch", include_bytes!(env!("OXFS_ARCH_ELF_PATH")));
+    ok &= seed_file(sbin, b"sysctl", include_bytes!(env!("OXFS_SYSCTL_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"bc", include_bytes!(env!("OXFS_BC_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"bash_ash",
-        include_bytes!(env!("OXFS_BASH_ASH_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"bash", include_bytes!(env!("OXFS_BASH_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"bbconfig",
-        include_bytes!(env!("OXFS_BBCONFIG_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"arch", include_bytes!(env!("OXFS_ARCH_ELF_PATH")));
-    ok &= seed_file(bin, b"sysctl", include_bytes!(env!("OXFS_SYSCTL_ELF_PATH")));
-    ok &= seed_file(bin, b"bc", include_bytes!(env!("OXFS_BC_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"bootchartd",
-        include_bytes!(env!("OXFS_BOOTCHARTD_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"bunzip2",
         include_bytes!(env!("OXFS_BUNZIP2_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"bzcat", include_bytes!(env!("OXFS_BZCAT_ELF_PATH")));
-    ok &= seed_file(bin, b"bzip2", include_bytes!(env!("OXFS_BZIP2_ELF_PATH")));
-    ok &= seed_file(bin, b"cal", include_bytes!(env!("OXFS_CAL_ELF_PATH")));
-    ok &= seed_file(bin, b"chat", include_bytes!(env!("OXFS_CHAT_ELF_PATH")));
-    ok &= seed_file(bin, b"chgrp", include_bytes!(env!("OXFS_CHGRP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"bzcat", include_bytes!(env!("OXFS_BZCAT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"bzip2", include_bytes!(env!("OXFS_BZIP2_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"cal", include_bytes!(env!("OXFS_CAL_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"chat", include_bytes!(env!("OXFS_CHAT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"chgrp", include_bytes!(env!("OXFS_CHGRP_ELF_PATH")));
     ok &= seed_file(bin, b"chmod", include_bytes!(env!("OXFS_CHMOD_ELF_PATH")));
-    ok &= seed_file(bin, b"chown", include_bytes!(env!("OXFS_CHOWN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"chown", include_bytes!(env!("OXFS_CHOWN_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"chpasswd",
         include_bytes!(env!("OXFS_CHPASSWD_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"chroot", include_bytes!(env!("OXFS_CHROOT_ELF_PATH")));
-    ok &= seed_file(bin, b"chrt", include_bytes!(env!("OXFS_CHRT_ELF_PATH")));
-    ok &= seed_file(bin, b"cksum", include_bytes!(env!("OXFS_CKSUM_ELF_PATH")));
-    ok &= seed_file(bin, b"clear", include_bytes!(env!("OXFS_CLEAR_ELF_PATH")));
-    ok &= seed_file(bin, b"cmp", include_bytes!(env!("OXFS_CMP_ELF_PATH")));
-    ok &= seed_file(bin, b"comm", include_bytes!(env!("OXFS_COMM_ELF_PATH")));
-    ok &= seed_file(bin, b"cpio", include_bytes!(env!("OXFS_CPIO_ELF_PATH")));
-    ok &= seed_file(bin, b"crc32", include_bytes!(env!("OXFS_CRC32_ELF_PATH")));
-    ok &= seed_file(bin, b"crond", include_bytes!(env!("OXFS_CROND_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"chroot", include_bytes!(env!("OXFS_CHROOT_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"chrt", include_bytes!(env!("OXFS_CHRT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"cksum", include_bytes!(env!("OXFS_CKSUM_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"clear", include_bytes!(env!("OXFS_CLEAR_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"cmp", include_bytes!(env!("OXFS_CMP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"comm", include_bytes!(env!("OXFS_COMM_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"cpio", include_bytes!(env!("OXFS_CPIO_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"crc32", include_bytes!(env!("OXFS_CRC32_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"crond", include_bytes!(env!("OXFS_CROND_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"crontab",
         include_bytes!(env!("OXFS_CRONTAB_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"cryptpw",
         include_bytes!(env!("OXFS_CRYPTPW_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"cttyhack",
         include_bytes!(env!("OXFS_CTTYHACK_ELF_PATH")),
     );
     ok &= seed_file(bin, b"date", include_bytes!(env!("OXFS_DATE_ELF_PATH")));
-    ok &= seed_file(bin, b"dc", include_bytes!(env!("OXFS_DC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"dc", include_bytes!(env!("OXFS_DC_ELF_PATH")));
     ok &= seed_file(bin, b"dd", include_bytes!(env!("OXFS_DD_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"delgroup",
         include_bytes!(env!("OXFS_DELGROUP_ELF_PATH")),
     );
     ok &= seed_file(bin, b"df", include_bytes!(env!("OXFS_DF_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"diff", include_bytes!(env!("OXFS_DIFF_ELF_PATH")));
+    ok &= seed_file(sbin, b"dmesg", include_bytes!(env!("OXFS_DMESG_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"dhcprelay",
-        include_bytes!(env!("OXFS_DHCPRELAY_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"diff", include_bytes!(env!("OXFS_DIFF_ELF_PATH")));
-    ok &= seed_file(bin, b"dmesg", include_bytes!(env!("OXFS_DMESG_ELF_PATH")));
-    ok &= seed_file(bin, b"dnsd", include_bytes!(env!("OXFS_DNSD_ELF_PATH")));
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"dnsdomainname",
         include_bytes!(env!("OXFS_DNSDOMAINNAME_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"dos2unix",
         include_bytes!(env!("OXFS_DOS2UNIX_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"dpkg", include_bytes!(env!("OXFS_DPKG_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"dpkg_deb",
-        include_bytes!(env!("OXFS_DPKG_DEB_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"du", include_bytes!(env!("OXFS_DU_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"dumpleases",
-        include_bytes!(env!("OXFS_DUMPLEASES_ELF_PATH")),
-    );
+    ok &= seed_file(usr_bin, b"du", include_bytes!(env!("OXFS_DU_ELF_PATH")));
     ok &= seed_file(bin, b"ed", include_bytes!(env!("OXFS_ED_ELF_PATH")));
     ok &= seed_file(bin, b"egrep", include_bytes!(env!("OXFS_EGREP_ELF_PATH")));
-    ok &= seed_file(bin, b"env", include_bytes!(env!("OXFS_ENV_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"env", include_bytes!(env!("OXFS_ENV_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"envuidgid",
         include_bytes!(env!("OXFS_ENVUIDGID_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"expand", include_bytes!(env!("OXFS_EXPAND_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"expand", include_bytes!(env!("OXFS_EXPAND_ELF_PATH")));
     ok &= seed_file(bin, b"expr", include_bytes!(env!("OXFS_EXPR_ELF_PATH")));
-    ok &= seed_file(bin, b"factor", include_bytes!(env!("OXFS_FACTOR_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"factor", include_bytes!(env!("OXFS_FACTOR_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"fakeidentd",
-        include_bytes!(env!("OXFS_FAKEIDENTD_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"fallocate",
         include_bytes!(env!("OXFS_FALLOCATE_ELF_PATH")),
     );
     ok &= seed_file(bin, b"fgrep", include_bytes!(env!("OXFS_FGREP_ELF_PATH")));
-    ok &= seed_file(bin, b"find", include_bytes!(env!("OXFS_FIND_ELF_PATH")));
-    ok &= seed_file(bin, b"flock", include_bytes!(env!("OXFS_FLOCK_ELF_PATH")));
-    ok &= seed_file(bin, b"fold", include_bytes!(env!("OXFS_FOLD_ELF_PATH")));
-    ok &= seed_file(bin, b"free", include_bytes!(env!("OXFS_FREE_ELF_PATH")));
-    ok &= seed_file(bin, b"fsync", include_bytes!(env!("OXFS_FSYNC_ELF_PATH")));
-    ok &= seed_file(bin, b"ftpd", include_bytes!(env!("OXFS_FTPD_ELF_PATH")));
-    ok &= seed_file(bin, b"ftpget", include_bytes!(env!("OXFS_FTPGET_ELF_PATH")));
-    ok &= seed_file(bin, b"ftpput", include_bytes!(env!("OXFS_FTPPUT_ELF_PATH")));
-    ok &= seed_file(bin, b"fuser", include_bytes!(env!("OXFS_FUSER_ELF_PATH")));
-    ok &= seed_file(bin, b"getopt", include_bytes!(env!("OXFS_GETOPT_ELF_PATH")));
-    ok &= seed_file(bin, b"getty", include_bytes!(env!("OXFS_GETTY_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"find", include_bytes!(env!("OXFS_FIND_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"flock", include_bytes!(env!("OXFS_FLOCK_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"fold", include_bytes!(env!("OXFS_FOLD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"free", include_bytes!(env!("OXFS_FREE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"fsync", include_bytes!(env!("OXFS_FSYNC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ftpget", include_bytes!(env!("OXFS_FTPGET_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ftpput", include_bytes!(env!("OXFS_FTPPUT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"fuser", include_bytes!(env!("OXFS_FUSER_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"getopt", include_bytes!(env!("OXFS_GETOPT_ELF_PATH")));
+    ok &= seed_file(usr_libexec, b"getty", include_bytes!(env!("OXFS_GETTY_ELF_PATH")));
     ok &= seed_file(bin, b"grep", include_bytes!(env!("OXFS_GREP_ELF_PATH")));
-    ok &= seed_file(bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
     ok &= seed_file(bin, b"gunzip", include_bytes!(env!("OXFS_GUNZIP_ELF_PATH")));
     ok &= seed_file(bin, b"gzip", include_bytes!(env!("OXFS_GZIP_ELF_PATH")));
-    ok &= seed_file(bin, b"halt", include_bytes!(env!("OXFS_HALT_ELF_PATH")));
+    ok &= seed_file(sbin, b"halt", include_bytes!(env!("OXFS_HALT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"hexdump",
         include_bytes!(env!("OXFS_HEXDUMP_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"hexedit",
         include_bytes!(env!("OXFS_HEXEDIT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"hostid", include_bytes!(env!("OXFS_HOSTID_ELF_PATH")));
-    ok &= seed_file(bin, b"httpd", include_bytes!(env!("OXFS_HTTPD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"hostid", include_bytes!(env!("OXFS_HOSTID_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"hwclock",
-        include_bytes!(env!("OXFS_HWCLOCK_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
-        b"ifconfig",
-        include_bytes!(env!("OXFS_IFCONFIG_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"ifdown", include_bytes!(env!("OXFS_IFDOWN_ELF_PATH")));
-    ok &= seed_file(bin, b"inetd", include_bytes!(env!("OXFS_INETD_ELF_PATH")));
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"install",
         include_bytes!(env!("OXFS_INSTALL_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"iostat", include_bytes!(env!("OXFS_IOSTAT_ELF_PATH")));
-    ok &= seed_file(bin, b"ipcalc", include_bytes!(env!("OXFS_IPCALC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ipcalc", include_bytes!(env!("OXFS_IPCALC_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"killall5",
         include_bytes!(env!("OXFS_KILLALL5_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"less", include_bytes!(env!("OXFS_LESS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"less", include_bytes!(env!("OXFS_LESS_ELF_PATH")));
     ok &= seed_file(bin, b"link", include_bytes!(env!("OXFS_LINK_ELF_PATH")));
     ok &= seed_file(bin, b"ln", include_bytes!(env!("OXFS_LN_ELF_PATH")));
-    ok &= seed_file(bin, b"login", include_bytes!(env!("OXFS_LOGIN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"login", include_bytes!(env!("OXFS_LOGIN_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"logname",
         include_bytes!(env!("OXFS_LOGNAME_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"lpd", include_bytes!(env!("OXFS_LPD_ELF_PATH")));
-    ok &= seed_file(bin, b"lpq", include_bytes!(env!("OXFS_LPQ_ELF_PATH")));
-    ok &= seed_file(bin, b"lpr", include_bytes!(env!("OXFS_LPR_ELF_PATH")));
     ok &= seed_file(bin, b"ls", include_bytes!(env!("OXFS_LS_ELF_PATH")));
-    ok &= seed_file(bin, b"lsof", include_bytes!(env!("OXFS_LSOF_ELF_PATH")));
-    ok &= seed_file(bin, b"lspci", include_bytes!(env!("OXFS_LSPCI_ELF_PATH")));
-    ok &= seed_file(bin, b"lsscsi", include_bytes!(env!("OXFS_LSSCSI_ELF_PATH")));
-    ok &= seed_file(bin, b"lsusb", include_bytes!(env!("OXFS_LSUSB_ELF_PATH")));
-    ok &= seed_file(bin, b"lzcat", include_bytes!(env!("OXFS_LZCAT_ELF_PATH")));
-    ok &= seed_file(bin, b"lzop", include_bytes!(env!("OXFS_LZOP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"lsof", include_bytes!(env!("OXFS_LSOF_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"lzcat", include_bytes!(env!("OXFS_LZCAT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"lzop", include_bytes!(env!("OXFS_LZOP_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_sbin,
         b"makedevs",
         include_bytes!(env!("OXFS_MAKEDEVS_ELF_PATH")),
     );
+    ok &= seed_file(usr_bin, b"man", include_bytes!(env!("OXFS_MAN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"md5sum", include_bytes!(env!("OXFS_MD5SUM_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"minips", include_bytes!(env!("OXFS_MINIPS_ELF_PATH")));
+    ok &= seed_file(sbin, b"mknod", include_bytes!(env!("OXFS_MKNOD_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"makemime",
-        include_bytes!(env!("OXFS_MAKEMIME_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"man", include_bytes!(env!("OXFS_MAN_ELF_PATH")));
-    ok &= seed_file(bin, b"md5sum", include_bytes!(env!("OXFS_MD5SUM_ELF_PATH")));
-    ok &= seed_file(bin, b"minips", include_bytes!(env!("OXFS_MINIPS_ELF_PATH")));
-    ok &= seed_file(bin, b"mknod", include_bytes!(env!("OXFS_MKNOD_ELF_PATH")));
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"mkpasswd",
         include_bytes!(env!("OXFS_MKPASSWD_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"mktemp", include_bytes!(env!("OXFS_MKTEMP_ELF_PATH")));
-    ok &= seed_file(bin, b"mount", include_bytes!(env!("OXFS_MOUNT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"mktemp", include_bytes!(env!("OXFS_MKTEMP_ELF_PATH")));
+    ok &= seed_file(sbin, b"mount", include_bytes!(env!("OXFS_MOUNT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"mountpoint",
         include_bytes!(env!("OXFS_MOUNTPOINT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"mpstat", include_bytes!(env!("OXFS_MPSTAT_ELF_PATH")));
-    ok &= seed_file(bin, b"nc", include_bytes!(env!("OXFS_NC_ELF_PATH")));
-    ok &= seed_file(bin, b"netcat", include_bytes!(env!("OXFS_NETCAT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"nc", include_bytes!(env!("OXFS_NC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"netcat", include_bytes!(env!("OXFS_NETCAT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"netstat",
         include_bytes!(env!("OXFS_NETSTAT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"nice", include_bytes!(env!("OXFS_NICE_ELF_PATH")));
-    ok &= seed_file(bin, b"nl", include_bytes!(env!("OXFS_NL_ELF_PATH")));
-    ok &= seed_file(bin, b"nmeter", include_bytes!(env!("OXFS_NMETER_ELF_PATH")));
-    ok &= seed_file(bin, b"nohup", include_bytes!(env!("OXFS_NOHUP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"nice", include_bytes!(env!("OXFS_NICE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"nl", include_bytes!(env!("OXFS_NL_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"nohup", include_bytes!(env!("OXFS_NOHUP_ELF_PATH")));
     ok &= seed_file(bin, b"nproc", include_bytes!(env!("OXFS_NPROC_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"nslookup",
         include_bytes!(env!("OXFS_NSLOOKUP_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"ntpd", include_bytes!(env!("OXFS_NTPD_ELF_PATH")));
-    ok &= seed_file(bin, b"nuke", include_bytes!(env!("OXFS_NUKE_ELF_PATH")));
-    ok &= seed_file(bin, b"od", include_bytes!(env!("OXFS_OD_ELF_PATH")));
-    ok &= seed_file(bin, b"passwd", include_bytes!(env!("OXFS_PASSWD_ELF_PATH")));
-    ok &= seed_file(bin, b"paste", include_bytes!(env!("OXFS_PASTE_ELF_PATH")));
-    ok &= seed_file(bin, b"patch", include_bytes!(env!("OXFS_PATCH_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"ntpd", include_bytes!(env!("OXFS_NTPD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"od", include_bytes!(env!("OXFS_OD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"passwd", include_bytes!(env!("OXFS_PASSWD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"paste", include_bytes!(env!("OXFS_PASTE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"patch", include_bytes!(env!("OXFS_PATCH_ELF_PATH")));
     ok &= seed_file(bin, b"pgrep", include_bytes!(env!("OXFS_PGREP_ELF_PATH")));
-    ok &= seed_file(bin, b"pidof", include_bytes!(env!("OXFS_PIDOF_ELF_PATH")));
-    ok &= seed_file(bin, b"ping", include_bytes!(env!("OXFS_PING_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"pidof", include_bytes!(env!("OXFS_PIDOF_ELF_PATH")));
+    ok &= seed_file(sbin, b"ping", include_bytes!(env!("OXFS_PING_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"pipe_progress",
         include_bytes!(env!("OXFS_PIPE_PROGRESS_ELF_PATH")),
     );
     ok &= seed_file(bin, b"pkill", include_bytes!(env!("OXFS_PKILL_ELF_PATH")));
-    ok &= seed_file(bin, b"pmap", include_bytes!(env!("OXFS_PMAP_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"popmaildir",
-        include_bytes!(env!("OXFS_POPMAILDIR_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
+        sbin,
         b"poweroff",
         include_bytes!(env!("OXFS_POWEROFF_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
-        b"powertop",
-        include_bytes!(env!("OXFS_POWERTOP_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
+        usr_bin,
         b"printenv",
         include_bytes!(env!("OXFS_PRINTENV_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"pscan", include_bytes!(env!("OXFS_PSCAN_ELF_PATH")));
-    ok &= seed_file(bin, b"pstree", include_bytes!(env!("OXFS_PSTREE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"pscan", include_bytes!(env!("OXFS_PSCAN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"pstree", include_bytes!(env!("OXFS_PSTREE_ELF_PATH")));
     ok &= seed_file(bin, b"pwd", include_bytes!(env!("OXFS_PWD_ELF_PATH")));
-    ok &= seed_file(bin, b"pwdx", include_bytes!(env!("OXFS_PWDX_ELF_PATH")));
-    ok &= seed_file(bin, b"rdate", include_bytes!(env!("OXFS_RDATE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"pwdx", include_bytes!(env!("OXFS_PWDX_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"readlink",
         include_bytes!(env!("OXFS_READLINK_ELF_PATH")),
     );
@@ -7356,198 +7280,152 @@ fn format_fresh_filesystem() -> bool {
         b"realpath",
         include_bytes!(env!("OXFS_REALPATH_ELF_PATH")),
     );
-    ok &= seed_file(
-        bin,
-        b"reformime",
-        include_bytes!(env!("OXFS_REFORMIME_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"remove", include_bytes!(env!("OXFS_REMOVE_ELF_PATH")));
-    ok &= seed_file(bin, b"renice", include_bytes!(env!("OXFS_RENICE_ELF_PATH")));
-    ok &= seed_file(bin, b"reset", include_bytes!(env!("OXFS_RESET_ELF_PATH")));
-    ok &= seed_file(bin, b"resize", include_bytes!(env!("OXFS_RESIZE_ELF_PATH")));
-    ok &= seed_file(bin, b"rev", include_bytes!(env!("OXFS_REV_ELF_PATH")));
-    ok &= seed_file(bin, b"route", include_bytes!(env!("OXFS_ROUTE_ELF_PATH")));
-    ok &= seed_file(bin, b"rpm", include_bytes!(env!("OXFS_RPM_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"rpm2cpio",
-        include_bytes!(env!("OXFS_RPM2CPIO_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
-        b"rtcwake",
-        include_bytes!(env!("OXFS_RTCWAKE_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"run", include_bytes!(env!("OXFS_RUN_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"remove-shell", include_bytes!(env!("OXFS_REMOVE_SHELL_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"renice", include_bytes!(env!("OXFS_RENICE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"reset", include_bytes!(env!("OXFS_RESET_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"resize", include_bytes!(env!("OXFS_RESIZE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"rev", include_bytes!(env!("OXFS_REV_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"run-parts", include_bytes!(env!("OXFS_RUN_PARTS_ELF_PATH")));
     ok &= seed_file(bin, b"sed", include_bytes!(env!("OXFS_SED_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"setsid", include_bytes!(env!("OXFS_SETSID_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"sendmail",
-        include_bytes!(env!("OXFS_SENDMAIL_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"setsid", include_bytes!(env!("OXFS_SETSID_ELF_PATH")));
-    ok &= seed_file(
-        bin,
+        usr_sbin,
         b"setuidgid",
         include_bytes!(env!("OXFS_SETUIDGID_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"sha1sum",
         include_bytes!(env!("OXFS_SHA1SUM_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"sha256sum",
         include_bytes!(env!("OXFS_SHA256SUM_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"sha3sum",
         include_bytes!(env!("OXFS_SHA3SUM_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"sha512sum",
         include_bytes!(env!("OXFS_SHA512SUM_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"shred", include_bytes!(env!("OXFS_SHRED_ELF_PATH")));
-    ok &= seed_file(bin, b"shuf", include_bytes!(env!("OXFS_SHUF_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"shred", include_bytes!(env!("OXFS_SHRED_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"shuf", include_bytes!(env!("OXFS_SHUF_ELF_PATH")));
     ok &= seed_file(bin, b"sleep", include_bytes!(env!("OXFS_SLEEP_ELF_PATH")));
     ok &= seed_file(
-        bin,
-        b"smemcap",
-        include_bytes!(env!("OXFS_SMEMCAP_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
+        usr_sbin,
         b"softlimit",
         include_bytes!(env!("OXFS_SOFTLIMIT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"split", include_bytes!(env!("OXFS_SPLIT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"split", include_bytes!(env!("OXFS_SPLIT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"ssl_client",
         include_bytes!(env!("OXFS_SSL_CLIENT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"start", include_bytes!(env!("OXFS_START_ELF_PATH")));
-    ok &= seed_file(bin, b"stat", include_bytes!(env!("OXFS_STAT_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"start-stop-daemon", include_bytes!(env!("OXFS_START_STOP_DAEMON_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"stat", include_bytes!(env!("OXFS_STAT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"strings",
         include_bytes!(env!("OXFS_STRINGS_ELF_PATH")),
     );
     ok &= seed_file(bin, b"stty", include_bytes!(env!("OXFS_STTY_ELF_PATH")));
-    ok &= seed_file(bin, b"su", include_bytes!(env!("OXFS_SU_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"su", include_bytes!(env!("OXFS_SU_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        sbin,
         b"sulogin",
         include_bytes!(env!("OXFS_SULOGIN_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
-    ok &= seed_file(bin, b"tac", include_bytes!(env!("OXFS_TAC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tac", include_bytes!(env!("OXFS_TAC_ELF_PATH")));
     ok &= seed_file(bin, b"tar", include_bytes!(env!("OXFS_TAR_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"taskset",
-        include_bytes!(env!("OXFS_TASKSET_ELF_PATH")),
-    );
-    ok &= seed_file(bin, b"tcpsvd", include_bytes!(env!("OXFS_TCPSVD_ELF_PATH")));
-    ok &= seed_file(bin, b"tee", include_bytes!(env!("OXFS_TEE_ELF_PATH")));
-    ok &= seed_file(bin, b"telnet", include_bytes!(env!("OXFS_TELNET_ELF_PATH")));
-    ok &= seed_file(
-        bin,
-        b"telnetd",
-        include_bytes!(env!("OXFS_TELNETD_ELF_PATH")),
-    );
+    ok &= seed_file(usr_bin, b"tee", include_bytes!(env!("OXFS_TEE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"telnet", include_bytes!(env!("OXFS_TELNET_ELF_PATH")));
     ok &= seed_file(bin, b"test", include_bytes!(env!("OXFS_TEST_ELF_PATH")));
-    ok &= seed_file(bin, b"time", include_bytes!(env!("OXFS_TIME_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"time", include_bytes!(env!("OXFS_TIME_ELF_PATH")));
     ok &= seed_file(
         bin,
         b"timeout",
         include_bytes!(env!("OXFS_TIMEOUT_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"top", include_bytes!(env!("OXFS_TOP_ELF_PATH")));
-    ok &= seed_file(bin, b"tr", include_bytes!(env!("OXFS_TR_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"top", include_bytes!(env!("OXFS_TOP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tr", include_bytes!(env!("OXFS_TR_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"traceroute",
         include_bytes!(env!("OXFS_TRACEROUTE_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"tree", include_bytes!(env!("OXFS_TREE_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tree", include_bytes!(env!("OXFS_TREE_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"truncate",
         include_bytes!(env!("OXFS_TRUNCATE_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"ts", include_bytes!(env!("OXFS_TS_ELF_PATH")));
-    ok &= seed_file(bin, b"tsort", include_bytes!(env!("OXFS_TSORT_ELF_PATH")));
-    ok &= seed_file(bin, b"tty", include_bytes!(env!("OXFS_TTY_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"ts", include_bytes!(env!("OXFS_TS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tsort", include_bytes!(env!("OXFS_TSORT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"tty", include_bytes!(env!("OXFS_TTY_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"ttysize",
         include_bytes!(env!("OXFS_TTYSIZE_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"udhcpd", include_bytes!(env!("OXFS_UDHCPD_ELF_PATH")));
-    ok &= seed_file(bin, b"udpsvd", include_bytes!(env!("OXFS_UDPSVD_ELF_PATH")));
-    ok &= seed_file(bin, b"umount", include_bytes!(env!("OXFS_UMOUNT_ELF_PATH")));
+    ok &= seed_file(sbin, b"umount", include_bytes!(env!("OXFS_UMOUNT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"uncompress",
         include_bytes!(env!("OXFS_UNCOMPRESS_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"unexpand",
         include_bytes!(env!("OXFS_UNEXPAND_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"unit", include_bytes!(env!("OXFS_UNIT_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"unix2dos",
         include_bytes!(env!("OXFS_UNIX2DOS_ELF_PATH")),
     );
     ok &= seed_file(bin, b"unlink", include_bytes!(env!("OXFS_UNLINK_ELF_PATH")));
-    ok &= seed_file(bin, b"unlzma", include_bytes!(env!("OXFS_UNLZMA_ELF_PATH")));
-    ok &= seed_file(bin, b"unxz", include_bytes!(env!("OXFS_UNXZ_ELF_PATH")));
-    ok &= seed_file(bin, b"unzip", include_bytes!(env!("OXFS_UNZIP_ELF_PATH")));
-    ok &= seed_file(bin, b"uptime", include_bytes!(env!("OXFS_UPTIME_ELF_PATH")));
-    ok &= seed_file(bin, b"usleep", include_bytes!(env!("OXFS_USLEEP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"unlzma", include_bytes!(env!("OXFS_UNLZMA_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"unxz", include_bytes!(env!("OXFS_UNXZ_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"unzip", include_bytes!(env!("OXFS_UNZIP_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"uptime", include_bytes!(env!("OXFS_UPTIME_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"usleep", include_bytes!(env!("OXFS_USLEEP_ELF_PATH")));
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"uudecode",
         include_bytes!(env!("OXFS_UUDECODE_ELF_PATH")),
     );
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"uuencode",
         include_bytes!(env!("OXFS_UUENCODE_ELF_PATH")),
-    );
-    ok &= seed_file(
-        bin,
-        b"vconfig",
-        include_bytes!(env!("OXFS_VCONFIG_ELF_PATH")),
     );
     // Real `vi` (OpenVi, not BusyBox's own applet) is seeded above, near the other native/real
     // `/bin` replacements -- see `REPLACED_BUSYBOX_APPLETS`'s own doc comment in build.rs.
     ok &= seed_file(
-        bin,
+        usr_bin,
         b"volname",
         include_bytes!(env!("OXFS_VOLNAME_ELF_PATH")),
     );
-    ok &= seed_file(bin, b"watch", include_bytes!(env!("OXFS_WATCH_ELF_PATH")));
-    ok &= seed_file(bin, b"wget", include_bytes!(env!("OXFS_WGET_ELF_PATH")));
-    ok &= seed_file(bin, b"which", include_bytes!(env!("OXFS_WHICH_ELF_PATH")));
-    ok &= seed_file(bin, b"whoami", include_bytes!(env!("OXFS_WHOAMI_ELF_PATH")));
-    ok &= seed_file(bin, b"whois", include_bytes!(env!("OXFS_WHOIS_ELF_PATH")));
-    ok &= seed_file(bin, b"xargs", include_bytes!(env!("OXFS_XARGS_ELF_PATH")));
-    ok &= seed_file(bin, b"xxd", include_bytes!(env!("OXFS_XXD_ELF_PATH")));
-    ok &= seed_file(bin, b"xzcat", include_bytes!(env!("OXFS_XZCAT_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"watch", include_bytes!(env!("OXFS_WATCH_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"wget", include_bytes!(env!("OXFS_WGET_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"which", include_bytes!(env!("OXFS_WHICH_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"whoami", include_bytes!(env!("OXFS_WHOAMI_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"whois", include_bytes!(env!("OXFS_WHOIS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"xargs", include_bytes!(env!("OXFS_XARGS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"xxd", include_bytes!(env!("OXFS_XXD_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"xzcat", include_bytes!(env!("OXFS_XZCAT_ELF_PATH")));
     ok &= seed_file(bin, b"zcat", include_bytes!(env!("OXFS_ZCAT_ELF_PATH")));
     // Appended out of alphabetical order, added after SYS_UNAME existed -- see build.rs's own
     // BUSYBOX_APPLETS_PASS2 comment.
-    ok &= seed_file(bin, b"uname", include_bytes!(env!("OXFS_UNAME_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"uname", include_bytes!(env!("OXFS_UNAME_ELF_PATH")));
     ok &= seed_file(
         bin,
         b"hostname",
@@ -7754,11 +7632,11 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_symlink(lib, b"ld-musl-x86_64.so.1", b"/usr/lib/libc.so");
 
     // Clang's own resource-dir tree (intrinsic headers, compiler-rt's builtins archive) -- see
-    // CLAUDE.md's Clang/LLVM port section. `/lib/clang/23` is clang's own binary-relative default
-    // (`<bindir>/../lib/clang/<ver>`, `/bin/clang` -> `/lib/clang/23`), distinct from `/usr/include`
-    // + `/usr/lib` (`--sysroot`/`DEFAULT_SYSROOT`, baked in at build time so no on-target
-    // `--sysroot` flag is needed).
-    let lib_clang = ensure_dir(lib, b"clang");
+    // CLAUDE.md's Clang/LLVM port section. `/usr/lib/clang/23` is clang's own binary-relative
+    // default (`<bindir>/../lib/clang/<ver>`, `/usr/bin/clang` -> `/usr/lib/clang/23`), distinct
+    // from `/usr/include` + `/usr/lib` (`--sysroot`/`DEFAULT_SYSROOT`, baked in at build time so
+    // no on-target `--sysroot` flag is needed).
+    let lib_clang = ensure_dir(usr_lib, b"clang");
     let lib_clang_23 = ensure_dir(lib_clang, b"23");
     ok &= seed_tree(lib_clang_23, CLANG_RESOURCE_FILES);
 

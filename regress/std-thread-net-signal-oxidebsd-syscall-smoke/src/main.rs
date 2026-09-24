@@ -138,7 +138,7 @@ pub extern "C" fn _start() -> ! {
     match fork() {
         Ok(0) => {
             let _ = execve(
-                b"/bin/std-thread-net-signal-oxidebsd",
+                b"/usr/tests/std-thread-net-signal-oxidebsd",
                 &[b"std-thread-net-signal-oxidebsd"],
             );
             // execve only returns on failure.

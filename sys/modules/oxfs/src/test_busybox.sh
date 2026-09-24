@@ -1,8 +1,11 @@
-#!/bin/sh
+#!/bin/hush
 # BusyBox applet self-test -- runs INSIDE OxideBSD, not on the host.
 #
 # Usage, at the hush prompt:
-#   sh /test_busybox.sh
+#   hush /test_busybox.sh
+#
+# Under hush explicitly, not /bin/sh (OxideBSD's own shell now): the control-flow section is
+# hush's regression check, brace expansion and $RANDOM included.
 #
 # A real POSIX-shell test harness now, not a flat sequence of hand-unrolled PASS/FAIL lines.
 # `sh`'s own .config (target/busybox-sh/.config after a real build.rs run) used to have only
@@ -467,7 +470,7 @@ check_status "setsid runs a trivial command in a new session" $?
 
 # Short flags only -- this build's start_stop_daemon usage text shows no long-option support
 # (CONFIG_LONG_OPTS-gated, off by default here; found live, `--start`/`--exec` were both rejected).
-start -S -x /bin/true
+start-stop-daemon -S -x /bin/true
 check_status "start_stop_daemon starts a trivial program" $?
 
 echo "--- mount table (mount --bind / mount -t tmpfs / umount / mountpoint) ---"
@@ -570,29 +573,20 @@ echo "--- ps-family: pstree / minips ---"
 pstree
 minips
 
-echo "--- ifconfig / route (real rtl8139 + default-gateway rule) ---"
-ifconfig
-route
-
 echo "--- mkpasswd (crypt hash generation, doesn't touch /etc/passwd) ---"
 mkpasswd -m sha512 testpassword
 
-echo "--- makemime / reformime (MIME encode/decode, format not asserted) ---"
-makemime -o mime_out.txt comp_src.txt
-
 # NOT EXERCISED, deliberately, and why:
 #
-# - daemons that listen/block and would hang this script rather than return: httpd, ftpd, telnetd,
-#   inetd, dnsd, tcpsvd, udpsvd, udhcpd, lpd, crond, ntpd.
+# - daemons that listen/block and would hang this script rather than return: crond, ntpd.
 # - needs a real remote peer or infrastructure this environment doesn't guarantee: nc, netcat,
-#   telnet, traceroute, whois, rdate, lpq, lpr, fakeidentd, ssl_client, popmaildir, sendmail,
-#   pscan, dhcprelay, dumpleases, dnsdomainname, arping.
+#   telnet, traceroute, whois, ssl_client, pscan, dnsdomainname.
 # - real interactive-tty flows -- already documented elsewhere in this project as manual-QEMU-only
 #   (real Ctrl+C/SIGINT, sulogin/getty tty takeover, password prompts read from /dev/tty directly
 #   rather than stdin): login, getty, sulogin, su, cttyhack.
 # - would mutate persistent on-disk system files (/etc/passwd, /etc/group, /etc/shadow) in a way
 #   that outlives this one test run and could break real su/login testing afterward: adduser,
-#   addgroup, delgroup, passwd, chpasswd, remove_shell (out_name `remove`), envuidgid, setuidgid.
+#   addgroup, delgroup, passwd, chpasswd, remove-shell, envuidgid, setuidgid.
 # - dangerous to run unscoped (kills processes matching a pattern, could take out this script's own
 #   interpreter or other live processes): killall5, pkill.
 # - needs a real interactive/full-screen terminal takeover: vi, hexedit, man, watch, top, less
@@ -601,14 +595,11 @@ makemime -o mime_out.txt comp_src.txt
 #   against (unlike gzip/bzip2/lzop, which each provide both directions): unxz, xzcat, unlzma,
 #   uncompress, unzip.
 # - reads real hardware this kernel doesn't model (see CLAUDE.md's BusyBox gap analysis,
-#   NEEDS_HARDWARE): volname, resize, ttysize, hwclock, rtcwake, adjtimex.
+#   NEEDS_HARDWARE): volname, resize, ttysize.
 # - real destructive power state changes -- would kill the whole QEMU session, no test-exit-code
 #   ever gets read: halt, poweroff (SYS_REBOOT's RB_AUTOBOOT path too, though not a listed applet).
 # - hardware/proc stats with no meaningful assertion and uncertain real backing on this kernel:
-#   lsof, fuser, lspci, lsusb, lsscsi, iostat, mpstat, nmeter, powertop, smemcap, taskset, renice,
-#   pmap, dmesg, bootchartd, arp.
-# - package-management tools with no real package repository or archive present to act on:
-#   dpkg, dpkg_deb, rpm, rpm2cpio.
+#   lsof, fuser, renice, dmesg.
 
 echo "=== summary ==="
 echo "pass: $PASS  fail: $FAIL  total: $((PASS + FAIL))"
