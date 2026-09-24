@@ -1,0 +1,18 @@
+# Seeded at /ninja-demo: `ninja -C /ninja-demo` compiles two C files and links them with the
+# on-target clang (tests/ninja_syscall_smoke.rs), so ninja walks a real dependency graph and
+# runs its jobs through /bin/sh.
+cc = clang
+
+rule cc
+  command = $cc -c -o $out $in
+  description = CC $out
+
+rule link
+  command = $cc -static -o $out $in
+  description = LINK $out
+
+build main.o: cc main.c
+build greet.o: cc greet.c
+build hello: link main.o greet.o
+
+default hello

@@ -331,6 +331,10 @@ name = "net"
 version = "0.1.0"
 
 [[package]]
+name = "ninja-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "oxfs"
 version = "0.1.0"
 

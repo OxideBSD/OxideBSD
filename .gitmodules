@@ -32,3 +32,7 @@
 	path = bin/vi
 	url = https://github.com/OxideBSD/OpenVi-oxidebsd.git
 	branch = oxidebsd
+[submodule "usr.bin/ninja"]
+	path = usr.bin/ninja
+	url = https://github.com/OxideBSD/ninja-oxidebsd.git
+	branch = oxidebsd

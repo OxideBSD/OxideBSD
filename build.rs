@@ -225,6 +225,7 @@ fn main() {
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -350,6 +351,10 @@ fn main() {
     // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
     let vi_elf_path = build_nvi(&musl_sysroot, &ncurses_sysroot);
     let nano_elf_path = build_nano(&musl_sysroot, &ncurses_sysroot);
+    // ninja (`usr.bin/ninja`, a fork of ninja-build/ninja) -- the first rung of the clang
+    // self-hosting ladder that's pure C++; see `build_ninja`.
+    let ninja_elf_path = build_ninja(&llvm_host_build, &musl_sysroot);
+    let ninja_src_manifest_path = write_ninja_src_manifest();
 
     // A real, playable port of Doom (via doomgeneric) -- see `build_doomgeneric`'s own doc
     // comment for the source list, and `external/gpl2/doomgeneric/doomgeneric/doomgeneric_oxidebsd.c`
@@ -518,6 +523,11 @@ fn main() {
         ),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
+        ("OXFS_NINJA_ELF_PATH", ninja_elf_path.to_str().unwrap()),
+        (
+            "NINJA_SRC_MANIFEST_PATH",
+            ninja_src_manifest_path.to_str().unwrap(),
+        ),
         ("OXFS_DOOM_ELF_PATH", doom_elf_path.to_str().unwrap()),
         ("OXFS_DOOM1_WAD_PATH", doom1_wad_path.to_str().unwrap()),
         (
@@ -2889,6 +2899,94 @@ fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
 /// that value does need to survive into the generated Makefile's own further `+=`-extended uses
 /// (`CFLAGS` also picks up nano's own warning/optimization flags this way), unlike `LDFLAGS`,
 /// which `configure` never touches again after baking its own copy in.
+/// Cross-builds ninja (`usr.bin/ninja`, the `OxideBSD/ninja-oxidebsd` fork's `oxidebsd` branch)
+/// into a static C++ `ET_EXEC` at `0x1e000000` (the next slot after nano's `0x1c000000`), seeded at
+/// `/usr/bin/ninja`. Driven by the fork's own `Makefile.oxidebsd` -- plain POSIX make, no Python
+/// (`configure.py --bootstrap`) or CMake -- which is also what the on-target self-hosted build
+/// runs under bmake, so both builds share one source list. The tree is copied into `target/ninja`
+/// first: POSIX suffix rules put each `.o` next to its `.cc`, which would dirty the submodule.
+fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
+    const NINJA_LOAD_ADDR: u64 = 0x1e00_0000;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("usr.bin/ninja");
+    let build_dir = Path::new(manifest_dir).join("target/ninja");
+    let bin = build_dir.join("ninja");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let mtime = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::now())
+    };
+    let floor = mtime(&musl_sysroot.join("lib/libc.a"))
+        .max(mtime(&host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a"))))
+        .max(latest_mtime(&src));
+    if std::fs::metadata(&bin)
+        .and_then(|m| m.modified())
+        .is_ok_and(|m| m >= floor)
+    {
+        return bin;
+    }
+
+    let _ = std::fs::remove_dir_all(&build_dir);
+    copy_dir_recursive(&src.join("src"), &build_dir.join("src"));
+    std::fs::copy(src.join("Makefile.oxidebsd"), build_dir.join("Makefile.oxidebsd"))
+        .expect("failed to copy usr.bin/ninja/Makefile.oxidebsd");
+    let cxx = format!(
+        "{} --target={CLANG_TARGET_TRIPLE} --sysroot={}",
+        host_build.join("bin/clang++").display(),
+        musl_sysroot.display()
+    );
+    let status = Command::new("make")
+        .current_dir(&build_dir)
+        .args(["-f", "Makefile.oxidebsd", &format!("-j{}", build_jobs())])
+        .arg(format!("CXX={cxx}"))
+        .arg(format!(
+            "LDFLAGS=-static -fuse-ld=lld -Wl,--image-base={NINJA_LOAD_ADDR:#x}"
+        ))
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make for ninja: {e}"));
+    if !status.success() {
+        panic!("building ninja failed: {status}");
+    }
+    bin
+}
+
+/// `NINJA_SRC_FILES` (same idiom as `write_musl_runtime_manifest`): ninja's own source, seeded at
+/// `/usr/src/ninja` for the on-target self-hosted build (`bmake -f Makefile.oxidebsd`). Only what
+/// that build reads -- `src/*.{cc,h,c}` minus the re2c inputs (`*.in.cc`, their generated `.cc`
+/// ships) -- plus the Makefile and license.
+fn write_ninja_src_manifest() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("usr.bin/ninja");
+    let out_dir = Path::new(manifest_dir).join("target/generated");
+    std::fs::create_dir_all(&out_dir).expect("failed to create target/generated");
+    let out_path = out_dir.join("ninja_src_manifest.rs");
+
+    let mut files: Vec<(String, PathBuf)> = collect_dir_files(&src.join("src"))
+        .into_iter()
+        .filter(|(rel, _)| {
+            !rel.contains('/')
+                && !rel.ends_with(".in.cc")
+                && (rel.ends_with(".cc") || rel.ends_with(".h") || rel.ends_with(".c"))
+        })
+        .map(|(rel, abs)| (format!("src/{rel}"), abs))
+        .collect();
+    for top in ["Makefile.oxidebsd", "COPYING"] {
+        files.push((top.to_string(), src.join(top)));
+    }
+    files.sort();
+
+    let mut out = String::from("pub static NINJA_SRC_FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, abs) in &files {
+        out.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", abs.display()));
+    }
+    out.push_str("];\n");
+    std::fs::write(&out_path, out)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    out_path
+}
+
 fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
     const NANO_LOAD_ADDR: u64 = 0x1c00_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

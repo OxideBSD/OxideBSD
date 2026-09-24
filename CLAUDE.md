@@ -1616,6 +1616,28 @@ licensed despite the "GNU" association, and its portable autotools build is exac
   into that state, and could still degrade a real poll's latency by up to 64 wasted iterations
   every retry pass until it's actually chased down.
 
+## ninja (`usr.bin/ninja`), `ppoll(2)`, and demand-grown user stacks
+
+- **ninja**: submodule of `OxideBSD/ninja-oxidebsd` (`oxidebsd` branch, v1.13.2). Built with the
+  fork's own `Makefile.oxidebsd` -- plain POSIX make, no Python (`configure.py`) or CMake -- by both
+  `build.rs`'s `build_ninja` (host cross-build, static `ET_EXEC` at `0x1e000000`, seeded
+  `/usr/bin/ninja`) and on-target bmake + `clang++` from the seeded `/usr/src/ninja`.
+  `tests/ninja_syscall_smoke.rs`: on-target `ninja -C /ninja-demo` (2 `clang -c` jobs + link via
+  `/bin/sh`), then runs the result.
+- **`SYS_PPOLL=575`** (`sys/net/mod.rs`, net module): `poll` + atomic sigmask swap, reusing
+  `do_sigsuspend`'s deferred restore (`begin/end_temporary_sigmask`). Limit inherited from `poll`:
+  a signal arriving mid-wait isn't noticed until the wait ends. Fixed alongside: `poll(NULL, 0, t)`
+  panicked the kernel (slice from a null pointer). `tests/ppoll_syscall_smoke.rs`.
+- **User stacks grow on demand**: `USER_STACK_RESERVE` (8 MiB) below `USER_STACK_TOP`; only the top
+  `user_stack_pages()` -- or enough for the argv/envp image -- are mapped at exec.
+  `mm::try_grow_user_stack` maps a zeroed page for a not-present fault in the reserve, called first
+  in `page_fault_handler` for **both rings** (the kernel writes user stacks too: `read()` into
+  on-stack buffers, signal frames); lock-light (mapper from `CR3`, `try_lock` frame allocator).
+  Found via ninja (`BuildLog::Load`'s 256 KiB on-stack buffer vs. the old fixed 256 KiB stack).
+  Also fixed: an `execve` whose args outgrew the eager stack panicked the kernel
+  (`user_stack::write_image`). SysV shm's region now stops at the reserve's bottom.
+- Ring-3 page faults and `#GP` now log `[fault] pid N ... ip ...` (Linux's "segfault at" line).
+
 ## Dynamic linking: milestone 1, real `PT_INTERP` (`sys/process/elf.rs`, `sys/process/lifecycle.rs`, `build.rs`, `sys/modules/oxfs`)
 
 A real, working `fork`+`execve` of a genuinely dynamically-linked ELF, resolved/relocated by
