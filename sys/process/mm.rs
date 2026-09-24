@@ -24,6 +24,51 @@ use crate::syscall::{EACCES, EAGAIN, EBADF, EBUSY, EINVAL, ENODEV, ENOMEM, ENXIO
 /// address space asked for one — two different processes reusing the same numeric VA in their own
 /// tables never interferes, no shared visibility (the same reasoning `USER_STACK_TOP` already
 /// relies on being "fixed but per-address-space").
+/// Real Unix stack growth: maps one fresh zeroed page for a not-present fault inside the main
+/// thread's stack reserve (`USER_STACK_RESERVE` below `USER_STACK_TOP`), so the faulting
+/// instruction simply retries. Called first thing by `page_fault_handler`, for **both** rings:
+/// the kernel writes into user stacks too (`read()` into an on-stack buffer, signal frames), and
+/// a ring-0 fault there would otherwise reboot the machine.
+///
+/// Deliberately lock-light, since the fault can interrupt kernel code: the mapper comes straight
+/// from the live `CR3` (no process-table lock -- the active table *is* the faulting process's),
+/// and the frame allocator is only `try_lock`ed. `false` whenever growth doesn't apply or can't
+/// happen right now; the caller then takes its normal fault path.
+pub fn try_grow_user_stack(fault_addr: u64) -> bool {
+    let reserve_bottom = USER_STACK_TOP - USER_STACK_RESERVE;
+    if !(reserve_bottom..USER_STACK_TOP).contains(&fault_addr)
+        || scheduler::current_pid() == 0
+    {
+        return false;
+    }
+    let phys_offset = memory::phys_mem_offset();
+    let (l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let l4_ptr = (phys_offset + l4_frame.start_address().as_u64())
+        .as_mut_ptr::<x86_64::structures::paging::PageTable>();
+    // SAFETY: CR3's level-4 table is live and reachable through the physical-memory window, and
+    // nothing else touches page tables while this fault handler runs (single core, IF clear).
+    let mut mapper =
+        unsafe { x86_64::structures::paging::OffsetPageTable::new(&mut *l4_ptr, phys_offset) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(fault_addr));
+    if mapper.translate_page(page).is_ok() {
+        return false; // already mapped: a real protection fault, not growth
+    }
+    let leaf = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    memory::try_with_frame_allocator(|fa| {
+        let Some(frame) = fa.allocate_frame() else {
+            return false;
+        };
+        let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+        // SAFETY: a freshly allocated, unused frame; stack pages must start zeroed.
+        unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+        // SAFETY: `page` is unmapped (checked above) and inside this process's own stack reserve.
+        unsafe { mapper.map_to_with_table_flags(page, frame, leaf, leaf, fa) }
+            .map(|flush| flush.flush())
+            .is_ok()
+    })
+    .unwrap_or(false)
+}
+
 const MMAP_REGION_BASE: u64 = 0x_2000_0000_0000;
 const MMAP_REGION_CEILING: u64 = 0x_3000_0000_0000;
 static NEXT_MMAP_PAGE: Mutex<u64> = Mutex::new(MMAP_REGION_BASE);

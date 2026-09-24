@@ -133,7 +133,10 @@ static KEYS: spin::Mutex<BTreeMap<i32, i32>> = spin::Mutex::new(BTreeMap::new())
 /// numeric VA values, mapped separately into whichever process's own table asked for one" reasoning
 /// `MMAP_REGION_BASE`'s own doc comment already establishes.
 const SHM_REGION_BASE: u64 = 0x_4000_0000_0000;
-const SHM_REGION_CEILING: u64 = 0x_5000_0000_0000;
+/// Stops where the main thread's stack reserve begins (`USER_STACK_RESERVE` below
+/// `USER_STACK_TOP`), so the two regions are genuinely disjoint.
+const SHM_REGION_CEILING: u64 =
+    crate::process::USER_STACK_TOP - crate::process::USER_STACK_RESERVE;
 static NEXT_SHM_PAGE: spin::Mutex<u64> = spin::Mutex::new(SHM_REGION_BASE);
 
 /// musl's own `struct shmid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/shm.h`) -- 112

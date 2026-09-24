@@ -56,7 +56,8 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
     let stack_top = VirtAddr::new(USER_STACK_TOP);
     // Boot-time only -- same reasoning as address_space's own `.expect()` just above.
     let mapped_pages =
-        map_user_stack(&mut mapper, stack_top).expect("out of memory mapping a user stack");
+        map_user_stack(&mut mapper, stack_top, user_stack_pages())
+            .expect("out of memory mapping a user stack");
     crate::process::fault_trampoline::map(&mut mapper, phys_offset)
         .expect("out of memory mapping the fault trampoline page");
     // spawn() has no real invocation path to use as argv[0] (unlike do_execve, which knows exactly
@@ -95,7 +96,7 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
             b"PS1=\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
         ],
         stack_top,
-        user_stack_bottom(stack_top),
+        user_stack_bottom(stack_top, user_stack_pages()),
         &mapped_pages,
         phys_offset,
         None,
@@ -233,8 +234,9 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
 fn map_user_stack(
     mapper: &mut impl Mapper<Size4KiB>,
     stack_top: VirtAddr,
+    pages: u64,
 ) -> Result<BTreeMap<Page<Size4KiB>, PhysFrame<Size4KiB>>, ()> {
-    let stack_bottom_page = Page::containing_address(stack_top - user_stack_pages() * 4096);
+    let stack_bottom_page = Page::containing_address(stack_top - pages * 4096);
     let stack_top_page = Page::containing_address(stack_top - 1u64);
     let phys_offset = memory::phys_mem_offset();
     with_frame_allocator(|fa| {
@@ -286,8 +288,22 @@ fn map_user_stack(
 /// argv/envp length -- `map_user_stack` itself already computed this same bound (`user_stack_pages()`
 /// below `stack_top`); re-derived here rather than threading an extra return value through, since
 /// both callers already have `stack_top` in scope.
-fn user_stack_bottom(stack_top: VirtAddr) -> VirtAddr {
-    stack_top - user_stack_pages() * 4096
+fn user_stack_bottom(stack_top: VirtAddr, pages: u64) -> VirtAddr {
+    stack_top - pages * 4096
+}
+
+/// How many stack pages to map eagerly at exec: the usual `user_stack_pages()`, or enough to hold
+/// the whole argv/envp/auxv image `user_stack::build` writes through those pages' frames, capped
+/// at `USER_STACK_RESERVE`. The rest of the stack grows on demand (`mm::try_grow_user_stack`).
+/// Found live: `user_stack::write_image` `expect`s every image page to be mapped, so an `execve`
+/// whose arguments outgrew the fixed 64 pages panicked the kernel from userland.
+fn user_stack_eager_pages(arg_bytes: u64) -> u64 {
+    // Pointer arrays, auxv and alignment slack on top of the raw strings.
+    const IMAGE_OVERHEAD: u64 = 64 * 1024;
+    let needed = (arg_bytes + IMAGE_OVERHEAD).div_ceil(4096);
+    needed
+        .max(user_stack_pages())
+        .min(crate::process::USER_STACK_RESERVE / 4096)
 }
 
 /// `sys_fork`'s real logic: deep-copies the calling process's address space
@@ -1238,7 +1254,15 @@ fn exec_image(
     }
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
-    let mapped_pages = map_user_stack(&mut mapper, stack_top).map_err(|_| ENOMEM)?;
+    let arg_bytes: u64 = raw_argv
+        .iter()
+        .chain(envp.iter())
+        .chain(shebang_argv_prefix.iter().flatten())
+        .map(|a| a.len() as u64 + 1)
+        .sum();
+    let stack_pages = user_stack_eager_pages(arg_bytes);
+    let mapped_pages =
+        map_user_stack(&mut mapper, stack_top, stack_pages).map_err(|_| ENOMEM)?;
     crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
     // raw_argv (read above, while the caller's own address space was still active) is the caller's
     // complete, real argv[] -- including a real, caller-chosen argv[0], which need not equal
@@ -1270,7 +1294,7 @@ fn exec_image(
         &argv,
         &envp_refs,
         stack_top,
-        user_stack_bottom(stack_top),
+        user_stack_bottom(stack_top, stack_pages),
         &mapped_pages,
         phys_offset,
         interp_base,

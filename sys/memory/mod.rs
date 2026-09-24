@@ -250,6 +250,14 @@ pub fn with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R)
     f(guard.as_mut().expect("frame allocator not yet installed"))
 }
 
+/// `with_frame_allocator` for a page-fault handler: `None` instead of spinning when the lock is
+/// already held -- the fault may have interrupted kernel code holding it, which would otherwise
+/// deadlock on a single core.
+pub fn try_with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R) -> Option<R> {
+    let mut guard = FRAME_ALLOCATOR.try_lock()?;
+    Some(f(guard.as_mut()?))
+}
+
 /// The bootloader's physical-memory offset (see `init`'s own doc comment). Panics if
 /// `install_global_memory_state` hasn't run yet.
 pub fn phys_mem_offset() -> VirtAddr {

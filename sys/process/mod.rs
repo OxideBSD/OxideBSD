@@ -82,11 +82,19 @@ fn kernel_stack_size() -> usize {
 /// kernel half.
 pub const USER_STACK_TOP: u64 = 0x_5000_0000_0000;
 
+/// How far below `USER_STACK_TOP` the main thread's stack may grow: 8 MiB, real Linux's default
+/// `RLIMIT_STACK` (not consulted -- `Process::rlimits` is stored, never enforced). Only the top
+/// `user_stack_pages()` (or enough for a large argv/envp image) are mapped at exec; the rest is
+/// reserved and faulted in a page at a time by `mm::try_grow_user_stack`, like a real Unix stack.
+/// Found needed by ninja: `BuildLog::Load` keeps a 256 KiB line buffer on the stack, and the old
+/// fixed, fully-mapped 256 KiB stack faulted one page past its own end.
+pub const USER_STACK_RESERVE: u64 = 8 * 1024 * 1024;
+
 /// Floor: 4 pages (16 KiB) -- the fixed size this kernel always mapped, proven sufficient for
 /// `stsh` and every program it execs so far.
 const USER_STACK_PAGES_FLOOR: u64 = 4;
-/// Ceiling: 64 pages (256 KiB) -- bounds how much a RAM-rich boot maps per process; nothing today
-/// needs more.
+/// Ceiling: 64 pages (256 KiB) -- bounds how much a RAM-rich boot maps *up front* per process.
+/// Not the stack's size limit any more: it grows on demand to `USER_STACK_RESERVE`.
 const USER_STACK_PAGES_CEILING: u64 = 64;
 
 /// Scales the per-process user stack size the same way `kernel_stack_size` scales the kernel-side
