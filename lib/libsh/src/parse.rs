@@ -17,6 +17,9 @@ pub struct ParseError {
     pub line: usize,
     pub column: usize,
     pub message: String,
+    /// The input ended inside a construct (an open quote, `$(`, here-document, `if`, a trailing
+    /// `|` or `&&`...): more input could complete it. An interactive shell reads a `PS2` line.
+    pub incomplete: bool,
 }
 
 impl fmt::Display for ParseError {
@@ -117,12 +120,18 @@ impl Parser {
         let before = &self.src[..pos.min(self.src.len())];
         let line = before.iter().filter(|&&c| c == '\n').count() + 1;
         let column = pos - before.iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1) + 1;
-        ParseError { line, column, message: message.into() }
+        ParseError { line, column, message: message.into(), incomplete: false }
+    }
+
+    /// An error that only happened because the input ran out.
+    fn incomplete_at(&self, pos: usize, message: impl Into<String>) -> ParseError {
+        ParseError { incomplete: true, ..self.error_at(pos, message) }
     }
 
     fn error(&self, message: impl Into<String>) -> ParseError {
         let pos = self.peeked.as_ref().map_or(self.pos, |(_, start)| *start);
-        self.error_at(pos, message)
+        let at_eof = matches!(self.peeked, Some((Token::Eof, _)));
+        ParseError { incomplete: at_eof, ..self.error_at(pos, message) }
     }
 
     // --- characters ---------------------------------------------------------------------------
@@ -223,7 +232,7 @@ impl Parser {
         let Some(c) = self.ch() else {
             if let Some(h) = self.pending.first() {
                 let d = h.delimiter.clone();
-                return Err(self.error_at(start, format!("here-document delimited by `{d}` never ends")));
+                return Err(self.incomplete_at(start, format!("here-document delimited by `{d}` never ends")));
             }
             return Ok((Token::Eof, start));
         };
@@ -336,7 +345,7 @@ impl Parser {
         let mut s = String::new();
         loop {
             match self.ch() {
-                None => return Err(self.error_at(open, "unterminated single quote")),
+                None => return Err(self.incomplete_at(open, "unterminated single quote")),
                 Some('\'') => {
                     self.pos += 1;
                     return Ok(s);
@@ -357,7 +366,7 @@ impl Parser {
         let mut lit = String::new();
         loop {
             match self.ch() {
-                None => return Err(self.error_at(open, "unterminated double quote")),
+                None => return Err(self.incomplete_at(open, "unterminated double quote")),
                 Some('"') => {
                     self.pos += 1;
                     break;
@@ -438,7 +447,7 @@ impl Parser {
         debug_assert!(self.peeked.is_none());
         let list = self.list(Terminator::CloseParen)?;
         if !self.peek_op(Op::RParen)? {
-            return Err(self.error_at(open, "unterminated `$(`"));
+            return Err(self.incomplete_at(open, "unterminated `$(`"));
         }
         self.peeked = None;
         Ok(list)
@@ -452,7 +461,7 @@ impl Parser {
         let mut depth = 0usize;
         loop {
             match self.ch() {
-                None => return Err(self.error_at(start, "unterminated `$((`")),
+                None => return Err(self.incomplete_at(start, "unterminated `$((`")),
                 Some(')') if depth == 0 && self.ch_at(1) == Some(')') => {
                     self.pos += 2;
                     break;
@@ -527,7 +536,7 @@ impl Parser {
             return Ok(ParamExpansion { param, op: ParamOp::Plain });
         }
         let colon = self.eat_char(':');
-        let op_char = self.ch().ok_or_else(|| self.error_at(start, "unterminated `${`"))?;
+        let op_char = self.ch().ok_or_else(|| self.incomplete_at(start, "unterminated `${`"))?;
         self.pos += 1;
         let doubled = |p: &mut Self, c: char| p.eat_char(c);
         let op = match op_char {
@@ -555,7 +564,7 @@ impl Parser {
         let mut lit = String::new();
         loop {
             match self.ch() {
-                None => return Err(self.error_at(start, "unterminated `${`")),
+                None => return Err(self.incomplete_at(start, "unterminated `${`")),
                 Some('}') => {
                     self.pos += 1;
                     break;
@@ -605,7 +614,7 @@ impl Parser {
         let mut text = String::new();
         loop {
             match self.ch() {
-                None => return Err(self.error_at(open, "unterminated backquote")),
+                None => return Err(self.incomplete_at(open, "unterminated backquote")),
                 Some('`') => {
                     self.pos += 1;
                     break;
@@ -638,7 +647,7 @@ impl Parser {
             let mut lines = String::new();
             loop {
                 if self.ch().is_none() {
-                    return Err(self.error_at(start, format!("here-document delimited by `{}` never ends", h.delimiter)));
+                    return Err(self.incomplete_at(start, format!("here-document delimited by `{}` never ends", h.delimiter)));
                 }
                 let line_start = self.pos;
                 while self.ch().is_some_and(|c| c != '\n') {
@@ -1036,7 +1045,7 @@ fn unquote_delimiter(word: &Word) -> String {
 
 /// An unquoted here-document body: `$` expansions, `` ` `` and backslash (before `$ \` \\` and
 /// newline) are active, as inside double quotes, but `"` is an ordinary character.
-fn parse_heredoc_body(text: &str) -> Result<Word> {
+pub(crate) fn parse_heredoc_body(text: &str) -> Result<Word> {
     let mut p = Parser::new(text);
     let mut parts = Vec::new();
     let mut lit = String::new();

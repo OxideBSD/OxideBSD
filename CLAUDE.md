@@ -28,8 +28,8 @@ Current state:
   `argv`/`envp` passthrough, blocking pipes, per-process signal delivery, real ring-3 preemption
   (see "Real preemptive scheduling"), and real threading (`clone(2)`/`pthread_create`, see "Real
   threading").
-- pid 1 is BusyBox's `hush` (`/bin/hush`), built against a patched musl fork; `/bin/sh` is
-  OxideBSD's own shell (`lib/libsh`, see "Shell"). 195 BusyBox applets run as standalone static
+- pid 1 is OxideBSD's own `/bin/sh` (`lib/libsh`, see "Shell"), an interactive login shell;
+  BusyBox's `hush` (built against a patched musl fork) is still at `/bin/hush`. 195 BusyBox applets run as standalone static
   binaries, `execve`'d individually (not a multi-call `busybox` binary), placed per HIER.md (see
   "Filesystem layout"). 12 utilities (`echo true false pwd cat ls mkdir rm cp mv ln touch`) are
   native `bin/<name>` PIE binaries over `lib/oxlibc` — see "Real PIE/ASLR loading" below.
@@ -1624,9 +1624,20 @@ licensed despite the "GNU" association, and its portable autotools build is exac
 
 From-scratch Rust POSIX shell core (spec: OxideBSD-doc `INIT_SH.md`); `bin/sh` and `sbin/init_sh`
 are std binaries over it (`init_sh` adds the `init-dialect` feature, still empty). `/bin/sh` is
-libsh now — bmake/ninja/`system()`/the POSIX pilot's driver all go through it; BusyBox hush is
-`/bin/hush` (still pid 1, still the interactive shell) and `/bin/sh` execs it for an interactive
-invocation until libsh has one.
+libsh now — bmake/ninja/`system()`/the POSIX pilot's driver all go through it — and it's pid 1
+(`sys/kernel_main.rs`, `spawn_with(..., &[b"-sh"], ...)`: a login shell with `HOME=/`). Interactive
+mode (`src/interactive.rs`, `lineedit.rs`, `jobs.rs`, `prompt.rs`): its own raw-mode line editor
+(the console has no line discipline), history in `$HISTFILE` (`~/.sh_history`), Tab completion,
+Ctrl+R, `PS2` continuation via `ParseError::incomplete`, job control (`set -m`, `jobs`/`fg`/`bg`,
+`%n` specs), FreeBSD-sh `PS1` escapes. Shell errors are `Flow::Fatal` (ends a script, not an
+interactive shell); only `exit`/`set -e` are `Flow::Exit`. **The console's fds are one-way** (fd 0
+read-only, 1/2 write-only), so the editor reads fd 0 and draws on fd 2 — writing to a dup of fd 0
+fails silently. `init_sh` refuses interactive mode. BusyBox hush remains at `/bin/hush`.
+- The keyboard driver now sends Linux-console sequences for arrows/Home/End/Insert/Delete/PgUp/PgDn
+  (`dispatch_key`, `sys/cpu/interrupts.rs`) — they used to be dropped entirely — and DEL (0x7f)
+  for Backspace, matching `TERM=linux`.
+- Host-testing the interactive shell: drive `target/x86_64-unknown-linux-gnu/debug/libsh` through
+  a pty (Python `pty.fork()`); the diff corpus only covers non-interactive behavior.
 - `lib/libsh` is its own workspace targeting the host: `cargo test` there runs
   `tests/differential.rs` (`tests/diff/*.sh` vs `dash`: stdout + status exact). Its
   `.cargo/config.toml` adds `std` to `build-std`, since cargo merges that array with the root's.
@@ -1640,7 +1651,7 @@ oxfs seeds the BSD hierarchy HIER.md defines, not a flat `/bin`: `/bin` (44, sin
 essentials) / `/sbin` / `/usr/bin` (clang, ld.lld, bmake, nano, ninja, most applets) / `/usr/sbin`
 / `/usr/libexec/getty` / `/usr/games/doom` / `/usr/tests` (regress fixtures: `musl`, `smoke`,
 `std-*`). Clang's resource dir follows the binary: `/usr/lib/clang/23`. Root PATH (pid 1, POSIX
-driver) is `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin`. 48 BusyBox applets were
+driver) is `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/games` (the POSIX driver omits `/usr/games`). 48 BusyBox applets were
 cut outright (2026-09-23); `build_busybox.rs` no longer carries the native-utility/`vi` tuples, so
 there's no roster filter any more. Older sections below still say `/bin/clang` etc.
 

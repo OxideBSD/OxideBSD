@@ -230,3 +230,109 @@ pub fn strerror(e: &io::Error) -> String {
         None => e.to_string(),
     }
 }
+
+// --- Terminals and process groups (interactive mode, job control) -----------------------------
+
+pub fn isatty(fd: Fd) -> bool {
+    unsafe { libc::isatty(fd) == 1 }
+}
+
+pub fn tcgetattr(fd: Fd) -> io::Result<libc::termios> {
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    check(unsafe { libc::tcgetattr(fd, &mut t) })?;
+    Ok(t)
+}
+
+pub fn tcsetattr(fd: Fd, t: &libc::termios) -> io::Result<()> {
+    check(unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, t) }).map(|_| ())
+}
+
+/// Gives the terminal on `fd` to process group `pgid`.
+pub fn tcsetpgrp(fd: Fd, pgid: libc::pid_t) -> io::Result<()> {
+    check(unsafe { libc::tcsetpgrp(fd, pgid) }).map(|_| ())
+}
+
+pub fn tcgetpgrp(fd: Fd) -> libc::pid_t {
+    unsafe { libc::tcgetpgrp(fd) }
+}
+
+pub fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> io::Result<()> {
+    check(unsafe { libc::setpgid(pid, pgid) }).map(|_| ())
+}
+
+pub fn getpgrp() -> libc::pid_t {
+    unsafe { libc::getpgrp() }
+}
+
+/// What `waitpid` reported for one child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildState {
+    /// Exited or killed: the shell status (exit code, or 128 + signal).
+    Done(i32),
+    /// Stopped by this signal.
+    Stopped(i32),
+    /// Resumed by SIGCONT.
+    Continued,
+}
+
+/// `waitpid` with `WUNTRACED`, plus `WNOHANG`/`WCONTINUED` if asked. `Ok(None)`: nothing to report
+/// (only with `nohang`).
+pub fn wait_any(pid: libc::pid_t, nohang: bool) -> io::Result<Option<(libc::pid_t, ChildState)>> {
+    let mut status = 0;
+    let flags = libc::WUNTRACED | if nohang { libc::WNOHANG | libc::WCONTINUED } else { 0 };
+    loop {
+        let r = unsafe { libc::waitpid(pid, &mut status, flags) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if r == 0 {
+            return Ok(None);
+        }
+        let state = if libc::WIFSTOPPED(status) {
+            ChildState::Stopped(libc::WSTOPSIG(status))
+        } else if libc::WIFCONTINUED(status) {
+            ChildState::Continued
+        } else {
+            ChildState::Done(decode_status(status))
+        };
+        return Ok(Some((r, state)));
+    }
+}
+
+/// The terminal's width in columns, if `fd` is one.
+pub fn term_columns(fd: Fd) -> Option<usize> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 { Some(ws.ws_col as usize) } else { None }
+}
+
+pub fn geteuid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+pub fn user_name(uid: u32) -> Option<String> {
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+pub fn hostname() -> String {
+    let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut u) } != 0 {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(u.nodename.as_ptr()) }.to_string_lossy().into_owned()
+}
+
+/// Sets a signal's disposition (`SIG_DFL`/`SIG_IGN`/a handler).
+pub fn set_signal(sig: i32, handler: libc::sighandler_t) {
+    unsafe {
+        libc::signal(sig, handler);
+    }
+}

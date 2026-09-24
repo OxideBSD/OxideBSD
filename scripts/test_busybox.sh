@@ -114,7 +114,7 @@ pass "no panic/fault markers in the boot log"
 MISSING=0
 for marker in \
     '\[boot\] kernel initialization complete' \
-    '\[boot\] spawning hush \(BusyBox sh\) as pid 1' \
+    '\[boot\] spawning /bin/sh as pid 1' \
     '\[boot\] scheduler starting: switching to pid 1'
 do
     if ! grep -qE "$marker" "$LOG_FILE"; then
@@ -123,12 +123,12 @@ do
     fi
 done
 [[ "$MISSING" -eq 0 ]] || fail "boot did not reach the expected milestones (see above)"
-pass "hush (BusyBox sh) spawned as pid 1 and the scheduler started"
+pass "/bin/sh spawned as pid 1 and the scheduler started"
 
 echo
-pass "BusyBox smoke test passed: full roster builds, image boots, hush reaches the scheduler with no panic"
+pass "BusyBox smoke test passed: full roster builds, image boots, /bin/sh reaches the scheduler with no panic"
 echo
-echo "This script can't drive the interactive hush prompt itself -- to exercise applets, run"
+echo "This script can't drive the interactive shell prompt itself -- to exercise applets, run"
 echo "'cargo run' and try them by hand, e.g.:"
 echo "  ls /bin | wc -l      # confirm the full roster is present"
 echo "  echo hello | cat"

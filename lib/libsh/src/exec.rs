@@ -28,19 +28,27 @@ impl Shell {
     }
 
     fn run_background(&mut self, and_or: &AndOr) -> Exec {
+        let jc = self.job_control();
         match sys::fork() {
             Ok(0) => {
+                if jc {
+                    self.job_child_setup(0, false);
+                }
                 self.enter_subshell();
                 // XCU 2.9.3.1: without job control, an asynchronous list ignores SIGINT and
-                // SIGQUIT and reads from /dev/null unless it redirects its own input.
-                unsafe {
-                    libc::signal(libc::SIGINT, libc::SIG_IGN);
-                    libc::signal(libc::SIGQUIT, libc::SIG_IGN);
-                }
-                if let Ok(fd) = sys::open("/dev/null", libc::O_RDONLY, 0) {
-                    let _ = sys::dup2(fd, 0);
-                    if fd != 0 {
-                        sys::close(fd);
+                // SIGQUIT and reads from /dev/null unless it redirects its own input. With it,
+                // the job is in its own process group, which the terminal's signals don't reach,
+                // and reading the terminal stops it (SIGTTIN) instead.
+                if !jc {
+                    unsafe {
+                        libc::signal(libc::SIGINT, libc::SIG_IGN);
+                        libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+                    }
+                    if let Ok(fd) = sys::open("/dev/null", libc::O_RDONLY, 0) {
+                        let _ = sys::dup2(fd, 0);
+                        if fd != 0 {
+                            sys::close(fd);
+                        }
                     }
                 }
                 self.tail = and_or.rest.is_empty() && !and_or.first.bang;
@@ -50,7 +58,12 @@ impl Shell {
             }
             Ok(pid) => {
                 self.last_bg = Some(pid);
-                self.bg_pids.push(pid);
+                if jc {
+                    self.job_parent_setup(pid, 0);
+                    self.add_background_job(pid, vec![pid], crate::unparse::and_or(and_or));
+                } else {
+                    self.bg_pids.push(pid);
+                }
                 Ok(0)
             }
             Err(e) => {
@@ -77,7 +90,7 @@ impl Shell {
 
     pub(crate) fn flow_status(&self, f: Flow) -> i32 {
         match f {
-            Flow::Exit(s) | Flow::Return(s) => s,
+            Flow::Exit(s) | Flow::Fatal(s) | Flow::Return(s) => s,
             Flow::Break(_) | Flow::Continue(_) => self.status,
         }
     }
@@ -121,6 +134,9 @@ impl Shell {
     }
 
     fn run_multi(&mut self, commands: &[Command]) -> Exec {
+        let jc = self.job_control();
+        // With job control, the pipeline is one process group, led by its first process.
+        let mut pgid: libc::pid_t = 0;
         let mut pids = Vec::new();
         let mut prev_read: Option<Fd> = None;
         let mut spawn_error = None;
@@ -139,6 +155,9 @@ impl Shell {
             };
             match sys::fork() {
                 Ok(0) => {
+                    if jc {
+                        self.job_child_setup(pgid, true);
+                    }
                     if let Some(pr) = prev_read {
                         let _ = sys::dup2(pr, 0);
                         sys::close(pr);
@@ -156,7 +175,15 @@ impl Shell {
                     let status = self.finish(status);
                     sys::exit_child(status);
                 }
-                Ok(pid) => pids.push(pid),
+                Ok(pid) => {
+                    if jc {
+                        self.job_parent_setup(pid, pgid);
+                        if pgid == 0 {
+                            pgid = pid;
+                        }
+                    }
+                    pids.push(pid)
+                }
                 Err(e) => spawn_error = Some(format!("cannot fork: {e}")),
             }
             if let Some(pr) = prev_read.take() {
@@ -174,8 +201,14 @@ impl Shell {
             sys::close(pr);
         }
         let mut status = 0;
-        for pid in pids {
-            status = sys::wait_pid(pid).unwrap_or(1);
+        if jc && !pids.is_empty() {
+            let text = commands.iter().map(crate::unparse::command).collect::<Vec<_>>().join(" | ");
+            status = self.wait_foreground(pgid, &pids, &text);
+            self.interrupted_by_child(status)?;
+        } else {
+            for pid in pids {
+                status = sys::wait_pid(pid).unwrap_or(1);
+            }
         }
         if let Some(e) = spawn_error {
             self.error(&e);
@@ -212,8 +245,12 @@ impl Shell {
     }
 
     fn run_subshell(&mut self, list: &List, redirs: &[Redirect]) -> Exec {
+        let jc = self.job_control();
         match sys::fork() {
             Ok(0) => {
+                if jc {
+                    self.job_child_setup(0, true);
+                }
                 self.enter_subshell();
                 let status = match self.redirect(redirs, false) {
                     Ok(_) => self.run_list(list).unwrap_or_else(|f| self.flow_status(f)),
@@ -225,6 +262,12 @@ impl Shell {
                 let status = self.finish(status);
                 sys::exit_child(status);
             }
+            Ok(pid) if jc => {
+                self.job_parent_setup(pid, 0);
+                let status = self.wait_foreground(pid, &[pid], &format!("({})", crate::unparse::list(list)));
+                self.interrupted_by_child(status)?;
+                Ok(status)
+            }
             Ok(pid) => Ok(sys::wait_pid(pid).unwrap_or(1)),
             Err(e) => {
                 self.error(&format!("cannot fork: {e}"));
@@ -233,8 +276,24 @@ impl Shell {
         }
     }
 
+    /// A foreground job killed by Ctrl+C ends the whole command line in an interactive shell, as
+    /// if the shell had been interrupted itself (`sleep 10; echo done` doesn't print `done`).
+    fn interrupted_by_child(&self, status: i32) -> Result<(), Flow> {
+        if self.interactive && status == 128 + libc::SIGINT { Err(Flow::Fatal(status)) } else { Ok(()) }
+    }
+
     /// State changes on entering any forked subshell.
     pub(crate) fn enter_subshell(&mut self) {
+        if self.interactive {
+            // The interactive shell's own signal handling isn't inherited: a subshell or command
+            // gets the default dispositions back (the ones it ignored for its own sake).
+            for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+                sys::set_signal(sig, libc::SIG_DFL);
+            }
+            self.interactive = false;
+            self.jobs.clear();
+            self.job_order.clear();
+        }
         self.is_subshell = true;
         self.reset_traps_for_child();
         self.bg_pids.clear();
@@ -269,7 +328,7 @@ impl Shell {
                     for item in items {
                         if let Err(e) = self.set(var, &item) {
                             self.error(&e);
-                            return Err(Flow::Exit(2));
+                            return Err(Flow::Fatal(2));
                         }
                         match self.run_list(body) {
                             Ok(s) => status = s,
@@ -359,7 +418,7 @@ impl Shell {
             for (n, v) in &assigns {
                 if let Err(e) = self.set(n, v) {
                     self.error(&e);
-                    return Err(Flow::Exit(1));
+                    return Err(Flow::Fatal(1));
                 }
             }
             return Ok(status);
@@ -374,7 +433,7 @@ impl Shell {
             for (n, v) in &assigns {
                 if let Err(e) = self.set(n, v) {
                     self.error(&e);
-                    return Err(Flow::Exit(1));
+                    return Err(Flow::Fatal(1));
                 }
             }
             if name == "exec" && fields.len() == 1 {
@@ -383,7 +442,7 @@ impl Shell {
                     Ok(_) => Ok(0),
                     Err(e) => {
                         self.error(&e);
-                        Err(Flow::Exit(1))
+                        Err(Flow::Fatal(1))
                     }
                 };
             }
@@ -391,7 +450,7 @@ impl Shell {
                 Ok(s) => s,
                 Err(e) => {
                     self.error(&e);
-                    return Err(Flow::Exit(1));
+                    return Err(Flow::Fatal(1));
                 }
             };
             let r = b(self, &fields);
@@ -494,9 +553,28 @@ impl Shell {
         if tail {
             self.exec_in_child(&path, fields, &env, redirs);
         }
+        let jc = self.job_control();
         match sys::fork() {
-            Ok(0) => self.exec_in_child(&path, fields, &env, redirs),
-            Ok(pid) => Ok(sys::wait_pid(pid).unwrap_or(1)),
+            Ok(0) => {
+                if jc {
+                    self.job_child_setup(0, true);
+                }
+                if self.interactive {
+                    self.enter_subshell();
+                }
+                self.exec_in_child(&path, fields, &env, redirs)
+            }
+            Ok(pid) if jc => {
+                self.job_parent_setup(pid, 0);
+                let status = self.wait_foreground(pid, &[pid], &fields.join(" "));
+                self.interrupted_by_child(status)?;
+                Ok(status)
+            }
+            Ok(pid) => {
+                let status = sys::wait_pid(pid).unwrap_or(1);
+                self.interrupted_by_child(status)?;
+                Ok(status)
+            }
             Err(e) => {
                 self.error(&format!("cannot fork: {e}"));
                 Ok(2)
@@ -718,7 +796,7 @@ impl Shell {
         if let Some(b) = b {
             // Under `command`, a special built-in's errors don't end the shell.
             return match b(self, fields) {
-                Err(Flow::Exit(s)) if name != "exit" && name != "exec" => Ok(s),
+                Err(Flow::Fatal(s)) => Ok(s),
                 other => other,
             };
         }

@@ -863,6 +863,45 @@ fn normalize_enter_key(code: KeyCode, key: DecodedKey) -> DecodedKey {
     }
 }
 
+/// One decoded key, from either keyboard path: a navigation/editing key becomes the escape
+/// sequence a Linux console sends (what `TERM=linux`'s terminfo, which pid 1 advertises, tells
+/// programs to expect), everything else goes through `handle_decoded_key`.
+fn dispatch_key(code: KeyCode, key: DecodedKey) -> bool {
+    if let Some(seq) = console_key_sequence(code, &key) {
+        if !crate::console::stdin::raw_keyboard_owned() {
+            for &b in seq {
+                crate::console::stdin::push_byte(b);
+            }
+        }
+        return false;
+    }
+    handle_decoded_key(normalize_enter_key(code, key))
+}
+
+/// Linux console key sequences (`kcuu1`/`khome`/`kdch1`/... in the `linux` terminfo entry).
+/// pc-keyboard reports these keys as `RawKey` -- they used to be dropped entirely, so no program
+/// ever saw an arrow key -- except Delete, which it decodes as DEL (0x7f), and Backspace, as BS
+/// (0x08). A Linux console sends DEL for Backspace (matching `VERASE`, see
+/// `console::stdin::DEFAULT_TERMIOS`) and `ESC [ 3 ~` for Delete, so both are rewritten too.
+/// Ctrl+H still produces BS: only the Backspace key itself is matched.
+fn console_key_sequence(code: KeyCode, key: &DecodedKey) -> Option<&'static [u8]> {
+    let seq: &'static [u8] = match (code, key) {
+        (KeyCode::ArrowUp | KeyCode::Numpad8, DecodedKey::RawKey(_)) => b"\x1b[A",
+        (KeyCode::ArrowDown | KeyCode::Numpad2, DecodedKey::RawKey(_)) => b"\x1b[B",
+        (KeyCode::ArrowRight | KeyCode::Numpad6, DecodedKey::RawKey(_)) => b"\x1b[C",
+        (KeyCode::ArrowLeft | KeyCode::Numpad4, DecodedKey::RawKey(_)) => b"\x1b[D",
+        (KeyCode::Home | KeyCode::Numpad7, DecodedKey::RawKey(_)) => b"\x1b[1~",
+        (KeyCode::Insert | KeyCode::Numpad0, DecodedKey::RawKey(_)) => b"\x1b[2~",
+        (KeyCode::End | KeyCode::Numpad1, DecodedKey::RawKey(_)) => b"\x1b[4~",
+        (KeyCode::PageUp | KeyCode::Numpad9, DecodedKey::RawKey(_)) => b"\x1b[5~",
+        (KeyCode::PageDown | KeyCode::Numpad3, DecodedKey::RawKey(_)) => b"\x1b[6~",
+        (KeyCode::Delete | KeyCode::NumpadPeriod, DecodedKey::Unicode('\u{7f}')) => b"\x1b[3~",
+        (KeyCode::Backspace, DecodedKey::Unicode('\u{8}')) => b"\x7f",
+        _ => return None,
+    };
+    Some(seq)
+}
+
 fn handle_decoded_key(key: DecodedKey) -> bool {
     match key {
         DecodedKey::Unicode(character) => {
@@ -978,7 +1017,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
             crate::console::keyevents::record_raw_key_event(&key_event);
             let code = key_event.code;
             match keyboard.process_keyevent(key_event) {
-                Some(key) => handle_decoded_key(normalize_enter_key(code, key)),
+                Some(key) => dispatch_key(code, key),
                 None => false,
             }
         } else {
@@ -1013,7 +1052,7 @@ pub(crate) fn feed_synthetic_scancode(byte: u8) {
             crate::console::keyevents::record_raw_key_event(&key_event);
             let code = key_event.code;
             match keyboard.process_keyevent(key_event) {
-                Some(key) => handle_decoded_key(normalize_enter_key(code, key)),
+                Some(key) => dispatch_key(code, key),
                 None => false,
             }
         } else {

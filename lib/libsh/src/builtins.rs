@@ -27,12 +27,15 @@ const SPECIAL: &[(&str, Builtin)] = &[
 
 const REGULAR: &[(&str, Builtin)] = &[
     ("[", test),
+    ("bg", crate::jobs::bg),
     ("cd", cd),
     ("command", command),
     ("echo", echo),
     ("false", false_),
+    ("fg", crate::jobs::fg),
     ("getopts", getopts),
     ("hash", hash),
+    ("jobs", crate::jobs::jobs),
     ("kill", kill),
     ("local", local),
     ("printf", crate::printf::printf),
@@ -53,6 +56,11 @@ pub fn lookup_regular(name: &str) -> Option<Builtin> {
     REGULAR.iter().find(|(n, _)| *n == name).map(|&(_, b)| b)
 }
 
+/// Every built-in's name, for completion.
+pub fn names() -> Vec<&'static str> {
+    SPECIAL.iter().chain(REGULAR).map(|&(n, _)| n).collect()
+}
+
 fn out(s: &str) {
     let _ = sys::write_all(1, s.as_bytes());
 }
@@ -60,7 +68,7 @@ fn out(s: &str) {
 /// A special built-in's usage error: fatal (XCU 2.8.1).
 fn fatal(sh: &Shell, msg: &str) -> Exec {
     sh.error(msg);
-    Err(Flow::Exit(2))
+    Err(Flow::Fatal(2))
 }
 
 fn colon(_: &mut Shell, _: &[String]) -> Exec {
@@ -115,7 +123,7 @@ fn loop_count(sh: &Shell, args: &[String], what: &str) -> Result<usize, Flow> {
             Ok(n) if n > 0 => Ok(n),
             _ => {
                 sh.error(&format!("{what}: illegal number: {a}"));
-                Err(Flow::Exit(2))
+                Err(Flow::Fatal(2))
             }
         },
     }
@@ -152,12 +160,12 @@ fn exec(sh: &mut Shell, args: &[String]) -> Exec {
     let fields = &args[1..];
     let Some(path) = sh.find_command(&fields[0]) else {
         sh.error(&format!("exec: {}: not found", fields[0]));
-        return Err(Flow::Exit(127));
+        return Err(Flow::Fatal(127));
     };
     let env = sh.environment(&[]);
     let err = sys::execve(&path, fields, &env);
     sh.error(&format!("exec: {}: {}", fields[0], sys::strerror(&err)));
-    Err(Flow::Exit(if err.raw_os_error() == Some(libc::ENOENT) { 127 } else { 126 }))
+    Err(Flow::Fatal(if err.raw_os_error() == Some(libc::ENOENT) { 127 } else { 126 }))
 }
 
 fn exit(sh: &mut Shell, args: &[String]) -> Exec {
@@ -941,10 +949,25 @@ fn kill(sh: &mut Shell, args: &[String]) -> Exec {
     }
     let mut status = 0;
     for p in &args[i..] {
-        let Ok(pid) = p.parse::<i32>() else {
-            sh.error(&format!("kill: illegal pid: {p}"));
-            status = 1;
-            continue;
+        // `%job` signals the job's whole process group.
+        let pid = if p.starts_with('%') {
+            match sh.find_job(Some(p)).map(|id| sh.job_pgid(id)) {
+                Ok(Some(pgid)) => -pgid,
+                Ok(None) | Err(_) => {
+                    sh.error(&format!("kill: {p}: no such job"));
+                    status = 1;
+                    continue;
+                }
+            }
+        } else {
+            match p.parse::<i32>() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    sh.error(&format!("kill: illegal pid: {p}"));
+                    status = 1;
+                    continue;
+                }
+            }
         };
         if let Err(e) = sys::kill(pid, sig) {
             sh.error(&format!("kill: {pid}: {}", sys::strerror(&e)));
@@ -960,10 +983,32 @@ fn wait(sh: &mut Shell, args: &[String]) -> Exec {
             let _ = sys::wait_pid(pid);
         }
         sh.bg_done.clear();
+        let ids: Vec<usize> = sh.jobs.iter().map(|j| j.id).collect();
+        for id in ids {
+            sh.wait_for_job(id);
+        }
         return Ok(0);
     }
     let mut status = 0;
     for a in &args[1..] {
+        // A job, named by `%spec` or by one of its pids (with job control on, background
+        // commands are tracked as jobs rather than in `bg_pids`).
+        let job = if a.starts_with('%') {
+            match sh.find_job(Some(a)) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    sh.error(&format!("wait: {e}"));
+                    status = 127;
+                    continue;
+                }
+            }
+        } else {
+            a.parse::<i32>().ok().and_then(|pid| sh.jobs.iter().find(|j| j.procs.iter().any(|&(p, _)| p == pid)).map(|j| j.id))
+        };
+        if let Some(id) = job {
+            status = sh.wait_for_job(id);
+            continue;
+        }
         let Ok(pid) = a.parse::<i32>() else {
             sh.error(&format!("wait: illegal pid: {a}"));
             status = 2;

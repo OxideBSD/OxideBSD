@@ -39,6 +39,24 @@ const SYS_PREAD: u64 = 17;
 /// into the process table in `Ready` state and enqueues it — does not itself switch to it (the
 /// caller decides when, via `scheduler::schedule`/`start`).
 pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
+    spawn_with(elf_bytes, parent, &[b"(init)"], DEFAULT_ENVP)
+}
+
+/// The environment `spawn` gives a boot-spawned process (with `argv` just `(init)`: an embedded
+/// ELF has no path to name it by). `TERM=linux` matches the console (`sys/console/vga.rs`'s
+/// VT100/ANSI parser); `PS1` uses the backslash escapes both `/bin/sh` and hush expand at print
+/// time, `\[ \]` marking the colour codes as taking no room.
+pub const DEFAULT_ENVP: &[&[u8]] = &[
+    // Root's PATH from OxideBSD-doc HIER.md: most of the base system lives outside /bin
+    // (a missing directory here once left a seeded /usr/bin/nano unreachable by name).
+    b"PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/games",
+    b"TERM=linux",
+    b"PS1=\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
+];
+
+/// `spawn` with an explicit `argv` and `envp` (the real boot's pid 1, `/bin/sh` as a login
+/// shell, needs `argv[0] = "-sh"` and `HOME`).
+pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &[&[u8]]) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
 
     // Boot-time only: no syscall caller to report a real ENOMEM to, and no recovery from pid 1
@@ -60,38 +78,10 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
             .expect("out of memory mapping a user stack");
     crate::process::fault_trampoline::map(&mut mapper, phys_offset)
         .expect("out of memory mapping the fault trampoline page");
-    // spawn() has no real invocation path to use as argv[0] (unlike do_execve, which knows exactly
-    // what path it opened) -- this is only ever pid 1, built directly from an embedded ELF at
-    // boot, so a fixed placeholder is all there is to give. pid 1 is a real musl-linked binary
-    // (BusyBox's `hush`) now -- `envp` carries a single-entry `PATH=/bin`: musl's `__execvpe`
-    // builds one candidate per colon-separated component as `<component>/<name>`, so this always
-    // searches oxfs's `/bin` directory (where every applet is seeded, under its bare name --
-    // `ls`, `cat`, ... -- not `.elf`-suffixed) as an *absolute* path, regardless of hush's current
-    // cwd. (An earlier version relied on an empty `PATH=` component, which POSIX defines as
-    // "search cwd" -- only worked by coincidence while both applets and hush's cwd sat at root;
-    // see CLAUDE.md's BusyBox section.) `PATH=/bin` beats musl's own hardcoded
-    // `/usr/local/bin:/bin:/usr/bin` fallback (used only when `$PATH` is unset entirely), since
-    // none of *those* directories exist in oxfs.
-    // `TERM=linux` matches this console's real nature (a VGA text-mode VT, see
-    // `sys/console/vga.rs`'s own SGR/CSI parser) -- most BusyBox tools treat unset `TERM` as
-    // non-dumb already (`is_TERM_dumb()` only fires on an exact "dumb" match), but ncurses-shaped
-    // tools (`vi`, `clear`, `reset`) key off a real value. `PS1` uses `hush`'s already-compiled
-    // `CONFIG_FEATURE_EDITING_FANCY_PROMPT` escapes (`build.rs`'s HUSH-specific Kconfig flip) --
-    // these are literal two-byte `\e`/`\[`/`\]`/`\u`/`\h`/`\w`/`\$` sequences that `lineedit.c`'s
-    // own `parse_prompt` expands at print time (NOT a raw ESC byte here -- that's what `\e` itself
-    // expands to). `\[`/`\]` mark non-printing spans so line-editing cursor math ignores the color
-    // codes, `\u`/`\h` resolve via /etc/passwd + uname()'s nodename (both already real), `\w` is
-    // cwd, `\$` is euid-sensitive ('#' for root).
     let initial_rsp = crate::process::user_stack::build(
         &elf,
-        &[b"(init)"],
-        &[
-            // Root's PATH from OxideBSD-doc HIER.md: most of the base system lives outside /bin
-            // (a missing directory here once left a seeded /usr/bin/nano unreachable by name).
-            b"PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin",
-            b"TERM=linux",
-            b"PS1=\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
-        ],
+        argv,
+        envp,
         stack_top,
         user_stack_bottom(stack_top, user_stack_pages()),
         &mapped_pages,

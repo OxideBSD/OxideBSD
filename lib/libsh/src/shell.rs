@@ -24,6 +24,8 @@ pub struct Options {
     pub errexit: bool,
     /// `-f`
     pub noglob: bool,
+    /// `-m`: job control. On by default in an interactive shell.
+    pub monitor: bool,
     /// `-n`
     pub noexec: bool,
     /// `-u`
@@ -40,6 +42,7 @@ impl Options {
         ('C', "noclobber"),
         ('e', "errexit"),
         ('f', "noglob"),
+        ('m', "monitor"),
         ('n', "noexec"),
         ('u', "nounset"),
         ('v', "verbose"),
@@ -52,6 +55,7 @@ impl Options {
             'C' => &mut self.noclobber,
             'e' => &mut self.errexit,
             'f' => &mut self.noglob,
+            'm' => &mut self.monitor,
             'n' => &mut self.noexec,
             'u' => &mut self.nounset,
             'v' => &mut self.verbose,
@@ -71,7 +75,11 @@ pub enum Flow {
     Break(usize),
     Continue(usize),
     Return(i32),
+    /// `exit`, or `set -e` tripping: always ends the shell.
     Exit(i32),
+    /// A shell error (XCU 2.8.1): ends a non-interactive shell, but an interactive one only
+    /// abandons the current command line.
+    Fatal(i32),
 }
 
 pub type Exec = Result<i32, Flow>;
@@ -116,6 +124,19 @@ pub struct Shell {
     pub tail: bool,
     /// Status of the last command substitution in the current simple command.
     pub subst_status: Option<i32>,
+    /// Reading commands from a terminal (`-i`, or no script with a terminal on stdin).
+    pub interactive: bool,
+    /// The terminal an interactive shell uses for prompts, editing and job control.
+    pub tty_fd: Option<sys::Fd>,
+    /// The terminal's modes when the shell started, restored after each foreground job.
+    pub tty_modes: Option<libc::termios>,
+    /// The shell's own process group, which gets the terminal back after a job.
+    pub shell_pgid: i32,
+    pub jobs: Vec<crate::jobs::Job>,
+    /// Job ids, least recently used first: the last is `%+`, the one before `%-`.
+    pub job_order: Vec<usize>,
+    /// The command line being run, which names any job it starts.
+    pub current_text: String,
 }
 
 impl Shell {
@@ -140,6 +161,13 @@ impl Shell {
             bg_done: HashMap::new(),
             tail: false,
             subst_status: None,
+            interactive: false,
+            tty_fd: None,
+            tty_modes: None,
+            shell_pgid: sys::getpid(),
+            jobs: Vec::new(),
+            job_order: Vec::new(),
+            current_text: String::new(),
         };
         for (k, v) in std::env::vars_os() {
             let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else { continue };
@@ -233,7 +261,7 @@ impl Shell {
         }
         let status = match self.run_list(&list) {
             Ok(s) => s,
-            Err(Flow::Exit(s)) => s,
+            Err(Flow::Exit(s) | Flow::Fatal(s)) => s,
             Err(Flow::Return(s)) => s,
             Err(Flow::Break(_) | Flow::Continue(_)) => self.status,
         };
@@ -247,7 +275,7 @@ impl Shell {
             let saved = self.status;
             if let Ok(list) = crate::parse(&action) {
                 match self.run_list(&list) {
-                    Err(Flow::Exit(s)) => return s,
+                    Err(Flow::Exit(s) | Flow::Fatal(s)) => return s,
                     _ => self.status = saved,
                 }
             }
@@ -260,6 +288,10 @@ impl Shell {
         let pending = PENDING_SIGNALS.swap(0, Ordering::SeqCst);
         if pending == 0 {
             return Ok(());
+        }
+        if self.interactive && pending & (1 << libc::SIGINT) != 0 && !self.traps.contains_key(&libc::SIGINT) {
+            let _ = sys::write_all(2, b"\n");
+            return Err(Flow::Fatal(130));
         }
         for sig in 1..64 {
             if pending & (1 << sig) != 0
@@ -298,13 +330,13 @@ fn same_dir(a: &str, b: &str) -> bool {
     }
 }
 
-/// What to do when asked for an interactive shell, which this one doesn't implement yet.
-#[derive(Clone, Copy, Debug)]
+/// Whether this binary offers an interactive shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interactive {
     /// Exit with an error (`/sbin/init_sh`, INIT_SH.md §3.2).
     Refuse,
-    /// Hand the whole invocation to another shell (`/bin/sh`, until it has interactive mode).
-    Exec(&'static str),
+    /// `/bin/sh`.
+    Allow,
 }
 
 /// `sh [-abCefnuvx] [-o opt]... [-c command_string [command_name [arg...]] | script [arg...]]`
@@ -312,15 +344,7 @@ pub fn main(args: Vec<String>) -> i32 {
     main_with(args, Interactive::Refuse)
 }
 
-fn refuse_interactive(prog: &str, args: &[String], interactive: Interactive) -> i32 {
-    if let Interactive::Exec(path) = interactive {
-        let env: Vec<String> = std::env::vars_os()
-            .filter_map(|(k, v)| Some(format!("{}={}", k.to_str()?, v.to_str()?)))
-            .collect();
-        let err = sys::execve(path, args, &env);
-        let _ = sys::write_all(2, format!("{prog}: interactive mode: cannot run {path}: {}\n", sys::strerror(&err)).as_bytes());
-        return 127;
-    }
+fn refuse_interactive(prog: &str) -> i32 {
     let _ = sys::write_all(2, format!("{prog}: interactive mode is not supported\n").as_bytes());
     2
 }
@@ -334,6 +358,9 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
     let mut i = 1;
     let mut opts = Options::default();
     let mut command_string = false;
+    let mut force_interactive = false;
+    // `-m`/`+m` given explicitly; otherwise an interactive shell turns job control on itself.
+    let mut monitor_set = false;
     while i < args.len() {
         let a = &args[i];
         if a == "--" || a == "-" {
@@ -354,13 +381,16 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
                 if let Some(f) = Options::letter_for(name).and_then(|l| opts.flag_mut(l)) {
                     *f = on;
                 }
-            } else if c == 's' || c == 'i' {
-                // -s: read from stdin (the default without a script); -i is not supported.
-                if c == 'i' {
-                    return refuse_interactive(&prog, &args, interactive);
+            } else if c == 's' {
+                // Read commands from standard input: the default without a script anyway.
+            } else if c == 'i' {
+                if interactive == Interactive::Refuse {
+                    return refuse_interactive(&prog);
                 }
+                force_interactive = on;
             } else if let Some(f) = opts.flag_mut(c) {
                 *f = on;
+                monitor_set |= c == 'm';
             } else {
                 let _ = sys::write_all(2, format!("{prog}: illegal option -{c}\n").as_bytes());
                 return 2;
@@ -385,8 +415,16 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
             }
         }
     } else {
-        if unsafe { libc::isatty(0) } == 1 {
-            return refuse_interactive(&prog, &args, interactive);
+        if force_interactive || (sys::isatty(0) && sys::isatty(2)) {
+            if interactive == Interactive::Refuse {
+                return refuse_interactive(&prog);
+            }
+            let mut sh = Shell::new(prog.clone(), rest.to_vec());
+            sh.opts = opts;
+            if !monitor_set {
+                sh.opts.monitor = true;
+            }
+            return sh.run_interactive();
         }
         match sys::read_to_end(0) {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), prog.clone(), Vec::new()),

@@ -213,20 +213,15 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     crate::fs::fd::init();
 
-    // BusyBox's `hush` (see CLAUDE.md's BusyBox/oxfs sections) is pid 1 -- a real shell over a
-    // real filesystem. It superseded `stsh`, the original hand-written shell, which has since been
-    // removed entirely (see CLAUDE.md's "Interactive shell" section for what remains relevant of
-    // its design). `hush` prints no prompt of its own (`CONFIG_HUSH_INTERACTIVE` is off
-    // -- see CLAUDE.md's BusyBox section) -- it silently blocks reading the first line, which is
-    // correct, not stuck (confirmed via QEMU + injected keystrokes: ordinary commands, `cd`/`pwd`,
-    // and piping all work).
-    const HUSH_ELF: &[u8] = include_bytes!(env!("HUSH_ELF_PATH"));
-    serial_println!(
-        "[boot] spawning hush (BusyBox sh) as pid 1 ({} byte ELF)",
-        HUSH_ELF.len()
-    );
-    let pid1 = crate::process::spawn(HUSH_ELF, None)
-        .unwrap_or_else(|e| panic!("failed to spawn hush: {e:?}"));
+    // pid 1 is OxideBSD's own shell, `/bin/sh` (lib/libsh), as an interactive login shell
+    // (`argv[0]` starting with `-`: it reads /etc/profile and ~/.profile). BusyBox hush, pid 1
+    // before it, is still seeded as /bin/hush.
+    const SH_ELF: &[u8] = include_bytes!(env!("OXFS_SH_ELF_PATH"));
+    serial_println!("[boot] spawning /bin/sh as pid 1 ({} byte ELF)", SH_ELF.len());
+    let mut envp: alloc::vec::Vec<&[u8]> = crate::process::lifecycle::DEFAULT_ENVP.to_vec();
+    envp.push(b"HOME=/");
+    let pid1 = crate::process::lifecycle::spawn_with(SH_ELF, None, &[b"-sh"], &envp)
+        .unwrap_or_else(|e| panic!("failed to spawn /bin/sh: {e:?}"));
 
     crate::process::scheduler::start(pid1)
 }

@@ -153,7 +153,7 @@ impl Shell {
                     };
                     let value = crate::arith::eval(&text, &mut ArithVars(self)).map_err(|e| {
                         self.error(&format!("arithmetic expression: {e}: \"{}\"", text.trim()));
-                        Flow::Exit(2)
+                        Flow::Fatal(2)
                     })?;
                     b.push(&value.to_string(), if in_dq { Kind::Quoted } else { Kind::Expanded });
                 }
@@ -222,7 +222,7 @@ impl Shell {
             ParamOp::Plain => {
                 if value.is_none() && self.opts.nounset && !is_at_or_star {
                     self.error(&format!("{name}: parameter not set"));
-                    return Err(Flow::Exit(2));
+                    return Err(Flow::Fatal(2));
                 }
                 if is_at_or_star {
                     self.push_positional(pe.param == Param::Special('@'), in_dq, mode, b);
@@ -233,7 +233,7 @@ impl Shell {
             ParamOp::Length => {
                 if value.is_none() && self.opts.nounset && !is_at_or_star {
                     self.error(&format!("{name}: parameter not set"));
-                    return Err(Flow::Exit(2));
+                    return Err(Flow::Fatal(2));
                 }
                 let n = if is_at_or_star { self.positional.len() } else { value.unwrap_or_default().chars().count() };
                 b.push(&n.to_string(), kind);
@@ -260,12 +260,12 @@ impl Shell {
                 } else {
                     let Param::Named(n) = &pe.param else {
                         self.error(&format!("{name}: bad variable name"));
-                        return Err(Flow::Exit(2));
+                        return Err(Flow::Fatal(2));
                     };
                     let v = self.expand_string(word)?;
                     if let Err(e) = self.set(n, &v) {
                         self.error(&e);
-                        return Err(Flow::Exit(2));
+                        return Err(Flow::Fatal(2));
                     }
                     b.push(&v, kind);
                 }
@@ -277,13 +277,13 @@ impl Shell {
                     let msg = self.expand_string(word)?;
                     let msg = if msg.is_empty() { "parameter not set".to_string() } else { msg };
                     self.error(&format!("{name}: {msg}"));
-                    return Err(Flow::Exit(2));
+                    return Err(Flow::Fatal(2));
                 }
             }
             ParamOp::RemovePrefix { longest, pattern } | ParamOp::RemoveSuffix { longest, pattern } => {
                 if value.is_none() && self.opts.nounset {
                     self.error(&format!("{name}: parameter not set"));
-                    return Err(Flow::Exit(2));
+                    return Err(Flow::Fatal(2));
                 }
                 let v = value.unwrap_or_default();
                 let pat = self.expand_pattern(pattern)?;
@@ -372,7 +372,7 @@ impl Shell {
     pub fn capture(&mut self, list: &List) -> Result<String, Flow> {
         let (r, w) = sys::pipe().map_err(|e| {
             self.error(&format!("cannot create pipe: {e}"));
-            Flow::Exit(2)
+            Flow::Fatal(2)
         })?;
         match sys::fork() {
             Ok(0) => {
@@ -384,7 +384,7 @@ impl Shell {
                 self.enter_subshell();
                 let status = match self.run_list(list) {
                     Ok(s) => s,
-                    Err(Flow::Exit(s) | Flow::Return(s)) => s,
+                    Err(Flow::Exit(s) | Flow::Fatal(s) | Flow::Return(s)) => s,
                     Err(_) => self.status,
                 };
                 let status = self.finish(status);
@@ -405,7 +405,7 @@ impl Shell {
             }
             Err(e) => {
                 self.error(&format!("cannot fork: {e}"));
-                Err(Flow::Exit(2))
+                Err(Flow::Fatal(2))
             }
         }
     }

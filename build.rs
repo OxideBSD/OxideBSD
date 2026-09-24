@@ -456,8 +456,6 @@ fn main() {
     // explicit exception ("sh" -> "HUSH", matching `sys/modules/oxfs/src/lib.rs`'s existing
     // `OXFS_HUSH_ELF_PATH`/`seed_file(root, b"sh.elf", ...)` naming, itself inherited from this
     // applet's own Kconfig symbol `HUSH`, not its embedded filename).
-    let hush_elf_path_for_main = target_dir_busybox_elf("sh");
-    println!("cargo:rustc-env=HUSH_ELF_PATH={hush_elf_path_for_main}");
     let oxfs_applet_paths: Vec<(String, String)> = all_applets
         .iter()
         .map(|&(_, out_name, _)| {
