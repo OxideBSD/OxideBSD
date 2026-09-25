@@ -173,8 +173,8 @@ pub extern "C" fn _start() -> ! {
     let bindtest = b"/bindtest";
     let bin = b"/bin";
 
-    if unsafe { syscall(SYS_MKDIR, mnttest.as_ptr() as u64, mnttest.len() as u64, 0) }.is_err()
-        || unsafe { syscall(SYS_MKDIR, bindtest.as_ptr() as u64, bindtest.len() as u64, 0) }
+    if unsafe { syscall(SYS_MKDIR, mnttest.as_ptr() as u64, mnttest.len() as u64, 0o755) }.is_err()
+        || unsafe { syscall(SYS_MKDIR, bindtest.as_ptr() as u64, bindtest.len() as u64, 0o755) }
             .is_err()
     {
         write_bytes(b"mount-syscall-smoke: mkdir failed\n");

@@ -72,10 +72,10 @@ pub fn build(
 ) -> VirtAddr {
     let phdr_vaddr = elf.phdr_vaddr() + main_bias;
 
-    // Deliberately NOT cryptographically random -- musl only requires that AT_RANDOM point at 16
-    // present bytes (it uses them for the stack-protector canary and as an arc4random seed); this
-    // kernel has no entropy source at all yet, and this is a placeholder, not a security claim.
-    let random_bytes: [u8; 16] = *b"OxideBSDNotRealX";
+    // 16 fresh bytes per exec: musl seeds its stack-protector canary (and Rust std its hashmap
+    // keys) from these, so a fixed value would make every canary on the system predictable.
+    let mut random_bytes = [0u8; 16];
+    crate::random::oxidebsd_random_bytes(random_bytes.as_mut_ptr() as u64, 16);
 
     // --- Strings first (argv, then envp, then AT_RANDOM's 16 bytes), each remembering where it
     // landed so the pointer arrays built below can reference them. ---

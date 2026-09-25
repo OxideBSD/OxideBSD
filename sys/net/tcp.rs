@@ -46,23 +46,16 @@ const CONNECT_TIMEOUT_TICKS: u64 = 500; // ~5s
 const ACCEPT_BACKLOG_MIN: usize = 1;
 const ACCEPT_BACKLOG_MAX: usize = 128;
 
-/// `11`, matching musl's own compiled-in value -- not `35` (the real FreeBSD value this ABI is
-/// otherwise meant to follow, see `sys/syscall.rs`'s module doc comment), for the same
-/// "must match whatever musl's own `bits/errno.h` actually compares `errno` against" reason
-/// `sys/syscall.rs`'s own `EPROTONOSUPPORT`/`EAGAIN`/`ENOTSOCK` were corrected for. Fixed here
-/// specifically because `tcp_read`'s new `O_NONBLOCK` path (below) is a fresh caller of this
-/// constant; `EISCONN`/`ENOTCONN`/`ECONNREFUSED`/`ETIMEDOUT`/`EOPNOTSUPP`/`EADDRINUSE`/
-/// `EHOSTUNREACH` below are real FreeBSD values with the exact same latent mismatch, not yet
-/// audited/fixed (see `sys/syscall.rs`'s own doc comment for the full story -- a known,
-/// deliberately-scoped-out issue, not fixed here).
+/// errno values are musl's (`bits/errno.h`), since they become userland's `errno` unchanged. All
+/// but `EAGAIN` used to be FreeBSD's.
 const EAGAIN: i64 = 11;
-const EISCONN: i64 = 56;
-const ENOTCONN: i64 = 57;
-const ECONNREFUSED: i64 = 61;
-const ETIMEDOUT: i64 = 60;
-const EOPNOTSUPP: i64 = 45;
-const EADDRINUSE: i64 = 48;
-const EHOSTUNREACH: i64 = 65;
+const EISCONN: i64 = 106;
+const ENOTCONN: i64 = 107;
+const ECONNREFUSED: i64 = 111;
+const ETIMEDOUT: i64 = 110;
+const EOPNOTSUPP: i64 = 95;
+const EADDRINUSE: i64 = 98;
+const EHOSTUNREACH: i64 = 113;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnState {
@@ -673,6 +666,26 @@ pub fn has_data_ready(real_fd: u64) -> Option<bool> {
         Some(TcpSocket::Unbound { .. }) => Some(false),
         None => None,
     }
+}
+
+/// `poll`/`select` readiness, Linux-shaped. `None` if `real_fd` isn't a TCP socket.
+pub fn readiness(real_fd: u64) -> Option<crate::fs::Readiness> {
+    let mut r = crate::fs::Readiness::default();
+    match STATE.lock().sockets.get(&real_fd)? {
+        TcpSocket::Connection(conn) => {
+            let peer_finished =
+                matches!(conn.state, ConnState::CloseWait | ConnState::LastAck | ConnState::Closed);
+            r.readable = !conn.recv_buf.is_empty() || peer_finished;
+            // Stop-and-wait: one segment in flight at a time.
+            r.writable = matches!(conn.state, ConnState::Established | ConnState::CloseWait)
+                && conn.unacked_segment.is_none();
+            r.hangup = matches!(conn.state, ConnState::LastAck | ConnState::Closed);
+        }
+        TcpSocket::Listener(l) => r.readable = !l.pending.is_empty(),
+        // Linux reports an unconnected TCP socket as hung up.
+        TcpSocket::Unbound { .. } => r.hangup = true,
+    }
+    Some(r)
 }
 
 pub fn create_socket() -> u64 {

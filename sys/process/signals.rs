@@ -202,6 +202,48 @@ pub fn do_kill(caller_pid: Pid, target_pid: i64, sig: i64) -> Result<u64, u64> {
     }
     let caller_uid = oxidebsd_current_uid() as u32;
 
+    if target_pid == -1 {
+        // POSIX kill(-1, sig): every process the caller may signal, except init and the caller's
+        // own thread group. Used to fall through to the group branch below as "pgrp 1".
+        let caller_tgid = {
+            let table = PROCESS_TABLE.lock();
+            table
+                .get(&caller_pid)
+                .expect("kill: current process missing from table")
+                .tgid
+        };
+        let (targets, any_denied) = {
+            let table = PROCESS_TABLE.lock();
+            let mut targets = Vec::new();
+            let mut any_denied = false;
+            for (&pid, p) in table.iter() {
+                if p.tgid != pid
+                    || pid == INIT_PID
+                    || pid == caller_tgid
+                    || matches!(p.state, ProcState::Zombie(_))
+                {
+                    continue;
+                }
+                if has_signal_permission(caller_uid, p.shared.lock().uid) {
+                    targets.push(pid);
+                } else {
+                    any_denied = true;
+                }
+            }
+            (targets, any_denied)
+        };
+        if targets.is_empty() {
+            return Err(if any_denied { EPERM } else { ESRCH });
+        }
+        if sig != 0 {
+            for pid in targets {
+                // A target may have exited since the scan; that's not the caller's error.
+                let _ = do_kill(caller_pid, pid as i64, sig);
+            }
+        }
+        return Ok(0);
+    }
+
     if target_pid <= 0 {
         // Real POSIX process-group broadcast: `0` targets the caller's own group, `< 0` targets
         // group `|target_pid|` -- both real `kill(2)` shapes, not this ABI's own invention. Found
@@ -641,7 +683,7 @@ pub(crate) fn wake_if_paused(pid: Pid, proc: &mut Process, sig: u64) {
 /// deliverability right before each re-block, so without this hook nothing would ever notice
 /// early). Found live via the Open POSIX Test Suite pilot's `nanosleep/1-3.c`.
 pub(crate) fn wake_if_sleeping(pid: Pid, proc: &mut Process, sig: u64) {
-    if let ProcState::Blocked(BlockReason::Sleeping(_)) = proc.state
+    if let ProcState::Blocked(BlockReason::Sleeping(_) | BlockReason::Polling(_)) = proc.state
         && proc.blocked_signals & (1 << (sig - 1)) == 0
     {
         proc.state = ProcState::Ready;

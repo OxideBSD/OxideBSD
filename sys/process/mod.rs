@@ -166,6 +166,12 @@ pub enum BlockReason {
     /// reaches directly into `process::table()`" shape `WaitingForChild`/`WaitingForPipeData`
     /// already established.
     WaitingForSignal,
+    /// Blocked in `poll`/`select` on pipes and/or the console until something changes. Payload is
+    /// the tick deadline (`u64::MAX` = none), expired by the timer IRQ like `Sleeping`; also woken
+    /// by any pipe activity (`fs::pipe`), a keystroke (`console::stdin`), or a signal
+    /// (`wake_if_sleeping`). The caller re-checks every fd after waking, so one wake source covering
+    /// every pipe is fine.
+    Polling(u64),
     /// Blocked in `crate::fs::mqueue`'s `do_mq_timedreceive` on an empty queue, still bounded by a
     /// real deadline (identified by mq id, same convention `WaitingForPipeData`'s pipe id already
     /// establishes) -- `u64::MAX` means "no timeout" (the plain `mq_receive()` wrapper, which
@@ -1220,6 +1226,17 @@ fn alloc_pid() -> Pid {
 /// a real deadlock risk if the switched-to process needs this same lock, which it always will.
 pub(crate) fn table() -> &'static Mutex<BTreeMap<Pid, Box<Process>>> {
     &PROCESS_TABLE
+}
+
+/// Makes every process blocked in `poll`/`select` (`BlockReason::Polling`) runnable again, so it
+/// re-checks its fds. Called with the table already locked by each wake source.
+pub(crate) fn wake_pollers(table: &mut BTreeMap<Pid, Box<Process>>) {
+    for (&pid, proc) in table.iter_mut() {
+        if let ProcState::Blocked(BlockReason::Polling(_)) = proc.state {
+            proc.state = ProcState::Ready;
+            scheduler::enqueue_ready(pid);
+        }
+    }
 }
 #[derive(Debug)]
 pub enum SpawnError {

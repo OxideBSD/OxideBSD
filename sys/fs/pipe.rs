@@ -42,6 +42,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 
 use spin::Mutex;
 
+use super::Readiness;
 use crate::process::scheduler;
 use crate::process::{self, BlockReason, ProcState};
 use crate::syscall::{EAGAIN, ENOTSOCK, EPIPE};
@@ -410,6 +411,47 @@ pub(crate) fn do_shutdown(real_fd: u64, how: u64) -> Result<u64, u64> {
     Ok(0)
 }
 
+// `readiness` below reports `poll`/`select` state for a pipe or socketpair fd; `None` if `real_fd`
+// isn't one.
+/// POSIX's atomic-write size; Linux likewise reports a pipe writable only with this much room.
+const PIPE_BUF: usize = 4096;
+
+fn read_side(pipes: &BTreeMap<u64, PipeBuffer>, pipe_id: u64) -> (bool, bool) {
+    match pipes.get(&pipe_id) {
+        Some(p) => (!p.data.is_empty() || p.write_closed, p.write_closed),
+        None => (true, true), // fully torn down: reads see EOF
+    }
+}
+
+fn write_side(pipes: &BTreeMap<u64, PipeBuffer>, pipe_id: u64) -> (bool, bool) {
+    match pipes.get(&pipe_id) {
+        Some(p) if p.read_closed || p.write_closed => (false, true),
+        Some(p) => (PIPE_CAPACITY - p.data.len() >= PIPE_BUF, false),
+        None => (false, true),
+    }
+}
+
+pub(crate) fn readiness(real_fd: u64) -> Option<Readiness> {
+    if let Some(&(pipe_id, end)) = PIPE_ENDS.lock().get(&real_fd) {
+        let pipes = PIPES.lock();
+        return Some(match end {
+            End::Read => {
+                let (readable, hangup) = read_side(&pipes, pipe_id);
+                Readiness { readable, hangup, ..Default::default() }
+            }
+            End::Write => {
+                let (writable, error) = write_side(&pipes, pipe_id);
+                Readiness { writable, error, ..Default::default() }
+            }
+        });
+    }
+    let end = SOCK_ENDS.lock().get(&real_fd).copied()?;
+    let pipes = PIPES.lock();
+    let (readable, peer_done) = read_side(&pipes, end.read_pipe);
+    let (writable, write_done) = write_side(&pipes, end.write_pipe);
+    Some(Readiness { readable, writable, hangup: peer_done && write_done, error: false })
+}
+
 fn wake_blocked_readers(pipe_id: u64) {
     let mut table = process::table().lock();
     for (&pid, proc) in table.iter_mut() {
@@ -418,6 +460,7 @@ fn wake_blocked_readers(pipe_id: u64) {
             scheduler::enqueue_ready(pid);
         }
     }
+    process::wake_pollers(&mut table);
 }
 
 fn wake_blocked_writers(pipe_id: u64) {
@@ -428,4 +471,5 @@ fn wake_blocked_writers(pipe_id: u64) {
             scheduler::enqueue_ready(pid);
         }
     }
+    process::wake_pollers(&mut table);
 }

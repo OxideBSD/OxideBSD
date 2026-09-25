@@ -289,6 +289,7 @@ fn wake_blocked_readers() {
             scheduler::enqueue_ready(pid);
         }
     }
+    process::wake_pollers(&mut table);
 }
 
 /// Whether a real byte is sitting in the ring buffer right now, with **no blocking, no side

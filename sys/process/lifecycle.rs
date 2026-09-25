@@ -1693,7 +1693,7 @@ pub(crate) fn terminate_thread_group(target_pid: Pid, code: i32) {
 /// itself is still running and hasn't blocked or exited.
 /// Real pid 1 -- `init` in every real Unix, `hush` here (see `spawn`'s own doc comment). The one
 /// process every real orphan gets reparented to.
-const INIT_PID: Pid = 1;
+pub(crate) const INIT_PID: Pid = 1;
 
 /// Real orphan reparenting: any still-living child of `pid` gets handed to `INIT_PID` rather than
 /// left permanently parentless -- see `Process::adopted`'s own doc comment for why this exists and
@@ -2010,11 +2010,13 @@ const RB_HALT_SYSTEM: u64 = 0xcdef0123;
 const RB_POWER_OFF: u64 = 0x4321fedc;
 
 /// `SYS_REBOOT`'s real logic -- matches real Linux's own magic `cmd` values against this kernel's
-/// three real actions (`sys/reboot.rs`). No permission check: this kernel has no capability model
-/// to gate real Linux's own `CAP_SYS_BOOT` requirement against, the same "collapses to
-/// always-allowed" reasoning `do_setpgid`/`TIOCSCTTY`'s own `force` flag already use. Every
-/// success arm diverges (`-> !`) -- the `Result` return type exists only for the `EINVAL` case.
+/// three real actions (`sys/reboot.rs`). Root only (`EPERM` otherwise, checked before `cmd`, as
+/// Linux does for `CAP_SYS_BOOT`). Every success arm diverges (`-> !`) -- the `Result` return
+/// type exists only for the error cases.
 pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
+    if crate::process::identity::oxidebsd_current_uid() != 0 {
+        return Err(crate::syscall::EPERM);
+    }
     match cmd {
         RB_AUTOBOOT => crate::reboot::reboot(),
         RB_HALT_SYSTEM => crate::reboot::halt(),

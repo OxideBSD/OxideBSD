@@ -276,7 +276,7 @@ pub extern "C" fn _start() -> ! {
 
     // --- mkdir relative while cwd is still inside /proc must fail with EROFS. ---
     let x = b"x";
-    let mkdir_result = unsafe { syscall(SYS_MKDIR, x.as_ptr() as u64, x.len() as u64, 0) };
+    let mkdir_result = unsafe { syscall(SYS_MKDIR, x.as_ptr() as u64, x.len() as u64, 0o755) };
     if mkdir_result != Err(EROFS) {
         write_bytes(b"proc-smoke: mkdir inside /proc should have failed with EROFS\n");
         test_exit(false);

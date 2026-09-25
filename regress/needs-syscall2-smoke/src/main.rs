@@ -441,7 +441,7 @@ fn check_chroot_permission() -> bool {
 /// parent process has no path-based way back to the real root.
 fn check_chroot_containment() -> bool {
     let dir = b"/n2root";
-    if unsafe { syscall(SYS_MKDIR, dir.as_ptr() as u64, dir.len() as u64, 0) }.is_err() {
+    if unsafe { syscall(SYS_MKDIR, dir.as_ptr() as u64, dir.len() as u64, 0o755) }.is_err() {
         write_bytes(b"needs-syscall2-smoke: mkdir /n2root failed\n");
         return false;
     }

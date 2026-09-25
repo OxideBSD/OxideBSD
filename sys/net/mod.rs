@@ -41,7 +41,12 @@ pub fn poll() {
 }
 
 const POLLIN: i16 = 0x0001;
+const POLLOUT: i16 = 0x0004;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
 const POLLNVAL: i16 = 0x0020;
+const POLLRDNORM: i16 = 0x0040;
+const POLLWRNORM: i16 = 0x0100;
 
 /// Real Linux/musl `struct pollfd` layout (`int fd; short events; short revents;`) -- no padding
 /// needed, already 8-byte aligned as a whole.
@@ -52,22 +57,109 @@ struct PollFd {
     revents: i16,
 }
 
-/// `SYS_POLL = 148` (see `bits/syscall.h.in`'s own comment on why `__NR_poll`'s real, unremapped
-/// value can't be used here -- it collides with this ABI's own `SYS_WAIT4`). Exists to unblock a
-/// real DNS resolver: musl's own stub resolver (`external/mit/musl/src/network/res_msend.c`) is
-/// already a real userspace UDP client built on `socket`/`sendto`/`recvfrom` -- it just also needs
-/// `poll()` to multiplex retries across nameservers with a timeout, the one primitive this stack
-/// didn't have yet.
+/// How a not-yet-ready fd can become ready, which decides how `poll`/`select` wait for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Changes only when another process runs (pipes, socketpairs) or a key is pressed (the
+    /// console): the waiter can genuinely block (`BlockReason::Polling`) and be woken.
+    Wakeable,
+    /// A network socket. Incoming packets are only processed when someone calls `poll()` (the NIC
+    /// is pull-based), so the waiter must keep running, yielding between passes.
+    Pulled,
+}
+
+/// Current readiness of `real_fd` and how it changes. Regular files, devices and anything else
+/// without a blocking model are always readable and writable, as POSIX specifies for files.
+fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
+    use crate::fs::Readiness;
+    // real_fd 0-2 are the console (a fixed mapping, see `sys/fs/fd.rs`'s `init`).
+    if real_fd <= 2 {
+        let r = Readiness {
+            readable: crate::console::stdin::has_bytes_available(),
+            writable: true,
+            ..Default::default()
+        };
+        return (r, Source::Wakeable);
+    }
+    if let Some(r) = crate::fs::pipe::readiness(real_fd) {
+        return (r, Source::Wakeable);
+    }
+    if let Some(r) = tcp::readiness(real_fd) {
+        return (r, Source::Pulled);
+    }
+    if let Some(readable) = udp::has_data_ready(real_fd).or_else(|| icmp::has_data_ready(real_fd)) {
+        return (Readiness { readable, writable: true, ..Default::default() }, Source::Pulled);
+    }
+    let always = Readiness { readable: true, writable: true, ..Default::default() };
+    (always, Source::Wakeable)
+}
+
+/// `poll(2)` `revents` for one fd: the requested subset of `POLLIN`/`POLLOUT` (and their `*NORM`
+/// aliases), plus `POLLHUP`/`POLLERR`, which are always reported whether requested or not.
+fn poll_revents(r: crate::fs::Readiness, events: i16) -> i16 {
+    let mut ready = 0;
+    if r.readable {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    if r.writable {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+    let mut revents = ready & events;
+    if r.hangup {
+        revents |= POLLHUP;
+    }
+    if r.error {
+        revents |= POLLERR;
+    }
+    revents
+}
+
+/// Shared waiting step of `poll`/`select` once nothing is ready: `Err(EINTR)` for a deliverable
+/// signal, otherwise waits for something to change and returns so the caller re-checks every fd.
+/// `deadline_tick` is `u64::MAX` for no timeout.
 ///
-/// Only ever reports `POLLIN` -- the only event class any fd in this kernel has real blocking
-/// semantics for. A `real_fd` that doesn't belong to any protocol's socket table (a regular oxfs
-/// file, a pipe, ...) is treated as always-ready, matching real POSIX behavior for regular files
-/// and a reasonable stand-in for everything else this stack doesn't model blocking for --
-/// **except the console (`real_fd == 0`), which gets a real readiness check** (`console::stdin::
-/// has_bytes_available`) instead: unlike a regular file, stdin is genuinely, legitimately empty
-/// whenever nobody's typing, and a real curses program's own zero-timeout `nodelay`-mode check
-/// depends on that being reported honestly -- see that function's own doc comment for the real
-/// bug this closes.
+/// Waits on sockets yield without blocking: the NIC is pull-based, so a blocked poller would
+/// never see a packet arrive. Every other wait blocks as `BlockReason::Polling`, woken by pipe
+/// activity, a keystroke, a signal, or the deadline. The syscall runs with interrupts masked, so
+/// a blocking wait is also the only way a keystroke can ever arrive during one.
+fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
+    let pid = crate::process::scheduler::current_pid();
+    {
+        let mut table = crate::process::table().lock();
+        let proc = table.get_mut(&pid).expect("poll: current process missing from table");
+        if crate::process::signals::has_interrupting_signal(proc) {
+            return Err(-(EINTR as i64));
+        }
+        if !any_pulled {
+            proc.state = crate::process::ProcState::Blocked(
+                crate::process::BlockReason::Polling(deadline_tick),
+            );
+        }
+    } // table lock dropped before schedule() -- see process::table()'s own doc comment
+    crate::process::scheduler::schedule();
+    Ok(())
+}
+
+/// Converts a millisecond timeout into an absolute timer-tick deadline for `wait_for_change`,
+/// rounded up so the tick deadline never fires before the TSC one. Negative means none.
+fn deadline_tick_for(timeout_ms: i64) -> u64 {
+    if timeout_ms < 0 {
+        return u64::MAX;
+    }
+    let hz = crate::cpu::pit::TIMER_HZ as u64;
+    crate::cpu::interrupts::ticks() + (timeout_ms as u64 * hz).div_ceil(1000) + 1
+}
+
+/// `SYS_POLL = 148` (see `bits/syscall.h.in`'s own comment on why `__NR_poll`'s real, unremapped
+/// value can't be used here -- it collides with this ABI's own `SYS_WAIT4`). First added for
+/// musl's stub DNS resolver, which multiplexes retries across nameservers with it.
+///
+/// Reports real `POLLIN`/`POLLOUT`/`POLLHUP`/`POLLERR`/`POLLNVAL` per fd (`fd_readiness`), waits
+/// genuinely rather than spinning (`wait_for_change`), and fails `EINTR` when a signal arrives.
+/// Pipes used to be reported readable even when empty, so a `read()` right after `poll` blocked.
+///
+/// `timeout` is measured on the TSC, not `ticks()`: this handler runs with interrupts masked (the
+/// syscall entry's `SFMASK`), so `ticks()` stands still whenever it doesn't actually block.
 pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) -> i64 {
     if fds_ptr == 0 && nfds > 0 {
         return -(EINVAL as i64);
@@ -85,23 +177,16 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
     } else {
         unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds as usize) }
     };
-
-    // `crate::tsc`, not `crate::cpu::interrupts::ticks()`: this is a real syscall handler, and
-    // `ticks()` is driven entirely by the timer IRQ, which can't fire for the syscall's *entire*
-    // duration (`sys/syscall.rs`'s SFMASK clears `RFLAGS::INTERRUPT_FLAG` at entry) -- a
-    // tick-based deadline here would be frozen at the value it had when the syscall began and
-    // could never actually elapse. Confirmed live: `tests/poll_syscall_smoke.rs`'s real `SYSCALL`
-    // path hung solid on exactly this before `crate::tsc` existed -- see that module's own doc
-    // comment. RDTSC keeps advancing regardless of the interrupt-enable state.
     let deadline = (timeout_ms >= 0)
         .then(|| crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(timeout_ms as u64));
+    let deadline_tick = deadline_tick_for(timeout_ms);
 
     loop {
         if nfds > 0 {
             poll(); // drain the NIC / run the protocol stack once per pass, same as recvfrom's self-poll
         }
         let mut ready_count: i64 = 0;
-        let mut awaits_stdin = false;
+        let mut any_pulled = false;
         for entry in entries.iter_mut() {
             entry.revents = 0;
             if entry.fd < 0 {
@@ -112,21 +197,10 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
                 ready_count += 1;
                 continue;
             };
-            // real_fd 0 is always the console (see `sys/fs/fd.rs`'s `init` -- a fixed, global
-            // mapping) -- a real readiness check, not the generic always-ready fallback below.
-            // See `console::stdin::has_bytes_available`'s own doc comment for the real bug this
-            // closes.
-            let ready = if real_fd == 0 {
-                awaits_stdin = true;
-                crate::console::stdin::has_bytes_available()
-            } else {
-                udp::has_data_ready(real_fd)
-                    .or_else(|| tcp::has_data_ready(real_fd))
-                    .or_else(|| icmp::has_data_ready(real_fd))
-                    .unwrap_or(true)
-            };
-            if ready {
-                entry.revents = entry.events & POLLIN;
+            let (readiness, source) = fd_readiness(real_fd);
+            any_pulled |= source == Source::Pulled;
+            entry.revents = poll_revents(readiness, entry.events);
+            if entry.revents != 0 {
                 ready_count += 1;
             }
         }
@@ -136,58 +210,8 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
         if deadline.is_some_and(|d| crate::cpu::tsc::now() >= d) {
             return 0;
         }
-        // `hint::spin_loop()`, not `hlt()`: this is a real syscall handler, and
-        // `sys/syscall.rs`'s SFMASK setup clears `RFLAGS::INTERRUPT_FLAG` for the syscall's
-        // *entire* duration -- `hlt()` only wakes on an unmasked interrupt or an NMI, so it would
-        // freeze the CPU permanently the first time nothing was ready yet (no timer tick to ever
-        // advance a tick-based deadline's own check either, no NMI under normal operation). See
-        // `ipv4::resolve_with_retry`'s own doc comment for the fuller explanation and the same
-        // fix, applied there for the identical reason.
-        //
-        // **`nfds == 0` (no fd involved, "poll used as a portable sleep" idiom) is a real, separate
-        // livelock risk if given `timeout_ms == -1` (block forever)**: nothing here checks
-        // `pending_signals` at all, so on this single-core kernel a caller in exactly that shape
-        // would spin forever with no possible escape -- starving every *other* process too,
-        // including whichever one might otherwise deliver a signal, since a bare CPU hint never
-        // actually yields. No pilot caller currently reaches this exact shape, but `n > 0`'s real
-        // fd-readiness case must keep spinning (yielding here would stop this process from ever
-        // pumping the NIC again for a connection nothing else services -- see this function's own
-        // doc comment).
-        //
-        // **`awaits_stdin` is a real, separate exception to that spin-forever rule, found live
-        // chasing a real, confirmed total-input hang** (`gdb`'s own `RIP` sampling caught this
-        // exact `spin_loop()` stuck solid, `real nano`/`hush` both affected -- see
-        // `console::stdin::has_bytes_available`'s own doc comment for the first half of this same
-        // investigation). `spin_loop()` is a bare CPU hint, not a real yield -- and this whole
-        // syscall runs with interrupts masked for its entire duration (the same `SFMASK` fact the
-        // paragraph above already explains). Stdin's own readiness is **interrupt-driven** (only
-        // `keyboard_interrupt_handler`'s own `push_byte` call ever adds a byte) -- unlike NIC
-        // readiness, which this same loop's own `poll()` call above discovers by directly reading
-        // hardware registers, no interrupt required. A bare `spin_loop()` while waiting on stdin
-        // therefore can not just waste cycles the way it might for network fds -- it makes the one
-        // event being waited for *structurally impossible*, since the interrupt that would ever
-        // deliver it cannot fire while this loop keeps spinning. Blocking via the exact same
-        // `WaitingForStdin` primitive `console::stdin::read` itself already uses instead performs
-        // a real context switch, which is what actually lets interrupts run again (for whatever
-        // process gets scheduled next, and eventually this one once `push_byte`'s own
-        // `wake_blocked_readers` re-queues it) -- confirmed live: real keystrokes reached the
-        // kernel's own ring buffer throughout this bug (`gdb` dumps showed `head` correctly
-        // advancing), so blocked-forever, not lost, was always the right diagnosis. Scoped to
-        // "stdin is one of the awaited fds" rather than every poll -- a poll that only awaits
-        // network fds still needs the original spin-and-repoll behavior to keep actively pumping
-        // a connection nothing else services; no real caller in this kernel currently mixes stdin
-        // with a socket fd in one call, so this doesn't need to arbitrate between the two.
-        if awaits_stdin {
-            let caller = crate::process::scheduler::current_pid();
-            let mut table = crate::process::table().lock();
-            table.get_mut(&caller).unwrap().state =
-                crate::process::ProcState::Blocked(crate::process::BlockReason::WaitingForStdin);
-            drop(table);
-            crate::process::scheduler::schedule();
-        } else if nfds == 0 {
-            crate::process::scheduler::schedule();
-        } else {
-            core::hint::spin_loop();
+        if let Err(e) = wait_for_change(any_pulled, deadline_tick) {
+            return e;
         }
     }
 }
@@ -200,10 +224,8 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
 ///
 /// The mask swap reuses `do_sigsuspend`'s machinery (`process::begin_temporary_sigmask`/
 /// `end_temporary_sigmask`), so a signal caught during the call runs its handler under the
-/// temporary mask and `sigreturn` restores the original. Known limit, inherited from
-/// `oxidebsd_sys_poll` itself: a signal arriving *while* the wait is genuinely blocked doesn't cut
-/// it short -- it's only noticed before and after the wait. Never a hang for fds this kernel
-/// reports as always-ready (pipes, regular files), which is ninja's case.
+/// temporary mask and `sigreturn` restores the original. A signal arriving during the wait ends it
+/// with `EINTR` (`oxidebsd_sys_poll`'s own check, made under the temporary mask).
 pub extern "C" fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, mask_ptr: u64) -> i64 {
     let timeout_ms: i64 = if timeout_ptr == 0 {
         -1
@@ -294,27 +316,16 @@ fn fd_set_write_back(ptr: u64, words: &[u64; FD_SET_WORDS]) {
 /// landing directly on a real-but-inert Linux number instead of an invented one). Takes a single
 /// `RawSelectRequest*` -- see that struct's own doc comment for why.
 ///
-/// Real fd-readiness monitoring, reusing `oxidebsd_sys_poll`'s own per-fd resolution chain
-/// (`udp::has_data_ready`/`tcp::has_data_ready`/`icmp::has_data_ready`, defaulting to always-ready
-/// for anything this stack doesn't model blocking for -- a regular oxfs file, a pipe, a real
-/// mqueue end, ...) and its identical spin-loop-with-`crate::tsc`-deadline shape (`hlt()` would
-/// freeze the CPU permanently for the same reason `oxidebsd_sys_poll`'s own doc comment already
-/// explains, and network readiness here is genuinely pull-based -- nothing drives the NIC while
-/// blocked any other way). **Only `POLLIN`-shaped read-readiness is real** -- this kernel has no
-/// write-backpressure or exceptional-condition model for *any* fd kind, so every requested `wfds`/
-/// `efds` bit is reported ready immediately, matching `oxidebsd_sys_poll`'s own identical scope
-/// (`POLLIN` is the only event class it can ever report either). A requested fd this process
-/// doesn't actually have open is treated as simply never-ready rather than modeling a real
+/// Same readiness and waiting as `oxidebsd_sys_poll`, mapped the way Linux maps them: an fd is
+/// readable on data, end-of-file, hangup or error, and writable when writable or on error. The
+/// exceptional set means out-of-band data (`POLLPRI`), which nothing here produces, so it is never
+/// set; it used to be reported set for every fd, as were all write bits. A requested fd this
+/// process doesn't actually have open is treated as simply never-ready rather than modeling a real
 /// `EBADF` -- no caller in this port's own corpus needs that distinction.
 ///
-/// **Real signal-interrupt support `oxidebsd_sys_poll` itself doesn't have**: checked once per
-/// spin pass via `process::signals::has_interrupting_signal`, same real-delivery-aware check
-/// every other blocking primitive in this codebase uses -- found live via three Open POSIX Test
-/// Suite pilot files
-/// (`sigaction/10-1,11-1,17-1.c`) that use `select(0, NULL, NULL, NULL, &tv)` purely as a
-/// "block until this timeout elapses or a signal arrives" idiom, no fd involved at all; that
-/// shape falls out of this same general implementation for free (the `0..n` readiness scan is
-/// simply empty).
+/// `select(0, NULL, NULL, NULL, &tv)` -- a plain "sleep until timeout or signal" idiom, found via
+/// `sigaction/10-1,11-1,17-1.c` and `sigaction/9-1.c` (`NULL` timeout) -- falls out of the same
+/// loop with an empty scan.
 pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     if req_ptr == 0 {
         return -(EINVAL as i64);
@@ -327,112 +338,52 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
     }
     let n = req.n as usize;
 
-    let deadline = (req.tv_sec >= 0).then(|| {
-        crate::cpu::tsc::now()
-            + crate::cpu::tsc::ms_to_cycles(req.tv_sec as u64 * 1000 + req.tv_usec as u64 / 1000)
-    });
-    let caller_pid = crate::process::scheduler::current_pid();
+    let timeout_ms = (req.tv_sec >= 0).then(|| req.tv_sec * 1000 + req.tv_usec / 1000);
+    let deadline = timeout_ms
+        .map(|ms| crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(ms as u64));
+    let deadline_tick = deadline_tick_for(timeout_ms.unwrap_or(-1));
 
     loop {
         if n > 0 {
             poll(); // drain the NIC / run the protocol stack once per pass, same as oxidebsd_sys_poll
         }
         let mut ready_count: i64 = 0;
-        let mut awaits_stdin = false;
+        let mut any_pulled = false;
         let mut rout = [0u64; FD_SET_WORDS];
         let mut wout = [0u64; FD_SET_WORDS];
-        let mut eout = [0u64; FD_SET_WORDS];
+        let eout = [0u64; FD_SET_WORDS];
 
         for fd in 0..n {
             let wants_r = fd_set_bit(req.rfds, fd);
             let wants_w = fd_set_bit(req.wfds, fd);
-            let wants_e = fd_set_bit(req.efds, fd);
-            if !wants_r && !wants_w && !wants_e {
+            if !wants_r && !wants_w {
                 continue;
             }
-            if wants_r {
-                let Some(real_fd) = crate::fs::fd::real_fd_of(fd as u64) else {
-                    continue; // no such fd -- never-ready, see this function's own doc comment
-                };
-                // Same real-readiness special case as `oxidebsd_sys_poll` -- see
-                // `console::stdin::has_bytes_available`'s own doc comment.
-                let ready = if real_fd == 0 {
-                    awaits_stdin = true;
-                    crate::console::stdin::has_bytes_available()
-                } else {
-                    udp::has_data_ready(real_fd)
-                        .or_else(|| tcp::has_data_ready(real_fd))
-                        .or_else(|| icmp::has_data_ready(real_fd))
-                        .unwrap_or(true)
-                };
-                if ready {
-                    rout[fd / 64] |= 1u64 << (fd % 64);
-                    ready_count += 1;
-                }
-            }
-            // No real write-backpressure/exceptional-condition model exists anywhere in this
-            // kernel -- see this function's own doc comment.
-            if wants_w {
-                wout[fd / 64] |= 1u64 << (fd % 64);
+            let Some(real_fd) = crate::fs::fd::real_fd_of(fd as u64) else {
+                continue; // no such fd -- never-ready, see this function's own doc comment
+            };
+            let (r, source) = fd_readiness(real_fd);
+            any_pulled |= source == Source::Pulled;
+            let bit = 1u64 << (fd % 64);
+            if wants_r && (r.readable || r.hangup || r.error) {
+                rout[fd / 64] |= bit;
                 ready_count += 1;
             }
-            if wants_e {
-                eout[fd / 64] |= 1u64 << (fd % 64);
+            if wants_w && (r.writable || r.error) {
+                wout[fd / 64] |= bit;
                 ready_count += 1;
             }
         }
 
-        if ready_count > 0 {
+        let timed_out = deadline.is_some_and(|d| crate::cpu::tsc::now() >= d);
+        if ready_count > 0 || timed_out {
             fd_set_write_back(req.rfds, &rout);
             fd_set_write_back(req.wfds, &wout);
             fd_set_write_back(req.efds, &eout);
             return ready_count;
         }
-
-        if deadline.is_some_and(|d| crate::cpu::tsc::now() >= d) {
-            fd_set_write_back(req.rfds, &rout);
-            fd_set_write_back(req.wfds, &wout);
-            fd_set_write_back(req.efds, &eout);
-            return 0;
-        }
-
-        let signal_pending = crate::process::table()
-            .lock()
-            .get(&caller_pid)
-            .is_some_and(|proc| crate::process::signals::has_interrupting_signal(proc));
-        if signal_pending {
-            return -(EINTR as i64);
-        }
-
-        // A real, previously-live deadlock, not just a missed optimization: `n == 0` (no fd
-        // involved at all, the plain "block until timeout/signal" idiom this function's own doc
-        // comment already covers for `sigaction/10-1,11-1,17-1.c`) has nothing to poll for, so
-        // spinning here bought nothing -- but a *pure* `spin_loop()` hint never actually yields the
-        // CPU. On this single-core kernel, a caller blocked this way (no fds, `deadline == None`,
-        // i.e. a real `NULL` timeout -- `sigaction/9-1.c`'s own `select(0, NULL, NULL, NULL, NULL)`)
-        // can *only* ever escape via `signal_pending` above, which requires some *other* process to
-        // actually run and deliver that signal -- impossible if this process never gives up the CPU,
-        // a genuine livelock, not a slow test. Real `core::hint::spin_loop()` is kept for the `n > 0`
-        // case (matches every already-passing real-socket-readiness caller's existing behavior
-        // unchanged -- see this function's own doc comment for why yielding there would stop
-        // anything from ever pumping the NIC again) since those calls always carry a real deadline
-        // in every pilot caller today, bounding the wait regardless.
-        //
-        // **`awaits_stdin` is the same real exception `oxidebsd_sys_poll` has, for the identical
-        // reason** -- see `console::stdin::has_bytes_available`'s own doc comment for the full
-        // real-hang writeup. A bare `spin_loop()` while genuinely waiting on stdin can't ever see
-        // a new byte arrive: this whole syscall runs with interrupts masked, and only the keyboard
-        // IRQ handler's own `push_byte` call ever adds one.
-        if awaits_stdin {
-            let mut table = crate::process::table().lock();
-            table.get_mut(&caller_pid).unwrap().state =
-                crate::process::ProcState::Blocked(crate::process::BlockReason::WaitingForStdin);
-            drop(table);
-            crate::process::scheduler::schedule();
-        } else if n == 0 {
-            crate::process::scheduler::schedule();
-        } else {
-            core::hint::spin_loop();
+        if let Err(e) = wait_for_change(any_pulled, deadline_tick) {
+            return e;
         }
     }
 }

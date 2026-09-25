@@ -25,9 +25,9 @@ const TYPE_ECHO_REPLY: u8 = 0;
 const TYPE_ECHO_REQUEST: u8 = 8;
 const HEADER_LEN: usize = 8;
 
-const ENOTSOCK: i64 = 38;
-const EDESTADDRREQ: i64 = 39;
-const EHOSTUNREACH: i64 = 65;
+const ENOTSOCK: i64 = 88;
+const EDESTADDRREQ: i64 = 89;
+const EHOSTUNREACH: i64 = 113;
 
 /// Bounded for the same reason `udp::MAX_QUEUED_DATAGRAMS` is -- a raw socket nobody's reading
 /// from can't grow without limit.

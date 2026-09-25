@@ -403,9 +403,10 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
             proc.cpu_ticks += 1;
         }
         for (&pid, proc) in table.iter_mut() {
-            if let crate::process::ProcState::Blocked(crate::process::BlockReason::Sleeping(
-                deadline,
-            )) = proc.state
+            if let crate::process::ProcState::Blocked(
+                crate::process::BlockReason::Sleeping(deadline)
+                | crate::process::BlockReason::Polling(deadline),
+            ) = proc.state
                 && now >= deadline
             {
                 proc.state = crate::process::ProcState::Ready;

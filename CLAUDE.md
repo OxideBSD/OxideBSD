@@ -60,8 +60,12 @@ user before large structural commitments.
 
 ## Toolchain
 
-- Nightly Rust, pinned via `rust-toolchain.toml`. Load-bearing unstable features: `-Z build-std`
-  (no prebuilt std for the custom target), `-Z json-target-spec`, `-Z panic-abort-tests`.
+- Nightly Rust, pinned to a dated nightly in `rust-toolchain.toml`. Load-bearing unstable
+  features: `-Z build-std` (no prebuilt std for the custom target), `-Z json-target-spec`,
+  `-Z panic-abort-tests`. **The `external/mit/rust` fork must sit on that nightly's exact commit**
+  (`git_commit_hash` in `static.rust-lang.org/dist/<date>/channel-rust-nightly.toml`): its `std`
+  source is compiled by that compiler. Bump both together, plus the libc fork if std's required
+  `libc` version moved.
 - Requires `qemu-system-x86_64` on `PATH`, plus OVMF firmware for UEFI boot (the default — see
   "Boot: Limine" below); no separate `bootimage` install needed any more.
 - `.cargo/config.toml` sets the default target to `x86_64-oxidebsd.json` and
@@ -403,15 +407,10 @@ textually-later `456` silently win, so `unlock_requeue()`'s musl-side call issue
 chain-wake beyond the first directly-woken waiter (found live via `pthread_cond_broadcast/1-1.c`).
 Check the macro *name* for a collision too, not just the number, when adding a new `__NR_*`.
 
-errno **is meant to** use FreeBSD's values where Linux/BSD diverge, but whatever this file returns
-via the carry-flag ABI becomes musl's raw `errno` directly (see `syscall_arch.h`'s `jnc`/`neg`
-conversion) — it must match musl's own compiled-in `bits/errno.h`, not real FreeBSD.
-`EBADF`/`EINVAL`/`ECHILD`/`ENOEXEC`/`EPIPE`/`ESRCH`/`ENOTTY` happen to be identical between
-Linux/generic and FreeBSD. **Known, currently-wrong** (real FreeBSD values that don't match musl,
-deliberately deferred — discuss scope before a sweeping renumbering): `sys/net/udp.rs`'s
-`ENOTSOCK=38` (musl: `88`), `EDESTADDRREQ=39` (musl: `89`), `EADDRINUSE=48` (musl: `98`),
-`EHOSTUNREACH=65` (musl: `113`); `sys/net/tcp.rs`'s
-`EISCONN`/`ENOTCONN`/`ECONNREFUSED`/`ETIMEDOUT`/`EOPNOTSUPP`/`EADDRINUSE`/`EHOSTUNREACH`.
+errno values must match musl's compiled-in `bits/errno.h`, not FreeBSD: whatever a handler
+returns via the carry-flag ABI becomes musl's raw `errno` (`syscall_arch.h`'s `jnc`/`neg`). Every
+`const E*` in the tree was audited against it 2026-09-24 (the net stack and oxfs's `ENOTEMPTY` still
+had FreeBSD's) — re-check any new one.
 
 The number→handler mapping is a runtime registry (`SYSCALL_TABLE`, `Mutex<BTreeMap>`) populated by
 `oxidebsd_register_syscall` from each module's `module_init` — not a hardcoded `match`. An
@@ -472,7 +471,7 @@ future syscall port, so re-check these when adding one:
   became load-bearing once ring-3 preemption landed (see "Real preemptive scheduling").
 - `sys/process/user_stack.rs` builds a real System V argc/argv/envp/auxv stack. `AT_PHDR` derived
   from the `PT_LOAD` segment with smallest `p_offset` (linker scripts don't map the ELF header
-  into any segment). `AT_RANDOM` is a fixed placeholder.
+  into any segment). `AT_RANDOM` is 16 fresh `sys/random.rs` bytes per exec.
 - **`open`/`execve` argument-convention mismatches are fixed on the musl side**, not by remapping
   alone: length-prefixed `RawArgvEntry{ptr, len}` arrays instead of NUL-terminated `char**`, real
   4th syscall arg (`R10`) for `envp_ptr`. Same length-prefix pattern for
@@ -524,8 +523,9 @@ future syscall port, so re-check these when adding one:
 ## BusyBox port (`external/gpl2/busybox`, `sys/modules/posix_compat/`)
 
 256 applets run today (24 original + 232 from a second-pass roster), each its own standalone
-single-applet static binary. Vendored as a submodule (fork of `mirror/busybox`, tag `1_36_1`,
-`oxidebsd` branch — same pin/update procedure as musl). `build.rs`'s `build_busybox_applet` runs
+single-applet static binary. Vendored as a submodule (fork of `mirror/busybox`, tag `1_38_0`,
+`oxidebsd` branch, **no patches of its own** — upstream is `git.busybox.net`; the GitHub mirror
+stopped at `1_36_1`). `build.rs`'s `build_busybox_applet` runs
 `allnoconfig` → flip one applet's Kconfig symbol → `oldconfig` → build, asserting
 `NUM_APPLETS == 1`; `sh` additionally forces on `CONFIG_HUSH_INTERACTIVE`/`HUSH_JOB`/
 `FEATURE_EDITING` and hush's control-flow symbols directly (`allnoconfig` writes an explicit
@@ -952,8 +952,8 @@ Every `*at()` call musl can issue: `openat`/`mkdirat`/`mknodat`/`fchownat`/`newf
   allocation) -- now a 2 MiB total `E2BIG` cap (`MAX_EXEC_ARG_BYTES`); `sys/boot/multiboot2.rs`'s
   `global_asm!` never restored its section, so a CGU reshuffle put the syscall entry stub in
   `.boot32.text` (`multiboot2-boot-smoke` link failure) -- now `.pushsection`/`.popsection`.
-- Known, not fixed: moving a directory to a new parent doesn't rewrite its `..`; oxfs `ENOTEMPTY`
-  is FreeBSD's `66`, not musl's `39` (same deferred errno class as the net stack's).
+- `rename` follows POSIX since 2026-09-24: permission checks, `..` rewritten on reparent, `EINVAL`
+  into own subtree, a directory may replace only an empty directory.
 - Verified: `tests/at_syscall_smoke.rs` (`regress/at-smoke/main.c`, real musl API, PASS/FAIL per
   check) and `std::filesystem::remove_all` in `tests/clangxx_syscall_smoke.rs`.
 
@@ -1142,7 +1142,9 @@ sockets, raw ICMP sockets, `poll(2)`, and real hostname resolution via musl's ow
   stop-and-wait (one segment in flight, fixed 536-byte MSS, no window/congestion control).
 - **`sys/net/icmp.rs`** raw sockets: not port-addressed, every inbound ICMP fans out to every open
   raw socket.
-- **`SYS_POLL=148`**: reports `POLLIN` only; an fd not owned by udp/tcp/icmp is always ready.
+- **`SYS_POLL=148`**/`SYS_SELECT`: real `POLLIN`/`POLLOUT`/`POLLHUP`/`POLLERR` per fd
+  (`fs::Readiness`: pipes, console, TCP; files always ready) and `EINTR`. Waits on pipes/console
+  block as `BlockReason::Polling`; waits involving a socket yield instead (the NIC is pull-based).
 - **Real DNS resolution**: `/etc/resolv.conf` seeded with SLIRP's DNS relay.
   `recvmsg`/`sendmsg` delegate to `recvfrom`/`sendto` for the single-iovec shape musl's resolver
   actually uses.
@@ -1211,10 +1213,10 @@ namespaces don't fit this single-address-space kernel at all.
   former policy broke `pthread_setschedparam()` whenever the caller's policy wasn't already
   `SCHED_OTHER`, since fixed).
 - **`SYS_REBOOT`** (+ `sys/reboot.rs`) matches real Linux's `RB_AUTOBOOT`/`RB_HALT_SYSTEM`/
-  `RB_POWER_OFF` magic values. No permission check. Every success path halts/resets/powers off the
+  `RB_POWER_OFF` magic values. Root only (`EPERM`). Every success path halts/resets/powers off the
   VM — manual-QEMU-only.
-- **`SYS_UMASK=487`**. `Process::umask: u32` (default `0o022`) — real per-process state, stored
-  but not actually consulted anywhere oxfs creates a new inode.
+- **`SYS_UMASK=487`**. `Process::umask: u32` (default `0o022`), applied by oxfs's `open(O_CREAT)`,
+  `mkdir` and `mknod`.
 - **`sched_getaffinity`** (real `__NR_sched_getaffinity=204`, found via `nproc`): single-core, mask
   always bit 0.
 - Verified via `tests/needs_syscall_smoke.rs`/`needs_syscall2_smoke.rs` (except `reboot`/`umask`,
@@ -1233,7 +1235,7 @@ ever needed again.
 A real on-target C/C++ toolchain — genuinely self-hosted (a host-built cross-compiler builds a
 target-executable `clang`+`ld.lld`), not vendored binaries. Vendored as a submodule
 (`OxideBSD/llvm-project-oxidebsd`, `oxidebsd` branch, sparse checkout trimmed of tests/docs/
-unittests, tag `llvmorg-23.1.1`). `build.rs`: `build_llvm_host_toolchain` (host cross-compiler) →
+unittests, tag `llvmorg-23.1.2`; no shared upstream history — see its `VENDOR_NOTES.md` for how to update). `build.rs`: `build_llvm_host_toolchain` (host cross-compiler) →
 `build_llvm_target_runtimes` (libc++/libc++abi/libunwind + compiler-rt, statically self-contained)
 → `build_llvm_target_toolchain` (the real, on-target-executable `clang`+`ld.lld`, built using the
 host cross-compiler). A real `Triple::OxideBSD` + `clang::driver::toolchains::OxideBSD`
@@ -2154,7 +2156,7 @@ backend — this kernel's own patched musl fork's public C ABI is unchanged from
 `library/std/build.rs`'s supported-platform allowlist lists `oxidebsd` too, so consumer binaries
 need no `#![feature(restricted_std)]` — a real, fully-supported target, not one std merely
 tolerates. `build_std_oxidebsd_userland_crate` in `build.rs` does a genuine `-Z
-build-std=std,core,alloc,panic_abort` recompile every build (~20-40s, no prebuilt `std` exists for
+build-std=std,core,alloc,panic_abort,panic_unwind` recompile every build (~20-40s, no prebuilt `std` exists for
 a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the same
 `target/musl-sysroot` every other userland ELF uses.
 
@@ -2206,8 +2208,9 @@ a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the 
   — the `std::net` consumer proof is real socket/bind/listen/nonblocking-accept plumbing, not a
   full external round trip.
 - Not yet exercised through real `std`: anything beyond fs/process/thread/signal-basics/net-
-  plumbing above (no real `TcpStream`/`UdpSocket` data transfer, no `std::net` DNS resolution, no
-  `panic=unwind`).
+  plumbing above (no real `TcpStream`/`UdpSocket` data transfer, no `std::net` DNS resolution).
+  std programs unwind (`panic_unwind` + libunwind, required since nightly-2026-09);
+  `std-hello-oxidebsd` proves `catch_unwind` at runtime.
 
 ## Dependency notes
 

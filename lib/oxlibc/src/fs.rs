@@ -144,7 +144,8 @@ pub fn lstat(path: &[u8]) -> Result<Stat, u64> {
 }
 
 pub fn mkdir(path: &[u8]) -> Result<(), u64> {
-    unsafe { syscall3(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0) }.map(|_| ())
+    // 0o777 like mkdir(1); the kernel applies the caller's umask.
+    unsafe { syscall3(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0o777) }.map(|_| ())
 }
 
 pub fn unlink(path: &[u8]) -> Result<(), u64> {

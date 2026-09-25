@@ -419,9 +419,8 @@ const EOPNOTSUPP: i64 = 95;
 /// FreeBSD, no divergence to worry about here). Returned by `oxfs_lseek` for a fd this filesystem
 /// has no real position to seek within (an in-progress `Write`, or a synthetic `/dev/*` node).
 const ESPIPE: i64 = 29;
-/// FreeBSD's value (`66`), not Linux's (`39`) -- matching this codebase's established convention
-/// of using FreeBSD errno values where they diverge (see `sys/syscall.rs`'s own `ENOSYS`).
-const ENOTEMPTY: i64 = 66;
+/// musl's value (`39`); used to be FreeBSD's `66`, which musl reads as `EREMOTE`.
+const ENOTEMPTY: i64 = 39;
 /// Real value (`3`, same on FreeBSD/Linux) -- returned when a `/proc/<pid>/...` path's `pid`
 /// vanishes between `proc_open`'s own existence check and the kernel accessor call that follows it.
 const ESRCH: i64 = 3;
@@ -4491,7 +4490,11 @@ extern "C" fn oxfs_getcwd(buf_ptr: u64, buf_len: u64, _a2: u64, _a3: u64) -> i64
 /// and have their own, different correct answers for "no leaf" -- real `rmdir("/")` is `EBUSY`,
 /// not `EEXIST`), so this is handled here, specific to `mkdir`'s own real semantics: create-target-
 /// already-exists is always `EEXIST`, regardless of whether that target happens to be the root.
-extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
+///
+/// `mode` is real now: `(mode & 0o1777) & !umask`, owned by the caller, and creating needs `W_OK`
+/// on the parent -- all three used to be skipped (every directory was `0o755`, root-owned, and
+/// anyone could create one anywhere).
+extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, mode: u64, _a3: u64) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
     let cwd = match real_cwd_for_mutation(path) {
@@ -4507,10 +4510,18 @@ extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
     if dir_lookup(parent, leaf).is_some() {
         return -EEXIST;
     }
+    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if !check_access(&read_inode(parent), uid, gid, W_OK) {
+        return -EACCES;
+    }
     let Some(new_inode) = alloc_inode_in(parent) else {
         return -ENOSPC;
     };
-    write_inode(new_inode, Inode::new(InodeKind::Dir));
+    let mut inode = Inode::new(InodeKind::Dir);
+    inode.mode = ((mode as u16) & 0o1777) & !(unsafe { oxidebsd_current_umask() } as u16);
+    inode.uid = uid as u32;
+    inode.gid = gid as u32;
+    write_inode(new_inode, inode);
     if dir_insert(new_inode, b".", new_inode).is_err()
         || dir_insert(new_inode, b"..", parent).is_err()
     {
@@ -4552,8 +4563,7 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
         Err(e) => return errno_for(e),
     };
     let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
-    let parent_inode = read_inode(parent);
-    if !check_access(&parent_inode, uid, gid, W_OK) {
+    if !check_access(&read_inode(parent), uid, gid, W_OK) {
         return -EACCES;
     }
     let Some(target) = dir_lookup(parent, leaf) else {
@@ -4586,14 +4596,9 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
     if target_inode.kind == InodeKind::Dir {
         return -EISDIR;
     }
-    // Real sticky-bit protection (see this function's own doc comment) -- root and the directory's
-    // own owner are always exempt; otherwise only the file's own owner may remove it.
-    if parent_inode.mode & 0o1000 != 0
-        && uid != 0
-        && uid != parent_inode.uid as u64
-        && uid != target_inode.uid as u64
-    {
-        return -EACCES;
+    // Real sticky-bit protection (see this function's own doc comment).
+    if let Err(e) = may_delete(parent, target, uid, gid) {
+        return e;
     }
     if matches!(target_inode.kind, InodeKind::File | InodeKind::Device) {
         target_inode.nlink = target_inode.nlink.saturating_sub(1);
@@ -4736,7 +4741,7 @@ extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i
         return -ENOSPC;
     };
     let mut inode = Inode::new(kind);
-    inode.mode = (mode & 0o777) as u16;
+    inode.mode = (mode as u16 & 0o777) & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
     inode.gid = gid as u32;
     if kind == InodeKind::Device {
@@ -4748,6 +4753,24 @@ extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i
         Ok(()) => 0,
         Err(e) => errno_for(e),
     }
+}
+
+/// May the caller remove (or rename away) entry `target` from directory `parent`? Needs `W_OK` on
+/// `parent`, and inside a sticky directory (`/tmp`) the caller must also be root, the directory's
+/// owner, or `target`'s owner. Shared by unlink, rmdir and rename.
+fn may_delete(parent: u32, target: u32, uid: u64, gid: u64) -> Result<(), i64> {
+    let parent_inode = read_inode(parent);
+    if !check_access(&parent_inode, uid, gid, W_OK) {
+        return Err(-EACCES);
+    }
+    if parent_inode.mode & 0o1000 != 0
+        && uid != 0
+        && uid != parent_inode.uid as u64
+        && uid != read_inode(target).uid as u64
+    {
+        return Err(-EACCES);
+    }
+    Ok(())
 }
 
 /// Registered for `SYS_RMDIR`. Only succeeds on an empty directory (`.`/`..` excepted, via
@@ -4769,6 +4792,10 @@ extern "C" fn oxfs_rmdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
     };
     if read_inode(raw_target).kind != InodeKind::Dir {
         return -ENOTDIR;
+    }
+    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if let Err(e) = may_delete(parent, raw_target, uid, gid) {
+        return e;
     }
     // `dir_lookup` is a bare lookup -- doesn't apply the mount redirect `resolve_path_impl`'s own
     // loop does for intermediate components. `leaf` here is the thing actually being removed, so
@@ -4815,8 +4842,10 @@ extern "C" fn oxfs_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64
 /// Shared body of `rename(2)`/`renameat(2)`/`renameat2(2)`, with each side's base directory already
 /// resolved. `noreplace` is `renameat2`'s `RENAME_NOREPLACE`: fail `EEXIST` instead of replacing.
 ///
-/// Known, pre-existing gap (not new here): moving a directory to a different parent never rewrites
-/// its own `..` record, so `cd ..` from inside it afterwards still lands in the old parent.
+/// Follows POSIX: needs delete permission on the old entry and `W_OK` on the new parent; a
+/// directory may replace only an empty directory, and never move into its own subtree
+/// (`EINVAL`); a directory moved to a new parent gets its `..` rewritten (which, like Linux,
+/// needs `W_OK` on the directory itself).
 fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], noreplace: bool) -> i64 {
     let (old_parent, old_leaf) = match resolve_parent(old_cwd, old_path) {
         Ok(v) => v,
@@ -4829,32 +4858,78 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
-    if let Some(existing) = dir_lookup(new_parent, new_leaf) {
+    let target_inode = read_inode(target);
+    let is_dir = target_inode.kind == InodeKind::Dir;
+    let existing = dir_lookup(new_parent, new_leaf);
+    // Real POSIX: old and new naming the same file is a successful no-op. This used to remove
+    // the "destination" (i.e. the source itself) and then fail the source's own removal with
+    // EIO, losing the entry.
+    if existing == Some(target) {
+        return if noreplace { -EEXIST } else { 0 };
+    }
+    if is_dir && is_same_or_descendant(new_parent, target) {
+        return -EINVAL;
+    }
+
+    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if let Err(e) = may_delete(old_parent, target, uid, gid) {
+        return e;
+    }
+    if !check_access(&read_inode(new_parent), uid, gid, W_OK) {
+        return -EACCES;
+    }
+    let reparent = is_dir && new_parent != old_parent;
+    if reparent && !check_access(&target_inode, uid, gid, W_OK) {
+        return -EACCES;
+    }
+
+    if let Some(existing) = existing {
         if noreplace {
             return -EEXIST;
         }
-        // Real POSIX: old and new naming the same file is a successful no-op. This used to remove
-        // the "destination" (i.e. the source itself) and then fail the source's own removal with
-        // EIO, losing the entry.
-        if existing == target {
-            return 0;
+        if let Err(e) = may_delete(new_parent, existing, uid, gid) {
+            return e;
         }
-        if read_inode(existing).kind == InodeKind::Dir {
-            return -EISDIR;
+        let existing_is_dir = read_inode(existing).kind == InodeKind::Dir;
+        match (is_dir, existing_is_dir) {
+            (false, true) => return -EISDIR,
+            (true, false) => return -ENOTDIR,
+            (true, true) if dir_entry_count(existing) > 2 => return -ENOTEMPTY,
+            _ => {}
         }
         let _ = dir_remove(new_parent, new_leaf);
     }
     if dir_remove(old_parent, old_leaf).is_err() {
         return -EIO;
     }
-    match dir_insert(new_parent, new_leaf, target) {
-        Ok(()) => 0,
-        Err(e) => {
-            // Best-effort rollback so a failed rename doesn't just lose the entry outright.
-            let _ = dir_insert(old_parent, old_leaf, target);
-            errno_for(e)
+    if let Err(e) = dir_insert(new_parent, new_leaf, target) {
+        // Best-effort rollback so a failed rename doesn't just lose the entry outright.
+        let _ = dir_insert(old_parent, old_leaf, target);
+        return errno_for(e);
+    }
+    if reparent {
+        // Removing then re-adding `..` reuses the slot just freed, so this can't run out of space.
+        let _ = dir_remove(target, b"..");
+        if let Err(e) = dir_insert(target, b"..", new_parent) {
+            return errno_for(e);
         }
     }
+    0
+}
+
+/// Is `dir` the directory `ancestor` itself, or somewhere beneath it? Walks `..` up to the root.
+fn is_same_or_descendant(mut dir: u32, ancestor: u32) -> bool {
+    // Bounded: a corrupted `..` chain must not hang a syscall.
+    for _ in 0..MAX_INODES {
+        if dir == ancestor {
+            return true;
+        }
+        match dir_lookup(dir, b"..") {
+            Some(parent) if parent != dir => dir = parent,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Registered for `SYS_ACCESS`, kept at real Linux's own inert value (`21`) rather than one of
@@ -5459,8 +5534,7 @@ extern "C" fn oxfs_openat(at_ptr: u64, flags: u64, mode: u64, _a3: u64) -> i64 {
     with_at(&at, || oxfs_open(at.ptr, at.len, flags, mode))
 }
 
-/// Registered for `SYS_MKDIRAT`. `(at, mode)`. `mode` is passed through, but `oxfs_mkdir` itself
-/// still ignores it (pre-existing: every directory starts at `FIXED_PERM`).
+/// Registered for `SYS_MKDIRAT`. `(at, mode)`.
 extern "C" fn oxfs_mkdirat(at_ptr: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
     let at = read_at(at_ptr);
     with_at(&at, || oxfs_mkdir(at.ptr, at.len, mode, 0))
@@ -7846,7 +7920,7 @@ fn format_fresh_filesystem() -> bool {
 
     // --- getdents round trip, through the real registered handler. ---
     let gdtest = b"/gdtest";
-    if oxfs_mkdir(gdtest.as_ptr() as u64, gdtest.len() as u64, 0, 0) != 0 {
+    if oxfs_mkdir(gdtest.as_ptr() as u64, gdtest.len() as u64, 0o755, 0) != 0 {
         ok = false;
         log("[oxfs] self-check FAILED: mkdir /gdtest failed\n");
     } else {
@@ -7917,7 +7991,7 @@ fn format_fresh_filesystem() -> bool {
     }
 
     // --- mkdir/chdir/open(O_CREAT)/write/close/read, through the real registered handlers. ---
-    if oxfs_mkdir(b"sub".as_ptr() as u64, 3, 0, 0) != 0 {
+    if oxfs_mkdir(b"sub".as_ptr() as u64, 3, 0o755, 0) != 0 {
         ok = false;
         log("[oxfs] self-check FAILED: mkdir sub failed\n");
     } else if oxfs_chdir(b"sub".as_ptr() as u64, 3, 0, 0) != 0 {
@@ -8001,7 +8075,7 @@ fn format_fresh_filesystem() -> bool {
                 log("[oxfs] self-check FAILED: unlink /sub/renamed.txt failed\n");
             }
             let nested = b"/sub/nested";
-            if oxfs_mkdir(nested.as_ptr() as u64, nested.len() as u64, 0, 0) != 0 {
+            if oxfs_mkdir(nested.as_ptr() as u64, nested.len() as u64, 0o755, 0) != 0 {
                 ok = false;
                 log("[oxfs] self-check FAILED: mkdir /sub/nested failed\n");
             } else {
@@ -8100,7 +8174,7 @@ fn format_fresh_filesystem() -> bool {
 
         // Opening a real directory (not the "/" special case) for writing is a real EISDIR now.
         let dir_path = b"/writetest_dir";
-        if oxfs_mkdir(dir_path.as_ptr() as u64, dir_path.len() as u64, 0, 0) != 0 {
+        if oxfs_mkdir(dir_path.as_ptr() as u64, dir_path.len() as u64, 0o755, 0) != 0 {
             ok = false;
             log("[oxfs] self-check FAILED: mkdir /writetest_dir failed\n");
         } else {
@@ -8191,7 +8265,7 @@ fn format_fresh_filesystem() -> bool {
 
             // EROFS guard: nothing can be created while cwd is inside /proc.
             let x = b"x";
-            if oxfs_mkdir(x.as_ptr() as u64, x.len() as u64, 0, 0) != -EROFS {
+            if oxfs_mkdir(x.as_ptr() as u64, x.len() as u64, 0o755, 0) != -EROFS {
                 ok = false;
                 log("[oxfs] self-check FAILED: mkdir inside /proc should have failed with EROFS\n");
             }
@@ -8451,7 +8525,7 @@ fn format_fresh_filesystem() -> bool {
     // so every check after this one in this same self-check still resolves against the real tree.
     {
         let dir_name = b"chroottest";
-        if oxfs_mkdir(dir_name.as_ptr() as u64, dir_name.len() as u64, 0, 0) != 0 {
+        if oxfs_mkdir(dir_name.as_ptr() as u64, dir_name.len() as u64, 0o755, 0) != 0 {
             ok = false;
             log("[oxfs] self-check FAILED: mkdir chroottest failed\n");
         } else {

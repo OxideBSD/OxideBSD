@@ -3,6 +3,10 @@
  * own public wrapper -- the same code any ported program links -- except execveat, which musl
  * doesn't export, so it's issued through syscall() with the same struct the wrappers build.
  *
+ * Also covers the 2026-09 cleanup batch (OxideBSD-doc CLEANUP.md): mkdir modes, umask and owners,
+ * permission checks on mkdir/rmdir/rename, POSIX rename of directories, musl's ENOTEMPTY,
+ * root-only reboot(2), kill(-1, sig) and a per-exec AT_RANDOM.
+ *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -11,6 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/auxv.h>
+#include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -81,6 +88,37 @@ static void child_execveat_relative(void)
 	struct at_path at = { bin, "true", 4 };
 	syscall(SYS_execveat, &at, argv, envp, 0);
 	_exit(1);
+}
+
+/* Runs as uid 1000 in a forked child; its exit status is its own failure count. */
+static void child_unprivileged(void)
+{
+	struct stat st;
+	failures = 0;
+	CHECK(setgid(1000) == 0 && setuid(1000) == 0, "drop to uid 1000");
+	CHECK(mkdir("/tmp/cleanup-user-dir", 0777) == 0 && stat("/tmp/cleanup-user-dir", &st) == 0
+	      && st.st_uid == 1000 && st.st_gid == 1000, "mkdir records the creator as owner");
+	rmdir("/tmp/cleanup-user-dir");
+	CHECK_ERR(mkdir("/cleanup-denied", 0777), EACCES, "mkdir needs write permission on the parent");
+	CHECK_ERR(rmdir("/at-test/cleanup/perm"), EACCES, "rmdir needs write permission on the parent");
+	CHECK_ERR(rename("/at-test/cleanup/perm", "/tmp/stolen"), EACCES,
+	          "rename needs write permission on the old parent");
+	CHECK_ERR(reboot(RB_AUTOBOOT), EPERM, "reboot(2) is root-only");
+
+	/* kill(-1): reaches every process we may signal except ourselves */
+	pid_t victim = fork();
+	if (victim == 0) {
+		for (;;)
+			pause();
+	}
+	usleep(50 * 1000);
+	CHECK(kill(-1, SIGTERM) == 0, "kill(-1, SIGTERM) succeeds");
+	int status = 0;
+	CHECK(waitpid(victim, &status, 0) == victim && WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM,
+	      "kill(-1) reached a same-uid process");
+	CHECK_ERR(kill(-1, 0), EPERM, "kill(-1) with only other users' processes left is EPERM");
+	fflush(stdout);
+	_exit(failures);
 }
 
 int main(void)
@@ -190,6 +228,42 @@ int main(void)
 	close(sf);
 	exec_fd = openat(dfd, "script", O_RDONLY);
 	CHECK(run_child(child_fexecve) == 42, "fexecve of a #! script is ENOENT (no /dev/fd)");
+
+	/* --- cleanup batch --- */
+	mkdir("/at-test/cleanup", 0755);
+	umask(022);
+	CHECK(mkdir("/at-test/cleanup/m755", 0777) == 0 && stat("/at-test/cleanup/m755", &st) == 0
+	      && (st.st_mode & 07777) == 0755, "mkdir applies mode and umask 022");
+	umask(077);
+	CHECK(mkdir("/at-test/cleanup/m700", 0777) == 0 && stat("/at-test/cleanup/m700", &st) == 0
+	      && (st.st_mode & 07777) == 0700, "mkdir applies umask 077");
+	CHECK(mknod("/at-test/cleanup/node", S_IFREG | 0666, 0) == 0
+	      && stat("/at-test/cleanup/node", &st) == 0 && (st.st_mode & 07777) == 0600,
+	      "mknod applies the umask");
+	umask(022);
+
+	mkdir("/at-test/cleanup/a", 0755);
+	mkdir("/at-test/cleanup/b", 0755);
+	mkdir("/at-test/cleanup/a/sub", 0755);
+	struct stat b_st, dotdot;
+	CHECK(rename("/at-test/cleanup/a/sub", "/at-test/cleanup/b/sub") == 0
+	      && stat("/at-test/cleanup/b", &b_st) == 0 && stat("/at-test/cleanup/b/sub/..", &dotdot) == 0
+	      && dotdot.st_ino == b_st.st_ino, "a directory moved to a new parent gets a new ..");
+	CHECK_ERR(rename("/at-test/cleanup/b", "/at-test/cleanup/b/sub/inside"), EINVAL,
+	          "a directory can't move into its own subtree");
+	mkdir("/at-test/cleanup/empty", 0755);
+	CHECK(rename("/at-test/cleanup/a", "/at-test/cleanup/empty") == 0
+	      && stat("/at-test/cleanup/a", &st) == -1, "a directory replaces an empty directory");
+	CHECK_ERR(rename("/at-test/cleanup/empty", "/at-test/cleanup/b"), ENOTEMPTY,
+	          "a directory can't replace a non-empty one (musl's ENOTEMPTY)");
+	CHECK_ERR(rmdir("/at-test/cleanup/b"), ENOTEMPTY, "rmdir of a non-empty directory is ENOTEMPTY");
+
+	mkdir("/at-test/cleanup/perm", 0755);
+	fflush(stdout); /* or the child re-prints our buffered output */
+	CHECK(run_child(child_unprivileged) == 0, "unprivileged checks (see above)");
+
+	const unsigned char *rnd = (const unsigned char *)getauxval(AT_RANDOM);
+	CHECK(rnd && memcmp(rnd, "OxideBSDNotRealX", 16) != 0, "AT_RANDOM is real random bytes");
 
 	printf("%s: %d failure(s)\n", failures ? "at-smoke FAILED" : "at-smoke passed", failures);
 	return failures;

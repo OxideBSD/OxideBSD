@@ -41,21 +41,15 @@ const SOCK_RAW: i64 = 3;
 const SOCK_CLOEXEC: i64 = 0o2000000;
 const SOCK_NONBLOCK: i64 = 0o4000;
 
-/// `ENOTSOCK`/`EDESTADDRREQ`/`EADDRINUSE`/`EHOSTUNREACH` below are real FreeBSD values (matching
-/// this ABI's own stated "BSD authenticity" errno convention, see `sys/syscall.rs`'s module doc
-/// comment) -- but, like `EPROTONOSUPPORT` used to be (see `sys/syscall.rs`'s own corrected copy
-/// and its doc comment), musl's actual compiled-in `bits/errno.h` was never patched to match, so
-/// none of these four currently equal what musl's own C code means by the same symbolic name --
-/// e.g. this file's own `ENOTSOCK = 38` is musl's real `ENOSYS`. Not fixed here (out of scope for
-/// the socketpair/fcntl/shutdown pass that found this) -- a real, latent, previously undiscovered
-/// bug across this whole file, flagged but not yet addressed.
-const ENOTSOCK: i64 = 38;
-const EDESTADDRREQ: i64 = 39;
+/// errno values are musl's (`bits/errno.h`): they become userland's `errno` unchanged. These four
+/// used to be FreeBSD's, so e.g. `ENOTSOCK` read as `ENOSYS`.
+const ENOTSOCK: i64 = 88;
+const EDESTADDRREQ: i64 = 89;
 /// `93`, matching musl's actual compiled-in value -- see `sys/syscall.rs`'s own copy of this
 /// constant for the full story (this one used to be the same wrong `43` before that fix).
 const EPROTONOSUPPORT: i64 = 93;
-const EADDRINUSE: i64 = 48;
-const EHOSTUNREACH: i64 = 65;
+const EADDRINUSE: i64 = 98;
+const EHOSTUNREACH: i64 = 113;
 /// `97`, matching musl's actual compiled-in value (`external/mit/musl/arch/generic/bits/errno.h`) --
 /// real Linux's own distinction between "this address family isn't supported at all" (this) and
 /// "this type/protocol combination isn't supported within an otherwise-known family"
