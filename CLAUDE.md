@@ -58,6 +58,13 @@ default-gateway rule only), no SMP. See "BusyBox gap analysis" below for what's 
 further. Architecture decisions for remaining subsystems haven't been made — discuss with the
 user before large structural commitments.
 
+## Git workflow
+
+- Work directly on `master`; no feature branches (the `v0.N.x` release branches stay).
+- Before a risky change (a large refactor, anything touching many files, or a history/working-tree
+  operation), commit what's there first so it can be recovered. Never `git stash` as a shortcut;
+  read old versions with `git show <rev>:<path>`.
+
 ## Toolchain
 
 - Nightly Rust, pinned to a dated nightly in `rust-toolchain.toml`. Load-bearing unstable
