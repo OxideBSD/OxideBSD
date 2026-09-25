@@ -377,6 +377,9 @@ harness = false
 
 [profile.dev]
 panic = "abort"
+# Off: every test binary embeds the whole ~260 MiB kernel image, so the incremental cache grew to
+# 25 GB and outlives every toolchain bump. Costs a slower rebuild of the kernel crate itself.
+incremental = false
 
 [profile.release]
 panic = "abort"
