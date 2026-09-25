@@ -6,4 +6,7 @@ target = "x86_64-unknown-linux-gnu"
 # "alloc"]` rather than replacing it, so a host build can't opt out of build-std; add `std` so
 # the rebuilt sysroot is complete for a std program.
 [unstable]
-build-std = ["std", "panic_abort"]
+# panic_unwind and its std feature too: since nightly-2026-09, a std rebuilt for an unwinding
+# target otherwise picks up the host's prebuilt panic_unwind, and with it a second `core`.
+build-std = ["std", "panic_abort", "panic_unwind"]
+build-std-features = ["panic-unwind"]
