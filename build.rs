@@ -4544,8 +4544,25 @@ fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)
         .join("bin");
 
     let deps_dir = target_dir.join("x86_64-oxidebsd/release/deps");
-    let module_obj = find_artifact_file(&stdout, crate_name, ".o")
-        .or_else(|| newest_matching(&deps_dir, &format!("{crate_name}-"), ".o"))
+    // The newest `<crate>-*.o` anywhere cargo may have written it: `build/<crate>/<hash>/out/`
+    // (nightly-2026-09 and later) or `deps/` (before). Newest wins because `deps/` can keep a
+    // stale object with the *same* filename from an older toolchain -- cargo copies the rlib
+    // into `deps/` but not the `--emit=obj` object. Found live: oxfs got linked from a previous
+    // nightly's object, whose `core` symbols no longer resolved, and the kernel panicked
+    // loading it.
+    let crate_build_dir = target_dir.join("x86_64-oxidebsd/release/build").join(crate_name);
+    let prefix = format!("{crate_name}-");
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&crate_build_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| newest_matching(&entry.path().join("out"), &prefix, ".o"))
+        .collect();
+    candidates.extend(find_artifact_file(&stdout, crate_name, ".o"));
+    candidates.extend(newest_matching(&deps_dir, &prefix, ".o"));
+    let module_obj = candidates
+        .into_iter()
+        .max_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
         .unwrap_or_else(|| {
             // Last resort -- confirmed live on rustc 1.99.0-nightly: cargo's own JSON build
             // output can report a crate's `compiler-artifact` message with only its `.rlib`/
@@ -4754,6 +4771,27 @@ fn partial_link(
     if !status.success() {
         panic!("partial link for module {crate_name} failed: {status}");
     }
+
+    // Anything from `core`/`alloc` still undefined after linking against them means the module
+    // object and the rlibs came from different toolchains. Caught here rather than as the kernel's
+    // `UnresolvedSymbol` panic at boot, where it first surfaced.
+    let nm = llvm_bin.join("llvm-nm");
+    let output = Command::new(&nm)
+        .args(["--undefined-only", "--format=just-symbols"])
+        .arg(merged_obj)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run llvm-nm on {}: {e}", merged_obj.display()));
+    let stale: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|s| (s.contains("4core") || s.contains("5alloc")) && !s.contains("rust_begin_unwind"))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "module {crate_name}: {} (a stale object from another toolchain?) left core/alloc \
+         symbols undefined: {stale:?}",
+        module_obj.display()
+    );
 }
 
 /// Scans `object`'s undefined symbols for the compiler-synthesized panic entry point

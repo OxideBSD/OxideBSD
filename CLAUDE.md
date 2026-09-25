@@ -99,6 +99,12 @@ No libtest — `no_std`, tests boot in QEMU and self-report via `sys/qemu.rs` (w
 `QemuExitCode::Success`) and `sys/console/serial.rs` (hand-rolled 16550 UART, read via `-serial
 stdio`).
 
+- **Since nightly-2026-09 cargo writes test binaries and module objects under `build/<crate>/<hash>/
+  out/`, not `deps/`**: `scripts/qemu_runner.sh` spots a test by its `-<16 hex>` name suffix (it
+  used to match `*/deps/*`, silently running every test as an interactive `cargo run` that
+  reported panics as passes), and `build.rs` links a module's newest object from either place
+  (a stale same-named `deps/` object once got a kernel panic at boot) and fails the build if
+  `core`/`alloc` symbols stay undefined.
 - `sys/lib.rs` defines `no_std` test scaffolding (`custom_test_frameworks`, `#[test_case]`) and
   boots itself under `#[cfg(test)]`.
 - `tests/*.rs` integration tests use `harness = false` — each defines its own `fn main()` via

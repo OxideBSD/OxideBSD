@@ -32,12 +32,14 @@ if [ ! -d "$STAGE_DIR" ]; then
     exit 1
 fi
 
-# Test-vs-run discrimination: a `cargo test` binary lands under
-# target/x86_64-oxidebsd/debug/deps/<name>-<hash>; the main kernel binary lands at
-# target/x86_64-oxidebsd/debug/oxidebsd, with no `/deps/` in its path -- confirmed directly
-# (`ls target/x86_64-oxidebsd/debug/deps`).
-case "$KERNEL_ELF" in
-    */deps/*) IS_TEST=1 ;;
+# Test-vs-run discrimination: a `cargo test` binary is named <name>-<16 hex digit hash> (under
+# deps/ before nightly-2026-09, build/oxidebsd/<hash>/out/ since); the main kernel binary is plain
+# target/x86_64-oxidebsd/debug/oxidebsd. Matching only `*/deps/*` stopped working with the newer
+# layout and silently ran every test as an interactive `cargo run`: a QEMU window per test, the
+# persistent dev disk, no timeout, and no exit-code translation, so failing tests reported success.
+case "${KERNEL_ELF##*/}" in
+    *-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        IS_TEST=1 ;;
     *) IS_TEST=0 ;;
 esac
 
