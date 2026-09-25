@@ -1035,7 +1035,7 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 /// target-identity path, as opposed to `build_std_hello_spike`'s cheaper
 /// `x86_64-unknown-linux-musl` one. **Real, permanent, disclosed cost**: every build here
 /// genuinely recompiles `std`/`core`/`alloc`/`panic_abort` from source via `-Z
-/// build-std=std,core,alloc,panic_abort` (~40s observed) -- there is no prebuilt `std` for a
+/// build-std=std,core,alloc,panic_abort,panic_unwind` (~40s observed) -- there is no prebuilt `std` for a
 /// brand-new custom target the way there is for a real Tier-1/2 one. `crate_name` must name a
 /// real crate directory under `regress/std/` with its own empty `[workspace]` table (see
 /// `regress/std/std-hello-oxidebsd/Cargo.toml`). No `#![feature(restricted_std)]` needed --
@@ -1107,7 +1107,11 @@ fn build_std_oxidebsd_userland_crate(
             "build",
             "--release",
             "-Z",
-            "build-std=std,core,alloc,panic_abort",
+            // panic_unwind + its std feature: since nightly-2026-09 std can't be built for an
+            // unwinding target without it, and unwinding is what Rust programs do on a real OS.
+            "build-std=std,core,alloc,panic_abort,panic_unwind",
+            "-Z",
+            "build-std-features=panic-unwind",
             "-Z",
             "json-target-spec",
             "--manifest-path",
