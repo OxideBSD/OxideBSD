@@ -32,11 +32,10 @@ pub type Pid = u64;
 /// `fork()` (`do_fork_from_current` -> `AddressSpace::fork`'s 4-level page-table walk ->
 /// `AddressSpace::new` -> `PageTable::clone()` -- in an unoptimized debug build, cloning a
 /// 512-entry array through the generic `try_from_fn` machinery has a surprisingly large unoptimized
-/// stack frame). There's no guard page (heap-allocated, not a dedicated mapped-with-a-gap region
-/// like `gdt.rs`'s stacks), so a stack overflow here corrupts silently or double-faults rather than
-/// failing cleanly -- this needs real margin for debug builds specifically, not just "enough for
-/// the common case observed once," which is why RAM-constrained boots keep exactly this floor
-/// rather than shrinking further (see `kernel_stack_size` below).
+/// stack frame). An overflow now hits a guard page (`memory::kstack`) instead of corrupting the
+/// heap, but it still takes the whole machine down -- this needs real margin for debug builds
+/// specifically, not just "enough for the common case observed once," which is why RAM-constrained
+/// boots keep exactly this floor rather than shrinking further (see `kernel_stack_size` below).
 const KERNEL_STACK_SIZE_FLOOR: usize = 128 * 1024;
 /// Ceiling: purely a bound on how much a RAM-rich boot hands each process for free (more headroom
 /// against deeper call chains, at essentially no cost against a multi-GiB usable-RAM pool) -- not
@@ -641,21 +640,16 @@ pub(crate) enum SignalDelivery {
         siginfo: QueuedSigInfo,
     },
 }
-/// A process's own kernel stack: heap-allocated (not a fixed-size `static`/`static mut` array like
-/// `gdt.rs`'s single RSP0 stack, since the number of processes isn't fixed) via a raw
-/// `alloc`/`dealloc` pair rather than `Vec<u8>`/`Box<[u8]>`, neither of which guarantees the
-/// 16-byte alignment `context_switch::SwitchFrame` needs.
-struct KernelStack {
-    base: *mut u8,
-    layout: core::alloc::Layout,
-}
+/// A process's own kernel stack, with an unmapped guard region below it (`memory::kstack`).
+/// Page-aligned, which covers the 16-byte alignment `context_switch::SwitchFrame` needs.
+struct KernelStack(memory::kstack::GuardedStack);
 
 impl KernelStack {
     /// `Err(())` on real allocation failure -- **not** a panic. A single userspace process
     /// legitimately creating many live threads/children at once (a real, if extreme, POSIX use
     /// case -- e.g. the Open POSIX Test Suite's own `pthread_cond_broadcast/1-2.c`, which creates
     /// up to `MAX_THREAD_CHILDREN = 10000` real threads all blocked on one condvar
-    /// simultaneously) can genuinely exhaust this heap-backed pool; real `fork()`/`clone(2)`
+    /// simultaneously) can genuinely exhaust physical memory; real `fork()`/`clone(2)`
     /// hitting that must return real `ENOMEM` to the one caller that asked for one more process/
     /// thread than the system can currently provide, not take down every other, unrelated process
     /// on the machine. `do_fork_from_current`/`do_clone` (`sys/process/lifecycle.rs`) propagate
@@ -663,35 +657,13 @@ impl KernelStack {
     /// no caller to report an errno to that early, and no recovery from pid 1 itself failing to
     /// start.
     fn new() -> Result<Self, ()> {
-        let stack_size = kernel_stack_size();
-        let layout =
-            core::alloc::Layout::from_size_align(stack_size, 16).expect("bad kernel stack layout");
-        // SAFETY: layout has non-zero size (stack_size >= KERNEL_STACK_SIZE_FLOOR > 0).
-        let base = unsafe { alloc::alloc::alloc_zeroed(layout) };
-        if base.is_null() {
-            return Err(());
-        }
-        Ok(KernelStack { base, layout })
+        memory::kstack::GuardedStack::new(kernel_stack_size()).map(KernelStack)
     }
 
     fn top(&self) -> VirtAddr {
-        VirtAddr::from_ptr(self.base) + self.layout.size() as u64
+        self.0.top()
     }
 }
-
-impl Drop for KernelStack {
-    fn drop(&mut self) {
-        // SAFETY: base/layout are exactly what alloc_zeroed returned in `new`; KernelStack is
-        // never cloned or shared, so this is the sole owner.
-        unsafe { alloc::alloc::dealloc(self.base, self.layout) };
-    }
-}
-
-// SAFETY: KernelStack owns its allocation exclusively -- conceptually equivalent to `Box<[u8]>`'s
-// own `Unique<u8>`, which is `Send` for the same reason. Needed because `PROCESS_TABLE` (below) is
-// a `Mutex<BTreeMap<Pid, Box<Process>>>` static, which requires `Process` (and transitively this
-// raw-pointer-holding field) to be `Send` for `Mutex<..>` to be `Sync`.
-unsafe impl Send for KernelStack {}
 
 /// One entry of `Process::signal_stack` — see that field's own doc comment for the real
 /// signal-stack design this backs.

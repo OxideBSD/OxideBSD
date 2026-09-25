@@ -178,6 +178,10 @@ name = "fb-mmap-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "fd-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "fork-exec-smoke"
 version = "0.1.0"
 

@@ -18,8 +18,6 @@
 //! real scheduler blocking -- a well-justified follow-up once real interactive use (a program
 //! that wants to sit in `accept()` indefinitely) actually needs it, not built speculatively now.
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
@@ -147,18 +145,36 @@ impl TcpState {
 }
 
 static STATE: Mutex<TcpState> = Mutex::new(TcpState::new());
-static ISN_COUNTER: AtomicU32 = AtomicU32::new(0);
+static ISN_KEY: spin::Once<[u8; 16]> = spin::Once::new();
 
 fn resolve(fd: u64) -> Option<u64> {
     crate::fs::fd::real_fd_of(fd)
 }
 
-/// Not RFC 6528 hash-based/random -- ticks mixed with a plain counter is non-repeating in
-/// practice and cheap, and this kernel has no real security model to defend yet anyway (same
-/// "no entropy source" simplification `AT_RANDOM` already documents elsewhere).
-fn isn() -> u32 {
-    let counter = ISN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    (crate::cpu::interrupts::ticks() as u32) ^ counter.wrapping_mul(0x9E37_79B1)
+/// RFC 6528 initial sequence number: `M + F(local, remote, secret)`. `M` is a clock ticking
+/// every 4 microseconds (from the TSC, so it advances inside a syscall too); `F` is SHA-256 over
+/// the connection 4-tuple and a boot-time random key. The clock keeps a reused 4-tuple's sequence
+/// space moving forward past any old duplicate segments; the keyed hash keeps an off-path attacker
+/// from predicting it.
+fn isn(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16) -> u32 {
+    use sha2::{Digest, Sha256};
+    let key = *ISN_KEY.call_once(|| {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&crate::random::kernel_random_u64().to_le_bytes());
+        key[8..].copy_from_slice(&crate::random::kernel_random_u64().to_le_bytes());
+        key
+    });
+    let mut h = Sha256::new();
+    h.update(crate::net::ipv4::GUEST_IP);
+    h.update(local_port.to_be_bytes());
+    h.update(remote_ip);
+    h.update(remote_port.to_be_bytes());
+    h.update(key);
+    let f = u32::from_le_bytes(h.finalize()[..4].try_into().unwrap());
+    // 250 ticks of M per millisecond.
+    let cycles_per_tick = (crate::cpu::tsc::ms_to_cycles(1) / 250).max(1);
+    let m = (crate::cpu::tsc::now() / cycles_per_tick) as u32;
+    m.wrapping_add(f)
 }
 
 fn window_for(recv_buf_len: usize) -> u16 {
@@ -459,7 +475,7 @@ fn handle_new_syn(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16, their_
         return; // silently drop -- the peer's own SYN retransmission will retry later
     }
 
-    let seq = isn();
+    let seq = isn(local_port, remote_ip, remote_port);
     let conn_fd = crate::fs::fd::oxidebsd_alloc_fd();
     let conn = Connection {
         state: ConnState::SynReceived,
@@ -694,8 +710,7 @@ pub fn create_socket() -> u64 {
         .lock()
         .sockets
         .insert(fd, TcpSocket::Unbound { local_port: None });
-    crate::fs::fd::oxidebsd_register_fd_ops(fd, tcp_read, tcp_write, tcp_close);
-    fd
+    crate::fs::fd::oxidebsd_register_fd_ops(fd, tcp_read, tcp_write, tcp_close)
 }
 
 /// `None` if `real_fd` isn't a TCP socket at all (the caller, `udp::oxidebsd_sys_bind`, should
@@ -782,7 +797,7 @@ pub extern "C" fn oxidebsd_sys_connect(fd: u64, addr_ptr: u64, len: u64) -> i64 
         }
     };
 
-    let seq = isn();
+    let seq = isn(local_port, remote_ip, remote_port);
     let conn = Connection {
         state: ConnState::SynSent,
         local_port,
@@ -913,14 +928,15 @@ pub extern "C" fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u
         return -ECONNREFUSED;
     };
 
-    crate::fs::fd::oxidebsd_register_fd_ops(conn_fd, tcp_read, tcp_write, tcp_close);
+    let user_fd =
+        crate::fs::fd::oxidebsd_register_fd_ops(conn_fd, tcp_read, tcp_write, tcp_close);
     super::udp::write_sockaddr(addr_out_ptr, remote_ip, remote_port);
     if addrlen_ptr != 0 {
         unsafe {
             *(addrlen_ptr as *mut u32) = 16;
         }
     }
-    conn_fd as i64
+    user_fd as i64
 }
 
 /// Genuinely blocks (unless `O_NONBLOCK` is set -- `crate::fs::fd::is_nonblocking`, `syscall::

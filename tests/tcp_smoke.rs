@@ -256,9 +256,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
         addr_out.as_mut_ptr() as u64,
         (&raw mut addrlen) as u64,
     );
+    // `conn_fd` is the connection's kernel-internal `real_fd`; accept() hands out the lowest free
+    // fd number, and the read/write below proves that number reaches this connection.
     assert_eq!(
-        accepted, conn_fd as i64,
-        "accept() didn't return the promoted connection's fd"
+        accepted,
+        listen_fd as i64 + 1,
+        "accept() didn't return the lowest free fd"
     );
     let accepted_port = u16::from_be_bytes([addr_out[2], addr_out[3]]);
     let accepted_ip: [u8; 4] = addr_out[4..8].try_into().unwrap();
@@ -306,7 +309,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     // --- We reply -- through the driver interface, not real hardware (see this file's own doc
     // comment), but exercising the exact same send/checksum/bookkeeping path either way ---
-    let seq_before = tcp::debug_send_next(accepted as u64).unwrap();
+    let seq_before = tcp::debug_send_next(conn_fd).unwrap();
     let n = oxidebsd_sys_write(
         accepted as u64,
         SERVER_DATA.as_ptr() as u64,
@@ -317,7 +320,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
         SERVER_DATA.len() as i64,
         "write() didn't accept the full payload: {n}"
     );
-    let seq_after = tcp::debug_send_next(accepted as u64).unwrap();
+    let seq_after = tcp::debug_send_next(conn_fd).unwrap();
     assert_eq!(
         seq_after,
         seq_before.wrapping_add(SERVER_DATA.len() as u32),

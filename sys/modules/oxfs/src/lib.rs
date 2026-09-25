@@ -74,7 +74,7 @@ unsafe extern "C" {
         read: extern "C" fn(u64, u64, u64) -> i64,
         write: extern "C" fn(u64, u64, u64) -> i64,
         close: extern "C" fn(u64) -> i64,
-    ) -> i32;
+    ) -> u64;
     /// Same as `oxidebsd_register_fd_ops`, plus a `content_id` callback — see
     /// `crate::fs::fd::FdContentId`'s own doc comment (kernel tree) for why this exists: real
     /// fd-backed `MAP_SHARED` mmap (`crate::process::mm::do_mmap`) needs a live "what real inode
@@ -88,7 +88,7 @@ unsafe extern "C" {
         write: extern "C" fn(u64, u64, u64) -> i64,
         close: extern "C" fn(u64) -> i64,
         content_id: extern "C" fn(u64) -> i64,
-    ) -> i32;
+    ) -> u64;
     /// See `crate::fs::fd::ContentRead`/`ContentWrite`/`ContentSize`'s own doc comment (kernel
     /// tree) for why real fd-backed `MAP_SHARED` mmap needs this instead of the plain per-fd
     /// read/write callbacks. Called once, from this module's own `module_init`.
@@ -130,6 +130,9 @@ unsafe extern "C" {
     fn oxidebsd_get_root() -> u64;
     fn oxidebsd_set_root(inode: u64);
     fn oxidebsd_real_fd_of(fd: u64) -> i64;
+    /// Opens the FIFO whose inode is `key` with `open(2)`'s `flags`; returns the new fd or
+    /// `-errno`. The kernel owns the pipe buffer and the reader/writer rendezvous (`fs::pipe`).
+    fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64;
     fn oxidebsd_proc_exists(pid: u64) -> i32;
     fn oxidebsd_proc_pid_at(index: u64) -> i64;
     fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
@@ -385,6 +388,7 @@ const S_IFLNK: u32 = 0o120000;
 /// `oxfs_mknod`'s own doc comment).
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
+const S_IFIFO: u32 = 0o010000;
 /// Real POSIX mask isolating the type bits above out of a raw `mode_t` -- used by `oxfs_mknod` to
 /// read the caller's requested node type back out of its own `mode` argument.
 const S_IFMT: u32 = 0o170000;
@@ -400,6 +404,7 @@ const DT_LNK: u8 = 10;
 /// `oxfs_mknod`'s own doc comment).
 const DT_CHR: u8 = 2;
 const DT_BLK: u8 = 6;
+const DT_FIFO: u8 = 1;
 
 const EBADF: i64 = 9;
 const ENOENT: i64 = 2;
@@ -790,6 +795,9 @@ enum InodeKind {
     /// `oxfs_mknod`'s own doc comment for the (deliberately small) set of major:minor pairs that
     /// actually work when opened.
     Device,
+    /// A named pipe (`mkfifo`). Holds no data of its own: `open()` hands it to the kernel's pipe
+    /// code, keyed by inode number.
+    Fifo,
 }
 
 #[derive(Clone, Copy)]
@@ -1575,6 +1583,7 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
             if inode.device_char { S_IFCHR } else { S_IFBLK },
             inode.nlink.max(1) as u64,
         ),
+        InodeKind::Fifo => (S_IFIFO, inode.nlink.max(1) as u64),
         _ => (S_IFREG, inode.nlink.max(1) as u64),
     };
     let mode = type_bits | inode.mode as u32;
@@ -2751,15 +2760,15 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         return -EMFILE;
     };
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let fd = unsafe { oxidebsd_alloc_fd() };
-    *slot = Some((fd, open_file));
+    let real_fd = unsafe { oxidebsd_alloc_fd() };
+    *slot = Some((real_fd, open_file));
     // SAFETY: oxfs_read/oxfs_write/oxfs_close/oxfs_content_id are this module's own functions,
     // already relocated by the time module_init (which makes this function reachable) runs.
     // Always the `_with_content_id` variant, not just for `FileRead`/`Write` -- `oxfs_content_id`
     // itself already returns `-1` for every other variant, so there's no need to discriminate here.
-    unsafe {
-        oxidebsd_register_fd_ops_with_content_id(
-            fd,
+    let fd = unsafe {
+        let fd = oxidebsd_register_fd_ops_with_content_id(
+            real_fd,
             oxfs_read,
             oxfs_write,
             oxfs_close,
@@ -2768,10 +2777,11 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         // Always registered, unconditionally -- same "the callback itself discriminates by
         // variant" reasoning `oxfs_content_id` above already established. See `oxfs_pread`/
         // `oxfs_pwrite`'s own doc comments for what each real variant actually supports.
-        oxidebsd_set_fd_pread_pwrite(fd, oxfs_pread, oxfs_pwrite);
-        oxidebsd_set_fd_access_mode(fd, oxfs_access_mode);
-        oxidebsd_set_fd_append(fd, oxfs_is_append);
-        oxidebsd_set_fd_fb_geometry(fd, oxfs_fb_geometry);
+        oxidebsd_set_fd_pread_pwrite(real_fd, oxfs_pread, oxfs_pwrite);
+        oxidebsd_set_fd_access_mode(real_fd, oxfs_access_mode);
+        oxidebsd_set_fd_append(real_fd, oxfs_is_append);
+        oxidebsd_set_fd_fb_geometry(real_fd, oxfs_fb_geometry);
+        fd
     };
     fd as i64
 }
@@ -3605,6 +3615,15 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                     Some(open_file) => register_open_file(open_file),
                     None => -ENXIO,
                 },
+                InodeKind::Fifo => {
+                    // The open can block until the other end shows up, and other processes'
+                    // syscalls run meanwhile -- they must not see an `*at()` base override.
+                    let saved =
+                        unsafe { core::ptr::replace(core::ptr::addr_of_mut!(AT_BASE_OVERRIDE), None) };
+                    let fd = unsafe { oxidebsd_fifo_open(resolved as u64, flags) };
+                    unsafe { *core::ptr::addr_of_mut!(AT_BASE_OVERRIDE) = saved };
+                    fd
+                }
                 _ if want_write => {
                     let mut name = [0u8; NAME_MAX];
                     name[..leaf.len()].copy_from_slice(leaf);
@@ -4600,7 +4619,10 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
     if let Err(e) = may_delete(parent, target, uid, gid) {
         return e;
     }
-    if matches!(target_inode.kind, InodeKind::File | InodeKind::Device) {
+    if matches!(
+        target_inode.kind,
+        InodeKind::File | InodeKind::Device | InodeKind::Fifo
+    ) {
         target_inode.nlink = target_inode.nlink.saturating_sub(1);
         write_inode(target, target_inode);
     }
@@ -4660,7 +4682,7 @@ fn link_impl(
     };
     let mut inode = read_inode(existing_inode);
     let linkable = match inode.kind {
-        InodeKind::File | InodeKind::Device => true,
+        InodeKind::File | InodeKind::Device | InodeKind::Fifo => true,
         InodeKind::Symlink => !follow,
         _ => false,
     };
@@ -4705,11 +4727,11 @@ fn link_impl(
 /// backed by any inode at all). See `known_device`'s own doc comment for the deliberately small
 /// set of major:minor pairs `open()` actually services. Also supports `S_IFREG` (an immediately
 /// committed empty regular file, unlike `O_CREAT`'s deferred-to-`close()` commit -- matches
-/// `oxfs_symlink`'s eager-allocate shape instead). `S_IFIFO`/`S_IFSOCK`/anything else in `mode`'s
-/// type bits is `-EINVAL` -- real named-pipe persistence is a distinct, unstarted gap. Creating a
-/// device node is root-only (`-EPERM` otherwise, real `mknod(2)`'s own `CAP_MKNOD` requirement,
-/// same genuine-root-only tier as `oxfs_chown`); `S_IFREG` only needs ordinary write permission on
-/// the parent, same as any other create.
+/// `oxfs_symlink`'s eager-allocate shape instead) and `S_IFIFO` (a named pipe, `mkfifo(3)`).
+/// `S_IFSOCK`/anything else in `mode`'s type bits is `-EINVAL`. Creating a device node is root-only
+/// (`-EPERM` otherwise, real `mknod(2)`'s own `CAP_MKNOD` requirement, same genuine-root-only tier
+/// as `oxfs_chown`); `S_IFREG`/`S_IFIFO` only need ordinary write permission on the parent, same as
+/// any other create.
 extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
@@ -4728,6 +4750,7 @@ extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i
         S_IFREG => (InodeKind::File, false),
         S_IFCHR => (InodeKind::Device, true),
         S_IFBLK => (InodeKind::Device, false),
+        S_IFIFO => (InodeKind::Fifo, false),
         _ => return -EINVAL,
     };
     let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
@@ -6255,6 +6278,7 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                     InodeKind::Symlink => DT_LNK,
                     InodeKind::Device if child.device_char => DT_CHR,
                     InodeKind::Device => DT_BLK,
+                    InodeKind::Fifo => DT_FIFO,
                     _ => DT_REG,
                 };
                 write_dirent_record(
@@ -6360,6 +6384,7 @@ fn pack_inode(inode: &Inode, out: &mut [u8]) {
         InodeKind::Dir => 2,
         InodeKind::Symlink => 3,
         InodeKind::Device => 4,
+        InodeKind::Fifo => 5,
     };
     // `size` widened 4 -> 8 bytes (real `u64`, see `Inode::size`'s own doc comment) -- every offset
     // from here on shifts +4 relative to `SUPERBLOCK_VERSION`'s prior (version 1) on-disk shape.
@@ -6405,6 +6430,7 @@ fn unpack_inode(data: &[u8]) -> Inode {
         2 => InodeKind::Dir,
         3 => InodeKind::Symlink,
         4 => InodeKind::Device,
+        5 => InodeKind::Fifo,
         _ => InodeKind::Free,
     };
     let size = u64::from_le_bytes(data[1..9].try_into().unwrap());
@@ -6948,6 +6974,21 @@ include!(env!("NCURSES_TERMINFO_MANIFEST_PATH"));
 /// in the whole corpus that `open()`s itself by relative path) -- see each entry's own generation
 /// comment in build.rs.
 include!(env!("POSIX_TEST_MANIFEST_PATH"));
+
+/// For `format_fresh_filesystem`'s self-check: `oxfs_open` returns a process fd, but `oxfs_read`/
+/// `oxfs_write` are per-open-file callbacks keyed by `real_fd`, and closing has to go through the
+/// kernel so the fd table entry goes too.
+fn sc_read(fd: u64, ptr: u64, len: u64) -> i64 {
+    oxfs_read(unsafe { oxidebsd_real_fd_of(fd) } as u64, ptr, len)
+}
+
+fn sc_write(fd: u64, ptr: u64, len: u64) -> i64 {
+    oxfs_write(unsafe { oxidebsd_real_fd_of(fd) } as u64, ptr, len)
+}
+
+fn sc_close(fd: u64) {
+    sys_close(fd, 0, 0, 0);
+}
 
 /// Populates a completely fresh (never-before-formatted) in-memory filesystem: root/`bin`/`etc`,
 /// every seed file/BusyBox applet, and the self-check. Runs unconditionally when no data disk is
@@ -7757,6 +7798,12 @@ fn format_fresh_filesystem() -> bool {
         b"ppoll-smoke.elf",
         include_bytes!(env!("OXFS_PPOLL_SMOKE_ELF_PATH")),
     );
+    // fd numbering and FIFOs, run by `tests/fd_syscall_smoke.rs` -- see `regress/fd-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"fd-smoke.elf",
+        include_bytes!(env!("OXFS_FD_SMOKE_ELF_PATH")),
+    );
 
     // Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) via the real
     // `/dev/shm`-backed `MAP_SHARED` mmap two independent processes each map at their own,
@@ -7911,7 +7958,7 @@ fn format_fresh_filesystem() -> bool {
                 ok = false;
                 log("[oxfs] self-check FAILED: fstat hello.txt disagreed with stat\n");
             }
-            oxfs_close(fd as u64);
+            sc_close(fd as u64);
         }
     } else {
         ok = false;
@@ -7930,7 +7977,7 @@ fn format_fresh_filesystem() -> bool {
             if fd < 0 {
                 seeded = false;
             } else {
-                oxfs_close(fd as u64);
+                sc_close(fd as u64);
             }
         }
         if !seeded {
@@ -7986,7 +8033,7 @@ fn format_fresh_filesystem() -> bool {
                     log("[oxfs] self-check FAILED: getdents /gdtest didn't reach EOF\n");
                 }
             }
-            oxfs_close(dfd);
+            sc_close(dfd);
         }
     }
 
@@ -8009,12 +8056,12 @@ fn format_fresh_filesystem() -> bool {
             log("[oxfs] self-check FAILED: open(O_CREAT) sub/in.txt failed\n");
         } else {
             let fd = fd as u64;
-            if oxfs_write(fd, content.as_ptr() as u64, content.len() as u64) != content.len() as i64
+            if sc_write(fd, content.as_ptr() as u64, content.len() as u64) != content.len() as i64
             {
                 ok = false;
                 log("[oxfs] self-check FAILED: write sub/in.txt failed\n");
             }
-            oxfs_close(fd);
+            sc_close(fd);
 
             // getcwd inside sub -> "/sub".
             let mut cwd_buf = [0u8; 64];
@@ -8034,8 +8081,8 @@ fn format_fresh_filesystem() -> bool {
             } else {
                 let fd = fd as u64;
                 let mut buf = [0u8; 64];
-                let n = oxfs_read(fd, buf.as_mut_ptr() as u64, buf.len() as u64);
-                oxfs_close(fd);
+                let n = sc_read(fd, buf.as_mut_ptr() as u64, buf.len() as u64);
+                sc_close(fd);
                 if n < 0 || &buf[..n as usize] != content {
                     ok = false;
                     log("[oxfs] self-check FAILED: /sub/in.txt contents mismatch\n");
@@ -8065,7 +8112,7 @@ fn format_fresh_filesystem() -> bool {
                     ok = false;
                     log("[oxfs] self-check FAILED: renamed.txt not openable after rename\n");
                 } else {
-                    oxfs_close(fd as u64);
+                    sc_close(fd as u64);
                 }
             }
 
@@ -8115,11 +8162,11 @@ fn format_fresh_filesystem() -> bool {
             log("[oxfs] self-check FAILED: create overwrite_test.txt failed\n");
         } else {
             let fd = fd as u64;
-            if oxfs_write(fd, b"AAAAA".as_ptr() as u64, 5) != 5 {
+            if sc_write(fd, b"AAAAA".as_ptr() as u64, 5) != 5 {
                 ok = false;
                 log("[oxfs] self-check FAILED: write overwrite_test.txt (initial AAAAA) failed\n");
             }
-            oxfs_close(fd);
+            sc_close(fd);
 
             // Plain O_WRONLY on an existing path: real overwrite-from-scratch, including a real
             // truncate (writing fewer bytes than before must not leave the old tail behind).
@@ -8129,13 +8176,13 @@ fn format_fresh_filesystem() -> bool {
                 log("[oxfs] self-check FAILED: O_WRONLY reopen of an existing file failed\n");
             } else {
                 let fd = fd as u64;
-                oxfs_write(fd, b"BB".as_ptr() as u64, 2);
-                oxfs_close(fd);
+                sc_write(fd, b"BB".as_ptr() as u64, 2);
+                sc_close(fd);
 
                 let fd = oxfs_open(path.as_ptr() as u64, path.len() as u64, 0, 0);
                 let mut buf = [0u8; 16];
-                let n = oxfs_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-                oxfs_close(fd as u64);
+                let n = sc_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+                sc_close(fd as u64);
                 if fd < 0 || n != 2 || &buf[..2] != b"BB" {
                     ok = false;
                     log(
@@ -8156,13 +8203,13 @@ fn format_fresh_filesystem() -> bool {
                 log("[oxfs] self-check FAILED: O_APPEND reopen of an existing file failed\n");
             } else {
                 let fd = fd as u64;
-                oxfs_write(fd, b"CC".as_ptr() as u64, 2);
-                oxfs_close(fd);
+                sc_write(fd, b"CC".as_ptr() as u64, 2);
+                sc_close(fd);
 
                 let fd = oxfs_open(path.as_ptr() as u64, path.len() as u64, 0, 0);
                 let mut buf = [0u8; 16];
-                let n = oxfs_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-                oxfs_close(fd as u64);
+                let n = sc_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+                sc_close(fd as u64);
                 if fd < 0 || n != 4 || &buf[..4] != b"BBCC" {
                     ok = false;
                     log("[oxfs] self-check FAILED: O_APPEND did not preserve existing content\n");
@@ -8207,8 +8254,8 @@ fn format_fresh_filesystem() -> bool {
             log("[oxfs] self-check FAILED: open /proc system file failed\n");
             continue;
         }
-        let n = oxfs_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-        oxfs_close(fd as u64);
+        let n = sc_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+        sc_close(fd as u64);
         if n <= 0 || !buf[..n as usize].windows(needle.len()).any(|w| w == needle) {
             ok = false;
             log("[oxfs] self-check FAILED: /proc system file content mismatch\n");
@@ -8230,8 +8277,8 @@ fn format_fresh_filesystem() -> bool {
                 log("[oxfs] self-check FAILED: relative open(\"\") inside /proc failed\n");
             } else {
                 let mut buf = [0u8; DIR_LISTING_BUFFER];
-                let n = oxfs_read(dfd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-                oxfs_close(dfd as u64);
+                let n = sc_read(dfd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+                sc_close(dfd as u64);
                 if n <= 0 || !buf[..n as usize].windows(7).any(|w| w == b"meminfo") {
                     ok = false;
                     log("[oxfs] self-check FAILED: relative /proc listing missing meminfo\n");
@@ -8249,18 +8296,18 @@ fn format_fresh_filesystem() -> bool {
             } else {
                 let mut rbuf = [0u8; PROC_BUFFER];
                 let mut abuf = [0u8; PROC_BUFFER];
-                let rn = oxfs_read(rfd as u64, rbuf.as_mut_ptr() as u64, rbuf.len() as u64);
-                let an = oxfs_read(afd as u64, abuf.as_mut_ptr() as u64, abuf.len() as u64);
+                let rn = sc_read(rfd as u64, rbuf.as_mut_ptr() as u64, rbuf.len() as u64);
+                let an = sc_read(afd as u64, abuf.as_mut_ptr() as u64, abuf.len() as u64);
                 if rn != an || rbuf != abuf {
                     ok = false;
                     log("[oxfs] self-check FAILED: relative /proc/meminfo content mismatch\n");
                 }
             }
             if rfd >= 0 {
-                oxfs_close(rfd as u64);
+                sc_close(rfd as u64);
             }
             if afd >= 0 {
-                oxfs_close(afd as u64);
+                sc_close(afd as u64);
             }
 
             // EROFS guard: nothing can be created while cwd is inside /proc.
@@ -8288,7 +8335,7 @@ fn format_fresh_filesystem() -> bool {
                 ok = false;
                 log("[oxfs] self-check FAILED: real open after leaving /proc failed\n");
             } else {
-                oxfs_close(real_fd as u64);
+                sc_close(real_fd as u64);
             }
         }
     }
@@ -8363,8 +8410,8 @@ fn format_fresh_filesystem() -> bool {
             } else {
                 let expected_size = read_inode(hello).size as usize;
                 let mut buf = [0u8; 64];
-                let n = oxfs_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-                oxfs_close(fd as u64);
+                let n = sc_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+                sc_close(fd as u64);
                 if n < 0 || n as usize != expected_size {
                     ok = false;
                     log("[oxfs] self-check FAILED: open hello_link content length mismatch\n");
@@ -8501,10 +8548,10 @@ fn format_fresh_filesystem() -> bool {
                 log("[oxfs] self-check FAILED: open mknodtest.null failed\n");
             } else {
                 let payload = b"x";
-                let wrote = oxfs_write(fd as u64, payload.as_ptr() as u64, 1);
+                let wrote = sc_write(fd as u64, payload.as_ptr() as u64, 1);
                 let mut rbuf = [1u8; 8];
-                let read = oxfs_read(fd as u64, rbuf.as_mut_ptr() as u64, rbuf.len() as u64);
-                oxfs_close(fd as u64);
+                let read = sc_read(fd as u64, rbuf.as_mut_ptr() as u64, rbuf.len() as u64);
+                sc_close(fd as u64);
                 if wrote < 0 || read != 0 {
                     ok = false;
                     log("[oxfs] self-check FAILED: mknodtest.null didn't behave like /dev/null\n");

@@ -19,10 +19,12 @@
 //! process gets its own independently-closable entry referring to the same underlying resource) —
 //! `fork_inherit` below is what actually does that now.
 //!
-//! Known, deliberate limitation kept from before: fd numbers (and the `real_fd` identity described
-//! below) are handed out by a simple global bump counter and never reused, even after every
-//! reference to one is closed — consistent with this kernel's broader "no deallocation" pattern
-//! elsewhere (e.g. `memory::BootInfoFrameAllocator`, `module::allocate_region`).
+//! **Two tables, like a real Unix kernel's descriptor table and file table.** `TABLE` maps a
+//! process's own fd number to a `real_fd`; `DESCRIPTIONS` maps a `real_fd` (one open file
+//! description, shared by every `dup`/`fork` alias) to its callbacks and refcount. fd numbers are
+//! per process and always the lowest free one, as POSIX requires of `open`/`pipe`/`socket`/`dup`/
+//! `accept`. `real_fd`s come from a global bump counter and are never reused, so a module's own
+//! `real_fd`-keyed state can never be confused with a later, unrelated open.
 //!
 //! **stdin/stdout/stderr are registered entries here, not special cases in `sys_read`/`sys_write`**
 //! — forced by `dup2`: a shell redirecting a pipeline's stdout (`dup2(pipe_write_fd, 1)`) needs fd 1
@@ -38,8 +40,8 @@
 //! table) is keyed by whatever fd the resource was originally opened/created under, not by every
 //! later alias. `FdOps::real_fd` (a globally unique identity, independent of which process(es) can
 //! currently see it) is threaded through every alias: `read`/`write`/`close` below always invoke
-//! the registered callback with `ops.real_fd`, never the `(pid, fd)` that was actually looked up.
-//! `REFCOUNTS` (keyed by `real_fd`, shared across every process that has an alias of it, not per
+//! the registered callback with `real_fd`, never the `(pid, fd)` that was actually looked up.
+//! `DESCRIPTIONS`' refcount (keyed by `real_fd`, shared across every process that has an alias of it, not per
 //! `(pid, fd)`) ensures the underlying resource's own `close` callback only actually fires once
 //! every alias — across every process that ever had one — has been closed.
 
@@ -154,13 +156,13 @@ struct FdOps {
     fb_geometry: FdFbGeometry,
     pread: FdReadWriteAt,
     pwrite: FdReadWriteAt,
-    /// The fd this entry's callbacks are actually invoked with — itself for a fresh registration,
-    /// or another entry's own `real_fd` for a `dup2`/`fork_inherit`-created alias (see this file's
-    /// module doc comment). Chains never nest more than one level deep in practice, but every alias
-    /// is built by copying the *source* entry's already-resolved `real_fd`, not the source's own
-    /// `(pid, fd)`, so an alias-of-an-alias still resolves directly rather than accumulating a
-    /// chain.
-    real_fd: u64,
+}
+
+/// One open file description: its callbacks, plus how many `TABLE` entries (across every process)
+/// refer to it. The `close` callback fires when `refs` reaches zero.
+struct Description {
+    ops: FdOps,
+    refs: u32,
 }
 
 /// A pseudo-pid, never a real running process (`process::alloc_pid` starts at `1`) — the identity
@@ -169,22 +171,56 @@ struct FdOps {
 /// separate one-off "seed the new process's fds" routine.
 const BOOTSTRAP_PID: u64 = 0;
 
-/// 0/1/2 reserved for stdin/stdout/stderr, registered by `init` below — never handed out by
-/// `oxidebsd_alloc_fd`.
-static NEXT_FD: Mutex<u64> = Mutex::new(3);
-static TABLE: Mutex<BTreeMap<(u64, u64), FdOps>> = Mutex::new(BTreeMap::new());
-/// Keyed by `real_fd` (a global identity, not a `(pid, fd)` pair) — how many live `TABLE` entries,
-/// across *every* process that has one, currently resolve to this underlying resource. See this
-/// file's module doc comment.
-static REFCOUNTS: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
+/// Next `real_fd`. 0 and 1 are the console's input and output, registered by `init` below — never
+/// handed out by `oxidebsd_alloc_fd`.
+static NEXT_REAL_FD: Mutex<u64> = Mutex::new(3);
+/// `(tgid, fd)` -> `real_fd`. Lock order: `TABLE` before `DESCRIPTIONS`.
+static TABLE: Mutex<BTreeMap<(u64, u64), u64>> = Mutex::new(BTreeMap::new());
+static DESCRIPTIONS: Mutex<BTreeMap<u64, Description>> = Mutex::new(BTreeMap::new());
+
+/// The lowest fd number >= `min` that `pid` doesn't have open.
+fn lowest_free(table: &BTreeMap<(u64, u64), u64>, pid: u64, min: u64) -> u64 {
+    let mut candidate = min;
+    for &(_, fd) in table.range((pid, min)..=(pid, u64::MAX)).map(|(k, _)| k) {
+        if fd != candidate {
+            break;
+        }
+        candidate += 1;
+    }
+    candidate
+}
+
+/// Points `(pid, fd)` at `real_fd`, which must already have a description, and counts the
+/// reference. The caller has already closed whatever `(pid, fd)` held before.
+fn install(table: &mut BTreeMap<(u64, u64), u64>, pid: u64, fd: u64, real_fd: u64) {
+    table.insert((pid, fd), real_fd);
+    DESCRIPTIONS
+        .lock()
+        .get_mut(&real_fd)
+        .expect("fd registry: installing an fd for a real_fd with no description")
+        .refs += 1;
+}
+
+/// The calling process's `fd`, resolved to its `real_fd` and callbacks.
+fn lookup(fd: u64) -> Option<(u64, FdOps)> {
+    let real_fd = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let ops = DESCRIPTIONS.lock().get(&real_fd)?.ops;
+    Some((real_fd, ops))
+}
+
+/// Applies `f` to `real_fd`'s description, if it has one.
+fn with_description(real_fd: u64, f: impl FnOnce(&mut FdOps)) {
+    if let Some(d) = DESCRIPTIONS.lock().get_mut(&real_fd) {
+        f(&mut d.ops);
+    }
+}
 /// `O_NONBLOCK`, as set via `fcntl(F_SETFL, ...)` (`syscall::sys_fcntl`). Keyed by `real_fd`, the
-/// same "open file description" scoping `REFCOUNTS` already uses -- POSIX defines `O_NONBLOCK` as
+/// same "open file description" scoping `DESCRIPTIONS` already uses -- POSIX defines `O_NONBLOCK` as
 /// a property of the *description*, shared correctly across `dup`/`dup2`/`fork_inherit` aliases,
 /// not the individual `(pid, fd)` handle, which is why this isn't a field on `FdOps` itself. Only
 /// `src/pipe.rs`'s `blocking_read` actually consults this today -- a real, deliberate
 /// simplification, not every blocking read path in this kernel honors it yet (see that module's
-/// own doc comment). Never cleaned up on close, consistent with this file's own fd-number/refcount
-/// convention of never reusing/reclaiming identities.
+/// own doc comment). Dropped when the description's last reference closes.
 static NONBLOCKING: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 pub(crate) fn set_nonblocking(real_fd: u64, on: bool) {
@@ -209,8 +245,7 @@ pub(crate) fn is_nonblocking(real_fd: u64) -> bool {
 /// (real POSIX: only `F_DUPFD_CLOEXEC`/`dup3(..., O_CLOEXEC)` would, and this kernel's own
 /// `F_DUPFD_CLOEXEC` handling sets it explicitly afterward rather than inheriting it here) --
 /// `fork_inherit` does copy it (real `fork()` preserves each fd's own close-on-exec flag into the
-/// child). Never cleaned up on close, same "identities aren't reclaimed" convention `NONBLOCKING`
-/// already documents.
+/// child). Dropped when the fd is closed, since fd numbers are reused.
 static CLOEXEC: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
 
 pub(crate) fn set_cloexec(pid: u64, fd: u64, on: bool) {
@@ -255,28 +290,30 @@ pub(crate) fn close_cloexec(pid: u64) {
     }
 }
 
+/// A fresh `real_fd`: the identity a module keys its own state by, and later passes to
+/// `oxidebsd_register_fd_ops*` to give the calling process an fd for it.
 pub(crate) extern "C" fn oxidebsd_alloc_fd() -> u64 {
-    let mut next = NEXT_FD.lock();
-    let fd = *next;
+    let mut next = NEXT_REAL_FD.lock();
+    let real_fd = *next;
     *next += 1;
-    fd
+    real_fd
 }
 
+/// Gives the calling process an fd for `real_fd` (the lowest free number) and returns it.
 pub(crate) extern "C" fn oxidebsd_register_fd_ops(
-    fd: u64,
+    real_fd: u64,
     read: FdReadWrite,
     write: FdReadWrite,
     close: FdClose,
-) -> i32 {
+) -> u64 {
     register(
         scheduler::current_tgid(),
-        fd,
+        real_fd,
         read,
         write,
         close,
         no_content_id,
-    );
-    0
+    )
 }
 
 /// Same as `oxidebsd_register_fd_ops`, plus a `content_id` callback — only `sys/modules/oxfs` calls
@@ -284,59 +321,61 @@ pub(crate) extern "C" fn oxidebsd_register_fd_ops(
 /// via the plain function above), so every other fd-registering module (pipes, sockets, mqueues,
 /// ...) needed zero changes. See `FdContentId`'s own doc comment for why this exists.
 pub(crate) extern "C" fn oxidebsd_register_fd_ops_with_content_id(
-    fd: u64,
+    real_fd: u64,
     read: FdReadWrite,
     write: FdReadWrite,
     close: FdClose,
     content_id: FdContentId,
-) -> i32 {
+) -> u64 {
     register(
         scheduler::current_tgid(),
-        fd,
+        real_fd,
         read,
         write,
         close,
         content_id,
-    );
-    0
+    )
 }
 
 /// The non-`extern "C"` body every registration entry point (`oxidebsd_register_fd_ops`,
-/// `oxidebsd_register_fd_ops_with_content_id`, `init`'s stdin/stdout/stderr) shares.
+/// `oxidebsd_register_fd_ops_with_content_id`) shares. Returns the
+/// new fd.
 fn register(
     pid: u64,
-    fd: u64,
+    real_fd: u64,
     read: FdReadWrite,
     write: FdReadWrite,
     close: FdClose,
     content_id: FdContentId,
-) {
-    TABLE.lock().insert(
-        (pid, fd),
-        FdOps {
-            read,
-            write,
-            close,
-            content_id,
-            access_mode: default_access_mode,
-            is_append: default_is_append,
-            fb_geometry: no_fb_geometry,
-            pread: no_pread_pwrite,
-            pwrite: no_pread_pwrite,
-            real_fd: fd,
-        },
-    );
-    *REFCOUNTS.lock().entry(fd).or_insert(0) += 1;
+) -> u64 {
+    let ops = FdOps {
+        read,
+        write,
+        close,
+        content_id,
+        access_mode: default_access_mode,
+        is_append: default_is_append,
+        fb_geometry: no_fb_geometry,
+        pread: no_pread_pwrite,
+        pwrite: no_pread_pwrite,
+    };
+    DESCRIPTIONS
+        .lock()
+        .entry(real_fd)
+        .and_modify(|d| d.ops = ops)
+        .or_insert(Description { ops, refs: 0 });
+    let mut table = TABLE.lock();
+    let fd = lowest_free(&table, pid, 0);
+    install(&mut table, pid, fd, real_fd);
+    fd
 }
 
 /// Overrides `real_fd`'s `access_mode` callback after the fact -- same "separate post-hoc setter,
 /// not a `register`/`oxidebsd_register_fd_ops*` parameter" shape `oxidebsd_set_fd_pread_pwrite`
 /// already establishes, for the identical reason: every existing fd-registering call site keeps the
 /// `default_access_mode` `register` already sets. `sys/modules/oxfs` is the one real caller today.
-pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: FdAccessMode) {
-    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
-        ops.access_mode = access_mode;
-    }
+pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(real_fd: u64, access_mode: FdAccessMode) {
+    with_description(real_fd, |ops| ops.access_mode = access_mode);
 }
 
 /// Overrides `real_fd`'s `is_append` callback after the fact -- same shape
@@ -344,10 +383,8 @@ pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: FdAcc
 /// unconditionally for every `OpenFile::Write` fd it registers (the callback itself discriminates
 /// by whether that fd was actually opened with `O_APPEND`, same "always registered, harmless
 /// default for everything else" precedent `oxidebsd_set_fd_access_mode`'s own call site sets).
-pub(crate) extern "C" fn oxidebsd_set_fd_append(fd: u64, is_append: FdIsAppend) {
-    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
-        ops.is_append = is_append;
-    }
+pub(crate) extern "C" fn oxidebsd_set_fd_append(real_fd: u64, is_append: FdIsAppend) {
+    with_description(real_fd, |ops| ops.is_append = is_append);
 }
 
 /// Overrides `real_fd`'s `fb_geometry` callback after the fact -- same shape
@@ -355,10 +392,8 @@ pub(crate) extern "C" fn oxidebsd_set_fd_append(fd: u64, is_append: FdIsAppend) 
 /// unconditionally for every fd it registers (the callback itself discriminates by `OpenFile`
 /// variant, same "always registered, harmless default for everything else" precedent
 /// `oxidebsd_set_fd_access_mode`'s own call site already sets).
-pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: FdFbGeometry) {
-    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
-        ops.fb_geometry = fb_geometry;
-    }
+pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(real_fd: u64, fb_geometry: FdFbGeometry) {
+    with_description(real_fd, |ops| ops.fb_geometry = fb_geometry);
 }
 
 /// Overrides `real_fd`'s `pread`/`pwrite` callbacks after the fact — a separate setter, not a
@@ -368,14 +403,14 @@ pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: FdFbG
 /// `oxidebsd_set_fd_pread_pwrite` — `sys/modules/oxfs` is the one real caller today, right after
 /// `register_open_file` for its own real, on-disk-backed `OpenFile` variants.
 pub(crate) extern "C" fn oxidebsd_set_fd_pread_pwrite(
-    fd: u64,
+    real_fd: u64,
     pread: FdReadWriteAt,
     pwrite: FdReadWriteAt,
 ) {
-    if let Some(ops) = TABLE.lock().get_mut(&(scheduler::current_tgid(), fd)) {
+    with_description(real_fd, |ops| {
         ops.pread = pread;
         ops.pwrite = pwrite;
-    }
+    });
 }
 
 /// Removes the calling process's own `fd` from the registry; only actually invokes the underlying
@@ -398,19 +433,22 @@ pub extern "C" fn oxidebsd_close_fd(fd: u64) -> i32 {
 /// Shared by `oxidebsd_close_fd` and `close_all` — closes exactly one `(pid, fd)` entry. Returns
 /// `false` if there was no such entry (not registered, or already closed).
 fn close_one(pid: u64, fd: u64) -> bool {
-    let Some(ops) = TABLE.lock().remove(&(pid, fd)) else {
+    let Some(real_fd) = TABLE.lock().remove(&(pid, fd)) else {
         return false;
     };
-    let mut refcounts = REFCOUNTS.lock();
-    let count = refcounts.get_mut(&ops.real_fd).expect(
-        "fd registry: real_fd missing from REFCOUNTS -- every TABLE entry must have one, \
-         maintained by register/dup2/fork_inherit",
+    CLOEXEC.lock().remove(&(pid, fd));
+    let mut descriptions = DESCRIPTIONS.lock();
+    let d = descriptions.get_mut(&real_fd).expect(
+        "fd registry: real_fd missing from DESCRIPTIONS -- every TABLE entry must have one, \
+         maintained by register/install",
     );
-    *count -= 1;
-    if *count == 0 {
-        refcounts.remove(&ops.real_fd);
-        drop(refcounts); // don't hold the lock across the callback
-        (ops.close)(ops.real_fd);
+    d.refs -= 1;
+    if d.refs == 0 {
+        let close = d.ops.close;
+        descriptions.remove(&real_fd);
+        drop(descriptions); // don't hold the lock across the callback
+        NONBLOCKING.lock().remove(&real_fd);
+        close(real_fd);
     }
     true
 }
@@ -442,17 +480,13 @@ pub(crate) fn close_all(pid: u64) {
 /// the boot-time bootstrap identity" in exactly the same sense forking is "inheriting from a real
 /// parent," so this one function serves both.
 pub(crate) fn fork_inherit(parent: u64, child: u64) {
-    let parent_entries: alloc::vec::Vec<(u64, FdOps)> = TABLE
-        .lock()
-        .iter()
-        .filter(|&(&(p, _), _)| p == parent)
-        .map(|(&(_, fd), &ops)| (fd, ops))
-        .collect();
     let mut table = TABLE.lock();
-    let mut refcounts = REFCOUNTS.lock();
-    for (fd, ops) in parent_entries {
-        table.insert((child, fd), ops);
-        *refcounts.entry(ops.real_fd).or_insert(0) += 1;
+    let parent_entries: alloc::vec::Vec<(u64, u64)> = table
+        .range((parent, 0)..=(parent, u64::MAX))
+        .map(|(&(_, fd), &real_fd)| (fd, real_fd))
+        .collect();
+    for (fd, real_fd) in parent_entries {
+        install(&mut table, child, fd, real_fd);
         // Real fork() preserves each fd's own close-on-exec flag into the child -- see CLOEXEC's
         // own doc comment for why this is a per-(pid, fd) copy, not shared state.
         if is_cloexec(parent, fd) {
@@ -470,31 +504,17 @@ pub(crate) fn fork_inherit(parent: u64, child: u64) {
 /// fresh alias of `oldfd`'s own `real_fd`.
 pub(crate) fn dup2(oldfd: u64, newfd: u64) -> Result<u64, ()> {
     let pid = scheduler::current_tgid();
+    let real_fd = *TABLE.lock().get(&(pid, oldfd)).ok_or(())?;
     if oldfd == newfd {
-        return if TABLE.lock().contains_key(&(pid, oldfd)) {
-            Ok(newfd)
-        } else {
-            Err(())
-        };
+        return Ok(newfd);
     }
-    let old_ops = *TABLE.lock().get(&(pid, oldfd)).ok_or(())?;
-    if TABLE.lock().contains_key(&(pid, newfd)) {
-        close_one(pid, newfd);
-    }
-    TABLE.lock().insert(
-        (pid, newfd),
-        FdOps {
-            real_fd: old_ops.real_fd,
-            ..old_ops
-        },
-    );
-    *REFCOUNTS.lock().entry(old_ops.real_fd).or_insert(0) += 1;
+    close_one(pid, newfd);
+    install(&mut TABLE.lock(), pid, newfd, real_fd);
     Ok(newfd)
 }
 
 /// `SYS_DUP`'s real logic (`sys/syscall.rs`'s `sys_dup` is a thin wrapper over this) — real
-/// `dup(2)`'s single-argument form: allocate a fresh fd (via the same bump counter
-/// `oxidebsd_alloc_fd` uses) and alias it to `oldfd`'s own `real_fd`, same aliasing mechanics as
+/// `dup(2)`'s single-argument form: the lowest free fd becomes an alias to `oldfd`'s own `real_fd`, same aliasing mechanics as
 /// `dup2` above minus the caller-chosen-target-fd/close-first cases `dup2` has to handle. Added
 /// specifically because BusyBox's `hush` (`CONFIG_HUSH_JOB`) calls `dup_CLOEXEC`, which tries
 /// `fcntl(fd, F_DUPFD_CLOEXEC, ...)` first — this kernel has no `fcntl` at all, so that call
@@ -503,17 +523,16 @@ pub(crate) fn dup2(oldfd: u64, newfd: u64) -> Result<u64, ()> {
 /// exact thing turning on real interactive mode was for. See CLAUDE.md's "Interactive shell"
 /// section for the full trace of why `fcntl` itself doesn't need implementing for this to work.
 pub(crate) fn dup(oldfd: u64) -> Result<u64, ()> {
+    dup_min(oldfd, 0)
+}
+
+/// `fcntl(F_DUPFD, min)`: like `dup`, but the new fd is the lowest free one >= `min`.
+pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, ()> {
     let pid = scheduler::current_tgid();
-    let old_ops = *TABLE.lock().get(&(pid, oldfd)).ok_or(())?;
-    let newfd = oxidebsd_alloc_fd();
-    TABLE.lock().insert(
-        (pid, newfd),
-        FdOps {
-            real_fd: old_ops.real_fd,
-            ..old_ops
-        },
-    );
-    *REFCOUNTS.lock().entry(old_ops.real_fd).or_insert(0) += 1;
+    let mut table = TABLE.lock();
+    let real_fd = *table.get(&(pid, oldfd)).ok_or(())?;
+    let newfd = lowest_free(&table, pid, min);
+    install(&mut table, pid, newfd, real_fd);
     Ok(newfd)
 }
 
@@ -534,19 +553,19 @@ pub(crate) fn dup(oldfd: u64) -> Result<u64, ()> {
 /// covers every one of them without touching each callback individually, since `sys_read`/
 /// `sys_write` (`sys/syscall.rs`) route every fd through these two functions unconditionally.
 pub(crate) fn read(fd: u64, ptr: u64, len: u64) -> Option<i64> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let (real_fd, ops) = lookup(fd)?;
     if len == 0 {
         return Some(0);
     }
-    Some((ops.read)(ops.real_fd, ptr, len))
+    Some((ops.read)(real_fd, ptr, len))
 }
 
 pub(crate) fn write(fd: u64, ptr: u64, len: u64) -> Option<i64> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let (real_fd, ops) = lookup(fd)?;
     if len == 0 {
         return Some(0);
     }
-    Some((ops.write)(ops.real_fd, ptr, len))
+    Some((ops.write)(real_fd, ptr, len))
 }
 
 /// Real `pread(2)` — like `read` above, but never touches the fd's own current file position (real
@@ -554,20 +573,20 @@ pub(crate) fn write(fd: u64, ptr: u64, len: u64) -> Option<i64> {
 /// `fd` isn't registered at all (`EBADF`, matching `read`/`write`'s own convention); `-ESPIPE` (via
 /// `no_pread_pwrite`) for any fd kind with no real seekable position.
 pub(crate) fn pread(fd: u64, ptr: u64, len: u64, offset: u64) -> Option<i64> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let (real_fd, ops) = lookup(fd)?;
     if len == 0 {
         return Some(0);
     }
-    Some((ops.pread)(ops.real_fd, ptr, len, offset))
+    Some((ops.pread)(real_fd, ptr, len, offset))
 }
 
 /// Real `pwrite(2)` — see `pread`'s own doc comment just above.
 pub(crate) fn pwrite(fd: u64, ptr: u64, len: u64, offset: u64) -> Option<i64> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let (real_fd, ops) = lookup(fd)?;
     if len == 0 {
         return Some(0);
     }
-    Some((ops.pwrite)(ops.real_fd, ptr, len, offset))
+    Some((ops.pwrite)(real_fd, ptr, len, offset))
 }
 
 /// Looks up the calling process's own `fd` and returns its `real_fd` — the underlying resource
@@ -581,7 +600,7 @@ pub(crate) fn real_fd_of(fd: u64) -> Option<u64> {
     TABLE
         .lock()
         .get(&(scheduler::current_tgid(), fd))
-        .map(|ops| ops.real_fd)
+        .copied()
 }
 
 /// Live "is this fd backed by an identifiable real file, and if so which one" query — see
@@ -590,8 +609,8 @@ pub(crate) fn real_fd_of(fd: u64) -> Option<u64> {
 /// decide whether a real fd-backed `MAP_SHARED` mapping is even possible, and to key its own
 /// cross-open shared-frame cache. `None` covers both "no such fd" and "not identifiable right now."
 pub(crate) fn content_id_of(fd: u64) -> Option<u64> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
-    let id = (ops.content_id)(ops.real_fd);
+    let (real_fd, ops) = lookup(fd)?;
+    let id = (ops.content_id)(real_fd);
     if id < 0 { None } else { Some(id as u64) }
 }
 
@@ -600,10 +619,10 @@ pub(crate) fn content_id_of(fd: u64) -> Option<u64> {
 /// caller (`do_mmap`) always calls `content_id_of` first and bails `ENODEV` before this could ever
 /// matter for an unregistered fd.
 pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
-    let Some(ops) = TABLE.lock().get(&(scheduler::current_tgid(), fd)).copied() else {
+    let Some((real_fd, ops)) = lookup(fd) else {
         return (true, true);
     };
-    let bits = (ops.access_mode)(ops.real_fd);
+    let bits = (ops.access_mode)(real_fd);
     (bits & 0b01 != 0, bits & 0b10 != 0)
 }
 
@@ -612,10 +631,10 @@ pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
 /// found in `TABLE` at all, matching `F_GETFL`'s existing `EBADF`-before-ever-reaching-this
 /// resolution (`real_fd_of` already fails first for that case).
 pub(crate) fn is_append_of(fd: u64) -> bool {
-    let Some(ops) = TABLE.lock().get(&(scheduler::current_tgid(), fd)).copied() else {
+    let Some((real_fd, ops)) = lookup(fd) else {
         return false;
     };
-    (ops.is_append)(ops.real_fd) != 0
+    (ops.is_append)(real_fd) != 0
 }
 
 /// Live "is this fd a real `/dev/fb0` mapping-eligible framebuffer, and if so what's its real
@@ -624,7 +643,7 @@ pub(crate) fn is_append_of(fd: u64) -> bool {
 /// -- a framebuffer fd's `content_id_of` always returns `None`/`ENODEV` too, so order matters) and
 /// by `syscall::ffi::sys_ioctl`'s framebuffer-info request.
 pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::FbGeometry> {
-    let ops = *TABLE.lock().get(&(scheduler::current_tgid(), fd))?;
+    let (real_fd, ops) = lookup(fd)?;
     let mut geom = crate::drivers::fbdev::FbGeometry {
         phys_base: 0,
         len: 0,
@@ -634,7 +653,7 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
         bpp: 0,
     };
     let ok = (ops.fb_geometry)(
-        ops.real_fd,
+        real_fd,
         &mut geom as *mut crate::drivers::fbdev::FbGeometry as u64,
     );
     if ok == 0 { Some(geom) } else { None }
@@ -780,28 +799,20 @@ extern "C" fn stdio_close(_real_fd: u64) -> i64 {
 /// `dup2`-style alias of fd 1 from the moment it's created, not a second independent registration —
 /// matching real shell convention (`2>&1` is normally already true by default in practice) and
 /// this kernel's own total lack of a second output destination.
+///
+/// Runs after the modules load, so anything a `module_init` left open under `BOOTSTRAP_PID` can
+/// already hold fd 0-2 -- those get closed so stdio lands on its real numbers.
 pub fn init() {
-    register(
-        BOOTSTRAP_PID,
-        0,
-        stdin_read,
-        write_not_permitted,
-        stdio_close,
-        no_content_id,
-    );
-    register(
-        BOOTSTRAP_PID,
-        1,
-        read_not_permitted,
-        stdout_write,
-        stdio_close,
-        no_content_id,
-    );
-    TABLE.lock().insert(
-        (BOOTSTRAP_PID, 2),
-        FdOps {
-            read: read_not_permitted,
-            write: stdout_write,
+    for fd in 0..3 {
+        close_one(BOOTSTRAP_PID, fd);
+    }
+    for (real_fd, read, write) in [
+        (0, stdin_read as FdReadWrite, write_not_permitted as FdReadWrite),
+        (1, read_not_permitted, stdout_write),
+    ] {
+        let ops = FdOps {
+            read,
+            write,
             close: stdio_close,
             content_id: no_content_id,
             access_mode: default_access_mode,
@@ -809,8 +820,11 @@ pub fn init() {
             fb_geometry: no_fb_geometry,
             pread: no_pread_pwrite,
             pwrite: no_pread_pwrite,
-            real_fd: 1,
-        },
-    );
-    *REFCOUNTS.lock().entry(1).or_insert(0) += 1;
+        };
+        DESCRIPTIONS.lock().insert(real_fd, Description { ops, refs: 0 });
+    }
+    let mut table = TABLE.lock();
+    install(&mut table, BOOTSTRAP_PID, 0, 0);
+    install(&mut table, BOOTSTRAP_PID, 1, 1);
+    install(&mut table, BOOTSTRAP_PID, 2, 1);
 }

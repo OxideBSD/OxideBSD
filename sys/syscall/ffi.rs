@@ -239,8 +239,11 @@ pub(crate) fn sys_pipe2(fds_ptr: u64, flags: u64) -> Result<u64, u64> {
         crate::fs::fd::set_cloexec(pid, write_fd, true);
     }
     if flags & O_NONBLOCK != 0 {
-        crate::fs::fd::set_nonblocking(read_fd, true);
-        crate::fs::fd::set_nonblocking(write_fd, true);
+        for fd in [read_fd, write_fd] {
+            if let Some(real_fd) = crate::fs::fd::real_fd_of(fd) {
+                crate::fs::fd::set_nonblocking(real_fd, true);
+            }
+        }
     }
     Ok(0)
 }
@@ -380,9 +383,9 @@ pub(crate) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
             crate::fs::fd::set_cloexec(pid, fd, arg & FD_CLOEXEC != 0);
             Ok(0)
         }
-        F_DUPFD => crate::fs::fd::dup(fd).map_err(|_| EBADF),
+        F_DUPFD => crate::fs::fd::dup_min(fd, arg).map_err(|_| EBADF),
         F_DUPFD_CLOEXEC => {
-            let newfd = crate::fs::fd::dup(fd).map_err(|_| EBADF)?;
+            let newfd = crate::fs::fd::dup_min(fd, arg).map_err(|_| EBADF)?;
             crate::fs::fd::set_cloexec(pid, newfd, true);
             Ok(newfd)
         }

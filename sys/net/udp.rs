@@ -242,8 +242,7 @@ pub extern "C" fn oxidebsd_sys_socket(domain: u64, ty: u64, protocol: u64) -> i6
         SOCK_DGRAM => {
             let fd = crate::fs::fd::oxidebsd_alloc_fd();
             STATE.lock().sockets.insert(fd, UdpSocket::new());
-            crate::fs::fd::oxidebsd_register_fd_ops(fd, udp_read, udp_write, udp_close);
-            fd as i64
+            crate::fs::fd::oxidebsd_register_fd_ops(fd, udp_read, udp_write, udp_close) as i64
         }
         SOCK_STREAM => super::tcp::create_socket() as i64,
         // socket(AF_INET, SOCK_RAW, 1) is exactly what a real `ping` asks for (see

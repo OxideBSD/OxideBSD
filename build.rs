@@ -225,6 +225,7 @@ fn main() {
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
@@ -318,6 +319,7 @@ fn main() {
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
     let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
+    let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
 
     // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
@@ -499,6 +501,7 @@ fn main() {
         ),
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
         (
             "OXFS_SEM_OPEN_SMOKE_ELF_PATH",
             sem_open_smoke_elf_path.to_str().unwrap(),
@@ -1447,6 +1450,29 @@ fn build_ppoll_smoke(sysroot: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for ppoll-smoke: {e}"));
     if !status.success() {
         panic!("building ppoll-smoke failed: {status}");
+    }
+    out
+}
+
+/// fd numbering and FIFO coverage -- see `regress/fd-smoke/main.c`. Same recipe as
+/// `build_ppoll_smoke`, next slot (`0x82c0000`).
+fn build_fd_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/fd-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/fd-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/fd-smoke");
+    let out = target_dir.join("fd-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x82c0000", "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for fd-smoke: {e}"));
+    if !status.success() {
+        panic!("building fd-smoke failed: {status}");
     }
     out
 }

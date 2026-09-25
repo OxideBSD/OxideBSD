@@ -652,8 +652,10 @@ see "Real threading" for the full design.
   `uid`/`gid` copied, preserved; `sid` inherited, untouched; `rlimits`/`nice`/`sched_policy`/
   `sched_priority`/`umask` copied, preserved; `root_inode` copied, untouched. Itimer state resets
   on `fork`, preserved by `execve` (the one exception).
-- Kernel stack size floor is `128` KiB — found empirically. No guard page — overflow corrupts
-  silently.
+- Kernel stack size floor is `128` KiB — found empirically. Stacks live in `memory::kstack`'s
+  VA window (L4 slot 385, 1 MiB slots, frame-backed) with unmapped guard space below; an overflow
+  double-faults and logs `KERNEL STACK OVERFLOW`. The window's L3 table is allocated in `init`,
+  before any `AddressSpace` copies the kernel's L4 entries.
 - **`do_wait4`'s reported status is real `wait(2)`-encoded — normal exit shifts into bits 8-15**
   (`WEXITSTATUS`). Signal-based termination passes a pre-encoded `128 + sig` directly, must
   **not** be shifted. Real `WUNTRACED`/`WCONTINUED`/`WNOHANG`; `WIFSTOPPED` writes
@@ -780,9 +782,15 @@ filesystem well before that, this was just retiring dead weight.
 
 **`sys/fs/fd.rs`** (now `tgid`-keyed — see "Real threading"): a per-process
 `(Pid, fd)` scoped registry — the only coordination channel between independently-loaded modules.
-Bump-allocated fd numbers, never reused. **Real per-`(pid, fd)` `FD_CLOEXEC`**: scoped per
+Two tables: `(tgid, fd) -> real_fd` and `real_fd -> Description` (callbacks + refcount). fd
+numbers are per process, lowest free (POSIX); `real_fd` is a never-reused global id that modules
+key their state by. **`oxidebsd_alloc_fd` returns a `real_fd`; `oxidebsd_register_fd_ops*` returns
+the user fd** — return *that* to userspace, and pass `real_fd` to the `oxidebsd_set_fd_*` setters.
+**Real per-`(pid, fd)` `FD_CLOEXEC`**: scoped per
 descriptor not per open-file description (`dup`/`dup2` don't copy it, `fork_inherit` does);
-`do_execve` calls `fs::fd::close_cloexec`. **Real per-fd access-mode enforcement**
+`do_execve` calls `fs::fd::close_cloexec`. **FIFOs**: `InodeKind::Fifo` (`mknod(S_IFIFO)`); `open`
+calls the kernel's `oxidebsd_fifo_open` (`sys/fs/pipe.rs`, keyed by inode), which can block — oxfs
+clears its `AT_BASE_OVERRIDE` around the call. **Real per-fd access-mode enforcement**
 (`OpenFile::Write::readonly`) on write/`ftruncate`/`fallocate` — `open(path, O_CREAT)` with no
 explicit `O_WRONLY`/`O_RDWR` now genuinely produces a read-only fd rather than silently writable.
 
@@ -2093,7 +2101,7 @@ entirely — structurally incapable of working here, not "not started yet"). 229
 | Real block device driver + oxfs persistence, mount table | done | see "Real disk persistence"/"Mount table" — still a fixed, non-mountable backing store; `pivot_root`/`switch_root`/partition tables remain out of scope |
 | uid/passwd-db model, real login/session auth | done | `adduser`/`chpasswd`/`passwd` still need real *mutation* of `/etc/passwd`/`/etc/group` (applet-level gap) |
 | `clock_gettime`/`gettimeofday`/`time`/`nanosleep` | done | — |
-| Init-system/service-supervisor framework | not started, out of scope | 2 applets kept anyway (don't need a real init framework); 4 removed (runit family needs FIFOs oxfs doesn't have) |
+| Init-system/service-supervisor framework | not started, out of scope | 2 applets kept anyway (don't need a real init framework); 4 removed (runit family needed FIFOs, which exist now) |
 | `tcsetpgrp`/real job control | done | see "Real job control" |
 | `uname`/`gethostname` | done | `gethostname` is a pure musl wrapper around `uname()`, no new syscall |
 

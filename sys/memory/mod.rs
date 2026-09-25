@@ -4,6 +4,7 @@
 
 pub mod address_space;
 pub mod allocator;
+pub mod kstack;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

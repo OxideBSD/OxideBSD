@@ -335,6 +335,14 @@ extern "x86-interrupt" fn page_fault_handler(
             return;
         }
     }
+    if let Ok(addr) = Cr2::read()
+        && crate::memory::kstack::is_guard(addr.as_u64())
+    {
+        serial_println!(
+            "EXCEPTION: KERNEL STACK OVERFLOW (pid {})",
+            crate::process::scheduler::current_pid()
+        );
+    }
     serial_println!(
         "EXCEPTION: PAGE FAULT\naccessed address: {:?}\nerror code: {:?}\n{:#?}",
         Cr2::read(),
@@ -348,6 +356,15 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    if let Ok(addr) = Cr2::read()
+        && crate::memory::kstack::is_guard(addr.as_u64())
+    {
+        serial_println!(
+            "EXCEPTION: KERNEL STACK OVERFLOW (pid {}) at {:?}",
+            crate::process::scheduler::current_pid(),
+            addr
+        );
+    }
     serial_println!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
     reboot();
 }

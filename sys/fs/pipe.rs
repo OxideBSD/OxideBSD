@@ -260,14 +260,16 @@ pub(crate) fn do_pipe(fds_ptr: u64) -> Result<u64, u64> {
     let write_fd = crate::fs::fd::oxidebsd_alloc_fd();
     PIPE_ENDS.lock().insert(read_fd, (pipe_id, End::Read));
     PIPE_ENDS.lock().insert(write_fd, (pipe_id, End::Write));
-    crate::fs::fd::oxidebsd_register_fd_ops(read_fd, pipe_read, write_denied, pipe_close);
-    crate::fs::fd::oxidebsd_register_fd_ops(write_fd, read_denied, pipe_write, pipe_close);
+    let read_user_fd =
+        crate::fs::fd::oxidebsd_register_fd_ops(read_fd, pipe_read, write_denied, pipe_close);
+    let write_user_fd =
+        crate::fs::fd::oxidebsd_register_fd_ops(write_fd, read_denied, pipe_write, pipe_close);
 
     // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
     // already has -- fds_ptr isn't checked against the caller's actual mappings first.
     unsafe {
-        (fds_ptr as *mut i32).write(read_fd as i32);
-        (fds_ptr as *mut i32).add(1).write(write_fd as i32);
+        (fds_ptr as *mut i32).write(read_user_fd as i32);
+        (fds_ptr as *mut i32).add(1).write(write_user_fd as i32);
     }
     Ok(0)
 }
@@ -341,14 +343,14 @@ pub(crate) fn do_socketpair(fds_ptr: u64) -> Result<u64, u64> {
             read_pipe: pipe_a,
         },
     );
-    crate::fs::fd::oxidebsd_register_fd_ops(fd0, sock_read, sock_write, sock_close);
-    crate::fs::fd::oxidebsd_register_fd_ops(fd1, sock_read, sock_write, sock_close);
+    let user_fd0 = crate::fs::fd::oxidebsd_register_fd_ops(fd0, sock_read, sock_write, sock_close);
+    let user_fd1 = crate::fs::fd::oxidebsd_register_fd_ops(fd1, sock_read, sock_write, sock_close);
 
     // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
     // already has -- fds_ptr isn't checked against the caller's actual mappings first.
     unsafe {
-        (fds_ptr as *mut i32).write(fd0 as i32);
-        (fds_ptr as *mut i32).add(1).write(fd1 as i32);
+        (fds_ptr as *mut i32).write(user_fd0 as i32);
+        (fds_ptr as *mut i32).add(1).write(user_fd1 as i32);
     }
     Ok(0)
 }
@@ -432,6 +434,18 @@ fn write_side(pipes: &BTreeMap<u64, PipeBuffer>, pipe_id: u64) -> (bool, bool) {
 }
 
 pub(crate) fn readiness(real_fd: u64) -> Option<Readiness> {
+    if let Some(end) = FIFO_ENDS.lock().get(&real_fd).copied() {
+        let pipe_id = FIFOS.lock().get(&end.key)?.pipe_id;
+        let pipes = PIPES.lock();
+        let mut r = Readiness::default();
+        if end.read {
+            (r.readable, r.hangup) = read_side(&pipes, pipe_id);
+        }
+        if end.write {
+            (r.writable, r.error) = write_side(&pipes, pipe_id);
+        }
+        return Some(r);
+    }
     if let Some(&(pipe_id, end)) = PIPE_ENDS.lock().get(&real_fd) {
         let pipes = PIPES.lock();
         return Some(match end {
@@ -472,4 +486,167 @@ fn wake_blocked_writers(pipe_id: u64) {
         }
     }
     process::wake_pollers(&mut table);
+}
+
+// Named pipes (FIFOs). oxfs owns the inode; `open()` of one lands in `fifo_open` below, keyed by
+// inode number. The data lives in an ordinary `PipeBuffer` shared by every open of that FIFO, whose
+// `read_closed`/`write_closed` flags track "no readers"/"no writers" -- unlike a plain pipe they
+// can clear again when someone reopens. The buffer (and any unread data) goes away when the last
+// open end closes, as POSIX requires.
+
+struct Fifo {
+    pipe_id: u64,
+    readers: u32,
+    writers: u32,
+    /// Bumped on every open for reading/writing, so a blocked `open()` notices a peer that opened
+    /// and closed again before it got to run.
+    reader_opens: u64,
+    writer_opens: u64,
+}
+
+#[derive(Clone, Copy)]
+struct FifoEnd {
+    key: u64,
+    read: bool,
+    write: bool,
+}
+
+static FIFOS: Mutex<BTreeMap<u64, Fifo>> = Mutex::new(BTreeMap::new());
+/// Keyed by `real_fd`, like `PIPE_ENDS`.
+static FIFO_ENDS: Mutex<BTreeMap<u64, FifoEnd>> = Mutex::new(BTreeMap::new());
+
+/// Syncs a FIFO's buffer flags with its open counts and wakes everything that might care: blocked
+/// readers/writers and anyone waiting in `fifo_open` or `poll` (both block as `Polling`).
+fn fifo_changed(fifo: &Fifo) {
+    if let Some(pipe) = PIPES.lock().get_mut(&fifo.pipe_id) {
+        pipe.read_closed = fifo.readers == 0;
+        pipe.write_closed = fifo.writers == 0;
+    }
+    wake_blocked_readers(fifo.pipe_id);
+    wake_blocked_writers(fifo.pipe_id);
+}
+
+/// Real `open(2)` of a FIFO: `O_RDONLY` waits for a writer and `O_WRONLY` for a reader, unless
+/// `O_NONBLOCK` (then a write-only open with no reader fails `ENXIO`). `O_RDWR` never waits, as on
+/// Linux and the BSDs. Returns the new fd or `-errno`. Exported to modules as
+/// `oxidebsd_fifo_open`.
+pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
+    const O_ACCMODE: u64 = 3;
+    const O_WRONLY: u64 = 1;
+    const O_RDWR: u64 = 2;
+    const O_NONBLOCK: u64 = 0o4000;
+    let (read, write) = match flags & O_ACCMODE {
+        O_WRONLY => (false, true),
+        O_RDWR => (true, true),
+        _ => (true, false),
+    };
+    let nonblock = flags & O_NONBLOCK != 0;
+
+    let (wait_for_writer, wait_for_reader, seen) = {
+        let mut fifos = FIFOS.lock();
+        if !read && nonblock && fifos.get(&key).is_none_or(|f| f.readers == 0) {
+            return -(crate::syscall::ENXIO as i64);
+        }
+        let fifo = fifos.entry(key).or_insert_with(|| Fifo {
+            pipe_id: new_pipe_buffer(),
+            readers: 0,
+            writers: 0,
+            reader_opens: 0,
+            writer_opens: 0,
+        });
+        if read {
+            fifo.readers += 1;
+            fifo.reader_opens += 1;
+        }
+        if write {
+            fifo.writers += 1;
+            fifo.writer_opens += 1;
+        }
+        fifo_changed(fifo);
+        (
+            read && !write && !nonblock && fifo.writers == 0,
+            write && !read && fifo.readers == 0,
+            (fifo.reader_opens, fifo.writer_opens),
+        )
+    };
+
+    if wait_for_writer || wait_for_reader {
+        let caller = scheduler::current_pid();
+        loop {
+            {
+                let fifos = FIFOS.lock();
+                let fifo = fifos.get(&key).expect("a FIFO with an opener waiting on it exists");
+                if (wait_for_writer && fifo.writer_opens != seen.1)
+                    || (wait_for_reader && fifo.reader_opens != seen.0)
+                {
+                    break;
+                }
+            }
+            if process::signals::has_interrupting_signal_now(caller) {
+                fifo_release(key, read, write);
+                return -(crate::syscall::EINTR as i64);
+            }
+            process::table().lock().get_mut(&caller).unwrap().state =
+                ProcState::Blocked(BlockReason::Polling(u64::MAX));
+            scheduler::schedule();
+        }
+    }
+
+    let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
+    FIFO_ENDS.lock().insert(real_fd, FifoEnd { key, read, write });
+    if nonblock {
+        crate::fs::fd::set_nonblocking(real_fd, true);
+    }
+    let read_op = if read { fifo_read as FdOp } else { read_denied };
+    let write_op = if write { fifo_write as FdOp } else { write_denied };
+    crate::fs::fd::oxidebsd_register_fd_ops(real_fd, read_op, write_op, fifo_close) as i64
+}
+
+type FdOp = extern "C" fn(u64, u64, u64) -> i64;
+
+/// Drops one open end's counts; the last one out takes the buffer with it.
+fn fifo_release(key: u64, read: bool, write: bool) {
+    let mut fifos = FIFOS.lock();
+    let Some(fifo) = fifos.get_mut(&key) else {
+        return;
+    };
+    if read {
+        fifo.readers -= 1;
+    }
+    if write {
+        fifo.writers -= 1;
+    }
+    fifo_changed(fifo);
+    if fifo.readers == 0 && fifo.writers == 0 {
+        let pipe_id = fifo.pipe_id;
+        fifos.remove(&key);
+        PIPES.lock().remove(&pipe_id);
+    }
+}
+
+fn fifo_pipe(real_fd: u64) -> Option<u64> {
+    let key = FIFO_ENDS.lock().get(&real_fd)?.key;
+    Some(FIFOS.lock().get(&key)?.pipe_id)
+}
+
+extern "C" fn fifo_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+    match fifo_pipe(real_fd) {
+        Some(pipe_id) => blocking_read(pipe_id, ptr, len, real_fd),
+        None => -EBADF,
+    }
+}
+
+extern "C" fn fifo_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
+    match fifo_pipe(real_fd) {
+        Some(pipe_id) => write_into(pipe_id, ptr, len, real_fd),
+        None => -EBADF,
+    }
+}
+
+extern "C" fn fifo_close(real_fd: u64) -> i64 {
+    let Some(end) = FIFO_ENDS.lock().remove(&real_fd) else {
+        return -EBADF;
+    };
+    fifo_release(end.key, end.read, end.write);
+    0
 }
