@@ -1,0 +1,79 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt TTYS 5
+.Os OxideBSD
+.Sh NAME
+.Nm ttys
+.Nd terminal initialization information
+.Sh DESCRIPTION
+.Pa /etc/ttys
+lists the terminals on which
+.Xr init 8
+runs login sessions.
+Each line describes one terminal with these fields, separated by blanks:
+.Bl -tag -width indent
+.It Ar name
+The terminal's device name, relative to
+.Pa /dev .
+.It Ar getty
+The command
+.Xr init 8
+runs on the terminal, normally
+.Dq Pa /usr/libexec/getty Ar type ;
+the terminal's name is added as its last argument.
+It must be quoted if it contains blanks.
+.Cm none
+runs nothing.
+.It Ar type
+The terminal type, set as
+.Ev TERM
+for the session.
+.It Ar status
+.Cm on
+to run the command,
+.Cm off
+not to,
+.Cm onifexists
+to run it only if the device exists, or
+.Cm onifconsole
+only if the terminal is the system console.
+.El
+.Pp
+Any further words are flags:
+.Bl -tag -width indent
+.It Cm secure
+The superuser may log in on this terminal, and single-user mode does not ask
+for root's password.
+.It Cm insecure
+The opposite of
+.Cm secure ,
+and the default.
+.It Cm window Ns = Ns Ar command
+A command to run before
+.Ar getty .
+.It Cm group Ns = Ns Ar name
+Put the terminal in a group, for use by other programs.
+.El
+.Pp
+A
+.Ql #
+begins a comment, which runs to the end of the line.
+.Sh FILES
+.Bl -tag -width /etc/ttys -compact
+.It Pa /etc/ttys
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+console	none			unknown	off	insecure
+ttyv0	"/usr/libexec/getty Pc"	linux	on	insecure
+ttyu1	"/usr/libexec/getty 3wire"	vt100	onifexists	insecure
+.Ed
+.Sh SEE ALSO
+.Xr emergency 8 ,
+.Xr getty 8 ,
+.Xr init 8
+.Sh HISTORY
+A
+.Nm
+file appeared in
+.At v6 .

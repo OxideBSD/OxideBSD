@@ -1,0 +1,141 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt SHUTDOWN 8
+.Os OxideBSD
+.Sh NAME
+.Nm shutdown
+.Nd close down the system at a given time
+.Sh SYNOPSIS
+.Nm
+.Op Fl
+.Op Fl h | p | r | k
+.Op Fl o Op Fl n
+.Ar time
+.Op Ar warning-message ...
+.Nm
+.Fl C
+.Sh DESCRIPTION
+The
+.Nm
+utility takes the system down at
+.Ar time ,
+warning its users beforehand.
+It waits in the background, recording its process ID in
+.Pa /var/run/shutdown.pid .
+Warnings go to the system console at 10, 5 and 2 hours, 1 hour, 45, 30,
+20, 15, 10, 5, 3, 2 and 1 minutes, and 30 seconds before the time, together
+with
+.Ar warning-message .
+Five minutes before, it creates
+.Pa /var/run/nologin ,
+after which
+.Xr login 1
+refuses users other than the superuser.
+.Pp
+At
+.Ar time
+it asks
+.Xr init 8
+to stop the system: to reboot with
+.Fl r ,
+halt with
+.Fl h ,
+power off with
+.Fl p ,
+and with none of them, to take the system to single-user mode.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl
+Read the warning message from the standard input, after any given on the
+command line.
+.It Fl C
+Cancel the pending shutdown.
+.It Fl h
+Halt the system.
+.It Fl k
+Warn users and disable logins, but do not stop the system.
+.Pa /var/run/nologin
+is left in place.
+.It Fl n
+With
+.Fl o ,
+do not synchronize the file systems.
+.It Fl o
+Run
+.Xr reboot 8
+.Fl q
+instead of asking
+.Xr init 8 ,
+so no services are stopped.
+Requires
+.Fl h ,
+.Fl p
+or
+.Fl r .
+.It Fl p
+Power the system off.
+.It Fl r
+Reboot the system.
+.El
+.Pp
+.Ar time
+is one of:
+.Bl -tag -width indent
+.It Cm now
+Immediately.
+.It Cm + Ns Ar minutes
+That many minutes from now.
+.It Ar hh Ns Cm \&: Ns Ar mm
+Today at that time.
+.It Oo Oo Oo Oo Oo Ar cc Oc Ns Ar yy Oc Ns Ar mm Oc Ns Ar dd Oc Ns Ar hh Oc Ns Ar mm
+An absolute time; omitted fields keep their current values, and a
+two-digit year below 69 is in the 21st century.
+.El
+.Pp
+A time in the past is an error.
+Only one shutdown may be pending; sending it
+.Dv SIGINT
+or
+.Dv SIGTERM ,
+as
+.Fl C
+does, cancels it and removes
+.Pa /var/run/nologin .
+Only the superuser may use
+.Nm .
+.Sh FILES
+.Bl -tag -width /var/run/shutdown.pid -compact
+.It Pa /var/run/nologin
+tells
+.Xr login 1
+not to admit users
+.It Pa /var/run/shutdown.pid
+the pending shutdown
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Reboot in 10 minutes, then change your mind:
+.Bd -literal -offset indent
+# shutdown -r +10 "installing a new kernel"
+# shutdown -C
+.Ed
+.Sh SEE ALSO
+.Xr login 1 ,
+.Xr init 8 ,
+.Xr rc 8 ,
+.Xr reboot 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Bx 4.0 .
+This implementation was written for OxideBSD.
+The
+.Fl C
+option is OxideBSD's;
+.Fl c
+remains reserved for power cycling, as in
+.Fx ,
+which OxideBSD does not support.

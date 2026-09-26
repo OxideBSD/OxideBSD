@@ -1,0 +1,54 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt EMERGENCY 8
+.Os OxideBSD
+.Sh NAME
+.Nm emergency
+.Nd repair a system whose init keeps dying
+.Sh SYNOPSIS
+.Nm /sbin/emergency
+.Sh DESCRIPTION
+When process 1 ends, the kernel records why and starts it again.
+If it ends three times within 30 seconds, the kernel stops restarting it
+and runs
+.Nm
+as process 1 instead.
+.Pp
+.Nm
+lists each recorded end of process 1 \(em its time, and its exit status or
+the signal that killed it, with the faulting address \(em and offers two
+choices: a root shell to repair the system, or restarting the computer.
+When the shell exits,
+.Nm
+exits too, and the kernel starts
+.Xr init 8
+again, in recovery mode.
+.Pp
+If the console is marked
+.Cm insecure
+in
+.Xr ttys 5 ,
+the shell requires root's password, unless root has none.
+.Pp
+The kernel runs
+.Nm
+from a copy built into the kernel, so it works even if
+.Pa /sbin
+is damaged.
+.Sh FILES
+.Bl -tag -width /proc/initdeaths -compact
+.It Pa /proc/initdeaths
+the kernel's record of process 1's ends, one per line:
+.Ar seconds Cm exit Ar status ,
+or
+.Ar seconds Cm signal Ar number
+.Op Cm ip Ar address Op Cm addr Ar address
+.El
+.Sh SEE ALSO
+.Xr ttys 5 ,
+.Xr init 8
+.Sh HISTORY
+The
+.Nm
+program first appeared in OxideBSD.
+Other BSDs halt the system when process 1 exits.

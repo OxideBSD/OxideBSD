@@ -7724,6 +7724,20 @@ fn format_fresh_filesystem() -> bool {
     let usr_lib = ensure_dir(usr, b"lib");
     ok &= seed_tree(usr_lib, MUSL_LIB_FILES);
     let usr_share = ensure_dir(usr, b"share");
+    // mdoc(7) manual pages, from the source tree's share/man.
+    let usr_share_man = ensure_dir(usr_share, b"man");
+    let man_man5 = ensure_dir(usr_share_man, b"man5");
+    ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
+    ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
+    let man_man8 = ensure_dir(usr_share_man, b"man8");
+    ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
+    ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
+    ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
+    ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));
+    ok &= seed_file(man_man8, b"reboot.8", include_bytes!("../../../../share/man/man8/reboot.8"));
+    ok &= seed_hardlink(man_man8, b"halt.8", b"reboot.8");
+    ok &= seed_hardlink(man_man8, b"poweroff.8", b"reboot.8");
+    ok &= seed_file(man_man8, b"shutdown.8", include_bytes!("../../../../share/man/man8/shutdown.8"));
     let usr_share_mk = ensure_dir(usr_share, b"mk");
     ok &= seed_tree(usr_share_mk, BMAKE_MK_FILES);
 

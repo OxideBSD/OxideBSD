@@ -1,0 +1,141 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt RC 8
+.Os OxideBSD
+.Sh NAME
+.Nm rc ,
+.Nm rc.shutdown ,
+.Nm rc.d
+.Nd system startup and shutdown scripts
+.Sh SYNOPSIS
+.Nm /sbin/init_sh /etc/rc Op Cm autoboot
+.Nm /sbin/init_sh /etc/rc.shutdown
+.Nm /etc/rc.d/ Ns Ar service Ar command
+.Sh DESCRIPTION
+.Pa /etc/rc
+starts the system's services when it comes up to multi-user mode.
+.Xr init 8
+runs it with the argument
+.Cm autoboot
+when the system boots unattended.
+It loads the settings in
+.Xr rc.conf 5 ,
+orders the scripts in
+.Pa /etc/rc.d
+and
+.Pa /usr/local/etc/rc.d
+with
+.Xr rcorder 8 ,
+leaving out those with the keyword
+.Cm nostart ,
+and runs each with the command
+.Cm faststart
+.Po
+.Cm quietstart
+when not booting
+.Pc .
+A script that fails is reported on the console and the boot continues; only
+a failure of
+.Pa /etc/rc
+itself makes
+.Xr init 8
+fall back to single-user mode.
+.Pp
+.Pa /etc/rc.shutdown
+stops services before the system goes down.
+It runs the scripts that have the keyword
+.Cm shutdown ,
+in the reverse of their start order, with the command
+.Cm faststop .
+.Xr init 8
+stops it after
+.Va rcshutdown_timeout
+seconds.
+.Pp
+Each script in
+.Pa /etc/rc.d
+manages one service, and is run by
+.Xr init_sh 8 .
+It may be written with the
+.Xr rc.subr 8
+functions, in the style of
+.Fx
+scripts, or as an
+.Xr init_sh 8
+service block.
+Its commands are
+.Bl -tag -width indent
+.It Cm start
+Start the service, if it is enabled in
+.Xr rc.conf 5 .
+.It Cm stop
+Stop the service.
+.It Cm restart
+Stop the service, then start it.
+.It Cm status
+Report whether the service is running; exit 0 if it is.
+.It Cm rcvar
+Print the
+.Xr rc.conf 5
+variable that enables the service, and its value.
+.It Cm enabled
+Exit 0 if the service is enabled.
+.El
+.Pp
+A script may define more commands.
+A command may be prefixed with
+.Cm one ,
+to run it even if the service is disabled;
+.Cm force ,
+to also ignore failed preconditions;
+.Cm quiet ,
+to omit some messages; or
+.Cm fast ,
+to skip the check for an already running service.
+.Pp
+The scripts
+.Pa FILESYSTEMS ,
+.Pa NETWORKING ,
+.Pa SERVERS ,
+.Pa DAEMON
+and
+.Pa LOGIN
+do nothing; they provide points in the boot that other scripts can require.
+.Sh FILES
+.Bl -tag -width /etc/defaults/rc.conf -compact
+.It Pa /etc/rc
+the startup script
+.It Pa /etc/rc.shutdown
+the shutdown script
+.It Pa /etc/rc.d/
+the base system's service scripts
+.It Pa /usr/local/etc/rc.d/
+service scripts for added software
+.It Pa /etc/rc.conf
+settings; see
+.Xr rc.conf 5
+.It Pa /etc/defaults/rc.conf
+default settings
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# /etc/rc.d/hostname status
+# /etc/rc.d/cron onestart
+.Ed
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr ttys 5 ,
+.Xr init 8 ,
+.Xr init_sh 8 ,
+.Xr rc.subr 8 ,
+.Xr rcorder 8 ,
+.Xr shutdown 8
+.Sh HISTORY
+The
+.Nm
+script appeared in
+.At v6 .
+The
+.Pa rc.d
+system first appeared in
+.Nx 1.5 .

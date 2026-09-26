@@ -624,7 +624,7 @@ fn main() {
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
-    for seeded in ["etc", "regress/rc-syscall-smoke/run.sh"] {
+    for seeded in ["etc", "share/man", "regress/rc-syscall-smoke/run.sh"] {
         println!(
             "cargo:rerun-if-changed={}",
             Path::new(env!("CARGO_MANIFEST_DIR")).join(seeded).display()

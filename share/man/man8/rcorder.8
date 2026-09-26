@@ -1,0 +1,116 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt RCORDER 8
+.Os OxideBSD
+.Sh NAME
+.Nm rcorder
+.Nd print a dependency ordering of interdependent files
+.Sh SYNOPSIS
+.Nm
+.Op Fl gp
+.Op Fl k Ar keep
+.Op Fl s Ar skip
+.Ar
+.Sh DESCRIPTION
+The
+.Nm
+utility reads the dependency declarations of the named files, which are
+normally the scripts in
+.Pa /etc/rc.d ,
+and prints the files so that every file appears after all files it depends
+on.
+.Xr rc 8
+uses it to decide the order in which services start.
+.Pp
+A file declares its dependencies in one of two ways.
+Classic
+.Xr rc.subr 8
+scripts use comment lines at the top of the file:
+.Bd -literal -offset indent
+# PROVIDE: cron
+# REQUIRE: LOGIN FILESYSTEMS
+# BEFORE:  securelevel
+# KEYWORD: shutdown
+.Ed
+.Pp
+The lines must be contiguous; the first other line after them ends the
+header.
+Scripts written in the
+.Xr init_sh 8
+dialect instead declare a service block, whose
+.Ic provide ,
+.Ic require ,
+.Ic before
+and
+.Ic keyword
+fields have the same meanings:
+.Bd -literal -offset indent
+service cron {
+	require LOGIN FILESYSTEMS
+	keyword shutdown
+}
+.Ed
+.Pp
+A service block that has no
+.Ic provide
+field provides its own name.
+The block is parsed but never run.
+A set of files may mix both forms.
+.Pp
+.Dq PROVIDE
+names the conditions a file provides,
+.Dq REQUIRE
+the conditions that must be provided first, and
+.Dq BEFORE
+conditions that must come after this file.
+Several files may provide the same condition; a file requiring it comes
+after all of them.
+Files not otherwise constrained keep the order given on the command line.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl g
+Print the dependency graph in the
+.Xr dot 1
+language instead of a list.
+Edges point in the order files run; edges removed to break a cycle, and
+requirements nobody provides, are drawn in red.
+.It Fl k Ar keep
+Print only files that have the keyword
+.Ar keep .
+May be given more than once, to keep files having any of the keywords.
+.It Fl p
+Print files that may run at the same time on one line.
+Each line depends only on lines before it.
+.It Fl s Ar skip
+Do not print files that have the keyword
+.Ar skip .
+May be given more than once.
+.El
+.Pp
+Filtered files are still used to order the others.
+.Sh EXIT STATUS
+The
+.Nm
+utility exits 0 on success, and 1 if a file cannot be read or the
+dependencies contain a cycle.
+A cycle is broken where it is found and reported, and a complete order is
+still printed, so the system can boot.
+A requirement that no file provides is reported but is not an error.
+.Sh EXAMPLES
+Print the order in which services start, and the ones stopped at shutdown:
+.Bd -literal -offset indent
+$ rcorder /etc/rc.d/*
+$ rcorder -k shutdown /etc/rc.d/*
+.Ed
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr init_sh 8 ,
+.Xr rc 8 ,
+.Xr rc.subr 8
+.Sh HISTORY
+An
+.Nm
+utility first appeared in
+.Nx 1.5 .
+This implementation was written for OxideBSD.

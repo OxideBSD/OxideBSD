@@ -1,0 +1,81 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt REBOOT 8
+.Os OxideBSD
+.Sh NAME
+.Nm reboot ,
+.Nm halt ,
+.Nm poweroff
+.Nd stop, restart or power off the system
+.Sh SYNOPSIS
+.Nm
+.Op Fl lnpq
+.Nm halt
+.Op Fl lnpq
+.Nm poweroff
+.Op Fl lnq
+.Sh DESCRIPTION
+The
+.Nm ,
+.Nm halt
+and
+.Nm poweroff
+utilities restart the system, stop it, or turn the power off.
+They are one program; its name selects the action.
+.Pp
+By default the request goes to
+.Xr init 8 ,
+which runs
+.Pa /etc/rc.shutdown ,
+terminates every process, synchronizes the file systems and then carries
+it out.
+The request is a signal to process 1:
+.Dv SIGINT
+to restart,
+.Dv SIGUSR1
+to halt, and
+.Dv SIGUSR2
+to power off.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl l
+Accepted for compatibility; there is no system log to suppress.
+.It Fl n
+With
+.Fl q ,
+do not synchronize the file systems first.
+.It Fl p
+Power off instead of restarting or halting.
+.It Fl q
+Do not involve
+.Xr init 8 :
+synchronize the file systems and call
+.Xr reboot 2
+at once.
+No services are stopped and no process is warned.
+.El
+.Pp
+Only the superuser may use these utilities.
+.Sh EXIT STATUS
+.Ex -std
+On success with
+.Fl q
+nothing returns.
+.Sh SEE ALSO
+.Xr reboot 2 ,
+.Xr init 8 ,
+.Xr rc 8 ,
+.Xr shutdown 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.At v6 .
+This implementation was written for OxideBSD.
+.Sh BUGS
+Until
+.Pa /sbin/init
+runs as process 1, only
+.Fl q
+restarts or stops the system.

@@ -1,0 +1,182 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt RC.SUBR 8
+.Os OxideBSD
+.Sh NAME
+.Nm rc.subr
+.Nd functions for rc.d scripts
+.Sh SYNOPSIS
+.Li .\& /etc/rc.subr
+.Pp
+.Nm checkyesno Ar var
+.Nm check_pidfile Ar pidfile procname
+.Nm check_process Ar procname
+.Nm debug Ar message
+.Nm err Ar exitval message
+.Nm force_depend Ar script Op Ar var
+.Nm info Ar message
+.Nm load_rc_config Op Ar name
+.Nm run_rc_command Ar command Op Ar argument ...
+.Nm wait_for_pids Ar pid ...
+.Nm warn Ar message
+.Sh DESCRIPTION
+The functions of
+.Fx Ns 's
+.Nm
+are built into
+.Xr init_sh 8 ,
+so that
+.Xr rc 8
+scripts written for it run unchanged.
+.Li .\& /etc/rc.subr
+is accepted and has no effect in
+.Xr init_sh 8 ;
+a script started by any other shell re-runs itself under
+.Xr init_sh 8 .
+.Pp
+A typical script:
+.Bd -literal -offset indent
+#!/sbin/init_sh
+#
+# PROVIDE: food
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+\&. /etc/rc.subr
+
+name="food"
+rcvar="food_enable"
+command="/usr/sbin/food"
+pidfile="/var/run/food.pid"
+
+load_rc_config $name
+run_rc_command "$1"
+.Ed
+.Bl -tag -width indent
+.It Ic checkyesno Ar var
+Exit 0 if the variable
+.Ar var
+is
+.Dq YES ,
+.Dq TRUE ,
+.Dq ON
+or
+.Dq 1 ,
+and 1 if it is
+.Dq NO ,
+.Dq FALSE ,
+.Dq OFF
+or
+.Dq 0 ,
+in any case.
+Any other value is reported and counts as no.
+.It Ic check_pidfile Ar pidfile procname
+Print the process ID in
+.Ar pidfile
+if that process exists and is running
+.Ar procname .
+.It Ic check_process Ar procname
+Print the IDs of the processes running
+.Ar procname .
+.It Ic debug Ar message
+Print
+.Ar message
+on the standard error if
+.Va rc_debug
+is enabled.
+.It Ic err Ar exitval message
+Print
+.Ar message
+on the standard error and exit with status
+.Ar exitval .
+.It Ic force_depend Ar script
+Start the service
+.Pa /etc/rc.d/ Ns Ar script
+if it is not running, whether or not it is enabled.
+.It Ic info Ar message
+Print
+.Ar message
+if
+.Va rc_info
+is enabled.
+.It Ic load_rc_config Op Ar name
+Load
+.Pa /etc/defaults/rc.conf
+and the files in
+.Va rc_conf_files ,
+once, and then
+.Pa /etc/rc.conf.d/ Ns Ar name
+if it exists.
+The files are read, not run: see
+.Xr rc.conf 5 .
+.It Ic run_rc_command Ar command Op Ar argument ...
+Carry out
+.Ar command ,
+as described in
+.Xr rc 8 ,
+using the variables below.
+.It Ic wait_for_pids Ar pid ...
+Wait until the processes have exited.
+.It Ic warn Ar message
+Print
+.Ar message
+on the standard error.
+.El
+.Pp
+.Ic run_rc_command
+uses these variables:
+.Bl -tag -width indent
+.It Va name
+The service's name.
+Required.
+.It Va rcvar
+The
+.Xr rc.conf 5
+variable enabling the service.
+If empty, the service is always enabled.
+.It Va command
+The program to start, followed by
+.Va ${name}_flags
+from
+.Xr rc.conf 5
+(or
+.Va flags )
+and
+.Va command_args .
+.Va ${name}_program
+overrides it.
+.It Va pidfile
+The file holding the running service's process ID.
+.It Va procname
+The program name that identifies the running service; defaults to
+.Va command .
+.It Va sig_stop
+The signal that stops the service; default
+.Dv TERM .
+.It Va extra_commands
+Commands besides the standard ones.
+.It Va required_dirs , required_files
+Must exist for the service to start.
+.It Va ${command}_cmd
+Replaces the built-in handling of
+.Ar command .
+.It Va ${command}_precmd , ${command}_postcmd
+Run before and after
+.Ar command .
+A failing
+.Va _precmd
+stops the command.
+.El
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr init_sh 8 ,
+.Xr rc 8 ,
+.Xr rcorder 8
+.Sh HISTORY
+.Nm
+first appeared in
+.Nx 1.3 .
+These built-ins were written for OxideBSD.
+.Sh BUGS
+.Va ${name}_user
+is not supported yet.

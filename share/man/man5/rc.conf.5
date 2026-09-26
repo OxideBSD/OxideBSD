@@ -1,0 +1,126 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 25, 2026
+.Dt RC.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm rc.conf
+.Nd system configuration for rc
+.Sh DESCRIPTION
+.Pa /etc/rc.conf
+holds the settings that
+.Xr rc 8
+and the
+.Pa rc.d
+scripts use: which services start, and with what options.
+Every setting and its default is listed in
+.Pa /etc/defaults/rc.conf ,
+which is read first and should not be edited;
+.Pa /etc/rc.conf ,
+then
+.Pa /etc/rc.conf.local
+if it exists, override it.
+Settings for one service may also be put in
+.Pa /etc/rc.conf.d/ Ns Ar service .
+.Pp
+Each line is an assignment,
+.Ar name Ns = Ns Ar value ,
+or a comment.
+The values are shell words: quoted, and may refer to other settings with
+.Li ${ Ns Ar name Ns } .
+The files are read, not run: any other line is reported with its file and
+line number, and ignored.
+.Pp
+A service
+.Ar foo
+starts only if
+.Va foo_enable
+is
+.Dq YES .
+The values of
+.Va *_enable
+and
+.Va *_restart
+must be
+.Dq YES ,
+.Dq NO ,
+.Dq TRUE ,
+.Dq FALSE ,
+.Dq ON ,
+.Dq OFF ,
+.Dq 1
+or
+.Dq 0 ,
+in any case; any other value is reported and counts as
+.Dq NO .
+.Va foo_flags
+adds options to the service's command, and
+.Va foo_program
+replaces the command.
+.Pp
+The settings:
+.Bl -tag -width indent
+.It Va rc_conf_files
+The files read after
+.Pa /etc/defaults/rc.conf .
+Default:
+.Dq Pa /etc/rc.conf /etc/rc.conf.local .
+.It Va rc_info
+Print informational messages from the scripts.
+.It Va rc_debug
+Print debugging messages from the scripts.
+.It Va rc_startmsgs
+Print
+.Dq Starting Ar foo .
+messages during the boot.
+.It Va rcshutdown_timeout
+Seconds
+.Pa /etc/rc.shutdown
+may take before
+.Xr init 8
+stops it.
+Default 90.
+.It Va hostname
+The host's name.
+If empty, the kernel's default,
+.Dq oxidebsd ,
+is kept.
+.It Va tmpmfs
+Mount a memory file system on
+.Pa /tmp :
+.Dq YES ,
+.Dq NO ,
+or
+.Dq AUTO
+(the default), which mounts one only if
+.Pa /tmp
+is not writable.
+.It Va tmpmfs_flags
+Extra
+.Xr mount 8
+options for it.
+.It Va cleanvar_enable
+Remove the files in
+.Pa /var/run
+at boot.
+.El
+.Sh FILES
+.Bl -tag -width /etc/defaults/rc.conf -compact
+.It Pa /etc/rc.conf
+.It Pa /etc/rc.conf.local
+.It Pa /etc/rc.conf.d/
+.It Pa /etc/defaults/rc.conf
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+hostname="shed.example.org"
+cron_enable="YES"
+cron_flags="-J 15"
+.Ed
+.Sh SEE ALSO
+.Xr rc 8 ,
+.Xr rc.subr 8
+.Sh HISTORY
+The
+.Nm
+file appeared in
+.Fx 2.2.2 .
