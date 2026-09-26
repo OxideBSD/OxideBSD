@@ -10,7 +10,8 @@ use x86_64::VirtAddr;
 
 use crate::serial_println;
 
-use super::{EBADF, EINVAL, ENOTTY, EPERM, EPROTONOSUPPORT, ffi_result_to_result};
+use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, EPROTONOSUPPORT, ffi_result_to_result};
+use crate::process::SIGPIPE;
 
 /// Reads up to `len` bytes into `ptr` from `fd` — a pure lookup into `crate::fs::fd`'s registry now,
 /// for *every* fd including 0/1/2 (see `sys/fs/fd.rs`'s module doc comment for why stdin/stdout/
@@ -28,8 +29,20 @@ pub(crate) fn sys_read(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
 /// *every* fd including 0/1/2 (see `sys/fs/fd.rs`'s module doc comment; stdout/stderr's own
 /// UTF-8-checked `serial_print!` path lives in that file's `stdout_write` now, not here). `EBADF`
 /// if `fd` isn't registered at all.
+///
+/// A write that fails `EPIPE` (a pipe, FIFO, socketpair or TCP connection with no reader left)
+/// also raises `SIGPIPE` at the caller, as POSIX requires; `EPIPE` is still returned for a caller
+/// that ignores, blocks or catches it. Skipped for pid 0 (kernel context), where `kill`'s target
+/// `0` would mean a process group.
 pub(crate) fn sys_write(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
     match crate::fs::fd::write(fd, ptr, len) {
+        Some(raw) if raw == -(EPIPE as i64) => {
+            let pid = crate::process::scheduler::current_pid();
+            if pid != 0 {
+                let _ = crate::process::signals::do_kill(pid, pid as i64, SIGPIPE as i64);
+            }
+            Err(EPIPE)
+        }
         Some(raw) => ffi_result_to_result(raw),
         None => Err(EBADF),
     }

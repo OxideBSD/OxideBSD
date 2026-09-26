@@ -4,7 +4,8 @@
  * POSIX: open()/pipe()/dup()/socket() return the lowest fd the process doesn't have open, and
  * F_DUPFD the lowest one >= its argument. A FIFO's open() waits for the other side (unless
  * O_NONBLOCK: then a reader opens at once and a lone writer gets ENXIO), readers see EOF once
- * every writer closes, and unread data goes away with the last close.
+ * every writer closes, and unread data goes away with the last close. Writing to a pipe with no
+ * reader raises SIGPIPE, and fails EPIPE when SIGPIPE is ignored.
  *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
@@ -150,13 +151,48 @@ static void fifos(void)
 	CHECK(open(FIFO, O_WRONLY | O_NONBLOCK) == -1 && errno == ENXIO,
 	      "an interrupted open leaves no reader behind");
 
+	/* A process killed while blocked in open() mustn't leave its reader count behind. */
+	pid = fork();
+	if (pid == 0) {
+		open(FIFO, O_RDONLY);
+		_exit(1);
+	}
+	usleep(200 * 1000);
+	kill(pid, SIGKILL);
+	waitpid(pid, &status, 0);
+	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "blocked opener was killed");
+	CHECK(open(FIFO, O_WRONLY | O_NONBLOCK) == -1 && errno == ENXIO,
+	      "a killed opener leaves no reader behind");
+
 	CHECK(unlink(FIFO) == 0, "unlink FIFO");
+}
+
+static void sigpipe(void)
+{
+	int p[2];
+	pipe(p);
+	close(p[0]);
+	pid_t pid = fork();
+	if (pid == 0) {
+		write(p[1], "x", 1);
+		_exit(0);
+	}
+	int status;
+	waitpid(pid, &status, 0);
+	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGPIPE,
+	      "writing to a pipe with no reader raises SIGPIPE");
+
+	signal(SIGPIPE, SIG_IGN);
+	CHECK(write(p[1], "x", 1) == -1 && errno == EPIPE, "with SIGPIPE ignored, write fails EPIPE");
+	signal(SIGPIPE, SIG_DFL);
+	close(p[1]);
 }
 
 int main(void)
 {
 	fd_numbering();
 	fifos();
+	sigpipe();
 	printf("fd-smoke: %d failure(s)\n", failures);
 	return failures;
 }

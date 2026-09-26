@@ -24,7 +24,8 @@ use oxidebsd::limine_entry_point;
 use oxidebsd::net::udp::{oxidebsd_sys_recvfrom, oxidebsd_sys_sendto, oxidebsd_sys_socket};
 use oxidebsd::net::{ipv4, rtl8139};
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
-use oxidebsd::{interrupts, serial_println};
+use oxidebsd::cpu::interrupts;
+use oxidebsd::serial_println;
 
 limine_entry_point!(main);
 

@@ -403,13 +403,13 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
     // Wake any process blocked in `process::do_nanosleep` (`BlockReason::Sleeping`) whose deadline
     // has now passed -- same "IRQ handler reaches directly into `process::table()`" shape
     // `crate::console::stdin::push_byte`'s own `wake_blocked_readers` already established for
-    // `WaitingForStdin`, just driven by this timer IRQ instead of the keyboard one. Safe for the
-    // same reason that one is: every other place `process::table()` is locked either runs inside a
-    // `SYSCALL` (where `SFMASK` clears `IF` for the syscall's entire duration) or inside
-    // `scheduler::schedule()`'s own `without_interrupts` section -- this lock can never be held by
-    // code this interrupt could actually preempt.
-    {
-        let mut table = crate::process::table().lock();
+    // `WaitingForStdin`, just driven by this timer IRQ instead of the keyboard one. A syscall
+    // (`SFMASK` clears `IF`) or `schedule()` (`without_interrupts`) can't be interrupted holding
+    // this lock, but kernel-context code running with interrupts on can: boot's `spawn`, or a test
+    // calling a handler directly as pid 0. Spinning here would then deadlock the only core (found
+    // live: `tests/poll_smoke.rs`), so a contended tick skips this bookkeeping -- every deadline is
+    // `now >= deadline`, so the next tick catches up.
+    if let Some(mut table) = crate::process::table().try_lock() {
         // Real per-process CPU-time accounting (`Process::cpu_ticks`, see its own doc comment) --
         // the process this tick actually interrupted is the one that was consuming the CPU for it.
         // `current_pid() == 0` only at boot, before any real process exists.

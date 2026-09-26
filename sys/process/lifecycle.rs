@@ -1732,6 +1732,8 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
     // `other_thread_alive` branch just below) can have forked real children of its own under its
     // own real pid.
     reparent_orphans(pid);
+    // A process killed while blocked in a FIFO open() still holds that open's reader/writer count.
+    crate::fs::pipe::abandon_fifo_open(pid);
     // Real CLONE_THREAD semantics: only the whole thread group ever generates a wait4-visible
     // zombie, not each individual thread (a real pthread_join never goes through wait4 at all --
     // see process::lifecycle::do_clone's own doc comment). A plain scan for any *other* live

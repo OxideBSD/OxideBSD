@@ -126,7 +126,12 @@ fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
     let pid = crate::process::scheduler::current_pid();
     {
         let mut table = crate::process::table().lock();
-        let proc = table.get_mut(&pid).expect("poll: current process missing from table");
+        let Some(proc) = table.get_mut(&pid) else {
+            // Kernel context (pid 0: boot code, or a test calling this directly) has no process
+            // to block; spin once and let the caller re-check against its TSC deadline.
+            core::hint::spin_loop();
+            return Ok(());
+        };
         if crate::process::signals::has_interrupting_signal(proc) {
             return Err(-(EINTR as i64));
         }

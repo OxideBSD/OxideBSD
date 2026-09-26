@@ -514,6 +514,9 @@ struct FifoEnd {
 static FIFOS: Mutex<BTreeMap<u64, Fifo>> = Mutex::new(BTreeMap::new());
 /// Keyed by `real_fd`, like `PIPE_ENDS`.
 static FIFO_ENDS: Mutex<BTreeMap<u64, FifoEnd>> = Mutex::new(BTreeMap::new());
+/// Opens blocked in `oxidebsd_fifo_open`, by pid: they already count as a reader/writer, which
+/// `abandon_fifo_open` gives back if the process dies before the open returns.
+static FIFO_OPENING: Mutex<BTreeMap<process::Pid, FifoEnd>> = Mutex::new(BTreeMap::new());
 
 /// Syncs a FIFO's buffer flags with its open counts and wakes everything that might care: blocked
 /// readers/writers and anyone waiting in `fifo_open` or `poll` (both block as `Polling`).
@@ -572,6 +575,7 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
 
     if wait_for_writer || wait_for_reader {
         let caller = scheduler::current_pid();
+        FIFO_OPENING.lock().insert(caller, FifoEnd { key, read, write });
         loop {
             {
                 let fifos = FIFOS.lock();
@@ -583,6 +587,7 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
                 }
             }
             if process::signals::has_interrupting_signal_now(caller) {
+                FIFO_OPENING.lock().remove(&caller);
                 fifo_release(key, read, write);
                 return -(crate::syscall::EINTR as i64);
             }
@@ -590,6 +595,7 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
                 ProcState::Blocked(BlockReason::Polling(u64::MAX));
             scheduler::schedule();
         }
+        FIFO_OPENING.lock().remove(&caller);
     }
 
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
@@ -603,6 +609,14 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
 }
 
 type FdOp = extern "C" fn(u64, u64, u64) -> i64;
+
+/// Called when `pid` terminates: undoes a FIFO open it was still blocked in.
+pub(crate) fn abandon_fifo_open(pid: process::Pid) {
+    let opening = FIFO_OPENING.lock().remove(&pid);
+    if let Some(end) = opening {
+        fifo_release(end.key, end.read, end.write);
+    }
+}
 
 /// Drops one open end's counts; the last one out takes the buffer with it.
 fn fifo_release(key: u64, read: bool, write: bool) {
