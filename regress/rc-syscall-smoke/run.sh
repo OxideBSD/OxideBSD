@@ -48,6 +48,7 @@ check "rcorder exits 1 on a cycle" not rcorder /tmp/rcd/a /tmp/rcd/b
 # --- /etc/rc --------------------------------------------------------------------------------
 echo 'hostname="rcsmoke"' > /etc/rc.conf.local
 : > /var/run/stale.pid
+: > /etc/nologin
 out=$(/sbin/init_sh /etc/rc autoboot 2>&1)
 status=$?
 echo "$out"
@@ -56,6 +57,7 @@ check "rc reports no failures" not contains "$out" "failed"
 check "rc.d/hostname sets the host name" [ "$(uname -n)" = rcsmoke ]
 check "rc.d/hostname says so" contains "$out" "Setting hostname: rcsmoke."
 check "rc.d/cleanvar empties /var/run" [ ! -e /var/run/stale.pid ]
+check "rc.d/cleanvar removes a stale /etc/nologin" [ ! -e /etc/nologin ]
 
 # --- rc.subr built-ins, through a classic rc.d script -----------------------------------------
 cat > /etc/rc.d/smoked <<'EOF'
@@ -108,15 +110,15 @@ check "shutdown -C with nothing pending fails" not shutdown -C
 check "shutdown rejects a bad time" not shutdown -r 25:00
 check "shutdown -r +5 goes to the background" shutdown -r +5 "rc smoke test"
 check "and records its pid" eventually [ -s /var/run/shutdown.pid ]
-check "and blocks logins inside five minutes" eventually [ -e /var/run/nologin ]
+check "and blocks logins inside five minutes" eventually [ -e /etc/nologin ]
 check "a second shutdown is refused" not shutdown -h +10
 check "shutdown -C cancels it" shutdown -C
 check "the pid file goes away" eventually [ ! -e /var/run/shutdown.pid ]
-check "and so does nologin" eventually [ ! -e /var/run/nologin ]
+check "and so does nologin" eventually [ ! -e /etc/nologin ]
 out=$(shutdown -k now "just kidding" 2>&1)
 check "shutdown -k warns" contains "$out" "just kidding"
-check "shutdown -k leaves logins blocked" [ -e /var/run/nologin ]
-rm -f /var/run/nologin
+check "shutdown -k leaves logins blocked" [ -e /etc/nologin ]
+rm -f /etc/nologin
 
 # --- reboot / halt / poweroff (argument handling only: success would end the test) ---------
 check "reboot rejects an unknown flag" not reboot -x

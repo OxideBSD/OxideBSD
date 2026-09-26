@@ -27,7 +27,7 @@ Warnings go to the system console at 10, 5 and 2 hours, 1 hour, 45, 30,
 with
 .Ar warning-message .
 Five minutes before, it creates
-.Pa /var/run/nologin ,
+.Pa /etc/nologin ,
 after which
 .Xr login 1
 refuses users other than the superuser.
@@ -55,7 +55,7 @@ Cancel the pending shutdown.
 Halt the system.
 .It Fl k
 Warn users and disable logins, but do not stop the system.
-.Pa /var/run/nologin
+.Pa /etc/nologin
 is left in place.
 .It Fl n
 With
@@ -101,12 +101,12 @@ or
 as
 .Fl C
 does, cancels it and removes
-.Pa /var/run/nologin .
+.Pa /etc/nologin .
 Only the superuser may use
 .Nm .
 .Sh FILES
 .Bl -tag -width /var/run/shutdown.pid -compact
-.It Pa /var/run/nologin
+.It Pa /etc/nologin
 tells
 .Xr login 1
 not to admit users

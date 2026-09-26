@@ -7,7 +7,7 @@
 . /etc/rc.subr
 
 name="cleanvar"
-desc="Remove stale files from /var/run"
+desc="Remove stale files from /var/run, and /etc/nologin"
 rcvar="cleanvar_enable"
 start_cmd="cleanvar_start"
 stop_cmd=":"
@@ -26,8 +26,10 @@ purge()
 
 cleanvar_start()
 {
-	# Pid files, shutdown(8)'s nologin: nothing in /var/run outlives a boot.
+	# Pid files and session records: nothing in /var/run outlives a boot.
 	[ -d /var/run ] && purge /var/run
+	# Left by a shutdown(8) that never finished.
+	rm -f /etc/nologin
 	return 0
 }
 

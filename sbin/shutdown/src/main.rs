@@ -7,7 +7,7 @@
 //!
 //! `time` is `now`, `+minutes`, `hh:mm`, or `[[[[[cc]yy]mm]dd]hh]mm`. Until then, shutdown waits
 //! in the background (its pid recorded in `/var/run/shutdown.pid`), printing warnings to the
-//! console on FreeBSD's schedule and creating `/var/run/nologin` five minutes beforehand. At the
+//! console on FreeBSD's schedule and creating `/etc/nologin` five minutes beforehand. At the
 //! time, it signals init (INIT.md §6): `-r` reboot, `-h` halt, `-p` power off, and with none of
 //! them, single-user mode. `-o` runs `reboot -q` itself instead of asking init, `-n` (with `-o`)
 //! skips synchronizing storage, and `-k` only warns and blocks logins. `-C` cancels a pending
@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const PIDFILE: &str = "/var/run/shutdown.pid";
-const NOLOGIN: &str = "/var/run/nologin";
+const NOLOGIN: &str = "/etc/nologin";
 /// How long before the deadline logins are refused.
 const NOLOGIN_LEAD: i64 = 5 * 60;
 /// Seconds before the deadline at which the console is warned (FreeBSD's schedule).
@@ -212,7 +212,6 @@ fn warn(host: &str, deadline: i64, message: &str) {
 }
 
 fn nologin(deadline: i64, message: &str) {
-    let _ = std::fs::create_dir_all("/var/run");
     let _ = std::fs::write(NOLOGIN, format!("\n\nNO LOGINS: System going down at {}\n\n{message}\n", hhmm(deadline)));
 }
 
