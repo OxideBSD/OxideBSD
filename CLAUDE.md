@@ -60,7 +60,8 @@ user before large structural commitments.
 
 ## Git workflow
 
-- Work directly on `master`; no feature branches (the `v0.N.x` release branches stay).
+- Work directly on `master`; no feature branches. Release branches stay: `v0.2.x` still gets fixes,
+  `v0.1.x` is end-of-life (kept, never updated).
 - Before a risky change (a large refactor, anything touching many files, or a history/working-tree
   operation), commit what's there first so it can be recovered. Never `git stash` as a shortcut;
   read old versions with `git show <rev>:<path>`.
