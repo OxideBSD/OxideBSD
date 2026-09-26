@@ -1,0 +1,21 @@
+#!/sbin/init_sh
+#
+# PROVIDE: hostname
+# REQUIRE: FILESYSTEMS
+
+. /etc/rc.subr
+
+name="hostname"
+desc="Set the system's host name"
+start_cmd="hostname_start"
+stop_cmd=":"
+
+hostname_start()
+{
+	[ -n "$hostname" ] || return 0
+	hostname "$hostname" || return 1
+	echo "Setting hostname: $hostname."
+}
+
+load_rc_config $name
+run_rc_command "$1"

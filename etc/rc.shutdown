@@ -1,0 +1,26 @@
+#!/sbin/init_sh
+#
+# /etc/rc.shutdown: stops services before the system goes down (rc(8), INIT.md §10). init runs
+# it as `/sbin/init_sh /etc/rc.shutdown` and stops it after $rcshutdown_timeout seconds. Only
+# scripts with the `shutdown` keyword are stopped, in the reverse of their start order.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+HOME=/
+export PATH HOME
+
+load_rc_config
+
+_scripts=
+for _f in /etc/rc.d/* /usr/local/etc/rc.d/*; do
+	[ -f "$_f" ] && _scripts="$_scripts $_f"
+done
+
+_reversed=
+for _rc_elem in $(rcorder -k shutdown $_scripts); do
+	_reversed="$_rc_elem $_reversed"
+done
+for _rc_elem in $_reversed; do
+	/sbin/init_sh "$_rc_elem" faststop
+done
+
+exit 0

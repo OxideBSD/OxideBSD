@@ -228,6 +228,7 @@ fn main() {
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -289,6 +290,13 @@ fn main() {
 
     // Extends the real std consumer proof into std::thread, signals, and std::net -- see
     // regress/std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
+    // The kernel's supervision of pid 1 -- see tests/init_respawn_smoke.rs.
+    build_std_oxidebsd_userland_crate(
+        "regress/std/init-respawn-smoke",
+        "INIT_RESPAWN_SMOKE_ELF_PATH",
+        &musl_sysroot,
+    );
+
     let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "regress/std/std-thread-net-signal-oxidebsd",
         "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
@@ -316,6 +324,13 @@ fn main() {
         build_std_oxidebsd_userland_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
         build_std_oxidebsd_userland_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
+    // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
+    let emergency_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/emergency", "OXFS_EMERGENCY_ELF_PATH", &musl_sysroot);
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libttyent/src").display()
+    );
 
     // Derisk check for the fbdoom/doomgeneric port -- see regress/float-smoke/main.c's own doc
     // comment.
@@ -501,6 +516,7 @@ fn main() {
         ("OXFS_RCORDER_ELF_PATH", rcorder_elf_path.to_str().unwrap()),
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
+        ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),
@@ -607,6 +623,13 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
+    // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
+    for seeded in ["etc", "regress/rc-syscall-smoke/run.sh"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(seeded).display()
+        );
+    }
     build_module_crate("oxfs", "OXFS", &oxfs_extra_env);
 
     // Real disk persistence (see sys/drivers/ata.rs and sys/modules/oxfs's own "Real disk persistence"

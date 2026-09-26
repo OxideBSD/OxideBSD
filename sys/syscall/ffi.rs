@@ -1119,11 +1119,35 @@ struct RawUtsname {
     domainname: [u8; 65],
 }
 
-fn utsname_field(s: &str) -> [u8; 65] {
+/// The host name, NUL-terminated as `struct utsname` holds it; `oxidebsd` until
+/// `/etc/rc.d/hostname` sets one.
+static HOSTNAME: spin::Mutex<[u8; 65]> = spin::Mutex::new(utsname_field("oxidebsd"));
+
+/// `SYS_SETHOSTNAME` (576, registered by `sys/modules/posix_compat`): `sethostname(name, len)`.
+/// Root only; at most 64 bytes, as Linux and the BSDs' `MAXHOSTNAMELEN - 1` allow.
+pub(crate) fn sys_sethostname(name_ptr: u64, len: u64) -> Result<u64, u64> {
+    if crate::process::identity::oxidebsd_current_uid() != 0 {
+        return Err(EPERM);
+    }
+    if len > 64 {
+        return Err(EINVAL);
+    }
+    let mut field = [0u8; 65];
+    // SAFETY: the same unvalidated-user-pointer gap every other copy in this file has.
+    let name = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len as usize) };
+    field[..name.len()].copy_from_slice(name);
+    *HOSTNAME.lock() = field;
+    Ok(0)
+}
+
+const fn utsname_field(s: &str) -> [u8; 65] {
     let mut field = [0u8; 65];
     let bytes = s.as_bytes();
-    let len = bytes.len().min(64);
-    field[..len].copy_from_slice(&bytes[..len]);
+    let mut i = 0;
+    while i < bytes.len() && i < 64 {
+        field[i] = bytes[i];
+        i += 1;
+    }
     field
 }
 
@@ -1133,16 +1157,15 @@ fn utsname_field(s: &str) -> [u8; 65] {
 /// derived-argument computation from the pointer the way `open`'s `strlen` needed, so no
 /// argument-convention patch was needed on the musl side beyond the usual number remap).
 ///
-/// Every field is a fixed placeholder — this kernel has no real hostname-configuration mechanism
-/// (`nodename` is a constant, not settable via a `sethostname(2)` this ABI doesn't have) and no
-/// real build-timestamp source (`version` is a plausible-looking, hand-picked string, not derived
+/// `nodename` is the host name `sethostname(2)` set (`HOSTNAME`). The other fields are fixed
+/// placeholders -- this kernel has no real build-timestamp source (`version` is a plausible-looking, hand-picked string, not derived
 /// from anything). `release` is the one field that isn't fully static: it's this crate's own
 /// `CARGO_PKG_VERSION`, so bumping `Cargo.toml`'s `version` moves what `uname -a`/`uname -r`
 /// reports without touching this function again.
 pub(crate) fn sys_uname(uts_ptr: u64) -> Result<u64, u64> {
     let uts = RawUtsname {
         sysname: utsname_field("OxideBSD"),
-        nodename: utsname_field("oxidebsd"),
+        nodename: *HOSTNAME.lock(),
         release: utsname_field(env!("CARGO_PKG_VERSION")),
         version: utsname_field("#1 SMP PREEMPT"),
         machine: utsname_field("x86_64"),
@@ -1952,6 +1975,10 @@ pub(crate) extern "C" fn oxidebsd_sys_get_keyevent(out_ptr: u64) -> i64 {
 
 pub(crate) extern "C" fn oxidebsd_sys_uname(uts_ptr: u64) -> i64 {
     result_to_ffi(sys_uname(uts_ptr))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_sethostname(name_ptr: u64, len: u64) -> i64 {
+    result_to_ffi(sys_sethostname(name_ptr, len))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_clock_gettime(clockid: u64, ts_ptr: u64) -> i64 {

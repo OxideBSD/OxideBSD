@@ -1,0 +1,32 @@
+#!/sbin/init_sh
+#
+# PROVIDE: tmp
+# BEFORE: FILESYSTEMS
+
+. /etc/rc.subr
+
+name="tmp"
+desc="Mount a tmpfs on /tmp"
+start_cmd="tmp_start"
+stop_cmd=":"
+
+tmp_start()
+{
+	case "$tmpmfs" in
+	[Aa][Uu][Tt][Oo])
+		# Only when /tmp can't be written to.
+		if (: > /tmp/.rc.tmp) 2>/dev/null; then
+			rm -f /tmp/.rc.tmp
+			return 0
+		fi
+		;;
+	*)
+		checkyesno tmpmfs || return 0
+		;;
+	esac
+	mount -t tmpfs $tmpmfs_flags tmpfs /tmp || return 1
+	chmod 1777 /tmp
+}
+
+load_rc_config $name
+run_rc_command "$1"

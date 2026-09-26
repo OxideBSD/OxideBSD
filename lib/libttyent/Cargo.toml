@@ -1,0 +1,10 @@
+[package]
+name = "ttyent"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# /etc/ttys (ttys(5)), shared by init, login and emergency: FreeBSD's getttyent(3). Its own
+# workspace, testable on the host (.cargo/config.toml), like lib/libsh.
+[workspace]

@@ -893,6 +893,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_sys_dup" => Some(crate::syscall::oxidebsd_sys_dup as *const () as u64),
         "oxidebsd_sys_uname" => Some(crate::syscall::oxidebsd_sys_uname as *const () as u64),
+        "oxidebsd_sys_sethostname" => Some(crate::syscall::oxidebsd_sys_sethostname as *const () as u64),
         "oxidebsd_sys_socketpair" => {
             Some(crate::syscall::oxidebsd_sys_socketpair as *const () as u64)
         }
@@ -936,6 +937,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_proc_cmdline" => Some(crate::process::oxidebsd_proc_cmdline as *const () as u64),
         "oxidebsd_proc_status" => Some(crate::process::oxidebsd_proc_status as *const () as u64),
         "oxidebsd_proc_meminfo" => Some(crate::process::oxidebsd_proc_meminfo as *const () as u64),
+        "oxidebsd_proc_initdeaths" => Some(crate::process::init::oxidebsd_proc_initdeaths as *const () as u64),
         "oxidebsd_proc_uptime" => Some(crate::process::oxidebsd_proc_uptime as *const () as u64),
         "oxidebsd_proc_stat_global" => {
             Some(crate::process::oxidebsd_proc_stat_global as *const () as u64)

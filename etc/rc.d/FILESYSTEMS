@@ -1,0 +1,5 @@
+#!/sbin/init_sh
+#
+# PROVIDE: FILESYSTEMS
+#
+# A placeholder: services that need the file systems mounted REQUIRE this.

@@ -57,12 +57,56 @@ pub const DEFAULT_ENVP: &[&[u8]] = &[
 /// `spawn` with an explicit `argv` and `envp` (the real boot's pid 1, `/bin/sh` as a login
 /// shell, needs `argv[0] = "-sh"` and `HOME`).
 pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &[&[u8]]) -> Result<Pid, SpawnError> {
+    // Boot-time only: the active address space is the kernel's own, with nothing in user space.
     let phys_offset = memory::phys_mem_offset();
-
-    // Boot-time only: no syscall caller to report a real ENOMEM to, and no recovery from pid 1
-    // itself failing to start -- see KernelStack::new's own doc comment (sys/process/mod.rs).
     let address_space = with_frame_allocator(|fa| AddressSpace::new(phys_offset, fa))
-        .expect("out of memory allocating a new address space's level 4 table");
+        .map_err(|()| SpawnError::OutOfMemory)?;
+    spawn_into(address_space, None, elf_bytes, parent, argv, envp)
+}
+
+/// Starts a new parentless process with pid `pid` (which must be free) while other processes
+/// run: the kernel's restart of pid 1 (`process::init`). Unlike `spawn_with`, safe from any
+/// process's context.
+pub(crate) fn spawn_as(pid: Pid, elf_bytes: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> Result<Pid, SpawnError> {
+    let phys_offset = memory::phys_mem_offset();
+    let address_space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
+        .map_err(|()| SpawnError::OutOfMemory)?;
+    spawn_into(address_space, Some(pid), elf_bytes, None, argv, envp)
+}
+
+fn spawn_into(
+    address_space: AddressSpace,
+    pid: Option<Pid>,
+    elf_bytes: &[u8],
+    parent: Option<Pid>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<Pid, SpawnError> {
+    let phys_offset = memory::phys_mem_offset();
+    let loaded = load_image(&address_space, elf_bytes, argv, envp);
+    let (elf, entry, initial_rsp) = match loaded {
+        Ok(l) => l,
+        Err(e) => {
+            // SAFETY: never activated, so not the current CR3.
+            with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
+            return Err(e);
+        }
+    };
+    let Ok(kernel_stack) = KernelStack::new() else {
+        with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
+        return Err(SpawnError::OutOfMemory);
+    };
+    spawn_finish(address_space, kernel_stack, pid, &elf, entry, initial_rsp, parent)
+}
+
+/// Loads the program and builds its initial user stack in a not-yet-active address space.
+fn load_image<'a>(
+    address_space: &AddressSpace,
+    elf_bytes: &'a [u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<(Elf<'a>, VirtAddr, VirtAddr), SpawnError> {
+    let phys_offset = memory::phys_mem_offset();
     // SAFETY: phys_offset is the bootloader's phys-memory mapping; this is the only live view of
     // address_space's own (not-yet-active) level 4 table right now.
     let mut mapper = unsafe { address_space.mapper(phys_offset) };
@@ -72,12 +116,9 @@ pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &
         .map_err(SpawnError::Elf)?;
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
-    // Boot-time only -- same reasoning as address_space's own `.expect()` just above.
     let mapped_pages =
-        map_user_stack(&mut mapper, stack_top, user_stack_pages())
-            .expect("out of memory mapping a user stack");
-    crate::process::fault_trampoline::map(&mut mapper, phys_offset)
-        .expect("out of memory mapping the fault trampoline page");
+        map_user_stack(&mut mapper, stack_top, user_stack_pages()).map_err(|()| SpawnError::OutOfMemory)?;
+    crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|()| SpawnError::OutOfMemory)?;
     let initial_rsp = crate::process::user_stack::build(
         &elf,
         argv,
@@ -89,8 +130,19 @@ pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &
         None,
         0, // boot spawn always loads pid 1 at bias 0 -- see this file's own elf::load call above
     );
+    Ok((elf, entry, initial_rsp))
+}
 
-    let pid = alloc_pid();
+fn spawn_finish(
+    address_space: AddressSpace,
+    kernel_stack: KernelStack,
+    pid: Option<Pid>,
+    elf: &Elf,
+    entry: VirtAddr,
+    initial_rsp: VirtAddr,
+    parent: Option<Pid>,
+) -> Result<Pid, SpawnError> {
+    let pid = pid.unwrap_or_else(alloc_pid);
     // No parent to inherit a process group from (spawn doesn't inherit anything else from parent
     // either -- cwd/fs_base/brk all start fresh too) -- becomes its own group leader, same
     // convention as a real init/session leader.
@@ -99,9 +151,6 @@ pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &
     // for `/proc/1/stat`'s `(comm)` field than reusing that same "(init)" placeholder verbatim.
     let comm = b"hush".to_vec();
     let cmdline = build_cmdline(&[b"(init)"]);
-    // Boot-time only: no syscall caller to report a real ENOMEM to, and no recovery from pid 1
-    // itself failing to start -- see KernelStack::new's own doc comment.
-    let kernel_stack = KernelStack::new().expect("out of memory allocating a kernel stack");
     let kernel_stack_top = kernel_stack.top();
     let rsp = crate::process::context_switch::seed_spawn_frame(kernel_stack_top);
 
@@ -1838,6 +1887,14 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
         Some(me) if matches!(me.state, ProcState::Zombie(_)) => return, // already dead
         Some(me) => me.state = ProcState::Zombie(code),
         None => return,
+    }
+    // The system's init: the kernel records the death and starts pid 1 again (INIT.md §9).
+    if tgid == INIT_PID {
+        drop(table);
+        if crate::process::init::pid1_died(pid, code) {
+            return;
+        }
+        table = PROCESS_TABLE.lock();
     }
     // Real hardening, found live: `do_kill`'s cross-process `Action::Terminate` branch (a default-
     // disposition signal killing a target this process didn't just switch away from) can target a

@@ -1,0 +1,6 @@
+#!/sbin/init_sh
+#
+# PROVIDE: LOGIN
+# REQUIRE: DAEMON
+#
+# A placeholder: services that must run before users can log in come BEFORE this.

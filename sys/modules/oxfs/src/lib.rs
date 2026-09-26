@@ -139,6 +139,7 @@ unsafe extern "C" {
     fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_meminfo(buf_ptr: *mut u8, buf_cap: u64) -> i64;
+    fn oxidebsd_proc_initdeaths(buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_uptime(buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_stat_global(buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_modules(buf_ptr: *mut u8, buf_cap: u64) -> i64;
@@ -3031,7 +3032,7 @@ fn open_proc_root_dir() -> i64 {
             out.push_bytes(b"\n");
             i += 1;
         }
-        out.push_bytes(b"meminfo\nuptime\nstat\nmodules\n");
+        out.push_bytes(b"meminfo\nuptime\nstat\nmodules\nmounts\ninitdeaths\n");
         out.len
     };
     register_open_file(OpenFile::ProcDir {
@@ -3126,6 +3127,8 @@ enum ProcSysFile {
     Stat,
     Modules,
     Mounts,
+    /// Why pid 1 died, each time the kernel restarted it (INIT.md §9).
+    InitDeaths,
 }
 
 /// Formats `MOUNTS` as standard mtab-shaped lines (`<source> <target> <fstype> <opts> 0 0`) for
@@ -3178,6 +3181,9 @@ fn open_proc_sysfile(kind: ProcSysFile) -> i64 {
                 }
                 ProcSysFile::Modules => {
                     oxidebsd_proc_modules(content.as_mut_ptr(), PROC_BUFFER as u64)
+                }
+                ProcSysFile::InitDeaths => {
+                    oxidebsd_proc_initdeaths(content.as_mut_ptr(), PROC_BUFFER as u64)
                 }
                 ProcSysFile::Mounts => unreachable!(),
             }
@@ -3235,6 +3241,7 @@ fn proc_open(suffix: &[u8]) -> i64 {
         b"/stat" => return open_proc_sysfile(ProcSysFile::Stat),
         b"/modules" => return open_proc_sysfile(ProcSysFile::Modules),
         b"/mounts" => return open_proc_sysfile(ProcSysFile::Mounts),
+        b"/initdeaths" => return open_proc_sysfile(ProcSysFile::InitDeaths),
         _ => {}
     }
     let mut comps = suffix.split(|&b| b == b'/').filter(|c| !c.is_empty());
@@ -3291,7 +3298,7 @@ fn proc_open(suffix: &[u8]) -> i64 {
 /// doesn't need.
 fn proc_kind(suffix: &[u8]) -> Option<bool> {
     match suffix {
-        b"/meminfo" | b"/uptime" | b"/stat" | b"/modules" | b"/mounts" => return Some(false),
+        b"/meminfo" | b"/uptime" | b"/stat" | b"/modules" | b"/mounts" | b"/initdeaths" => return Some(false),
         _ => {}
     }
     let mut comps = suffix.split(|&b| b == b'/').filter(|c| !c.is_empty());
@@ -6176,7 +6183,7 @@ fn proc_dir_nth_entry(kind: ProcDirKind, n: usize) -> Option<(u64, [u8; NAME_MAX
         ProcDirKind::Root => {
             // The system-wide files come first (indices 0..SYS_NAMES.len()), so no live-pid count
             // needs computing up front -- pid entries simply start right after them.
-            const SYS_NAMES: [&[u8]; 4] = [b"meminfo", b"uptime", b"stat", b"modules"];
+            const SYS_NAMES: [&[u8]; 6] = [b"meminfo", b"uptime", b"stat", b"modules", b"mounts", b"initdeaths"];
             if let Some(name_bytes) = SYS_NAMES.get(n) {
                 let mut name = [0u8; NAME_MAX];
                 name[..name_bytes.len()].copy_from_slice(name_bytes);
@@ -7073,6 +7080,8 @@ fn format_fresh_filesystem() -> bool {
     let usr_tests = ensure_dir(usr, b"tests");
 
     ok &= seed_file(usr_tests, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
+    let usr_tests_rc = ensure_dir(usr_tests, b"rc");
+    ok &= seed_file(usr_tests_rc, b"run.sh", include_bytes!("../../../../regress/rc-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
     ok &= seed_file(
         usr_tests,
@@ -7566,6 +7575,24 @@ fn format_fresh_filesystem() -> bool {
     dir_insert(etc, b"..", root).expect("oxfs: failed to seed /etc's .. entry");
     dir_insert(root, b"etc", etc).expect("oxfs: failed to insert /etc into root");
     ok &= seed_file(etc, b"resolv.conf", b"nameserver 10.0.2.3\n");
+    // rc(8): the boot and shutdown scripts and the rc.d services, from the source tree's etc/
+    // (INIT.md in OxideBSD-doc).
+    ok &= seed_file(etc, b"rc", include_bytes!("../../../../etc/rc"));
+    ok &= seed_file(etc, b"rc.shutdown", include_bytes!("../../../../etc/rc.shutdown"));
+    ok &= seed_file(etc, b"rc.subr", include_bytes!("../../../../etc/rc.subr"));
+    ok &= seed_file(etc, b"rc.conf", include_bytes!("../../../../etc/rc.conf"));
+    ok &= seed_file(etc, b"ttys", include_bytes!("../../../../etc/ttys"));
+    let etc_defaults = ensure_dir(etc, b"defaults");
+    ok &= seed_file(etc_defaults, b"rc.conf", include_bytes!("../../../../etc/defaults/rc.conf"));
+    let rc_d = ensure_dir(etc, b"rc.d");
+    ok &= seed_file(rc_d, b"FILESYSTEMS", include_bytes!("../../../../etc/rc.d/FILESYSTEMS"));
+    ok &= seed_file(rc_d, b"NETWORKING", include_bytes!("../../../../etc/rc.d/NETWORKING"));
+    ok &= seed_file(rc_d, b"SERVERS", include_bytes!("../../../../etc/rc.d/SERVERS"));
+    ok &= seed_file(rc_d, b"DAEMON", include_bytes!("../../../../etc/rc.d/DAEMON"));
+    ok &= seed_file(rc_d, b"LOGIN", include_bytes!("../../../../etc/rc.d/LOGIN"));
+    ok &= seed_file(rc_d, b"cleanvar", include_bytes!("../../../../etc/rc.d/cleanvar"));
+    ok &= seed_file(rc_d, b"hostname", include_bytes!("../../../../etc/rc.d/hostname"));
+    ok &= seed_file(rc_d, b"tmp", include_bytes!("../../../../etc/rc.d/tmp"));
     // /etc/passwd + /etc/group -- musl's own getpwnam/getpwuid/getgrnam/getgrgid
     // (external/mit/musl/src/passwd/*.c) parse these directly via plain fopen/fgets, no syscall of
     // their own beyond the open/read/readv this filesystem already supports -- same "port libc's
@@ -7629,6 +7656,12 @@ fn format_fresh_filesystem() -> bool {
     // convention -- `oxfs_unlink` now real-enforces the sticky bit (see that function's own doc
     // comment, found live via `shm_unlink/8-1.c`/`9-1.c` against `/dev/shm` below), but every
     // caller in this pilot runs as root anyway, which bypasses permission bits entirely regardless.
+    // /var: /var/run for pid files and shutdown(8)'s nologin (emptied at boot by rc.d/cleanvar),
+    // /var/log for logs.
+    let var = ensure_dir(root, b"var");
+    ensure_dir(var, b"run");
+    ensure_dir(var, b"log");
+
     let tmp = ensure_dir(root, b"tmp");
     {
         let mut inode = read_inode(tmp);
@@ -7683,6 +7716,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(sbin, b"halt", b"reboot");
     ok &= seed_hardlink(sbin, b"poweroff", b"reboot");
     ok &= seed_file(sbin, b"shutdown", include_bytes!(env!("OXFS_SHUTDOWN_ELF_PATH")));
+    ok &= seed_file(sbin, b"emergency", include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH")));
 
     let usr = ensure_dir(root, b"usr");
     let usr_include = ensure_dir(usr, b"include");

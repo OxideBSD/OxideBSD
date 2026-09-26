@@ -1213,6 +1213,7 @@ pub(crate) fn wake_pollers(table: &mut BTreeMap<Pid, Box<Process>>) {
 #[derive(Debug)]
 pub enum SpawnError {
     Elf(elf::ElfError),
+    OutOfMemory,
 }
 
 pub use identity::*;
@@ -1229,6 +1230,7 @@ pub use timers::*;
 pub(crate) use procfs::*;
 
 pub mod identity;
+pub mod init;
 pub mod lifecycle;
 pub mod limits;
 pub mod mm;

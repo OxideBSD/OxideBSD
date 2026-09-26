@@ -1,0 +1,6 @@
+#
+# /etc/rc.subr: FreeBSD's rc.subr(8) functions are built into /sbin/init_sh (INIT_SH.md §4.7),
+# which ignores `. /etc/rc.subr`. A script started by any other shell re-runs itself under
+# init_sh.
+#
+command -v run_rc_command >/dev/null 2>&1 || exec /sbin/init_sh "$0" "$@"

@@ -40,6 +40,29 @@ pub fn parse(source: &str) -> Result<List> {
     Ok(list)
 }
 
+/// Parses a complete script into its top-level items, each with the line it starts on -- for
+/// diagnostics about individual statements (`rc.conf` loading, INIT_SH.md §4.6).
+pub fn parse_lines(source: &str) -> Result<Vec<(usize, ListItem)>> {
+    let mut p = Parser::new(source);
+    let mut items = Vec::new();
+    loop {
+        p.skip_newlines()?;
+        if *p.peek()? == Token::Eof {
+            return Ok(items);
+        }
+        let line = p.token_line()?;
+        let and_or = p.and_or()?;
+        let background = p.peek_op(Op::Amp)?;
+        items.push((line, ListItem { and_or, background }));
+        match p.peek()? {
+            Token::Op(Op::Semi | Op::Amp) | Token::Newline => {
+                p.next()?;
+            }
+            _ => p.expect_eof()?,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Token {
     Word(Word, String),
@@ -175,6 +198,13 @@ impl Parser {
 
     fn peek_op(&mut self, op: Op) -> Result<bool> {
         Ok(*self.peek()? == Token::Op(op))
+    }
+
+    /// The 1-based line of the current token.
+    fn token_line(&mut self) -> Result<usize> {
+        self.peek()?;
+        let start = self.peeked.as_ref().unwrap().1;
+        Ok(self.error_at(start, "").line)
     }
 
     fn skip_newlines(&mut self) -> Result<()> {
@@ -998,12 +1028,6 @@ impl Parser {
 
 #[cfg(feature = "init-dialect")]
 impl Parser {
-    /// The 1-based line of the current token.
-    fn token_line(&mut self) -> Result<usize> {
-        self.peek()?;
-        let start = self.peeked.as_ref().unwrap().1;
-        Ok(self.error_at(start, "").line)
-    }
 
     /// `service NAME { field... hook... }` (INIT_SH.md §4.1). In the init dialect `service` is a
     /// reserved word in command position.

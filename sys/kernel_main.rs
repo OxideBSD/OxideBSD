@@ -217,10 +217,24 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // (`argv[0]` starting with `-`: it reads /etc/profile and ~/.profile). BusyBox hush, pid 1
     // before it, is still seeded as /bin/hush.
     const SH_ELF: &[u8] = include_bytes!(env!("OXFS_SH_ELF_PATH"));
+    const DEFAULT_ENVP: &[&[u8]] = crate::process::lifecycle::DEFAULT_ENVP;
+    const SH_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], DEFAULT_ENVP[2], b"HOME=/"];
+    const SH_ARGV: &[&[u8]] = &[b"-sh"];
+    const EMERGENCY_ARGV: &[&[u8]] = &[b"/sbin/emergency"];
+    const EMERGENCY_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], b"HOME=/"];
+    // What the kernel starts if pid 1 keeps dying (INIT.md §9.4).
+    const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
+    crate::process::init::register(
+        crate::process::init::InitProgram { elf: SH_ELF, argv: SH_ARGV, restart_argv: SH_ARGV, envp: SH_ENVP },
+        crate::process::init::InitProgram {
+            elf: EMERGENCY_ELF,
+            argv: EMERGENCY_ARGV,
+            restart_argv: EMERGENCY_ARGV,
+            envp: EMERGENCY_ENVP,
+        },
+    );
     serial_println!("[boot] spawning /bin/sh as pid 1 ({} byte ELF)", SH_ELF.len());
-    let mut envp: alloc::vec::Vec<&[u8]> = crate::process::lifecycle::DEFAULT_ENVP.to_vec();
-    envp.push(b"HOME=/");
-    let pid1 = crate::process::lifecycle::spawn_with(SH_ELF, None, &[b"-sh"], &envp)
+    let pid1 = crate::process::lifecycle::spawn_with(SH_ELF, None, SH_ARGV, SH_ENVP)
         .unwrap_or_else(|e| panic!("failed to spawn /bin/sh: {e:?}"));
 
     crate::process::scheduler::start(pid1)

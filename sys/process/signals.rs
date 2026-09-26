@@ -52,7 +52,7 @@ pub(crate) fn force_fault_signal(pid: Pid, sig: u64) {
             proc.blocked_signals &= !(1 << (sig - 1));
         }
     }
-    let _ = do_kill(pid, pid as i64, sig as i64);
+    let _ = kill(pid, pid as i64, sig as i64, true);
 }
 
 /// Real POSIX thread-aware recipient selection for a process-directed `kill(pid, sig)` (or a
@@ -197,6 +197,12 @@ fn route_signal_target(table: &BTreeMap<Pid, Box<Process>>, target: Pid, sig: u6
 ///   has. `SIGCONT` gets its own pre-dispatch step *before* any of the above: an actually-`Stopped`
 ///   target always resumes regardless of its own `SIGCONT` disposition, real POSIX semantics.
 pub fn do_kill(caller_pid: Pid, target_pid: i64, sig: i64) -> Result<u64, u64> {
+    kill(caller_pid, target_pid, sig, false)
+}
+
+/// `do_kill`, where `fault` marks a signal the target's own faulting instruction generated:
+/// the only kind pid 1 can't refuse (INIT.md §9.1, `process::init::discards`).
+fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, u64> {
     if !((0..=34).contains(&sig) || (SIGRTMIN as i64..=SIGRTMAX as i64).contains(&sig)) {
         return Err(EINVAL);
     }
@@ -317,6 +323,9 @@ pub fn do_kill(caller_pid: Pid, target_pid: i64, sig: i64) -> Result<u64, u64> {
         let table = PROCESS_TABLE.lock();
         route_signal_target(&table, target, sig)
     };
+    if !fault && PROCESS_TABLE.lock().get(&target).is_some_and(|p| crate::process::init::discards(p, sig)) {
+        return Ok(0);
+    }
 
     if target == caller_pid {
         let mut table = PROCESS_TABLE.lock();
@@ -485,6 +494,9 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                 // never resolve its default disposition immediately, even with no handler
                 // installed.
                 let is_blocked = proc.blocked_signals & (1 << (sig - 1)) != 0;
+                if crate::process::init::discards(proc, sig) {
+                    return (pid, Action::Discard);
+                }
                 let action = match proc.shared.lock().sigactions[sig as usize].handler {
                     1 => Action::Discard, // SIG_IGN
                     0 if is_blocked => Action::SetPending,
@@ -1531,6 +1543,9 @@ pub fn do_sigqueue(
         let table = PROCESS_TABLE.lock();
         route_signal_target(&table, target, sig)
     };
+    if PROCESS_TABLE.lock().get(&target).is_some_and(|p| crate::process::init::discards(p, sig)) {
+        return Ok(0);
+    }
 
     if target == caller_pid {
         let mut table = PROCESS_TABLE.lock();

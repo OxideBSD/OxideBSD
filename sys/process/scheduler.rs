@@ -69,6 +69,12 @@ pub fn current_pid() -> Pid {
     CURRENT_PID.load(Ordering::Relaxed)
 }
 
+/// Renames the running process: used only when pid 1's exiting entry is moved to a fresh pid so
+/// a new pid 1 can start (`process::init`).
+pub(crate) fn set_current_pid(pid: Pid) {
+    CURRENT_PID.store(pid, Ordering::Relaxed);
+}
+
 /// The calling process's real POSIX thread-group id (`Process::tgid`) — what `fs::fd` (`CLONE_FILES`
 /// sharing) and `process::identity::do_getpid` both actually want, distinct from `current_pid()`'s
 /// raw schedulable pid once real `clone(2)`-created threads exist. Factors out the same

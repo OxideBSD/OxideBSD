@@ -53,12 +53,19 @@ pub fn lookup_special(name: &str) -> Option<Builtin> {
 }
 
 pub fn lookup_regular(name: &str) -> Option<Builtin> {
-    REGULAR.iter().find(|(n, _)| *n == name).map(|&(_, b)| b)
+    let found = REGULAR.iter().find(|(n, _)| *n == name).map(|&(_, b)| b);
+    #[cfg(feature = "init-dialect")]
+    let found = found.or_else(|| crate::rcsubr::lookup(name));
+    found
 }
 
 /// Every built-in's name, for completion.
 pub fn names() -> Vec<&'static str> {
-    SPECIAL.iter().chain(REGULAR).map(|&(n, _)| n).collect()
+    #[allow(unused_mut)]
+    let mut names: Vec<&'static str> = SPECIAL.iter().chain(REGULAR).map(|&(n, _)| n).collect();
+    #[cfg(feature = "init-dialect")]
+    names.extend(crate::rcsubr::names());
+    names
 }
 
 fn out(s: &str) {
@@ -86,6 +93,10 @@ fn hash(_: &mut Shell, _: &[String]) -> Exec {
 
 fn dot(sh: &mut Shell, args: &[String]) -> Exec {
     let Some(file) = args.get(1) else { return fatal(sh, ".: filename argument required") };
+    // rc.subr's functions are built in (INIT_SH.md §4.7); sourcing it is accepted and does nothing.
+    if cfg!(feature = "init-dialect") && file == "/etc/rc.subr" {
+        return Ok(0);
+    }
     let path = if file.contains('/') {
         file.clone()
     } else {

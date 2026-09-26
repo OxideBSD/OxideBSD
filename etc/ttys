@@ -1,0 +1,8 @@
+#
+# /etc/ttys: the terminals init runs login sessions on; see ttys(5).
+#
+# `insecure` means root may not log in there directly, and single-user mode asks for root's
+# password. Change it to `secure` only for a console nobody else can reach.
+#
+# name		getty				type	status		flags
+console		"/usr/libexec/getty"		linux	on		insecure

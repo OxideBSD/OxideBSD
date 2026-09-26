@@ -132,6 +132,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_get_keyevent(out_ptr: u64) -> i64;
     fn oxidebsd_sys_dup(oldfd: u64) -> i64;
     fn oxidebsd_sys_uname(uts_ptr: u64) -> i64;
+    fn oxidebsd_sys_sethostname(name_ptr: u64, len: u64) -> i64;
     fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64;
     fn oxidebsd_sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64;
     fn oxidebsd_sys_shutdown(fd: u64, how: u64) -> i64;
@@ -213,6 +214,9 @@ const SYS_SETSID: u64 = 112;
 const SYS_IOCTL: u64 = 124;
 const SYS_DUP: u64 = 125;
 const SYS_UNAME: u64 = 137;
+/// OxideBSD's own number (see `sys/syscall/ffi.rs`'s `sys_sethostname`); musl's
+/// `__NR_sethostname` is remapped to it.
+const SYS_SETHOSTNAME: u64 = 576;
 const SYS_SOCKETPAIR: u64 = 149;
 const SYS_FCNTL: u64 = 151;
 const SYS_SHUTDOWN: u64 = 152;
@@ -435,6 +439,10 @@ extern "C" fn handle_dup(oldfd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 
 
 extern "C" fn handle_uname(uts_ptr: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
     unsafe { oxidebsd_sys_uname(uts_ptr) }
+}
+
+extern "C" fn handle_sethostname(name_ptr: u64, len: u64, _arg2: u64, _arg3: u64) -> i64 {
+    unsafe { oxidebsd_sys_sethostname(name_ptr, len) }
 }
 
 extern "C" fn handle_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64 {
@@ -682,6 +690,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_GET_KEYEVENT, handle_get_keyevent);
         oxidebsd_register_syscall(SYS_DUP, handle_dup);
         oxidebsd_register_syscall(SYS_UNAME, handle_uname);
+        oxidebsd_register_syscall(SYS_SETHOSTNAME, handle_sethostname);
         oxidebsd_register_syscall(SYS_SOCKETPAIR, handle_socketpair);
         oxidebsd_register_syscall(SYS_FCNTL, handle_fcntl);
         oxidebsd_register_syscall(SYS_SHUTDOWN, handle_shutdown);

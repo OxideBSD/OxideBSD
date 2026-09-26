@@ -13,6 +13,8 @@ pub mod parse;
 pub mod pattern;
 mod printf;
 mod prompt;
+#[cfg(feature = "init-dialect")]
+pub mod rcsubr;
 pub mod shell;
 mod sys;
 mod test;

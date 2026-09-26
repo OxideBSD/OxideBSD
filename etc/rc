@@ -1,0 +1,37 @@
+#!/sbin/init_sh
+#
+# /etc/rc: the boot script (rc(8), INIT.md §4). init runs it as `/sbin/init_sh /etc/rc autoboot`.
+# Every rc.d script runs, in rcorder(8) order, with `faststart` (`quietstart` when rc is run by
+# hand). A failing script is reported and the boot goes on (INIT.md §4.6).
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+HOME=/
+export PATH HOME
+
+load_rc_config
+
+if [ "$1" = autoboot ]; then
+	_boot=faststart
+else
+	_boot=quietstart
+fi
+
+_scripts=
+for _f in /etc/rc.d/* /usr/local/etc/rc.d/*; do
+	[ -f "$_f" ] && _scripts="$_scripts $_f"
+done
+
+_failed=
+for _rc_elem in $(rcorder -s nostart $_scripts); do
+	/sbin/init_sh "$_rc_elem" $_boot
+	_status=$?
+	if [ $_status -ne 0 ]; then
+		echo "rc: ${_rc_elem##*/} failed (exit status $_status)" >&2
+		_failed="$_failed ${_rc_elem##*/}"
+	fi
+done
+[ -n "$_failed" ] && echo "rc: failed services:$_failed" >&2
+
+echo
+date
+exit 0

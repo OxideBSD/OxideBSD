@@ -1,0 +1,6 @@
+#!/sbin/init_sh
+#
+# PROVIDE: DAEMON
+# REQUIRE: NETWORKING SERVERS
+#
+# A placeholder: the point where ordinary daemons start.

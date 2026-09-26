@@ -196,6 +196,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(mut stack_frame: InterruptStack
         if pid != 0 {
             // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
             // comment for why a plain `do_kill` self-signal isn't safe here.
+            crate::process::init::note_fault(pid, stack_frame.instruction_pointer.as_u64(), None);
             crate::process::signals::force_fault_signal(pid, crate::process::SIGILL);
             // SAFETY: see page_fault_handler's own identical redirect.
             unsafe {
@@ -243,6 +244,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
                 error_code,
                 stack_frame.instruction_pointer.as_u64()
             );
+            crate::process::init::note_fault(pid, stack_frame.instruction_pointer.as_u64(), None);
             crate::process::signals::force_fault_signal(pid, crate::process::SIGSEGV);
             // SAFETY: see page_fault_handler's own identical redirect.
             unsafe {
@@ -321,6 +323,11 @@ extern "x86-interrupt" fn page_fault_handler(
             // reason `timer_interrupt_handler`'s own calls into `process::table()`/`scheduler`
             // already are (this interrupt gate runs with IF cleared, same single-core
             // non-reentrancy this whole file already relies on).
+            crate::process::init::note_fault(
+                pid,
+                stack_frame.instruction_pointer.as_u64(),
+                Some(fault_addr.as_u64()),
+            );
             crate::process::signals::force_fault_signal(pid, sig);
             // SAFETY: only the resume RIP is changed -- redirecting straight into a real,
             // kernel-mapped, user-executable trampoline page (see its own module doc comment).

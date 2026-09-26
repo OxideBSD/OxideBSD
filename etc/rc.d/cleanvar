@@ -1,0 +1,35 @@
+#!/sbin/init_sh
+#
+# PROVIDE: cleanvar
+# REQUIRE: tmp
+# BEFORE: FILESYSTEMS
+
+. /etc/rc.subr
+
+name="cleanvar"
+desc="Remove stale files from /var/run"
+rcvar="cleanvar_enable"
+start_cmd="cleanvar_start"
+stop_cmd=":"
+
+# Removes everything under a directory but the directories themselves.
+purge()
+{
+	for _f in "$1"/* "$1"/.[!.]*; do
+		if [ -d "$_f" ] && [ ! -L "$_f" ]; then
+			purge "$_f"
+		elif [ -e "$_f" ] || [ -L "$_f" ]; then
+			rm -f "$_f"
+		fi
+	done
+}
+
+cleanvar_start()
+{
+	# Pid files, shutdown(8)'s nologin: nothing in /var/run outlives a boot.
+	[ -d /var/run ] && purge /var/run
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"
