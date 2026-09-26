@@ -53,6 +53,19 @@ const F_SETFL: u64 = 4;
 const O_NONBLOCK: u64 = 0o4000;
 const SHUT_WR: u64 = 1;
 
+const SYS_SIGACTION: u64 = 117;
+const SIGPIPE: u64 = 13;
+const SIG_IGN: u64 = 1;
+
+/// Matches `sys/process/signals.rs`'s `do_sigaction`'s own `RawSigAction` wire format exactly.
+#[repr(C)]
+struct RawSigAction {
+    handler: u64,
+    flags: u64,
+    restorer: u64,
+    mask: u64,
+}
+
 /// Issues a syscall via `SYSCALL`; see `regress/stsh/src/main.rs`'s identical helper for the full
 /// doc comment (carry-flag convention, `rcx`/`r11` clobbered by `SYSCALL` itself). Delegates to
 /// `syscall4` with a zeroed 4th argument.
@@ -152,7 +165,11 @@ pub extern "C" fn _start() -> ! {
     }
     write_bytes(b"socketpair-syscall-smoke: fd1 -> fd0 direction verified -- full duplex\n");
 
-    // Closing one end: the peer's next read sees real EOF, its next write real EPIPE.
+    // Closing one end: the peer's next read sees real EOF, its next write real EPIPE. That write
+    // also raises SIGPIPE, whose default action would kill this process -- ignore it, as any
+    // program that wants EPIPE does.
+    let ignore = RawSigAction { handler: SIG_IGN, flags: 0, restorer: 0, mask: 0 };
+    let _ = unsafe { syscall4(SYS_SIGACTION, SIGPIPE, &ignore as *const RawSigAction as u64, 0, 8) };
     if unsafe { syscall(SYS_CLOSE, fd0, 0, 0) }.is_err() {
         write_bytes(b"socketpair-syscall-smoke: close(fd0) failed\n");
         test_exit(false);
