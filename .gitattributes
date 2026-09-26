@@ -1,0 +1,3 @@
+# Upstream trees committed as-is (no fork to submodule): keep them out of GitHub's language stats.
+lib/ncurses/** linguist-vendored
+usr.bin/make/** linguist-vendored
