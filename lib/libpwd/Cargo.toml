@@ -1,0 +1,10 @@
+[package]
+name = "pwd"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# Account records in the BSDs' master.passwd layout (passwd(5)), shared by pam_unix, login and
+# pwd_mkdb. Its own workspace, testable on the host (.cargo/config.toml).
+[workspace]

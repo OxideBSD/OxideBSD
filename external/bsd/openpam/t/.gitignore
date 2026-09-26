@@ -1,0 +1,8 @@
+/t_*.trs
+/t_openpam_ctype
+/t_openpam_dispatch
+/t_openpam_readlinev
+/t_openpam_readword
+/t_openpam_straddch
+/t_openpam_subst
+/t_pam_env

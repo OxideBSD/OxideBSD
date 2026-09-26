@@ -1,0 +1,13 @@
+OpenPAM "Zingiber" (tag openpam-20250531), from https://git.des.dev/OpenPAM/OpenPAM,
+committed as a plain tree (the tracked files of that tag, via git archive).
+
+build.rs compiles lib/libpam into a static libpam.a with musl; nothing here is built with
+autotools. OxideBSD's PAM modules are Rust (lib/libpam/modules), and link into each program.
+
+Local changes (see LOGIN.md §6 in OxideBSD-doc):
+- oxidebsd/config.h: the build configuration, in place of autoconf.
+- include/security/openpam.h: with OPENPAM_OXIDEBSD, PAM_MODULE_ENTRY is empty (no linker sets).
+- lib/libpam/openpam_static.c: looks modules up in a NULL-terminated table,
+  openpam_static_modules[], that the modules library defines, instead of GNU linker sets.
+
+To update: replace this tree with the new tag's git archive, then reapply the changes above.

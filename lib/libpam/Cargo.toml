@@ -1,0 +1,21 @@
+[package]
+name = "pam"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# OpenPAM (external/bsd/openpam, built by build.rs into the musl sysroot's libpam.a) for Rust
+# programs, and OxideBSD's PAM modules, which are linked into each program that uses PAM
+# (LOGIN.md §6). Target-only: nothing here runs on the host.
+
+[dependencies]
+libc = "0.2"
+pwd = { path = "../libpwd" }
+ttyent = { path = "../libttyent" }
+
+# The libc fork OxideBSD's std is built with; a [patch] only applies from the workspace root.
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+[workspace]

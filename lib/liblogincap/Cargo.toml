@@ -1,0 +1,13 @@
+[package]
+name = "logincap"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+getcap = { path = "../libgetcap" }
+
+# Login classes (login.conf(5)), the BSDs' login_cap(3). Its own workspace, testable on the host
+# (.cargo/config.toml).
+[workspace]

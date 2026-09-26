@@ -1,0 +1,10 @@
+[package]
+name = "getcap"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# The BSDs' getcap(3) capability-database format, for gettytab(5) and login.conf(5). Its own
+# workspace, testable on the host (.cargo/config.toml).
+[workspace]
