@@ -595,43 +595,21 @@ checks with a `PASS`/`FAIL` tally — the tool that found several bugs below.
   doesn't vendor, 25 need a companion Kconfig option a single-symbol flip didn't resolve, 3 were
   docs/example files mismatched by candidate-extraction, 1 (`lzopcat`) is a genuine link error.
 
-## Interactive shell (`sys/console/stdin.rs`)
+## Terminals (`sys/tty/`; spec + status: OxideBSD-doc `TTY.md` §10)
 
-`stsh` ("stupidshell"), the original hand-written interactive userland program, was pid 1 before
-BusyBox's `hush` superseded it, and has since been removed entirely (v0.2.0 cleanup — see git
-history for its design if ever needed again). Its influence remains in how stdin works:
-
-- Keyboard IRQ (`sys/cpu/interrupts.rs`) decodes scancodes into a fixed 256-byte ring buffer
-  (`sys/console/stdin.rs`) — non-ASCII dropped, no allocation in the interrupt handler. `sys_read`
-  drains it. Auto-echo only when `TERMIOS.ECHO` is set.
-- The `spin::Mutex` around the ring buffer can't deadlock between IRQ and syscall context
-  specifically because `SFMASK` clears `IF` for a `SYSCALL`'s entire duration on this single core
-  — breaks if SMP is ever added.
-- `sys_read` on stdin is a real, genuine blocking read (`console::stdin::read` — `ProcState::
-  Blocked(BlockReason::WaitingForStdin)` + `scheduler::schedule()`, woken by the keyboard IRQ
-  handler's own `push_byte`/`wake_blocked_readers`); `hush` reads one byte at a time in its own
-  line-editing loop, same shape `stsh` used, but each individual read genuinely blocks rather than
-  busy-polling. (This file used to claim `sys_read` was non-blocking — stale, corrected
-  2026-09-22, see the ncurses/nano/nvi section's own real input-hang writeup for how that surfaced.)
-- `sys/console/vga.rs`'s `Writer` is a true 2D-addressable console with a minimal ANSI/VT100 CSI
-  escape parser so full-screen applets (`vi`, `clear`, `reset`) render correctly.
-- Real `SYS_IOCTL=124` (`sys/console/stdin.rs`'s `RawTermios`, a single **global**, not
-  per-session, `TERMIOS`) implements `TCGETS`/`TCSETS*`/`TIOCGWINSZ` (the console's real grid)/`TIOCSWINSZ`;
-  else `ENOTTY`. Only succeeds against the real console — load-bearing for `isatty()`.
-- No pty/foreground-process-group layer at this file's level — `tcsetpgrp`/`bg`/`fg` are driven
-  entirely by the real session/controlling-tty model at the process level (see "Session,
-  controlling-tty..." and "Real job control" below); this file's only involvement is the
-  Ctrl+C/Ctrl+Z keyboard intercepts in `interrupts::keyboard_interrupt_handler`.
-- **`DEFAULT_TERMIOS.c_cc` (the fallback `TCGETS` returns before any `TCSETS`) must hold real
-  POSIX/Linux default control-character values, not all-zero.** Real BusyBox `libbb/lineedit.c`
-  clears `ISIG` when it takes over line editing and implements Ctrl+C/Ctrl+D itself by comparing
-  each byte against `initial_settings.c_cc[VINTR]`/`c_cc[VEOF]`, guarded by `!= 0`. An all-zero
-  default silently read as "disabled," so Ctrl+C/Ctrl+D did nothing once `hush`'s line editor took
-  over (effectively always, interactively) — a real, pre-existing bug affecting plain PS/2 too,
-  not USB-specific, found via scripted `OXIDEBSD_QEMU_MONITOR` keystroke testing. Fixed:
-  `DEFAULT_TERMIOS.c_cc` now holds real values (`VINTR=^C`/`VEOF=^D`/etc., matching musl's
-  `arch/generic/bits/termios.h` index layout). Confirmed live: Ctrl+C during a `sleep 100` now
-  returns immediately with a fresh prompt; Ctrl+D at an empty prompt cleanly ends the session.
+`sys/console/stdin.rs` is gone. Each terminal is a `sys/tty::Tty` with its own queues, termios
+(4.4BSD `TTYDEF`), winsize, session and foreground pgrp, and a real line discipline (canonical
+mode, VMIN/VTIME, echo flags, ISIG from `c_cc`, OPOST/ONLCR). `ttyv0` (`sys/tty/console.rs`) is
+the console: keyboard in, ANSI engine/framebuffer out, a pre-OPOST copy to COM1 so serial logs and
+tests read as before. fds 0-2 of the first process are one RW description of it (`fs::fd::init`).
+- Job control: SIGTTIN/SIGTTOU (default Stop), hang-up on session-leader exit, SIGWINCH;
+  `TIOCSCTTY` can't steal, `TIOCNOTTY` refuses a leader (BSD rules). `ERESTART` +
+  `SA_RESTART` restart syscalls (`syscall_dispatch`).
+- **An interrupt handler must only call `schedule()` when it interrupted ring 3** — a nested
+  `schedule()` from the idle loop (`wait_for_ready`) hung the system (found live after ^D).
+- `vga`'s `ESC[6n` reply is queued and fed to input after its lock drops (echo would deadlock).
+- Not done yet (TTY.md §10.2): /dev/{ttyv0,tty,console} nodes, `ttyname`//proc/self, COM2 `tty01`,
+  `TIOCCONS` + msgbuf//dev/klog. Test console input headlessly with the monitor's `sendkey`.
 
 ## Process abstraction, scheduler, and fork/exec/wait (`sys/process/`)
 
