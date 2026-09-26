@@ -80,6 +80,8 @@ fn compound(cc: &CompoundCommand) -> String {
         }
         CompoundCommand::While { cond, body } => format!("while {}; do {}; done", list(cond), list(body)),
         CompoundCommand::Until { cond, body } => format!("until {}; do {}; done", list(cond), list(body)),
+        #[cfg(feature = "init-dialect")]
+        CompoundCommand::Service(b) => format!("service {} {{ ... }}", b.name),
     }
 }
 

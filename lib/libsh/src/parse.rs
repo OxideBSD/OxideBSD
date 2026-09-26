@@ -768,6 +768,8 @@ impl Parser {
                 "while" | "until" => Some(self.loop_clause(raw == "while")?),
                 "for" => Some(self.for_clause()?),
                 "case" => Some(self.case_clause()?),
+                #[cfg(feature = "init-dialect")]
+                "service" => Some(CompoundCommand::Service(Rc::new(self.service_block()?))),
                 "then" | "else" | "elif" | "fi" | "do" | "done" | "esac" | "}" | "in" => {
                     return Err(self.error(format!("unexpected `{raw}`")));
                 }
@@ -990,6 +992,97 @@ impl Parser {
             self.skip_newlines()?;
             self.expect_reserved("esac")?;
             return Ok(CompoundCommand::Case { word, arms });
+        }
+    }
+}
+
+#[cfg(feature = "init-dialect")]
+impl Parser {
+    /// The 1-based line of the current token.
+    fn token_line(&mut self) -> Result<usize> {
+        self.peek()?;
+        let start = self.peeked.as_ref().unwrap().1;
+        Ok(self.error_at(start, "").line)
+    }
+
+    /// `service NAME { field... hook... }` (INIT_SH.md §4.1). In the init dialect `service` is a
+    /// reserved word in command position.
+    fn service_block(&mut self) -> Result<ServiceBlock> {
+        self.expect_reserved("service")?;
+        let name = match self.peek()?.clone() {
+            Token::Word(_, raw) if is_name(&raw) => {
+                self.next()?;
+                raw
+            }
+            _ => return Err(self.error("expected a service name after `service`")),
+        };
+        self.skip_newlines()?;
+        self.expect_reserved("{")?;
+        let mut block = ServiceBlock { name, fields: Vec::new(), hooks: Vec::new() };
+        loop {
+            while matches!(self.peek()?, Token::Newline | Token::Op(Op::Semi)) {
+                self.next()?;
+            }
+            let key = match self.peek()?.clone() {
+                Token::Word(_, raw) if raw == "}" => {
+                    self.next()?;
+                    return Ok(block);
+                }
+                Token::Word(_, raw) => raw,
+                Token::Eof => return Err(self.error(format!("service `{}` never ends", block.name))),
+                _ => return Err(self.error("expected a field or hook name")),
+            };
+            let line = self.token_line()?;
+            let is_hook_name = SERVICE_HOOKS.contains(&key.as_str());
+            if !is_hook_name && !SERVICE_FIELDS.contains(&key.as_str()) {
+                return Err(self.error(format!("unknown service field `{key}`")));
+            }
+            self.next()?;
+            let mut words = Vec::new();
+            let mut raws = Vec::new();
+            let opens_hook = loop {
+                match self.peek()?.clone() {
+                    Token::Word(_, raw) if raw == "{" && is_hook_name => break true,
+                    Token::Word(_, raw) if raw == "}" => break false,
+                    Token::Word(w, raw) => {
+                        self.next()?;
+                        words.push(w);
+                        raws.push(raw);
+                    }
+                    Token::Newline | Token::Op(Op::Semi) | Token::Eof => break false,
+                    _ => return Err(self.error(format!("unexpected operator in service field `{key}`"))),
+                }
+            };
+            if opens_hook {
+                let action = match (key.as_str(), raws.as_slice()) {
+                    ("command", [action]) if is_name(action) => Some(action.clone()),
+                    ("command", _) => return Err(self.error("expected `command NAME { ... }`")),
+                    (_, []) => None,
+                    _ => return Err(self.error(format!("hook `{key}` takes no arguments"))),
+                };
+                if block.hooks.iter().any(|h| h.name == key && h.action == action) {
+                    return Err(self.error(format!("duplicate hook `{}`", action.as_deref().unwrap_or(&key))));
+                }
+                self.next()?;
+                let body = self.list(Terminator::Words(&["}"]))?;
+                self.expect_reserved("}")?;
+                block.hooks.push(ServiceHook { name: key, action, body });
+                continue;
+            }
+            if !SERVICE_FIELDS.contains(&key.as_str()) {
+                return Err(self.error(format!("expected `{{` after `{key}`")));
+            }
+            if words.is_empty() {
+                return Err(self.error(format!("service field `{key}` needs a value")));
+            }
+            let ordering = ORDERING_FIELDS.contains(&key.as_str());
+            if ordering && words.iter().any(|w| literal_text(w).is_none()) {
+                return Err(self.error(format!("`{key}` values must be literal words, without expansions")));
+            }
+            if !ordering && block.fields.iter().any(|f| f.name == key) {
+                return Err(self.error(format!("duplicate service field `{key}`")));
+            }
+            block.fields.push(ServiceField { name: key, words, line });
         }
     }
 }

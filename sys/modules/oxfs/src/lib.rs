@@ -6887,6 +6887,18 @@ fn seed_symlink(parent: u32, name: &[u8], target: &[u8]) -> bool {
     write_inode_data(inode, target) && dir_insert(parent, name, inode).is_ok()
 }
 
+/// A second name for the already-seeded `existing` in the same directory -- a real hard link,
+/// for programs that pick their behavior from `argv[0]` (`/sbin/reboot`, `halt`, `poweroff`).
+fn seed_hardlink(parent: u32, name: &[u8], existing: &[u8]) -> bool {
+    let Some(inode) = dir_lookup(parent, existing) else {
+        return false;
+    };
+    let mut node = read_inode(inode);
+    node.nlink += 1;
+    write_inode(inode, node);
+    dir_insert(parent, name, inode).is_ok()
+}
+
 /// Idempotent directory creation -- looks up an existing child named `name` under `parent` first,
 /// only allocating and wiring a fresh `.`/`..`-seeded directory inode when one doesn't already
 /// exist. Factors out the same 5-statement pattern every other directory in this file hand-inlines
@@ -7284,7 +7296,6 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
     ok &= seed_file(bin, b"gunzip", include_bytes!(env!("OXFS_GUNZIP_ELF_PATH")));
     ok &= seed_file(bin, b"gzip", include_bytes!(env!("OXFS_GZIP_ELF_PATH")));
-    ok &= seed_file(sbin, b"halt", include_bytes!(env!("OXFS_HALT_ELF_PATH")));
     ok &= seed_file(
         usr_bin,
         b"hexdump",
@@ -7371,11 +7382,6 @@ fn format_fresh_filesystem() -> bool {
         include_bytes!(env!("OXFS_PIPE_PROGRESS_ELF_PATH")),
     );
     ok &= seed_file(bin, b"pkill", include_bytes!(env!("OXFS_PKILL_ELF_PATH")));
-    ok &= seed_file(
-        sbin,
-        b"poweroff",
-        include_bytes!(env!("OXFS_POWEROFF_ELF_PATH")),
-    );
     ok &= seed_file(
         usr_bin,
         b"printenv",
@@ -7670,6 +7676,13 @@ fn format_fresh_filesystem() -> bool {
     // /sbin: system programs. init_sh (lib/libsh with the init dialect) runs /etc/rc and rc.d.
     let sbin = ensure_dir(root, b"sbin");
     ok &= seed_file(sbin, b"init_sh", include_bytes!(env!("OXFS_INIT_SH_ELF_PATH")));
+    ok &= seed_file(sbin, b"rcorder", include_bytes!(env!("OXFS_RCORDER_ELF_PATH")));
+    ok &= seed_file(sbin, b"reboot", include_bytes!(env!("OXFS_REBOOT_ELF_PATH")));
+    // BusyBox's halt/poweroff aren't installed: they signal init with BusyBox init's meanings
+    // (SIGTERM = reboot), not INIT.md §6's.
+    ok &= seed_hardlink(sbin, b"halt", b"reboot");
+    ok &= seed_hardlink(sbin, b"poweroff", b"reboot");
+    ok &= seed_file(sbin, b"shutdown", include_bytes!(env!("OXFS_SHUTDOWN_ELF_PATH")));
 
     let usr = ensure_dir(root, b"usr");
     let usr_include = ensure_dir(usr, b"include");

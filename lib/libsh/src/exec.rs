@@ -304,6 +304,11 @@ impl Shell {
         match cc {
             CompoundCommand::Brace(list) => self.run_list(list),
             CompoundCommand::Subshell(_) => unreachable!("handled by run_command"),
+            #[cfg(feature = "init-dialect")]
+            CompoundCommand::Service(block) => {
+                self.error(&format!("service {}: service blocks cannot run yet", block.name));
+                Err(Flow::Fatal(2))
+            }
             CompoundCommand::If { branches, else_body } => {
                 for (cond, body) in branches {
                     if self.run_condition(cond)? == 0 {

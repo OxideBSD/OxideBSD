@@ -309,6 +309,13 @@ fn main() {
     let sh_elf_path = build_std_oxidebsd_userland_crate("bin/sh", "OXFS_SH_ELF_PATH", &musl_sysroot);
     let init_sh_elf_path =
         build_std_oxidebsd_userland_crate("sbin/init_sh", "OXFS_INIT_SH_ELF_PATH", &musl_sysroot);
+    // /sbin/rcorder links libsh too, for service blocks (INIT_SH.md §6).
+    let rcorder_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
+    let reboot_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
+    let shutdown_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
 
     // Derisk check for the fbdoom/doomgeneric port -- see regress/float-smoke/main.c's own doc
     // comment.
@@ -491,6 +498,9 @@ fn main() {
         ),
         ("OXFS_SH_ELF_PATH", sh_elf_path.to_str().unwrap()),
         ("OXFS_INIT_SH_ELF_PATH", init_sh_elf_path.to_str().unwrap()),
+        ("OXFS_RCORDER_ELF_PATH", rcorder_elf_path.to_str().unwrap()),
+        ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
+        ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),
