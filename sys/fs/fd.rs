@@ -50,7 +50,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use spin::Mutex;
 
 use crate::process::scheduler;
-use crate::syscall::{EBADF, ESPIPE};
+use crate::syscall::ESPIPE;
 
 /// Matches `syscall::SyscallHandler`'s own FFI convention (negative = `-errno`, non-negative =
 /// success value) for the same reason — see that type's doc comment. Kept as a separate type
@@ -756,49 +756,9 @@ pub(crate) extern "C" fn oxidebsd_fd_at(pid: u64, index: u64) -> i64 {
         .unwrap_or(-1)
 }
 
-extern "C" fn stdin_read(_real_fd: u64, ptr: u64, len: u64) -> i64 {
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has -- [ptr, ptr+len) isn't checked against the caller's actual mappings first.
-    // len == 0 is already handled by this file's own read() above, never reaching here.
-    let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-    crate::console::stdin::read(buf) as i64
-}
-
-extern "C" fn write_not_permitted(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
-    -(EBADF as i64)
-}
-
-extern "C" fn read_not_permitted(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
-    -(EBADF as i64)
-}
-
-/// Shared by fd 1 (stdout) and, via `dup2`-style aliasing, fd 2 (stderr) — see this file's module
-/// doc comment for why stderr isn't a genuinely separate destination.
-extern "C" fn stdout_write(_real_fd: u64, ptr: u64, len: u64) -> i64 {
-    // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-    // len == 0 is already handled by this file's own write() above, never reaching here.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    match core::str::from_utf8(bytes) {
-        Ok(s) => {
-            crate::serial_print!("{s}");
-            len as i64
-        }
-        Err(_) => -(crate::syscall::EINVAL as i64),
-    }
-}
-
-extern "C" fn stdio_close(_real_fd: u64) -> i64 {
-    0
-}
-
-/// Registers fd 0/1/2 under `BOOTSTRAP_PID` — called once at boot (`sys/main.rs`, before any
-/// process is spawned). `process::spawn` (used both for `stsh`, pid 1, and any later
-/// non-`fork`-based process creation) calls `fork_inherit(BOOTSTRAP_PID, new_pid)` right after
-/// creating each new process, giving it its own independent stdin/stdout/stderr the exact same way
-/// a real `fork()`ed child inherits its parent's — see this file's module doc comment. fd 2 is a
-/// `dup2`-style alias of fd 1 from the moment it's created, not a second independent registration —
-/// matching real shell convention (`2>&1` is normally already true by default in practice) and
-/// this kernel's own total lack of a second output destination.
+/// Registers fd 0/1/2 under `BOOTSTRAP_PID`: one read-write description of the console
+/// terminal, `ttyv0` (TTY.md §6.1), inherited by every process the kernel spawns through
+/// `fork_inherit(BOOTSTRAP_PID, pid)`.
 ///
 /// Runs after the modules load, so anything a `module_init` left open under `BOOTSTRAP_PID` can
 /// already hold fd 0-2 -- those get closed so stdio lands on its real numbers.
@@ -806,25 +766,22 @@ pub fn init() {
     for fd in 0..3 {
         close_one(BOOTSTRAP_PID, fd);
     }
-    for (real_fd, read, write) in [
-        (0, stdin_read as FdReadWrite, write_not_permitted as FdReadWrite),
-        (1, read_not_permitted, stdout_write),
-    ] {
-        let ops = FdOps {
-            read,
-            write,
-            close: stdio_close,
-            content_id: no_content_id,
-            access_mode: default_access_mode,
-            is_append: default_is_append,
-            fb_geometry: no_fb_geometry,
-            pread: no_pread_pwrite,
-            pwrite: no_pread_pwrite,
-        };
-        DESCRIPTIONS.lock().insert(real_fd, Description { ops, refs: 0 });
-    }
+    let ops = FdOps {
+        read: crate::tty::fd_read,
+        write: crate::tty::fd_write,
+        close: crate::tty::fd_close,
+        content_id: no_content_id,
+        access_mode: default_access_mode,
+        is_append: default_is_append,
+        fb_geometry: no_fb_geometry,
+        pread: no_pread_pwrite,
+        pwrite: no_pread_pwrite,
+    };
+    crate::tty::console::init();
+    DESCRIPTIONS.lock().insert(0, Description { ops, refs: 0 });
+    crate::tty::bind(0, crate::tty::TTYV0);
     let mut table = TABLE.lock();
-    install(&mut table, BOOTSTRAP_PID, 0, 0);
-    install(&mut table, BOOTSTRAP_PID, 1, 1);
-    install(&mut table, BOOTSTRAP_PID, 2, 1);
+    for fd in 0..3 {
+        install(&mut table, BOOTSTRAP_PID, fd, 0);
+    }
 }

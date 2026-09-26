@@ -876,67 +876,25 @@ const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSW: u64 = 0x5403;
 const TCSETSF: u64 = 0x5404;
-const TIOCGWINSZ: u64 = 0x5413;
-const TIOCSWINSZ: u64 = 0x5414;
-/// Session/controlling-tty requests (see CLAUDE.md's session/controlling-tty notes, and
-/// `process::Process::sid`/`stdin::CONTROLLING_SESSION`/`stdin::FOREGROUND_PGID`) — added
-/// specifically to get `sulogin`/`getty` (both call `setsid()` then one of these) past their own
-/// startup sequence, since this kernel had no session/foreground-process-group concept at all
-/// before.
+const TCSBRK: u64 = 0x5409;
+const TCXONC: u64 = 0x540A;
+const TCFLSH: u64 = 0x540B;
 const TIOCSCTTY: u64 = 0x540E;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
+const TIOCOUTQ: u64 = 0x5411;
+const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSWINSZ: u64 = 0x5414;
+const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
 const TIOCNOTTY: u64 = 0x5422;
+const TIOCGSID: u64 = 0x5429;
 /// OxideBSD's own invention, not real Linux's `FBIOGET_VSCREENINFO` (`0x4600`) -- deliberately a
 /// distinct, smaller wire struct (`RawFbInfo` below) rather than emulating that ioctl's real,
 /// much larger `struct fb_var_screeninfo` layout, since nothing in this port's roster needs real
 /// Linux fbdev source compatibility (see the doomgeneric/fbdoom port's own design notes: a
 /// backend file written against this kernel's own syscalls, not a literal Linux fbdev emulation).
 const FBIOGET_OXIDEBSD: u64 = 0x4600;
-
-/// A fixed, plausible `struct winsize` (`external/mit/musl`'s `include/alltypes.h.in`: four `u16`s,
-/// `ws_row`/`ws_col`/`ws_xpixel`/`ws_ypixel`, no padding) -- this kernel has no real display-size
-/// concept to report (VGA text mode is a fixed 80x25, but nothing downstream actually depends on
-/// the exact number, same "value now, precision later" reasoning `AT_RANDOM`'s own placeholder
-/// bytes already use), so `80x24` (leaving one row of headroom, the traditional default terminal
-/// size real `stty size`/`resize`-less setups already assume) is picked purely to look sane, not
-/// measured from anything.
-#[repr(C)]
-struct RawWinsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
-}
-/// The classic 24x80 -- only ever reported if the console somehow claims a zero-sized grid (it
-/// can't: `console::vga`'s own grid is clamped to at least 1x1, and falls back to 80x25 with no
-/// framebuffer). Used to be the only answer, reported no matter how big the screen really was.
-const FALLBACK_WINSIZE: RawWinsize = RawWinsize {
-    ws_row: 24,
-    ws_col: 80,
-    ws_xpixel: 0,
-    ws_ypixel: 0,
-};
-
-/// The console's real, current grid -- `console::vga`'s own `width()`/`height()`, the exact values
-/// its writer wraps at and scrolls by (as many 8x16 cells as the real framebuffer fits, e.g.
-/// 160x50 at 1280x800), so a program laying out to this size (`ls` columns, `hush`'s line editor,
-/// a full-screen `vi`) lines up with what the screen really does.
-fn console_winsize() -> RawWinsize {
-    let (rows, cols) = (
-        crate::console::vga::height() as u16,
-        crate::console::vga::width() as u16,
-    );
-    if rows == 0 || cols == 0 {
-        return FALLBACK_WINSIZE;
-    }
-    RawWinsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    }
-}
 
 /// `FBIOGET_OXIDEBSD`'s own wire struct -- real, runtime-queried framebuffer geometry (see
 /// `drivers::fbdev::FbGeometry`, which this mirrors exactly, minus `phys_base`/`len`: a userland
@@ -950,136 +908,94 @@ struct RawFbInfo {
     bpp: u32,
 }
 
-/// `SYS_IOCTL` (`124`) — real request codes (see above), but **not** real `ioctl(2)`'s full
-/// surface: only the handful of tty-specific requests this kernel's own console can plausibly
-/// answer (`TCGETS`/`TCSETS*`/`TIOCGWINSZ`/`TIOCSWINSZ`/`TIOCSCTTY`/`TIOCNOTTY`/`TIOCGPGRP`/
-/// `TIOCSPGRP`) are handled; anything else is `ENOTTY`, logged the same way an unregistered
-/// syscall number already is, so a future need is discoverable the same "boot it and read the log"
-/// way every other gap in this codebase was found.
-///
-/// **Only ever succeeds against the console** (`crate::fs::fd::real_fd_of(fd)` resolving to
-/// stdin's or stdout's own `real_fd`, `0`/`1` -- see `sys/fs/fd.rs`'s module doc comment for why
-/// checking `fd` itself, rather than what it currently resolves to, would be wrong after a
-/// `dup2`) **or a real `/dev/fb0` fd** (`crate::fs::fd::framebuffer_geometry_of`, backing
-/// `FBIOGET_OXIDEBSD` below), `ENOTTY` otherwise. This is load-bearing, not incidental: musl's own `isatty(fd)`
-/// (`external/mit/musl`'s `src/unistd/isatty.c`) is implemented as "does `ioctl(fd, TIOCGWINSZ,
-/// ...)` succeed" -- if this answered every fd successfully, every regular `oxfs` file and every
-/// pipe end would suddenly report itself as a tty too, which would be a real regression: BusyBox's
-/// own graceful "not a tty" degradation (see CLAUDE.md's musl-port/BusyBox-port sections) is what
-/// currently keeps e.g. a redirected/piped `cat`/`more` behaving like a real Unix pipeline.
-///
-/// **`TCSETS`/`TCSETSW`/`TCSETSF` are all treated identically** — real Unix distinguishes them by
-/// *when* the change takes effect relative to already-queued output/input (immediately, after
-/// output drains, or after input is also flushed), a distinction this kernel has no queued-output
-/// concept to make meaningful at all, so applying the new settings immediately, unconditionally,
-/// is already the correct behavior for the two "drain first" variants and a harmless
-/// oversimplification for the third.
+/// `SYS_IOCTL` (`124`), with musl's (Linux's) request codes. Terminal requests (TTY.md §5.6) act
+/// on the terminal `fd` is a description of, and fail with `ENOTTY` on anything else -- musl's
+/// `isatty()` is `ioctl(fd, TIOCGWINSZ)`, so this is what makes a pipe or a file not a tty.
+/// `FBIOGET_OXIDEBSD` acts on a `/dev/fb0` descriptor. Unknown requests are logged.
 pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
-    // Widened for a real `/dev/fb0` fd (see `FBIOGET_OXIDEBSD` below) -- checked only once the
-    // fast console-fd path already fails, so the ordinary tty-ioctl case never pays for the extra
-    // FFI round trip.
-    let is_console = matches!(crate::fs::fd::real_fd_of(fd), Some(0) | Some(1));
-    if !is_console && crate::fs::fd::framebuffer_geometry_of(fd).is_none() {
-        return Err(ENOTTY);
+    let real_fd = crate::fs::fd::real_fd_of(fd).ok_or(EBADF)?;
+    if request == FBIOGET_OXIDEBSD {
+        let geom = crate::fs::fd::framebuffer_geometry_of(fd).ok_or(ENOTTY)?;
+        let info = RawFbInfo { width: geom.width, height: geom.height, pitch: geom.pitch, bpp: geom.bpp };
+        // SAFETY: the unvalidated-user-pointer gap every ioctl argument has.
+        unsafe { *(argp as *mut RawFbInfo) = info };
+        return Ok(0);
     }
-
+    if request == FIONBIO {
+        // Not terminal-specific: sets O_NONBLOCK on the description.
+        // SAFETY: as above.
+        let on = unsafe { *(argp as *const i32) } != 0;
+        crate::fs::fd::set_nonblocking(real_fd, on);
+        return Ok(0);
+    }
+    let Some(tty) = crate::tty::of_real_fd(real_fd) else {
+        if !matches!(request, TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TIOCSCTTY | TIOCGPGRP | TIOCSPGRP | TIOCNOTTY | TIOCGSID | FIONREAD | TCFLSH | TCXONC | TCSBRK | TIOCOUTQ) {
+            serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
+        }
+        return Err(ENOTTY);
+    };
+    let cx = crate::tty::caller(crate::fs::fd::is_nonblocking(real_fd));
+    let int_arg = || -> i32 {
+        // SAFETY: as above.
+        unsafe { *(argp as *const i32) }
+    };
     match request {
         TCGETS => {
-            let termios = crate::console::stdin::get_termios();
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // file already has -- argp isn't checked against the caller's actual mappings first.
-            unsafe { *(argp as *mut crate::console::stdin::RawTermios) = termios };
+            // SAFETY: as above.
+            unsafe { *(argp as *mut crate::tty::RawTermios) = crate::tty::termios(tty) };
             Ok(0)
         }
         TCSETS | TCSETSW | TCSETSF => {
-            // SAFETY: same known pointer-validation gap as above, for a read this time.
-            let termios = unsafe { *(argp as *const crate::console::stdin::RawTermios) };
-            crate::console::stdin::set_termios(termios);
-            Ok(0)
+            // SAFETY: as above.
+            let t = unsafe { *(argp as *const crate::tty::RawTermios) };
+            // Output is written synchronously, so draining it (TCSETSW) is immediate.
+            crate::tty::set_termios(tty, t, request == TCSETSF, &cx).map(|()| 0)
         }
         TIOCGWINSZ => {
-            // SAFETY: same known pointer-validation gap as above.
-            unsafe { *(argp as *mut RawWinsize) = console_winsize() };
+            // SAFETY: as above.
+            unsafe { *(argp as *mut crate::tty::Winsize) = crate::tty::winsize(tty) };
             Ok(0)
         }
-        TIOCSWINSZ => Ok(0), // accepted, silently discarded -- nothing reads window size back out
-        TIOCSCTTY => {
-            let caller_pid = crate::process::scheduler::current_pid();
-            let table = crate::process::table().lock();
-            let Some(proc) = table.get(&caller_pid) else {
-                return Err(ENOTTY);
-            };
-            // Real Linux requires the caller be a session leader unless `force` (the raw `argp`
-            // value here, not a pointer -- real `ioctl(fd, TIOCSCTTY, arg)` passes `arg` by value
-            // for this request) is set; this kernel has no permission model gating `force` itself
-            // (only root has ever existed as a concept predating this pass), so any caller may
-            // force-steal the controlling tty, matching real Linux's own "force requires
-            // CAP_SYS_ADMIN" collapsing to "always allowed" on a kernel with no capability model.
-            if proc.sid != caller_pid && argp == 0 {
-                return Err(EPERM);
-            }
-            let sid = proc.sid;
-            drop(table);
-            crate::console::stdin::set_controlling_session(sid);
+        TIOCSWINSZ => {
+            // SAFETY: as above.
+            crate::tty::set_winsize(tty, unsafe { *(argp as *const crate::tty::Winsize) });
             Ok(0)
         }
-        TIOCNOTTY => {
-            let caller_pid = crate::process::scheduler::current_pid();
-            let sid = crate::process::table()
-                .lock()
-                .get(&caller_pid)
-                .map(|p| p.sid)
-                .ok_or(ENOTTY)?;
-            crate::console::stdin::clear_controlling_session_if(sid);
-            Ok(0)
-        }
+        TIOCSCTTY => crate::tty::set_controlling(tty, &cx).map(|()| 0),
+        TIOCNOTTY => crate::tty::release(tty, &cx).map(|()| 0),
         TIOCGPGRP => {
-            let caller_pid = crate::process::scheduler::current_pid();
-            let sid = crate::process::table()
-                .lock()
-                .get(&caller_pid)
-                .map(|p| p.sid)
-                .ok_or(ENOTTY)?;
-            if crate::console::stdin::controlling_session() != Some(sid) {
-                return Err(ENOTTY);
-            }
-            let pgid = crate::console::stdin::foreground_pgid().unwrap_or(sid) as i32;
-            // SAFETY: same known pointer-validation gap every other user-memory write in this file
-            // already has.
-            unsafe { *(argp as *mut i32) = pgid };
+            let pgrp = crate::tty::pgrp(tty, &cx)?;
+            // SAFETY: as above.
+            unsafe { *(argp as *mut i32) = pgrp as i32 };
             Ok(0)
         }
         TIOCSPGRP => {
-            let caller_pid = crate::process::scheduler::current_pid();
-            let sid = crate::process::table()
-                .lock()
-                .get(&caller_pid)
-                .map(|p| p.sid)
-                .ok_or(ENOTTY)?;
-            if crate::console::stdin::controlling_session() != Some(sid) {
-                return Err(ENOTTY);
-            }
-            // SAFETY: same known pointer-validation gap as above, for a read this time.
-            let pgid = unsafe { *(argp as *const i32) };
+            let pgid = int_arg();
             if pgid <= 0 {
                 return Err(EINVAL);
             }
-            crate::console::stdin::set_foreground_pgid(pgid as u64);
+            crate::tty::set_pgrp(tty, pgid as u64, &cx).map(|()| 0)
+        }
+        TIOCGSID => {
+            let sid = crate::tty::session_of(tty, &cx)?;
+            // SAFETY: as above.
+            unsafe { *(argp as *mut i32) = sid as i32 };
             Ok(0)
         }
-        FBIOGET_OXIDEBSD => {
-            let geom = crate::fs::fd::framebuffer_geometry_of(fd).ok_or(ENOTTY)?;
-            let info = RawFbInfo {
-                width: geom.width,
-                height: geom.height,
-                pitch: geom.pitch,
-                bpp: geom.bpp,
-            };
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // file already has.
-            unsafe { *(argp as *mut RawFbInfo) = info };
+        FIONREAD => {
+            // SAFETY: as above.
+            unsafe { *(argp as *mut i32) = crate::tty::pending_input(tty) as i32 };
             Ok(0)
         }
+        // Output is never queued: nothing waits in it and draining finishes at once.
+        TIOCOUTQ => {
+            // SAFETY: as above.
+            unsafe { *(argp as *mut i32) = 0 };
+            Ok(0)
+        }
+        TCSBRK => Ok(0),
+        TCFLSH => crate::tty::flush(tty, argp).map(|()| 0),
+        TCXONC => crate::tty::flow(tty, argp).map(|()| 0),
         _ => {
             serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
             Err(ENOTTY)

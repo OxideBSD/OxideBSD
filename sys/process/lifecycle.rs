@@ -222,6 +222,7 @@ fn spawn_finish(
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
+        tty_timed_out: false,
     };
 
     {
@@ -233,16 +234,10 @@ fn spawn_finish(
         }
         table.insert(pid, Box::new(process));
     }
-    // spawn() is only ever called once, for pid 1, with stdin/stdout/stderr already wired
-    // directly to the real console (never through a real `open()` syscall -- see the envp comment
-    // above). On a real kernel, a session leader's first real `open()` of a tty auto-associates it
-    // as that session's controlling terminal; since pid 1 never takes that path here, nothing ever
-    // would otherwise. Granting it directly mirrors that real behavior and is what lets `hush`'s
-    // own already-compiled job-control startup (`tcgetpgrp`/`bb_setpgrp`/`tcsetpgrp`, gated on
-    // `isatty()` succeeding via a real controlling session -- see `sys/console/stdin.rs`'s
-    // `TIOCGPGRP`/`TIOCSPGRP` handling) actually activate instead of sitting permanently dormant --
-    // this is what makes Ctrl+C interrupt a running foreground job for real.
-    crate::console::stdin::set_controlling_session(pid);
+    // A process the kernel starts (pid 1, and its restarts) runs on the console, which becomes
+    // its controlling terminal -- as the BSDs' init does for single-user mode -- so its job
+    // control works without it opening the console itself.
+    crate::tty::assign(crate::tty::TTYV0, pid, pid);
     // Bootstraps this process's own stdin/stdout/stderr from crate::fs::fd::init's own pseudo-pid
     // registration -- the same fork_inherit path a real fork() uses, see that function's own doc
     // comment.
@@ -592,6 +587,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
+        tty_timed_out: false,
     };
 
     {
@@ -846,6 +842,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
+        tty_timed_out: false,
     };
 
     {
@@ -1887,6 +1884,12 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
         Some(me) if matches!(me.state, ProcState::Zombie(_)) => return, // already dead
         Some(me) => me.state = ProcState::Zombie(code),
         None => return,
+    }
+    // A session leader's exit hangs up its controlling terminal (TTY.md §5.4).
+    if table.get(&pid).is_some_and(|me| me.sid == tgid) {
+        drop(table);
+        crate::tty::session_leader_exited(tgid);
+        table = PROCESS_TABLE.lock();
     }
     // The system's init: the kernel records the death and starts pid 1 again (INIT.md §9).
     if tgid == INIT_PID {

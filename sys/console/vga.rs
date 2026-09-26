@@ -676,20 +676,15 @@ impl Writer {
         }
     }
 
-    /// CPR: report the cursor's 1-based `row;col` position by writing `ESC[row;colR` straight
-    /// into the stdin ring buffer, exactly as if it had been typed -- the real mechanism every
-    /// terminal uses to answer this query (the reply travels back over the *input* side, not
-    /// this writer's own output). `crate::console::stdin::push_byte` is already `pub` and already the sole
-    /// producer the keyboard IRQ handler uses, so this is just a second, synthetic producer of
-    /// the same stream.
+    /// CPR: reports the cursor's 1-based position as `ESC[row;colR` on the terminal's *input*,
+    /// as every terminal answers this query. Queued in `REPLIES` and fed to `ttyv0` by
+    /// `crate::tty::console` once this writer's lock is released.
     fn device_status_report(&self, mode: u16) {
         if mode != 6 {
             return;
         }
         let reply = alloc::format!("\x1b[{};{}R", self.cursor_row + 1, self.cursor_col + 1);
-        for byte in reply.bytes() {
-            crate::console::stdin::push_byte(byte);
-        }
+        REPLIES.lock().extend_from_slice(reply.as_bytes());
     }
 
     /// Toggles the CRTC's own cursor-disable bit, and restores a normal cursor shape when turning
@@ -736,7 +731,11 @@ impl Writer {
     }
 
     fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
+        self.write_bytes(s.as_bytes());
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             match byte {
                 // Printable ASCII, the control characters `write_byte` gives meaning to
                 // (newline, carriage return, tab, backspace, DEL), and ESC (0x1b) -- every CSI
@@ -978,6 +977,19 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
     writer.apply_hw_cursor_visibility();
     Mutex::new(writer)
 });
+
+/// Replies to terminal queries (`ESC[6n`), waiting to be fed to `ttyv0`'s input once the writer
+/// is unlocked (`crate::tty::console`).
+static REPLIES: Mutex<alloc::vec::Vec<u8>> = Mutex::new(alloc::vec::Vec::new());
+
+pub fn take_replies() -> alloc::vec::Vec<u8> {
+    interrupts::without_interrupts(|| core::mem::take(&mut *REPLIES.lock()))
+}
+
+/// Writes bytes, which need not be UTF-8.
+pub fn write_bytes(bytes: &[u8]) {
+    interrupts::without_interrupts(|| WRITER.lock().write_bytes(bytes));
+}
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {

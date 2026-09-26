@@ -1,8 +1,7 @@
-//! Real-`SYSCALL` smoke test for the session/controlling-tty additions (`SYS_SETSID = 112`,
-//! `SYS_GETSID = 177`, and `SYS_IOCTL`'s new `TIOCSCTTY`/`TIOCNOTTY`/`TIOCGPGRP`/`TIOCSPGRP`
-//! requests) -- added specifically to get `sulogin`/`getty` past their own `setsid()`/
-//! `ioctl(TIOCSCTTY)` startup calls, which this kernel had no session/foreground-process-group
-//! concept to answer at all before. See CLAUDE.md's session/controlling-tty notes.
+//! Real-`SYSCALL` smoke test for sessions and controlling terminals (TTY.md §5 in OxideBSD-doc):
+//! `setsid`/`getsid`, and `TIOCSCTTY`/`TIOCNOTTY`/`TIOCGPGRP`/`TIOCSPGRP` with the BSDs' rules --
+//! pid 1 leads the console's session; a new session has no controlling terminal and can't take
+//! one another session has; a session leader can't detach from its own.
 //!
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- same reasoning every other `*-syscall-smoke` crate
@@ -150,15 +149,12 @@ fn child_main(parent_sid: u64) -> ! {
         };
     }
 
-    // Not yet a session leader (sid == parent's sid, != own pid) -- TIOCSCTTY without force must
-    // fail EPERM, the same real POSIX check `setsid()` itself enforces.
+    // Not a session leader: TIOCSCTTY fails with EPERM.
     check!(
         ioctl(STDIN, TIOCSCTTY, 0) == Err(1),
         b"session-syscall-smoke: TIOCSCTTY before setsid() should EPERM\n"
     );
 
-    // setsid() itself: succeeds (fork gave this child a pgid it doesn't lead), returns own pid,
-    // and a second call now fails EPERM (already its own group/session leader).
     check!(
         setsid() == Ok(own_pid),
         b"session-syscall-smoke: setsid() didn't return own pid\n"
@@ -172,46 +168,26 @@ fn child_main(parent_sid: u64) -> ! {
         b"session-syscall-smoke: getsid(0) after setsid() should be own pid\n"
     );
 
-    // No controlling tty claimed yet.
+    // The new session has no controlling terminal: the console is not its terminal.
     let mut pgrp: i32 = -1;
     check!(
         ioctl(STDIN, TIOCGPGRP, &mut pgrp as *mut i32 as u64) == Err(25), // ENOTTY
-        b"session-syscall-smoke: TIOCGPGRP before TIOCSCTTY should ENOTTY\n"
+        b"session-syscall-smoke: TIOCGPGRP in a new session should ENOTTY\n"
+    );
+    check!(
+        ioctl(STDIN, TIOCNOTTY, 0) == Err(25),
+        b"session-syscall-smoke: TIOCNOTTY on another session's terminal should ENOTTY\n"
     );
 
-    // Now a session leader -- TIOCSCTTY (no force needed) succeeds.
+    // The console is pid 1's session's controlling terminal; as in every BSD, another session
+    // can't take it, whatever the argument (TTY.md 5.1).
     check!(
-        ioctl(STDIN, TIOCSCTTY, 0) == Ok(0),
-        b"session-syscall-smoke: TIOCSCTTY as session leader should succeed\n"
-    );
-
-    // TIOCGPGRP now reports the session's own default foreground group (falls back to the sid
-    // itself until something explicitly calls TIOCSPGRP).
-    check!(
-        ioctl(STDIN, TIOCGPGRP, &mut pgrp as *mut i32 as u64) == Ok(0) && pgrp as u64 == own_pid,
-        b"session-syscall-smoke: TIOCGPGRP after TIOCSCTTY didn't report own pid\n"
-    );
-
-    // Explicit TIOCSPGRP round-trip.
-    let new_pgrp: i32 = own_pid as i32;
-    check!(
-        ioctl(STDIN, TIOCSPGRP, &new_pgrp as *const i32 as u64) == Ok(0),
-        b"session-syscall-smoke: TIOCSPGRP should succeed\n"
-    );
-    pgrp = -1;
-    check!(
-        ioctl(STDIN, TIOCGPGRP, &mut pgrp as *mut i32 as u64) == Ok(0) && pgrp as u64 == own_pid,
-        b"session-syscall-smoke: TIOCGPGRP after TIOCSPGRP round-trip mismatch\n"
-    );
-
-    // TIOCNOTTY releases the claim -- TIOCGPGRP goes back to ENOTTY.
-    check!(
-        ioctl(STDIN, TIOCNOTTY, 0) == Ok(0),
-        b"session-syscall-smoke: TIOCNOTTY should succeed\n"
+        ioctl(STDIN, TIOCSCTTY, 0) == Err(1),
+        b"session-syscall-smoke: TIOCSCTTY on another session's terminal should EPERM\n"
     );
     check!(
-        ioctl(STDIN, TIOCGPGRP, &mut pgrp as *mut i32 as u64) == Err(25),
-        b"session-syscall-smoke: TIOCGPGRP after TIOCNOTTY should ENOTTY again\n"
+        ioctl(STDIN, TIOCSCTTY, 1) == Err(1),
+        b"session-syscall-smoke: TIOCSCTTY(1) must not steal the terminal\n"
     );
 
     write_bytes(b"session-syscall-smoke: child checks all passed\n");
@@ -234,6 +210,23 @@ pub extern "C" fn _start() -> ! {
             test_exit(false);
         }
     };
+
+    // pid 1 is the console's session leader, with its own group in the foreground.
+    let own = getpid();
+    let mut pgrp: i32 = -1;
+    let parent_ok = ioctl(STDIN, TIOCGPGRP, &mut pgrp as *mut i32 as u64) == Ok(0)
+        && pgrp as u64 == own
+        && ioctl(STDIN, TIOCSPGRP, &pgrp as *const i32 as u64) == Ok(0)
+        // A process group outside the session is refused.
+        && ioctl(STDIN, TIOCSPGRP, &(own as i32 + 1000) as *const i32 as u64) == Err(1)
+        // Re-claiming its own terminal is a no-op success.
+        && ioctl(STDIN, TIOCSCTTY, 0) == Ok(0)
+        // A session leader can't detach (NetBSD, OpenBSD).
+        && ioctl(STDIN, TIOCNOTTY, 0) == Err(22);
+    if !parent_ok {
+        write_bytes(b"session-syscall-smoke: pid 1's controlling-terminal checks failed\n");
+        test_exit(false);
+    }
 
     match unsafe { syscall(SYS_FORK, 0, 0, 0) } {
         Ok(0) => child_main(parent_sid),

@@ -519,7 +519,7 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
     for pid in resumed {
         if crate::process::mm::has_live_phys_mapping(pid) {
             crate::console::framebuffer::set_owned_by_userspace(true);
-            crate::console::stdin::set_raw_keyboard_owned(true);
+            crate::tty::console::set_raw_keyboard_owned(true);
         }
     }
 
@@ -546,7 +546,7 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                 // `mm::has_live_phys_mapping`'s own doc comment for the real bug this closes.
                 if crate::process::mm::has_live_phys_mapping(pid) {
                     crate::console::framebuffer::set_owned_by_userspace(false);
-                    crate::console::stdin::set_raw_keyboard_owned(false);
+                    crate::tty::console::set_raw_keyboard_owned(false);
                 }
             }
             Action::SetPending => {
@@ -1640,4 +1640,37 @@ pub fn do_sigqueue(
         }
     }
     Ok(0)
+}
+
+/// Whether a system call `pid` was in when a signal arrived should run again (`ERESTART`, see
+/// `syscall_dispatch`): true unless the signal about to be delivered runs a handler installed
+/// without `SA_RESTART`. The choice mirrors `take_deliverable_signal`'s, without consuming
+/// anything.
+pub(crate) fn restart_after_signal(pid: Pid) -> bool {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else { return true };
+    let deliverable = proc.pending_signals & !proc.blocked_signals;
+    let actions = proc.shared.lock().sigactions;
+    for signum in 1..=SIGRTMAX {
+        if deliverable & (1 << (signum - 1)) == 0 {
+            continue;
+        }
+        let action = actions[signum as usize];
+        match action.handler {
+            1 => continue,
+            0 if default_disposition(signum) == DefaultDisposition::Ignore => continue,
+            0 => return true,
+            _ => return action.flags & SA_RESTART != 0,
+        }
+    }
+    true
+}
+
+/// `(ignored, blocked)` for `sig` in `pid` -- the job-control checks a terminal makes before
+/// sending `SIGTTIN`/`SIGTTOU` (TTY.md §5.3).
+pub(crate) fn signal_disposition(pid: Pid, sig: u64) -> (bool, bool) {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else { return (true, false) };
+    let ignored = proc.shared.lock().sigactions[sig as usize].handler == 1;
+    (ignored, proc.blocked_signals & (1 << (sig - 1)) != 0)
 }

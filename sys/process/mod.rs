@@ -139,20 +139,18 @@ pub enum BlockReason {
     /// `crate::fs::pipe::PipeBuffer` is bounded rather than an unboundedly-growable `VecDeque`. Woken
     /// by a reader draining space or by the read side closing (`EPIPE` once woken, if so).
     WaitingForPipeSpace(u64),
-    /// Blocked in `crate::console::stdin::read` on an empty keyboard ring buffer. Unlike every other
-    /// `BlockReason`, nothing *schedulable* ever wakes this one — the only thing that ever will is
-    /// the keyboard IRQ handler itself, which is why `scheduler::schedule()`'s own "nothing
-    /// runnable" fallback had to grow a real interrupts-enabled idle wait (`wait_for_ready`)
-    /// instead of spinning forever with interrupts masked. See `crate::stdin`'s module doc comment
-    /// for the full story — this is what makes `sh.elf` (BusyBox's `hush`), run with no `-c`
-    /// argument, able to actually block reading a line from the keyboard instead of seeing an
-    /// instant EOF.
-    WaitingForStdin,
+    /// Nothing but an interrupt (keyboard, UART, timer) wakes the two terminal reasons below,
+    /// which is why `scheduler::schedule()` idles with interrupts enabled (`wait_for_ready`).
+    /// Blocked reading terminal `.0` (`crate::tty::read`), until input arrives, a signal, or the
+    /// `VTIME` deadline `.1` (a `ticks()` value) passes.
+    WaitingForTty(crate::tty::TtyId, Option<u64>),
+    /// Blocked writing terminal `.0` while its output is stopped (`VSTOP`).
+    WaitingForTtyOutput(crate::tty::TtyId),
     /// Blocked in `do_nanosleep` until `interrupts::ticks()` reaches this absolute deadline (not a
     /// duration). Unlike `WaitingForPipeData`/`WaitingForChild` (woken by another schedulable
     /// process's own syscall), the only thing that ever wakes this one is
     /// `interrupts::timer_interrupt_handler` itself — the same "IRQ handler reaches directly into
-    /// `process::table()`" shape `crate::console::stdin::push_byte`'s own `wake_blocked_readers` already
+    /// `process::table()`" shape terminal input's own reader wakeup already
     /// established for `WaitingForStdin`, just driven by the timer IRQ instead of the keyboard one.
     Sleeping(u64),
     /// Blocked in `do_pause` (`SYS_PAUSE`) until a deliverable signal (pending and not blocked)
@@ -555,6 +553,8 @@ pub struct PosixTimer {
 /// no observable effect on this kernel -- there's no blocking-syscall-restart machinery to hook it
 /// into).
 const SA_NODEFER: u64 = 0x40000000;
+/// Restart a system call the handled signal interrupted, rather than fail it with `EINTR`.
+pub(crate) const SA_RESTART: u64 = 0x10000000;
 /// `SA_SIGINFO` (real Linux/x86_64 value) -- consulted by `deliver_pending_signal`
 /// (`sys/syscall/mod.rs`) to decide whether to invoke the handler as a real 3-argument
 /// `void (*)(int, siginfo_t *, void *)` (constructing a real `siginfo_t`/`ucontext_t` on the
@@ -602,10 +602,9 @@ enum DefaultDisposition {
 /// named constants matched above are ever in that range.
 fn default_disposition(sig: u64) -> DefaultDisposition {
     match sig {
-        SIGSTOP | SIGTSTP => DefaultDisposition::Stop,
-        SIGCHLD | SIGCONT | SIGURG | SIGWINCH | SIGIO | SIGTTIN | SIGTTOU => {
-            DefaultDisposition::Ignore
-        }
+        // POSIX: the four job-control stop signals (TTY.md §5.3).
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => DefaultDisposition::Stop,
+        SIGCHLD | SIGCONT | SIGURG | SIGWINCH | SIGIO => DefaultDisposition::Ignore,
         _ => DefaultDisposition::Terminate,
     }
 }
@@ -1171,6 +1170,9 @@ pub struct Process {
     /// gets its own fresh, fair snapshot on the *next* genuine return-to-userspace point, exactly
     /// like real hardware.
     pub cascade_budget: Option<CascadeBudget>,
+    /// Set when the timer wakes this process from a terminal read at its `VTIME` deadline,
+    /// rather than input arriving (`crate::tty::read`).
+    pub tty_timed_out: bool,
 }
 
 /// See `Process::cascade_budget`'s own doc comment for what this gates and why it exists.

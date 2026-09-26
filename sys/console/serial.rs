@@ -84,6 +84,16 @@ static SERIAL1: Lazy<Mutex<SerialPort>> = Lazy::new(|| {
     Mutex::new(serial_port)
 });
 
+/// Writes bytes to COM1 alone, which need not be UTF-8 (a copy of `ttyv0`'s output).
+pub fn write_bytes(bytes: &[u8]) {
+    interrupts::without_interrupts(|| {
+        let mut port = SERIAL1.lock();
+        for &b in bytes {
+            port.send(b);
+        }
+    });
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     interrupts::without_interrupts(|| {

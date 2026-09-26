@@ -72,14 +72,10 @@ enum Source {
 /// without a blocking model are always readable and writable, as POSIX specifies for files.
 fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
     use crate::fs::Readiness;
-    // real_fd 0-2 are the console (a fixed mapping, see `sys/fs/fd.rs`'s `init`).
-    if real_fd <= 2 {
-        let r = Readiness {
-            readable: crate::console::stdin::has_bytes_available(),
-            writable: true,
-            ..Default::default()
-        };
-        return (r, Source::Wakeable);
+    if let Some(tty) = crate::tty::of_real_fd(real_fd) {
+        let sid = crate::tty::caller(false).sid;
+        let (readable, writable) = crate::tty::poll_state(tty, sid);
+        return (Readiness { readable, writable, ..Default::default() }, Source::Wakeable);
     }
     if let Some(r) = crate::fs::pipe::readiness(real_fd) {
         return (r, Source::Wakeable);

@@ -114,11 +114,7 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
         if emergency { "it keeps dying; starting /sbin/emergency" } else { "starting it again" }
     );
     match lifecycle::spawn_as(INIT_PID, elf, argv, envp) {
-        Ok(_) => {
-            // The old pid 1's jobs lose the terminal; the new one starts in the foreground.
-            crate::console::stdin::set_foreground_pgid(INIT_PID);
-            adopt_orphans();
-        }
+        Ok(_) => adopt_orphans(),
         Err(e) => {
             crate::serial_println!("init: could not start pid 1: {:?}; the system is idle", e);
         }

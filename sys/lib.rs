@@ -21,6 +21,7 @@ pub mod qemu;
 pub mod random;
 pub mod reboot;
 pub mod syscall;
+pub mod tty;
 
 use core::panic::PanicInfo;
 

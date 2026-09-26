@@ -156,6 +156,8 @@ pub(crate) const ELOOP: u64 = 40;
 /// Returned by `process::do_pause` once a deliverable signal wakes it -- real `pause(2)`'s only
 /// possible return value. `4`, identical on Linux/BSD/musl, no divergence to worry about.
 pub(crate) const EINTR: u64 = 4;
+/// A terminal access by a revoked session, or a background read that can't stop (TTY.md §5).
+pub(crate) const EIO: u64 = 5;
 /// Returned by `crate::fs::mqueue`'s `do_mq_open` (no `O_CREAT`, name not found) / `do_mq_unlink`
 /// (name not found). `2`, identical on Linux/BSD/musl.
 pub(crate) const ENOENT: u64 = 2;
@@ -556,11 +558,26 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
     }
 
     CURRENT_FRAME.store(frame as *mut SyscallFrame, Ordering::Relaxed);
+    let number = frame.rax;
     let result = dispatch(frame.rax, frame.rdi, frame.rsi, frame.rdx, frame.r10);
     match result {
         Ok(value) => {
             frame.rax = value;
             frame.r11 &= !CARRY_FLAG;
+        }
+        // Interrupted by a signal: run the call again once the signal is dealt with -- after
+        // the process stops and continues, or after a handler installed with SA_RESTART --
+        // by resuming at the `syscall` instruction (2 bytes) with the original number; otherwise
+        // it fails with EINTR, as POSIX specifies.
+        Err(crate::tty::ERESTART) => {
+            if crate::process::restart_after_signal(crate::process::scheduler::current_pid()) {
+                frame.rcx -= 2;
+                frame.rax = number;
+                frame.r11 &= !CARRY_FLAG;
+            } else {
+                frame.rax = EINTR;
+                frame.r11 |= CARRY_FLAG;
+            }
         }
         Err(errno) => {
             frame.rax = errno;

@@ -11,7 +11,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 use crate::cpu::gdt::DOUBLE_FAULT_IST_INDEX;
 use crate::cpu::pic::{self, PIC_1_OFFSET, PIC_2_OFFSET};
 use crate::reboot::reboot;
-use crate::{serial_print, serial_println};
+use crate::serial_println;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -103,8 +103,7 @@ define_irq_trampolines! {
 
 // MapLettersToUnicode (not Ignore) so Ctrl+<letter> decodes to the corresponding C0 control code
 // (Ctrl+C => 0x03, Ctrl+D => 0x04, etc.) instead of being silently dropped to the plain letter --
-// stsh's read_line (see `regress/stsh/`) relies on those bytes reaching stdin to implement
-// abort-line/EOF handling.
+// the terminal's line discipline gives them their meaning (`crate::tty`).
 static KEYBOARD: Mutex<PS2Keyboard<Us104Key, ScancodeSet1>> = Mutex::new(PS2Keyboard::new(
     ScancodeSet1::new(),
     Us104Key,
@@ -408,9 +407,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Wake any process blocked in `process::do_nanosleep` (`BlockReason::Sleeping`) whose deadline
-    // has now passed -- same "IRQ handler reaches directly into `process::table()`" shape
-    // `crate::console::stdin::push_byte`'s own `wake_blocked_readers` already established for
-    // `WaitingForStdin`, just driven by this timer IRQ instead of the keyboard one. A syscall
+    // has now passed -- the same "IRQ handler reaches directly into `process::table()`" shape
+    // terminal input uses to wake its readers, driven by this timer IRQ instead. A syscall
     // (`SFMASK` clears `IF`) or `schedule()` (`without_interrupts`) can't be interrupted holding
     // this lock, but kernel-context code running with interrupts on can: boot's `spawn`, or a test
     // calling a handler directly as pid 0. Spinning here would then deadlock the only core (found
@@ -426,6 +424,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
         {
             proc.cpu_ticks += 1;
         }
+        // Terminal reads whose VTIME ran out.
+        crate::tty::expire_timers(&mut table, now);
         for (&pid, proc) in table.iter_mut() {
             if let crate::process::ProcState::Blocked(
                 crate::process::BlockReason::Sleeping(deadline)
@@ -737,7 +737,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
         };
         let higher_priority_ready =
             crate::process::scheduler::ready_queue_has_higher_priority_than(current_priority);
-        if higher_priority_ready || quantum_expired {
+        let key_signal = KEY_RESCHEDULE.swap(false, Ordering::Relaxed);
+        if higher_priority_ready || quantum_expired || key_signal {
             crate::process::scheduler::schedule();
         }
 
@@ -893,12 +894,7 @@ fn normalize_enter_key(code: KeyCode, key: DecodedKey) -> DecodedKey {
 /// programs to expect), everything else goes through `handle_decoded_key`.
 fn dispatch_key(code: KeyCode, key: DecodedKey) -> bool {
     if let Some(seq) = console_key_sequence(code, &key) {
-        if !crate::console::stdin::raw_keyboard_owned() {
-            for &b in seq {
-                crate::console::stdin::push_byte(b);
-            }
-        }
-        return false;
+        return crate::tty::console::keyboard(seq);
     }
     handle_decoded_key(normalize_enter_key(code, key))
 }
@@ -907,7 +903,7 @@ fn dispatch_key(code: KeyCode, key: DecodedKey) -> bool {
 /// pc-keyboard reports these keys as `RawKey` -- they used to be dropped entirely, so no program
 /// ever saw an arrow key -- except Delete, which it decodes as DEL (0x7f), and Backspace, as BS
 /// (0x08). A Linux console sends DEL for Backspace (matching `VERASE`, see
-/// `console::stdin::DEFAULT_TERMIOS`) and `ESC [ 3 ~` for Delete, so both are rewritten too.
+/// `crate::tty::default_termios`) and `ESC [ 3 ~` for Delete, so both are rewritten too.
 /// Ctrl+H still produces BS: only the Backspace key itself is matched.
 fn console_key_sequence(code: KeyCode, key: &DecodedKey) -> Option<&'static [u8]> {
     let seq: &'static [u8] = match (code, key) {
@@ -927,99 +923,17 @@ fn console_key_sequence(code: KeyCode, key: &DecodedKey) -> Option<&'static [u8]
     Some(seq)
 }
 
+/// One decoded key, as input to the console terminal. Echo, `^C`/`^Z` and line editing are the
+/// terminal's line discipline (`crate::tty`). Non-ASCII is dropped: a US layout doesn't produce it.
 fn handle_decoded_key(key: DecodedKey) -> bool {
     match key {
-        DecodedKey::Unicode(character) => {
-            // Non-ASCII is silently dropped here -- a US keyboard layout won't produce it,
-            // and it keeps sys_read's contract (raw bytes, not full UTF-8) simple.
-            if character.is_ascii() {
-                let byte = character as u8;
-                // Only echo printable characters and newline directly here. Control bytes
-                // (backspace, delete, Ctrl+C, Ctrl+D, ...) are still pushed to stdin below,
-                // but *how* they should look on screen (erasing a character, printing "^C",
-                // etc.) is a userland concern -- see `regress/stsh/`'s `read_line` -- and
-                // echoing them raw here just produces VGA's placeholder glyph for anything
-                // outside 0x20..=0x7e, which isn't useful for any of them.
-                //
-                // Gated on the console's own current termios ECHO bit (see `src/stdin.rs`) --
-                // a program that's switched to raw mode with ECHO cleared (e.g. a real
-                // line-editing shell) does its own echoing; echoing here on top of that would
-                // double every keystroke. Defaults to on, matching this kernel's original,
-                // always-echo behavior before real termios existed.
-                // Real tty-driver INTR behavior: once a real session has actually claimed the
-                // controlling terminal and set a foreground process group (`TIOCSCTTY`/
-                // `TIOCSPGRP` -- see CLAUDE.md's session/controlling-tty notes), Ctrl+C (ASCII
-                // ETX, `0x03`) is intercepted here and turned into a real `SIGINT` delivered to
-                // that whole group, exactly like a real terminal driver consuming INTR before
-                // it ever reaches a reading process's buffer -- it is deliberately *not* also
-                // pushed to stdin in this case. Gated on the console's own `ISIG` bit (real
-                // convention: a program that's cleared it, same as `ECHO` above, wants raw
-                // bytes instead, e.g. a line editor that means to handle Ctrl+C itself). Until
-                // some session actually does this (the common case today -- nothing calls
-                // `setsid`/`TIOCSCTTY` yet outside `sulogin`/`getty`), `foreground_pgid()` stays
-                // `None` and this falls through to the original behavior below: the raw byte is
-                // pushed to stdin and a userland reader (`stsh`'s own `read_line`, BusyBox
-                // `hush`'s line editor) handles it itself, unchanged from before this existed.
-                if byte == 0x03
-                    && crate::console::stdin::get_termios().c_lflag & crate::console::stdin::ISIG
-                        != 0
-                    && let Some(pgid) = crate::console::stdin::foreground_pgid()
-                {
-                    serial_print!("^C\n");
-                    let cur = crate::process::scheduler::current_pid();
-                    crate::process::signal_foreground_group(pgid, crate::process::SIGINT);
-                    return !matches!(
-                        crate::process::table().lock().get(&cur).map(|p| p.state),
-                        Some(crate::process::ProcState::Running)
-                    );
-                }
-                // Real tty-driver SUSP behavior, same shape as the Ctrl+C/SIGINT interception
-                // directly above (ASCII SUB, `0x1a`, is Ctrl+Z's real terminal-driver INTR-
-                // family byte) -- delivers a real SIGTSTP to the foreground group instead of
-                // SIGINT (see `ProcState::Stopped`/`process::signals`'s `Action::Stop` for what
-                // happens next: the target genuinely stops, observable via `wait4(WUNTRACED)`,
-                // resumable via a later `SIGCONT` -- `hush`'s own `fg`/`bg`/`jobs` builtins
-                // already send/observe that real machinery unmodified). Same `ISIG`/
-                // `foreground_pgid()` gating and not-also-pushed-to-stdin behavior.
-                if byte == 0x1a
-                    && crate::console::stdin::get_termios().c_lflag & crate::console::stdin::ISIG
-                        != 0
-                    && let Some(pgid) = crate::console::stdin::foreground_pgid()
-                {
-                    serial_print!("^Z\n");
-                    let cur = crate::process::scheduler::current_pid();
-                    crate::process::signal_foreground_group(pgid, crate::process::SIGTSTP);
-                    return !matches!(
-                        crate::process::table().lock().get(&cur).map(|p| p.state),
-                        Some(crate::process::ProcState::Running)
-                    );
-                }
-                // Suppressed while a process owns real raw keyboard input (`SYS_GET_KEYEVENT`,
-                // e.g. the fbdoom/doomgeneric port) -- see `console::stdin::RAW_KEYBOARD_OWNED`'s
-                // own doc comment for the real bug this closes (every ASCII-producing keystroke
-                // visibly "leaking" into the console while a program reads it correctly through
-                // the raw keyevent path instead).
-                if !crate::console::stdin::raw_keyboard_owned() {
-                    if crate::console::stdin::echo_enabled()
-                        && (byte == b'\n' || byte == b'\r' || (0x20..=0x7e).contains(&byte))
-                    {
-                        serial_print!("{character}");
-                    }
-                    crate::console::stdin::push_byte(byte);
-                }
-            }
-        }
-        // Modifier/lock keys (Shift, Ctrl, CapsLock, ...) and any other non-Unicode key --
-        // nothing to echo or push to stdin. These used to be logged via `{key:?}` for
-        // debugging during early keyboard-decode bring-up, but that printed raw debug names
-        // like "LControl" inline with real typed text (e.g. right before a Ctrl+C's "^C"),
-        // which is exactly the kind of noise a real shell shouldn't produce.
-        DecodedKey::RawKey(_) => {}
+        DecodedKey::Unicode(character) if character.is_ascii() => crate::tty::console::keyboard(&[character as u8]),
+        // Modifier and lock keys, and anything else with no byte to deliver.
+        _ => false,
     }
-    false
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
     let mut port: Port<u8> = Port::new(0x60);
     // SAFETY: 0x60 is the PS/2 controller's data port; reading it is how a keyboard IRQ is
     // acknowledged at the hardware level, and it's only ever read here.
@@ -1057,10 +971,20 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // See `handle_decoded_key`'s own doc comment for why this can't just be an ordinary `iretq`
     // back into a process a Ctrl+C/Ctrl+Z just terminated/stopped. Same "EOI before schedule()"
     // ordering `timer_interrupt_handler`'s own ring-3 preemption already establishes.
-    if must_reschedule {
+    // Only when user code was interrupted: an interrupt that landed in the kernel -- notably the
+    // scheduler's own idle loop, `wait_for_ready` -- must not call `schedule()` again from inside
+    // it. That nested call would take the next runnable process and return into the idle loop,
+    // which then halts with a process marked Running that never runs (found live: the shell
+    // hung after Ctrl+D ended a `cat`). The idle loop picks up whatever became runnable itself.
+    if must_reschedule && stack_frame.code_segment.0 & 0x3 == 3 {
         crate::process::scheduler::schedule();
     }
 }
+
+/// A USB keystroke's signal stopped or killed the current process: the timer interrupt, which
+/// polls the USB keyboard, reschedules if it interrupted user code (see
+/// `keyboard_interrupt_handler` for why only then).
+static KEY_RESCHEDULE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Feeds one synthesized PS/2 Scan Code Set 1 byte through the exact same decode pipeline a real
 /// PS/2 IRQ uses (`KEYBOARD`'s `add_byte`/`process_keyevent`, then `handle_decoded_key`) -- the
@@ -1084,12 +1008,8 @@ pub(crate) fn feed_synthetic_scancode(byte: u8) {
             false
         }
     };
-    // Safe here too: called from `drivers::usb::poll()`, itself called from
-    // `timer_interrupt_handler` *after* that handler's own EOI (see this function's own doc
-    // comment) -- same "EOI before schedule()" ordering as `keyboard_interrupt_handler`. See
-    // `handle_decoded_key`'s own doc comment for why this can't just fall through to a plain
-    // return.
+    // Left to the timer interrupt, which knows whether it interrupted user code.
     if must_reschedule {
-        crate::process::scheduler::schedule();
+        KEY_RESCHEDULE.store(true, Ordering::Relaxed);
     }
 }
