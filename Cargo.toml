@@ -331,6 +331,10 @@ name = "kstack_guard"
 harness = false
 
 [[test]]
+name = "boot_flags"
+harness = false
+
+[[test]]
 name = "ninja_syscall_smoke"
 harness = false
 

@@ -65,6 +65,8 @@ use super::BootInfo;
 const MULTIBOOT2_BOOTLOADER_MAGIC: u32 = 0x36d7_6289;
 
 const TAG_TYPE_END: u32 = 0;
+/// Boot command line (spec section 3.6.2): a NUL-terminated string after the 8-byte header.
+const TAG_TYPE_CMDLINE: u32 = 1;
 const TAG_TYPE_MMAP: u32 = 6;
 const TAG_TYPE_FRAMEBUFFER: u32 = 8;
 
@@ -578,7 +580,8 @@ pub fn primary_framebuffer() -> Option<super::FbInfo> {
 /// Walks the Multiboot2 info structure at `mbi_phys` (spec section 3.4: a `total_size`/`reserved`
 /// header followed by a sequence of 8-byte-aligned tags), keeping only the `MULTIBOOT_TAG_TYPE_MMAP`
 /// tag's entries, translated into the exact `limine::memmap::Entry` shape
-/// `memory::BootInfoFrameAllocator` already consumes unmodified.
+/// `memory::BootInfoFrameAllocator` already consumes unmodified. Also applies the command-line
+/// tag (`boot::apply_cmdline`) and records the framebuffer tag.
 ///
 /// # Safety
 ///
@@ -600,6 +603,15 @@ unsafe fn parse_mmap(mbi_phys: u64) -> &'static [&'static Entry] {
         let size = unsafe { ((tag_addr + 4) as *const u32).read_unaligned() } as usize;
         if typ == TAG_TYPE_END {
             break;
+        }
+        if typ == TAG_TYPE_CMDLINE && size > 8 {
+            // SAFETY: the string lies within this tag's own [tag_addr, tag_addr + size).
+            let bytes =
+                unsafe { core::slice::from_raw_parts((tag_addr + 8) as *const u8, size - 8) };
+            let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            if let Ok(cmdline) = core::str::from_utf8(&bytes[..len]) {
+                super::apply_cmdline(cmdline);
+            }
         }
         if typ == TAG_TYPE_MMAP && size >= 16 {
             let entry_size = unsafe { ((tag_addr + 8) as *const u32).read_unaligned() } as usize;

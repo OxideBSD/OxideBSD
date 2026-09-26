@@ -64,9 +64,15 @@ cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
 # QEMU launch, is the actual real-hardware artifact; safe to Ctrl-C the QEMU window once it's
 # produced) to get an ISO with this gate genuinely on, rather than hand-editing this file before
 # every real-hardware attempt.
+#
+# OXIDEBSD_KERNEL_CMDLINE appends further tokens, e.g. `-s` to boot init single-user
+# (`oxidebsd::boot::parse_cmdline`).
 KERNEL_CMDLINE=""
 if [ -n "${OXIDEBSD_REAL_HARDWARE:-}" ]; then
     KERNEL_CMDLINE="no-ata"
+fi
+if [ -n "${OXIDEBSD_KERNEL_CMDLINE:-}" ]; then
+    KERNEL_CMDLINE="${KERNEL_CMDLINE:+$KERNEL_CMDLINE }$OXIDEBSD_KERNEL_CMDLINE"
 fi
 
 # Deliberately no `resolution:` override here: `console::vga`'s text grid sizes itself

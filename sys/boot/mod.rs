@@ -205,6 +205,59 @@ pub fn ata_disabled() -> bool {
     ATA_DISABLED.load(Ordering::Relaxed)
 }
 
+/// `-s` on the kernel command line: boot init into single-user mode (FreeBSD's `RB_SINGLE`).
+static SINGLE_USER: AtomicBool = AtomicBool::new(false);
+
+pub fn single_user() -> bool {
+    SINGLE_USER.load(Ordering::Relaxed)
+}
+
+/// What the kernel command line asks for. Dash tokens are boot flags in the BSD `boot -s` style;
+/// the rest are kernel options. Unknown tokens of either kind are ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BootFlags {
+    /// `no-ata`: see `ata_disabled`.
+    pub no_ata: bool,
+    /// `-s`, alone or combined (`-sv`): see `single_user`.
+    pub single_user: bool,
+}
+
+pub fn parse_cmdline(cmdline: &str) -> BootFlags {
+    let mut flags = BootFlags::default();
+    for token in cmdline.split_whitespace() {
+        if token == "no-ata" {
+            flags.no_ata = true;
+        } else if let Some(letters) = token.strip_prefix('-')
+            && letters.contains('s')
+        {
+            flags.single_user = true;
+        }
+    }
+    flags
+}
+
+/// Records the kernel command line's flags. Called once per boot path: `read_boot_info` (Limine)
+/// or `multiboot2::parse_mmap` (the Multiboot2 command-line tag).
+pub(crate) fn apply_cmdline(cmdline: &str) {
+    let flags = parse_cmdline(cmdline);
+    ATA_DISABLED.store(flags.no_ata, Ordering::Relaxed);
+    SINGLE_USER.store(flags.single_user, Ordering::Relaxed);
+}
+
+/// Path pid 1 is started from.
+pub const INIT_PATH: &[u8] = b"/sbin/init";
+
+/// argv for `/sbin/init`, built the way FreeBSD's and OpenBSD's `start_init()` build it: the path,
+/// then `-s` only if single-user was requested. Init also gets an empty environment (`INIT.md`
+/// §4.2 has it build its own).
+pub fn init_argv() -> &'static [&'static [u8]] {
+    if single_user() {
+        &[INIT_PATH, b"-s"]
+    } else {
+        &[INIT_PATH]
+    }
+}
+
 /// Panics if Limine didn't honor the requested base revision -- called once, first thing, from
 /// `limine_entry_point!`'s generated `kmain`, before anything else touches a Limine response.
 pub fn check_base_revision() {
@@ -231,12 +284,11 @@ pub fn read_boot_info() -> &'static BootInfo {
     let memmap = MEMMAP_REQUEST
         .response()
         .expect("Limine did not answer the memory map request");
-    let has_no_ata_flag = CMDLINE_REQUEST
-        .response()
-        .is_some_and(|r| r.cmdline().split_whitespace().any(|tok| tok == "no-ata"));
+    if let Some(r) = CMDLINE_REQUEST.response() {
+        apply_cmdline(r.cmdline());
+    }
 
     HHDM_OFFSET.store(hhdm.offset, Ordering::Relaxed);
-    ATA_DISABLED.store(has_no_ata_flag, Ordering::Relaxed);
 
     unsafe {
         BOOT_INFO = Some(BootInfo {

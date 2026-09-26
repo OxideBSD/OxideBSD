@@ -204,6 +204,10 @@ Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine
   `.env("RUSTFLAGS", ...)` override actually took effect.
 - Verified via all 51 `tests/*.rs` files migrated and passing, confirmed on both `OXIDEBSD_FIRMWARE`
   values.
+- **Kernel command line** (`boot::parse_cmdline`, fed by Limine's cmdline response or the Multiboot2
+  cmdline tag): `no-ata`, and BSD-style boot flags — `-s` (single-user). `boot::init_argv()` is
+  pid 1's argv as FreeBSD/OpenBSD build it (`/sbin/init` [`-s`], empty environment); unused until
+  `/sbin/init` replaces `/bin/sh` as pid 1. `OXIDEBSD_KERNEL_CMDLINE=-s cargo run` sets it.
 
 ## Boot: Multiboot2 (`sys/boot/multiboot2.rs`, `x86_64-oxidebsd-multiboot2.ld`, `regress/multiboot2-boot-smoke/`, `regress/multiboot2-kernel/`, `scripts/qemu_common.sh`, `scripts/run_multiboot2_smoke.sh`, `scripts/run_multiboot2_kernel.sh`)
 
