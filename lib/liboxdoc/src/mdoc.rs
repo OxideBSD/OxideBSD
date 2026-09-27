@@ -278,6 +278,11 @@ impl Parser<'_> {
                 self.words(&args[used..], None);
             }
             "br" | "sp" => self.push(Node::new(Kind::Elem, name, self.line)),
+            _ if name.starts_with('%') && !self.stack.iter().any(|n| n.kind == Kind::Block && n.tok == "Rs") => {
+                // A reference field outside `.Rs`: an in-line macro like any other.
+                let used = self.inline_elem(name, args);
+                self.words(&args[used..], None);
+            }
             _ if name.starts_with('%') => {
                 self.open(Kind::Elem, name);
                 for a in args {
@@ -533,6 +538,7 @@ impl Parser<'_> {
         }
         let mut open = false;
         let mut produced = false;
+        let mut defaulted = false;
         let start_elem = |p: &mut Parser, open: &mut bool| {
             if !*open {
                 p.open(Kind::Elem, name);
@@ -545,10 +551,12 @@ impl Parser<'_> {
                 break;
             }
             if is_delim(a) && !a.contains(mark::ZERO) {
-                // A delimiter: close the element; a middle delimiter reopens it after.
+                // A delimiter: close the element; a middle delimiter reopens it after, unless the
+                // element printed its default (`.Nm , text`), when the rest is plain text.
                 if !produced && !open {
                     self.default_content(name);
                     produced = true;
+                    defaulted = true;
                 }
                 if open {
                     self.close_top();
@@ -557,6 +565,11 @@ impl Parser<'_> {
                 self.plain_word(a, i + 1 == rest.len());
                 i += 1;
                 // Only delimiters left (or a macro): they all stay outside.
+                continue;
+            }
+            if defaulted {
+                self.plain_word(a, i + 1 == rest.len());
+                i += 1;
                 continue;
             }
             start_elem(self, &mut open);
@@ -572,6 +585,10 @@ impl Parser<'_> {
             self.close_top();
         } else if !produced {
             self.default_content(name);
+            // `.Fl Fl variables`: an empty flag attaches to what follows.
+            if name == "Fl" && i < rest.len() {
+                self.nospace = true;
+            }
         }
         i
     }

@@ -179,6 +179,24 @@ impl R<'_> {
             }
             return;
         }
+        if !n.flags.line_start && (n.text.starts_with(' ') || n.text.ends_with(' ')) && n.text.trim() != "" {
+            // A macro argument with spaces at its edges (`.Dq "Password: "`) keeps them.
+            let lead = n.text.len() - n.text.trim_start_matches(' ').len();
+            let trail = n.text.len() - n.text.trim_end_matches(' ').len();
+            let words: Vec<&str> = n.text.split(' ').filter(|w| !w.is_empty()).collect();
+            let last = words.len().saturating_sub(1);
+            for (i, w) in words.iter().enumerate() {
+                let mut word = w.to_string();
+                if i == 0 {
+                    word = format!("{}{word}", mark::NBSP.to_string().repeat(lead));
+                }
+                if i == last {
+                    word.push_str(&mark::NBSP.to_string().repeat(trail));
+                }
+                self.t.word_ext(&word, style, i == last && n.flags.eos);
+            }
+            return;
+        }
         let text = n.text.trim_end_matches([' ', '\t']);
         if n.flags.line_start && text.starts_with(' ') {
             // A line starting with spaces breaks, and its first output line is indented by them.
@@ -327,14 +345,12 @@ impl R<'_> {
             }
             "Lk" => {
                 let url = n.args.first().cloned().unwrap_or_default();
-                if n.args.len() > 1 {
-                    let last = n.args.len() - 1;
-                    for (i, w) in n.args[1..].iter().enumerate() {
-                        self.t.word(w, under);
-                        if i + 1 == last {
-                            self.t.nospace();
-                            self.t.word(":", style);
-                        }
+                let words: Vec<String> = n.args.iter().skip(1).flat_map(|a| a.split(' ').filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>()).collect();
+                for (i, w) in words.iter().enumerate() {
+                    self.t.word(w, under);
+                    if i + 1 == words.len() {
+                        self.t.nospace();
+                        self.t.word(":", style);
                     }
                 }
                 self.t.word(&url, bold);
@@ -378,9 +394,16 @@ impl R<'_> {
                 r.t.nospace();
             }
             first = false;
-            // An argument never breaks across lines, and keeps its spacing.
-            let joined = words.join(" ").replace(' ', &mark::NBSP.to_string());
-            r.t.word(&joined, Style::Under);
+            // In SYNOPSIS an argument doesn't break across lines where it can be helped, and
+            // keeps its spacing; elsewhere its words fill like any others.
+            if r.synopsis {
+                let joined = words.join(" ").replace(' ', &mark::NBSP.to_string());
+                r.t.word(&joined, Style::Under);
+            } else {
+                for w in words.join(" ").split(' ').filter(|w| !w.is_empty()) {
+                    r.t.word(w, Style::Under);
+                }
+            }
         };
         for a in args {
             arg(self, vec![a.clone()]);
@@ -427,7 +450,7 @@ impl R<'_> {
         let fns = n.tok == "Rv";
         if fns && names.is_empty() {
             // `.Rv -std` naming no function.
-            for w in "Upon successful completion, the value 0 is returned; otherwise the value -1 is returned and the global variable errno is set to indicate the error.".split(' ') {
+            for w in "Upon successful completion, the value\u{E002}0 is returned; otherwise the value\u{E002}-1 is returned and the global variable errno is set to indicate the error.".split(' ') {
                 let st = if w == "errno" { Style::Under } else { style };
                 self.t.word_ext(w, st, w == "error.");
             }
@@ -457,8 +480,8 @@ impl R<'_> {
         let rest = match (fns, count > 1) {
             (false, false) => "utility exits 0 on success, and >0 if an error occurs.",
             (false, true) => "utilities exit 0 on success, and >0 if an error occurs.",
-            (true, false) => "function returns the value 0 if successful; otherwise the value -1 is returned and the global variable errno is set to indicate the error.",
-            (true, true) => "functions return the value 0 if successful; otherwise the value -1 is returned and the global variable errno is set to indicate the error.",
+            (true, false) => "function returns the value\u{E002}0 if successful; otherwise the value\u{E002}-1 is returned and the global variable errno is set to indicate the error.",
+            (true, true) => "functions return the value\u{E002}0 if successful; otherwise the value\u{E002}-1 is returned and the global variable errno is set to indicate the error.",
         };
         for w in rest.split(' ') {
             let st = if w == "errno" { Style::Under } else { style };

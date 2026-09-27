@@ -380,6 +380,16 @@ impl Term {
                 self.open_line();
                 continue;
             }
+            // Too long for an empty line: break it at its own spaces where it must.
+            if let Some(cut) = space_break(&cells, self.rmargin.saturating_sub(col)) {
+                self.push_cells(&cells[..cut]);
+                let rest = cells[cut..].iter().skip_while(|c| c.ch == ' ').count();
+                let skip = cells.len() - cut - rest;
+                cells.drain(..cut + skip);
+                self.emit_line();
+                self.open_line();
+                continue;
+            }
             // Too long for any line: it overflows.
             self.push_cells(&cells);
             self.fresh = false;
@@ -494,6 +504,11 @@ impl Term {
             // No room for the right part: the center part goes flush right.
             pad(&mut s, &mut col, w - cl);
             s.push_str(center);
+        } else if !center.is_empty() {
+            // Not even that: the center part goes flush right on a line of its own.
+            s.push('\n');
+            s.push_str(&" ".repeat(w.saturating_sub(cl)));
+            s.push_str(center);
         }
         let s = s.trim_end().to_string();
         let s = if self.encoding == Encoding::Ascii { s.chars().map(|c| if c.is_ascii() { c.to_string() } else { ascii_for(c).to_string() }).collect() } else { s };
@@ -516,6 +531,18 @@ fn hyphen_break(cells: &[Cell], room: usize) -> Option<usize> {
         let plain = cells[k - 1].style == Style::None && cells[k].style == Style::None && cells[k + 1].style == Style::None;
         if plain && cells[k].ch == '-' && cells[k - 1].ch.is_alphabetic() && cells[k + 1].ch.is_alphabetic() && visible_len(&cells[..=k]) <= room {
             best = Some(k + 1);
+        }
+    }
+    best
+}
+
+/// The last space in `cells` before which at most `room` columns are used. Returns the number of
+/// cells before it.
+fn space_break(cells: &[Cell], room: usize) -> Option<usize> {
+    let mut best = None;
+    for k in 1..cells.len() {
+        if cells[k].ch == ' ' && cells[k - 1].ch != ' ' && visible_len(&cells[..k]) <= room {
+            best = Some(k);
         }
     }
     best
