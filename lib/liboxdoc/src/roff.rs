@@ -360,12 +360,15 @@ impl<'a> Roff<'a> {
                 true
             }
             "nr" => {
-                let mut it = argstr.split_whitespace();
-                if let Some(key) = it.next() {
+                let (key, rest) = split_name(argstr);
+                if !key.is_empty() {
                     // The name may be built from other registers (`name\n[level]`).
                     let key = self.interpolate_name(key);
                     let key = key.as_str();
-                    let expr = self.expand(it.next().unwrap_or("0"), 0);
+                    // The value is expanded before it is split off the (ignored) increment, so
+                    // a `\w'...'` holding spaces stays whole.
+                    let rest = self.expand(rest, 0);
+                    let expr = rest.split_whitespace().next().unwrap_or("0").to_string();
                     let cur = *self.registers.get(key).unwrap_or(&0);
                     let v = if let Some(e) = expr.strip_prefix('+') {
                         cur + self.number(e, b'u')
