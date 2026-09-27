@@ -19,8 +19,6 @@ struct R<'a> {
     width: usize,
     /// Margins and widths saved by `.RS`, restored by `.RE`.
     levels: Vec<(usize, usize)>,
-    /// The indent `.in` sets, which lasts across sections until changed.
-    indent: isize,
     /// `lines_out` just after the last `.SH` heading: if nothing has been output since, the next
     /// heading follows it without space.
     after_sh: Option<(usize, bool)>,
@@ -33,7 +31,7 @@ pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     // man(7) sets tab stops every half inch, five columns.
     t.tab_width = 5;
     t.nofill_zero_lines = true;
-    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), indent: 0, after_sh: None, sp_swallowed: false };
+    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), after_sh: None, sp_swallowed: false };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {
             if sh.part(Kind::Head).is_some_and(|h| h.plain_text().trim() == "SYNOPSIS")
@@ -72,11 +70,6 @@ fn plain(s: &str) -> String {
 }
 
 impl R<'_> {
-    /// A margin shifted by the `.in` indent.
-    fn at(&self, col: usize) -> usize {
-        (col as isize + self.indent).max(0) as usize
-    }
-
     fn title(&self) -> String {
         format!("{}({})", plain(&self.meta.title), plain(&self.meta.section))
     }
@@ -229,19 +222,21 @@ impl R<'_> {
             }
             "in" => {
                 self.t.flush();
+                // An absolute indent counts from the page's left edge; with no argument, the
+                // paragraph's own margin. The next paragraph macro resets it.
                 let arg = n.args.first().map(String::as_str).unwrap_or("");
-                let old = self.indent;
-                self.indent = if let Some(v) = arg.strip_prefix('+') {
-                    self.indent + scaled(v) as isize
+                let off = if let Some(v) = arg.strip_prefix('+') {
+                    self.t.offset + scaled(v)
                 } else if let Some(v) = arg.strip_prefix('-') {
-                    self.indent - scaled(v) as isize
+                    self.t.offset.saturating_sub(scaled(v))
                 } else if arg.is_empty() {
-                    0
+                    self.base
                 } else {
-                    scaled(arg) as isize
+                    scaled(arg)
                 };
-                let off = (self.t.offset as isize + self.indent - old).max(0) as usize;
                 self.t.set_offset(off);
+                self.t.no_vspace = false;
+                self.after_sh = None;
             }
             "ti" => {
                 let arg = n.args.first().map(String::as_str).unwrap_or("0");
@@ -350,10 +345,10 @@ impl R<'_> {
                 self.t.nofill = false;
                 // A long subsection heading wraps to the body's indent.
                 if n.tok == "SH" {
-                    self.t.set_offset(self.at(0));
+                    self.t.set_offset(0);
                 } else {
-                    self.t.set_offset(self.at(INDENT));
-                    self.t.begin_line_at(self.at(SS_INDENT));
+                    self.t.set_offset(INDENT);
+                    self.t.begin_line_at(SS_INDENT);
                 }
                 if let Some(h) = n.part(Kind::Head) {
                     self.children(h, Style::Bold);
@@ -361,7 +356,7 @@ impl R<'_> {
                 self.t.flush();
                 self.after_sh = Some((self.t.lines_out, n.tok == "SH"));
                 self.t.reset_font();
-                self.base = self.at(INDENT);
+                self.base = INDENT;
                 self.t.set_offset(self.base);
                 self.t.no_vspace = true;
                 if let Some(b) = n.part(Kind::Body) {

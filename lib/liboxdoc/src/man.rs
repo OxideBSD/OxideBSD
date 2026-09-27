@@ -29,11 +29,13 @@ struct Parser<'a> {
     pending_head: bool,
     /// The last text line ended in `\c`: the next node attaches without a space.
     nospace: bool,
+    /// The last text line ended in `\c`.
+    continued: bool,
     line: usize,
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, line: 0 };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, line: 0 };
     for l in lines {
         match l {
             Line::Macro { name, args, line, .. } => {
@@ -130,24 +132,27 @@ impl Parser<'_> {
     fn text_line(&mut self, text: &str) {
         use crate::roff::mark::{CONT, NBSP};
         let text = text.trim_end_matches([' ', '\t']);
-        // `\c`: the next line continues this one without a space. Spaces before it are kept.
+        // `\c`: the next line continues this one without a space. Spaces before it are kept,
+        // and the line may break at the last of them.
         let cont = text.ends_with(CONT);
         let mut text = text.trim_end_matches(CONT).to_string();
+        let mut trail = 0;
         if cont {
             let body = text.trim_end_matches(' ').len();
-            let trail = text.len() - body;
+            trail = text.len() - body;
             text.truncate(body);
-            text.extend(std::iter::repeat_n(NBSP, trail));
+            text.extend(std::iter::repeat_n(NBSP, trail.saturating_sub(1)));
         }
         // A line continuing one that ended in `\c` doesn't break at its leading spaces.
-        if self.nospace && text.starts_with(' ') {
+        if std::mem::take(&mut self.continued) && text.starts_with(' ') {
             let lead = text.len() - text.trim_start_matches(' ').len();
             text = std::iter::repeat_n(NBSP, lead).chain(text[lead..].chars()).collect();
         }
         let text = text.as_str();
         self.text_line_inner(text);
         if cont {
-            self.nospace = true;
+            self.nospace = trail == 0;
+            self.continued = true;
         }
     }
 
