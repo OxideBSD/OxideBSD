@@ -788,7 +788,9 @@ impl<'a> Roff<'a> {
                             }
                         }
                         'w' => {
-                            let w = self.expand_depth(&arg, lineno, depth + 1).chars().filter(|c| !is_marker(*c)).count();
+                            // Markers for printable escapes (`\-`, `\ `, `\e`) take a column.
+                            let printable = |c: char| !is_marker(c) || matches!(c, mark::NBSP | mark::MINUS | mark::BACKSLASH);
+                            let w = self.expand_depth(&arg, lineno, depth + 1).chars().filter(|c| printable(*c)).count();
                             out.push_str(&(w * 24).to_string());
                         }
                         'o' => out.push_str(&arg),
