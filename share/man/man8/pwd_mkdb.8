@@ -1,0 +1,74 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt PWD_MKDB 8
+.Os OxideBSD
+.Sh NAME
+.Nm pwd_mkdb
+.Nd install the account database
+.Sh SYNOPSIS
+.Nm
+.Op Fl Cp
+.Op Fl d Ar directory
+.Op Fl u Ar user
+.Ar file
+.Sh DESCRIPTION
+The
+.Nm
+utility checks
+.Ar file ,
+a new account database in the
+.Pa master.passwd
+format described in
+.Xr passwd 5 ,
+and installs it as
+.Pa /etc/master.passwd
+with mode 0600.
+With
+.Fl p ,
+it also generates the public
+.Pa /etc/passwd ,
+in which every password is replaced by
+.Ql *
+and the class, change and expire fields are left out.
+.Pp
+Unlike the other BSDs'
+.Nm ,
+it writes no hashed database files: the C library reads the text files
+directly.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl C
+Only check
+.Ar file ;
+install nothing.
+.It Fl d Ar directory
+Install into
+.Ar directory
+instead of
+.Pa /etc .
+.It Fl p
+Generate
+.Pa passwd
+as well.
+.It Fl u Ar user
+Accepted for compatibility; the whole database is rebuilt.
+.El
+.Sh FILES
+.Bl -tag -width /etc/master.passwd -compact
+.It Pa /etc/master.passwd
+the account database
+.It Pa /etc/passwd
+its public form
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr passwd 5
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Bx 4.3 Reno .
+This implementation was written for OxideBSD.

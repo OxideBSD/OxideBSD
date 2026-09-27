@@ -1,0 +1,97 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt GETTY 8
+.Os OxideBSD
+.Sh NAME
+.Nm getty
+.Nd set up a terminal and ask for a login name
+.Sh SYNOPSIS
+.Nm
+.Op Ar type Op Ar tty
+.Sh DESCRIPTION
+The
+.Nm
+program is run by
+.Xr init 8
+for each terminal marked
+.Dq on
+in
+.Xr ttys 5 .
+It opens
+.Pa /dev/ Ns Ar tty
+as the controlling terminal of a new session and as its standard input,
+output and error, configures the line from the
+.Xr gettytab 5
+record
+.Ar type
+(or
+.Dq default ) ,
+prints a banner and a login prompt, and runs
+.Xr login 1
+with the name that is typed.
+A
+.Ar tty
+of
+.Dq -
+means the terminal
+.Nm
+was started on.
+.Pp
+The banner is the record's
+.Cm if
+file, or else its
+.Cm im
+string, and the prompt is its
+.Cm lm
+string.
+In each, the escapes
+.Ql %t
+(the terminal),
+.Ql %h
+(the host name),
+.Ql %s ,
+.Ql %r ,
+.Ql %v ,
+.Ql %m
+(the system's name, release, version and machine),
+.Ql %d
+(the date and time) and
+.Ql %%
+are replaced.
+.Pp
+An empty line prompts again.
+A break (a line holding a NUL character) switches to the record named by
+.Cm nx ,
+for serial lines whose speed is found by trying each in turn.
+With
+.Cm to
+set,
+.Nm
+exits if no name is typed within that many seconds, and
+.Xr init 8
+starts a new one.
+A record with
+.Cm al
+logs its user in automatically.
+.Sh FILES
+.Bl -tag -width /etc/gettytab -compact
+.It Pa /etc/gettytab
+terminal descriptions
+.It Pa /etc/ttys
+the terminals
+.Xr init 8
+runs
+.Nm
+on
+.El
+.Sh SEE ALSO
+.Xr login 1 ,
+.Xr gettytab 5 ,
+.Xr ttys 5 ,
+.Xr init 8
+.Sh HISTORY
+A
+.Nm
+program appeared in
+.At v6 .
+This implementation was written for OxideBSD.

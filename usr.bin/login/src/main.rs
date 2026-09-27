@@ -136,7 +136,15 @@ impl Pam {
     }
 }
 
+unsafe extern "C" {
+    /// Appends a record to a wtmpx file (musl, `_BSD_SOURCE`); the libc crate doesn't bind it.
+    fn updwtmpx(file: *const libc::c_char, ut: *const libc::utmpx);
+}
+
 /// A session record in `/var/run/utmpx` and `/var/log/wtmpx` (LOGIN.md §8).
+// The libc crate marks musl's utmpx functions deprecated because stock musl stubs them;
+// OxideBSD's musl implements them.
+#[allow(deprecated)]
 fn record(kind: libc::c_short, user: &str, tty: &str, host: Option<&str>) {
     // SAFETY: a zeroed utmpx filled in field by field, then pututxline.
     let mut ut: libc::utmpx = unsafe { std::mem::zeroed() };
@@ -162,10 +170,11 @@ fn record(kind: libc::c_short, user: &str, tty: &str, host: Option<&str>) {
         libc::setutxent();
         libc::pututxline(&ut);
         libc::endutxent();
+        updwtmpx(c"/var/log/wtmpx".as_ptr(), &ut);
     }
 }
 
-fn set_limit(resource: libc::__rlimit_resource_t, class: &Class, cap: &str, time: bool) {
+fn set_limit(resource: libc::c_int, class: &Class, cap: &str, time: bool) {
     let get = |name: &str| if time { class.time(name) } else { class.size(name) };
     let value = |l: Limit| match l {
         Limit::Unlimited => libc::RLIM_INFINITY,
@@ -347,7 +356,19 @@ fn main() {
         if !args.preserve {
             cmd.env_clear();
         }
-        let path = class.string("path").map(|p| p.split_whitespace().collect::<Vec<_>>().join(":")).unwrap_or_else(|| DEFAULT_PATH.into());
+        // `~` in a path entry is the home directory, as in the BSDs' login_cap.
+        let path = class
+            .string("path")
+            .map(|p| {
+                p.split_whitespace()
+                    .map(|d| match d.strip_prefix('~') {
+                        Some(rest) => format!("{dir}{rest}"),
+                        None => d.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .unwrap_or_else(|| DEFAULT_PATH.into());
         cmd.env("HOME", dir)
             .env("SHELL", &shell)
             .env("USER", &name)

@@ -112,7 +112,8 @@ fn configure(e: &getcap::Entry) {
     t.c_iflag = libc::ICRNL | libc::IXON | libc::IXANY | libc::IMAXBEL | libc::BRKINT;
     t.c_oflag = libc::OPOST | libc::ONLCR;
     if !e.flag("ht") {
-        t.c_oflag |= libc::TAB3;
+        // The libc crate types TAB3 as c_int for musl, not tcflag_t.
+        t.c_oflag |= libc::TAB3 as libc::tcflag_t;
     }
     t.c_lflag = libc::ICANON | libc::ISIG | libc::IEXTEN | libc::ECHO | libc::ECHOCTL;
     // `ce`/`ck`: a CRT, where erase and kill wipe what they remove.
@@ -204,7 +205,20 @@ fn main() {
         eprintln!("getty: /dev/{tty}: {e}");
         std::process::exit(1);
     }
-    let tty_name = tty.unwrap_or_else(|| "console".into());
+    // `-` (or nothing): the terminal getty was started on, named as ttyname(3) reports it.
+    let tty_name = match tty.filter(|t| t != "-") {
+        Some(t) => t,
+        None => {
+            // SAFETY: ttyname returns a static string or NULL.
+            let p = unsafe { libc::ttyname(0) };
+            if p.is_null() {
+                "console".into()
+            } else {
+                let path = unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy();
+                path.strip_prefix("/dev/").unwrap_or(&path).to_string()
+            }
+        }
+    };
     let db = getcap::Db::read(GETTYTAB).unwrap_or_default();
 
     loop {

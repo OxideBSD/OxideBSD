@@ -328,6 +328,35 @@ fn main() {
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
     let emergency_elf_path =
         build_std_oxidebsd_userland_crate("sbin/emergency", "OXFS_EMERGENCY_ELF_PATH", &musl_sysroot);
+
+    // Getty, login and the account tools (LOGIN.md in OxideBSD-doc). They replace BusyBox's, and
+    // keep their env var names, so oxfs seeds them at the same paths. login and passwd link
+    // OpenPAM, whose modules are Rust (lib/libpam); every lib/ crate they use is watched here
+    // since the helper only watches the program's own src/.
+    for lib in ["libpam", "libpwd", "liblogincap", "libgetcap", "libttyent"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join(lib).join("src").display()
+        );
+    }
+    let openpam_dir = build_openpam(&musl_sysroot);
+    let pam_env: &[(&str, &Path)] = &[("OXIDEBSD_LIBPAM_DIR", &openpam_dir)];
+    let getty_elf_path =
+        build_std_oxidebsd_userland_crate("libexec/getty", "OXFS_GETTY_ELF_PATH", &musl_sysroot);
+    let login_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "usr.bin/login",
+        "OXFS_LOGIN_ELF_PATH",
+        &musl_sysroot,
+        pam_env,
+    );
+    let passwd_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "usr.bin/passwd",
+        "OXFS_PASSWD_ELF_PATH",
+        &musl_sysroot,
+        pam_env,
+    );
+    let pwd_mkdb_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libttyent/src").display()
@@ -519,6 +548,10 @@ fn main() {
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
+        ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
+        ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
+        ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),
+        ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),
@@ -1087,15 +1120,30 @@ fn build_std_oxidebsd_userland_crate(
     env_var: &str,
     musl_sysroot: &Path,
 ) -> PathBuf {
+    build_std_oxidebsd_userland_crate_with_env(crate_path, env_var, musl_sysroot, &[])
+}
+
+/// [`build_std_oxidebsd_userland_crate`], with extra environment variables for the nested cargo:
+/// how a dependency's own build script learns where a C library built here lives
+/// (`OXIDEBSD_LIBPAM_DIR`, read by `lib/libpam/build.rs`).
+fn build_std_oxidebsd_userland_crate_with_env(
+    crate_path: &str,
+    env_var: &str,
+    musl_sysroot: &Path,
+    extra_env: &[(&str, &Path)],
+) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crate_dir = Path::new(manifest_dir).join(crate_path);
     // The package and binary name: the crate directory's last component (`regress/std/foo`,
     // `bin/sh`).
     let crate_name = crate_dir.file_name().unwrap().to_str().unwrap();
     let target_spec = Path::new(manifest_dir).join("x86_64-unknown-oxidebsd.json");
-    let target_dir = Path::new(manifest_dir)
-        .join("target/userland-std-oxidebsd")
-        .join(crate_name);
+    // One target dir for every std program: `-Z build-std` then compiles std/core/alloc once and
+    // every later program reuses it, instead of each program rebuilding std in a dir of its own
+    // (~30 s apiece). Each crate is its own workspace, but cargo shares units across workspaces
+    // in one target dir whenever their fingerprints match, as std's do: same target, profile and
+    // RUSTFLAGS for all of them. Binary names must stay unique (they're the crate dir's name).
+    let target_dir = Path::new(manifest_dir).join("target/std-oxidebsd");
 
     println!("cargo:rerun-if-changed={}", crate_dir.join("src").display());
     println!(
@@ -1165,6 +1213,7 @@ fn build_std_oxidebsd_userland_crate(
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("CARGO_PKG_NAME")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .envs(extra_env.iter().copied())
         .env("RUSTC_WRAPPER", &wrapper)
         .env(
             "RUSTFLAGS",
@@ -2669,6 +2718,89 @@ fn write_bmake_mk_manifest() -> PathBuf {
 /// headers straight into `$prefix/include` (`curses.h` directly, not `include/ncurses/curses.h`)
 /// since this is the only curses this kernel will ever have -- no risk of colliding with a system
 /// one the way a Linux distro package has to guard against.
+/// OpenPAM (`external/bsd/openpam`, LOGIN.md §6 in OxideBSD-doc) as a static `libpam.a`, built
+/// with musl-gcc from the sources its own `lib/libpam/Makefile.am` lists -- no autotools;
+/// `oxidebsd/config.h` stands in for `configure`'s. Returns the directory holding `libpam.a`.
+/// OxideBSD's PAM modules are Rust (`lib/libpam`) and link into each program alongside it.
+fn build_openpam(musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("external/bsd/openpam");
+    let out = Path::new(manifest_dir).join("target/openpam");
+    let lib = out.join("libpam.a");
+    for dir in ["lib/libpam", "include", "oxidebsd"] {
+        println!("cargo:rerun-if-changed={}", src.join(dir).display());
+    }
+
+    let am = std::fs::read_to_string(src.join("lib/libpam/Makefile.am"))
+        .expect("failed to read OpenPAM's lib/libpam/Makefile.am");
+    let mut sources = Vec::new();
+    let mut in_list = false;
+    for line in am.lines() {
+        if line.starts_with("libpam_la_SOURCES") {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            sources.extend(
+                line.split_whitespace()
+                    .filter(|w| w.ends_with(".c"))
+                    .map(|w| src.join("lib/libpam").join(w)),
+            );
+            if !line.trim_end().ends_with('\\') {
+                break;
+            }
+        }
+    }
+    assert!(!sources.is_empty(), "no libpam_la_SOURCES in OpenPAM's Makefile.am");
+
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let floor = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| mtime(&abs))
+        .chain(mtime(&musl_sysroot.join("lib/libc.a")))
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    if mtime(&lib).is_some_and(|m| m >= floor) {
+        return out;
+    }
+
+    std::fs::create_dir_all(&out).expect("failed to create target/openpam");
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+    let mut objects = Vec::new();
+    for c in &sources {
+        let obj = out.join(c.file_stem().unwrap()).with_extension("o");
+        let status = Command::new(&musl_gcc)
+            .args(["-O2", "-static", "-DHAVE_CONFIG_H"])
+            .arg("-I")
+            .arg(src.join("oxidebsd"))
+            .arg("-I")
+            .arg(src.join("include"))
+            .arg("-I")
+            .arg(src.join("lib/libpam"))
+            .arg("-c")
+            .arg(c)
+            .arg("-o")
+            .arg(&obj)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run musl-gcc for {}: {e}", c.display()));
+        if !status.success() {
+            panic!("compiling OpenPAM's {} failed: {status}", c.display());
+        }
+        objects.push(obj);
+    }
+    let _ = std::fs::remove_file(&lib);
+    let status = Command::new("ar")
+        .arg("rcs")
+        .arg(&lib)
+        .args(&objects)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run ar for libpam.a: {e}"));
+    if !status.success() {
+        panic!("archiving libpam.a failed: {status}");
+    }
+    out
+}
+
 fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("lib/ncurses");

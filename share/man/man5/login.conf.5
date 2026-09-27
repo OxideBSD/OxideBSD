@@ -1,0 +1,139 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt LOGIN.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm login.conf
+.Nd login class capability database
+.Sh DESCRIPTION
+The file
+.Pa /etc/login.conf
+describes login classes: the resource limits, environment and other
+settings a session starts with.
+An account's class is the fifth field of
+.Pa /etc/master.passwd ;
+see
+.Xr passwd 5 .
+An empty class means
+.Dq default ,
+except that the superuser's means
+.Dq root .
+A class with no record uses
+.Dq default .
+.Pp
+Like
+.Xr gettytab 5 ,
+it is a
+.Xr getcap 3
+database, and
+.Cm tc Ns = Ns Ar class
+continues a record with another class.
+Sizes take the suffixes
+.Cm b ,
+.Cm k ,
+.Cm m ,
+.Cm g
+and
+.Cm t ;
+times take
+.Cm s ,
+.Cm m ,
+.Cm h ,
+.Cm d
+and
+.Cm w ,
+and may be combined, as in
+.Ql 1h30m .
+Either may be
+.Ql unlimited .
+.Ss Resource limits
+Each limit sets both the soft and hard limit;
+.Ar name Ns Cm -cur
+and
+.Ar name Ns Cm -max
+set one of them.
+.Bl -column "coredumpsize" "size"
+.It Sy Name Ta Sy Type Ta Sy Limit
+.It coredumpsize Ta size Ta Dv RLIMIT_CORE
+.It cputime Ta time Ta Dv RLIMIT_CPU
+.It datasize Ta size Ta Dv RLIMIT_DATA
+.It filesize Ta size Ta Dv RLIMIT_FSIZE
+.It maxproc Ta number Ta Dv RLIMIT_NPROC
+.It memorylocked Ta size Ta Dv RLIMIT_MEMLOCK
+.It memoryuse Ta size Ta Dv RLIMIT_RSS
+.It openfiles Ta number Ta Dv RLIMIT_NOFILE
+.It stacksize Ta size Ta Dv RLIMIT_STACK
+.El
+.Ss Environment and session
+.Bl -tag -width indent
+.It Cm charset Ns = Ns Ar name
+.Ev MM_CHARSET .
+.It Cm hushlogin
+Do not print the message of the day.
+.It Cm lang Ns = Ns Ar locale
+.Ev LANG .
+.It Cm nologin Ns = Ns Ar file
+Refuse logins other than the superuser's while
+.Ar file
+exists, showing its contents.
+.It Cm path Ns = Ns Ar directories
+.Ev PATH ,
+as a space-separated list.
+.It Cm priority Ns = Ns Ar number
+The scheduling priority, as for
+.Xr nice 1 .
+.It Cm requirehome
+Refuse the login if the home directory is missing.
+.It Cm setenv Ns = Ns Ar list
+Further variables, as
+.Ar name Ns = Ns Ar value
+pairs separated by commas;
+.Ql \e,
+is a literal comma.
+In each value,
+.Ql ~
+stands for the home directory and
+.Ql $
+for the user name.
+.It Cm shell Ns = Ns Ar program
+Run
+.Ar program
+instead of the account's shell.
+.It Cm timezone Ns = Ns Ar zone
+.Ev TZ .
+.It Cm umask Ns = Ns Ar mask
+The file creation mask, in octal.
+.It Cm welcome Ns = Ns Ar file
+The message of the day; default
+.Pa /etc/motd .
+.El
+.Ss Authentication
+These are read from the
+.Dq default
+class only.
+.Bl -tag -width indent
+.It Cm login-backoff Ns = Ns Ar number
+Failed attempts after which
+.Xr login 1
+starts delaying; default 3.
+.It Cm login-retries Ns = Ns Ar number
+Failed attempts after which it gives up; default 10.
+.It Cm login-timeout Ns = Ns Ar seconds
+How long a login may take; default 300.
+.El
+.Sh FILES
+.Bl -tag -width /etc/login.conf -compact
+.It Pa /etc/login.conf
+.El
+.Sh SEE ALSO
+.Xr login 1 ,
+.Xr getcap 3 ,
+.Xr getrlimit 2 ,
+.Xr passwd 5
+.Sh HISTORY
+The
+.Nm
+file appeared in
+.Bsx 2.1 .
+.Cm login-timeout
+is OxideBSD's.

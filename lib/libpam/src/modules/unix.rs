@@ -65,7 +65,11 @@ unsafe extern "C" fn chauthtok(pamh: *mut PamHandle, flags: c_int, _: c_int, _: 
     if flags & PAM_PRELIM_CHECK != 0 {
         // SAFETY: getuid(2).
         if unsafe { libc::getuid() } == 0 || entries[i].password.is_empty() {
-            return PAM_SUCCESS;
+            // No old password to ask for, but record an empty one: OpenPAM's pam_get_authtok
+            // asks for a *new* password, twice, only when PAM_OLDAUTHTOK is set; otherwise root
+            // got a single "Password:" prompt with no retype check.
+            // SAFETY: OpenPAM copies the string.
+            return unsafe { pam_set_item(pamh, PAM_OLDAUTHTOK, c"".as_ptr().cast()) };
         }
         let old = match super::authtok(pamh, PAM_OLDAUTHTOK) {
             Ok(p) => p,

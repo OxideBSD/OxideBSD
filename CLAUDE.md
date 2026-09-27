@@ -2193,13 +2193,13 @@ a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the 
   though `build.rs` itself correctly reruns and rebuilds musl fresh — the *nested* cargo build for
   that one regress/std crate silently reuses its own stale cached executable. Confirmed via
   direct `objdump` inspection: `target/musl-sysroot/lib/libc.a` had the fix, the linked
-  `regress/std` ELF didn't, until `target/userland-std-oxidebsd/<crate>` was deleted by hand.
+  `regress/std` ELF didn't, until the crate's built binary was deleted by hand (`target/std-oxidebsd/x86_64-unknown-oxidebsd/release/<crate>`; one shared target dir for every std program since 2026-09-27, so std is built once).
   **A second, compounding layer of the same bug**: `sys/modules/oxfs`'s own `build_module_crate`
   invocation (a fresh `cargo rustc` subprocess every time `build.rs` runs at all) can *also* skip
   re-embedding a regress/std ELF via its own `include_bytes!(env!(...))` if its own nested
   cargo's fingerprint doesn't notice the referenced file's content changed — even right after a
   genuinely fresh relink of that ELF. **The only fix found reliable**: delete both
-  `target/userland-std-oxidebsd` and `target/modules` outright, or (cheaper) `touch
+  `target/std-oxidebsd` and `target/modules` outright, or (cheaper) `touch
   sys/modules/oxfs/sys/lib.rs` to force *that* crate's own next `cargo rustc` invocation to actually
   recompile (a real, cargo-tracked source-file change) rather than trusting either layer's
   incremental cache after a musl/`external/mit/rust` edit. **Do not `touch build.rs` itself** to

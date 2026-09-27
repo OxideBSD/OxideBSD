@@ -7469,16 +7469,6 @@ fn format_fresh_filesystem() -> bool {
     // yet; "builds" was the bar this pass used, not "works"). One-liner form (not the multi-line
     // seed_file(...) call the first 24 applets above use) purely because there are ~300 of these --
     // no behavioral difference.
-    ok &= seed_file(
-        usr_sbin,
-        b"addgroup",
-        include_bytes!(env!("OXFS_ADDGROUP_ELF_PATH")),
-    );
-    ok &= seed_file(
-        usr_sbin,
-        b"adduser",
-        include_bytes!(env!("OXFS_ADDUSER_ELF_PATH")),
-    );
     ok &= seed_file(usr_bin, b"ar", include_bytes!(env!("OXFS_AR_ELF_PATH")));
     ok &= seed_file(usr_bin, b"ascii", include_bytes!(env!("OXFS_ASCII_ELF_PATH")));
     ok &= seed_file(bin, b"ash", include_bytes!(env!("OXFS_ASH_ELF_PATH")));
@@ -7500,11 +7490,6 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"chgrp", include_bytes!(env!("OXFS_CHGRP_ELF_PATH")));
     ok &= seed_file(bin, b"chmod", include_bytes!(env!("OXFS_CHMOD_ELF_PATH")));
     ok &= seed_file(usr_bin, b"chown", include_bytes!(env!("OXFS_CHOWN_ELF_PATH")));
-    ok &= seed_file(
-        usr_sbin,
-        b"chpasswd",
-        include_bytes!(env!("OXFS_CHPASSWD_ELF_PATH")),
-    );
     ok &= seed_file(usr_sbin, b"chroot", include_bytes!(env!("OXFS_CHROOT_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"chrt", include_bytes!(env!("OXFS_CHRT_ELF_PATH")));
     ok &= seed_file(usr_bin, b"cksum", include_bytes!(env!("OXFS_CKSUM_ELF_PATH")));
@@ -7532,11 +7517,6 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"date", include_bytes!(env!("OXFS_DATE_ELF_PATH")));
     ok &= seed_file(usr_bin, b"dc", include_bytes!(env!("OXFS_DC_ELF_PATH")));
     ok &= seed_file(bin, b"dd", include_bytes!(env!("OXFS_DD_ELF_PATH")));
-    ok &= seed_file(
-        usr_sbin,
-        b"delgroup",
-        include_bytes!(env!("OXFS_DELGROUP_ELF_PATH")),
-    );
     ok &= seed_file(bin, b"df", include_bytes!(env!("OXFS_DF_ELF_PATH")));
     ok &= seed_file(usr_bin, b"diff", include_bytes!(env!("OXFS_DIFF_ELF_PATH")));
     ok &= seed_file(sbin, b"dmesg", include_bytes!(env!("OXFS_DMESG_ELF_PATH")));
@@ -7577,7 +7557,10 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"ftpput", include_bytes!(env!("OXFS_FTPPUT_ELF_PATH")));
     ok &= seed_file(usr_bin, b"fuser", include_bytes!(env!("OXFS_FUSER_ELF_PATH")));
     ok &= seed_file(usr_bin, b"getopt", include_bytes!(env!("OXFS_GETOPT_ELF_PATH")));
+    // getty, login, passwd and pwd_mkdb are OxideBSD's own (LOGIN.md), not BusyBox's; getty,
+    // login and passwd keep the env var names the BusyBox applets had.
     ok &= seed_file(usr_libexec, b"getty", include_bytes!(env!("OXFS_GETTY_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"pwd_mkdb", include_bytes!(env!("OXFS_PWD_MKDB_ELF_PATH")));
     ok &= seed_file(bin, b"grep", include_bytes!(env!("OXFS_GREP_ELF_PATH")));
     ok &= seed_file(usr_bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
     ok &= seed_file(bin, b"gunzip", include_bytes!(env!("OXFS_GUNZIP_ELF_PATH")));
@@ -7743,11 +7726,6 @@ fn format_fresh_filesystem() -> bool {
     );
     ok &= seed_file(bin, b"stty", include_bytes!(env!("OXFS_STTY_ELF_PATH")));
     ok &= seed_file(usr_bin, b"su", include_bytes!(env!("OXFS_SU_ELF_PATH")));
-    ok &= seed_file(
-        sbin,
-        b"sulogin",
-        include_bytes!(env!("OXFS_SULOGIN_ELF_PATH")),
-    );
     ok &= seed_file(usr_bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
     ok &= seed_file(usr_bin, b"tac", include_bytes!(env!("OXFS_TAC_ELF_PATH")));
@@ -7878,32 +7856,33 @@ fn format_fresh_filesystem() -> bool {
     // non-root `user` (uid/gid 1000) exists specifically so `su`/`login` have something real to
     // exercise: root calling either always skips the password check entirely (see busybox's own
     // su.c), so a root-only passwd file could never demonstrate real authentication at all.
-    ok &= seed_file(
-        etc,
-        b"passwd",
-        b"root:x:0:0:root:/:/bin/sh\nuser:x:1000:1000:User:/home/user:/bin/sh\n",
-    );
-    ok &= seed_file(etc, b"group", b"root:x:0:\ntty:x:4:\nuser:x:1000:\n");
+    ok &= seed_file(etc, b"passwd", include_bytes!("../../../../etc/passwd"));
+    ok &= seed_file(etc, b"group", include_bytes!("../../../../etc/group"));
 
-    // /etc/shadow: real crypt(3) password hashes (SHA-512, `$6$`) -- musl's own getspnam
-    // (external/mit/musl/src/passwd/getspnam*.c) parses this the same way it parses /etc/passwd.
-    // Both passwords equal the account's own username (`root`/`user`) -- fine for a kernel with no
-    // external network exposure and no real multi-user threat model, but real enough that `su`/
-    // `login`'s own crypt() comparison genuinely succeeds or fails on the actual input, not a
-    // hardcoded stub. Locked to 0600 immediately after seeding (`seed_file` would otherwise give it
-    // the data-file default `0o644`, and a real shadow file must not be world-readable).
-    ok &= seed_file(
-        etc,
-        b"shadow",
-        b"root:$6$rootsalt1$LPAGSn9wp5B5UT8Za.dDLpjIX7Iesb2cmVG/FkZsCpAaVTYOv5MM2tNq6/FtrWiSFSRAXC/JM.vP6j727dx63.:19000:0:99999:7:::\nuser:$6$usersalt1$K3nFr1EkyUio7bqA5yHH406lM.gYiQIJraJUwV47yxP/3fF.Sa4wdmFXIsT//WSUp5YDYkRnpOAFIjJqbtQXA.:19000:0:99999:7:::\n",
-    );
-    if let Some(shadow_inode) = dir_lookup(etc, b"shadow") {
-        let mut inode = read_inode(shadow_inode);
+    // /etc/master.passwd: the BSD account file (LOGIN.md §7.4) -- real crypt(3) SHA-512 (`$6$`)
+    // hashes, which pam_unix and musl's getspnam (patched to read this file; there is no
+    // /etc/shadow) check. Both passwords equal the account's own username (`root`/`user`) -- fine
+    // for a kernel with no external network exposure. `/etc/passwd` above is what pwd_mkdb(8)
+    // generates from it. Mode 0600, as on the BSDs: only root may read the hashes.
+    ok &= seed_file(etc, b"master.passwd", include_bytes!("../../../../etc/master.passwd"));
+    if let Some(master) = dir_lookup(etc, b"master.passwd") {
+        let mut inode = read_inode(master);
         inode.mode = 0o600;
-        write_inode(shadow_inode, inode);
+        write_inode(master, inode);
     } else {
         ok = false;
     }
+
+    // getty(8), login(1) and PAM (LOGIN.md): terminal descriptions, login classes, the message of
+    // the day and the PAM policies.
+    ok &= seed_file(etc, b"gettytab", include_bytes!("../../../../etc/gettytab"));
+    ok &= seed_file(etc, b"login.conf", include_bytes!("../../../../etc/login.conf"));
+    ok &= seed_file(etc, b"motd", include_bytes!("../../../../etc/motd"));
+    let pam_d = ensure_dir(etc, b"pam.d");
+    ok &= seed_file(pam_d, b"login", include_bytes!("../../../../etc/pam.d/login"));
+    ok &= seed_file(pam_d, b"other", include_bytes!("../../../../etc/pam.d/other"));
+    ok &= seed_file(pam_d, b"passwd", include_bytes!("../../../../etc/pam.d/passwd"));
+    ok &= seed_file(pam_d, b"system", include_bytes!("../../../../etc/pam.d/system"));
 
     // /home/user -- real, owned by uid/gid 1000 -- so `su -`/`login`'s own real chdir-to-home
     // lands somewhere that's actually theirs (permission-checked, not just root's own `/`).
@@ -7938,6 +7917,8 @@ fn format_fresh_filesystem() -> bool {
     let var = ensure_dir(root, b"var");
     ensure_dir(var, b"run");
     ensure_dir(var, b"log");
+    // Mailboxes, $MAIL for every login (login.conf's setenv).
+    ensure_dir(var, b"mail");
 
     let tmp = ensure_dir(root, b"tmp");
     {
@@ -8021,11 +8002,20 @@ fn format_fresh_filesystem() -> bool {
     let usr_share = ensure_dir(usr, b"share");
     // mdoc(7) manual pages, from the source tree's share/man.
     let usr_share_man = ensure_dir(usr_share, b"man");
+    let man_man1 = ensure_dir(usr_share_man, b"man1");
+    ok &= seed_file(man_man1, b"login.1", include_bytes!("../../../../share/man/man1/login.1"));
+    ok &= seed_file(man_man1, b"passwd.1", include_bytes!("../../../../share/man/man1/passwd.1"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
+    ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
+    ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
+    ok &= seed_file(man_man5, b"passwd.5", include_bytes!("../../../../share/man/man5/passwd.5"));
+    ok &= seed_hardlink(man_man5, b"master.passwd.5", b"passwd.5");
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
     let man_man8 = ensure_dir(usr_share_man, b"man8");
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
+    ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
+    ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
     ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
     ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));

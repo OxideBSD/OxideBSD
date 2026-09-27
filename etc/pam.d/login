@@ -1,0 +1,17 @@
+#
+# /etc/pam.d/login: the policy for login(1); see pam.conf(5).
+#
+
+# auth
+auth		include		system
+
+# account
+account		requisite	pam_securetty.so
+account		required	pam_nologin.so
+account		include		system
+
+# session
+session		include		system
+
+# password
+password	include		system

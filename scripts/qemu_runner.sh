@@ -66,13 +66,19 @@ cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
 # every real-hardware attempt.
 #
 # OXIDEBSD_KERNEL_CMDLINE appends further tokens, e.g. `-s` to boot init single-user
-# (`oxidebsd::boot::parse_cmdline`).
+# (`oxidebsd::boot::parse_cmdline`), and so do the arguments after `--` on `cargo run`, which
+# cargo hands this script after the ELF: `cargo run -- -s init_path=/bin/sh`. A test binary's
+# arguments are libtest-style filters, not kernel tokens, so they're ignored.
 KERNEL_CMDLINE=""
 if [ -n "${OXIDEBSD_REAL_HARDWARE:-}" ]; then
     KERNEL_CMDLINE="no-ata"
 fi
 if [ -n "${OXIDEBSD_KERNEL_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="${KERNEL_CMDLINE:+$KERNEL_CMDLINE }$OXIDEBSD_KERNEL_CMDLINE"
+fi
+shift
+if [ "$IS_TEST" = 0 ] && [ $# -gt 0 ]; then
+    KERNEL_CMDLINE="${KERNEL_CMDLINE:+$KERNEL_CMDLINE }$*"
 fi
 
 # Deliberately no `resolution:` override here: `console::vga`'s text grid sizes itself

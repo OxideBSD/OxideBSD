@@ -1,0 +1,92 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt GETTYTAB 5
+.Os OxideBSD
+.Sh NAME
+.Nm gettytab
+.Nd terminal descriptions for getty
+.Sh DESCRIPTION
+The file
+.Pa /etc/gettytab
+describes how
+.Xr getty 8
+sets up a terminal line.
+It is a
+.Xr getcap 3
+database: each record is a list of names separated by
+.Ql | ,
+followed by capabilities separated by
+.Ql \&: .
+A string capability is written
+.Ar cap Ns = Ns Ar value ,
+a number
+.Ar cap Ns # Ns Ar value ,
+and a flag is its bare name.
+.Cm tc Ns = Ns Ar name
+continues the record with another.
+A capability missing from a record takes its value from the
+.Dq default
+record, and a
+.Ar type
+with no record uses
+.Dq default
+itself.
+.Pp
+The capabilities are:
+.Bl -column "Name" "Type" "/usr/bin/login"
+.It Sy Name Ta Sy Type Ta Sy Default Ta Sy Description
+.It al Ta str Ta Ta log this user in automatically
+.It ap Ta bool Ta false Ta any parity (7 bits, no parity check)
+.It ce Ta bool Ta false Ta a CRT: erase wipes the character
+.It ck Ta bool Ta false Ta a CRT: kill wipes the line
+.It cl Ta str Ta Ta clear-screen sequence, sent before the banner
+.It ep Ta bool Ta false Ta even parity
+.It er Ta str Ta Ta erase character
+.It et Ta str Ta Ta end-of-file character
+.It hc Ta bool Ta false Ta do not hang up the line when it is last closed
+.It ht Ta bool Ta false Ta the terminal has hardware tabs
+.It if Ta str Ta Ta file whose contents are the banner
+.It im Ta str Ta see below Ta the banner
+.It in Ta str Ta Ta interrupt character
+.It kl Ta str Ta Ta kill character
+.It lm Ta str Ta login:\ Ta the login prompt
+.It ln Ta str Ta Ta literal-next character
+.It lo Ta str Ta /usr/bin/login Ta the program to run
+.It nx Ta str Ta Ta the record to switch to on a break
+.It op Ta bool Ta false Ta odd parity
+.It qu Ta str Ta Ta quit character
+.It rp Ta str Ta Ta reprint character
+.It sa Ta str Ta Ta start character
+.It sp Ta num Ta Ta line speed
+.It st Ta str Ta Ta stop character
+.It su Ta str Ta Ta suspend character
+.It to Ta num Ta 0 Ta seconds to wait for a name
+.It tt Ta str Ta Ta the terminal type, passed on as
+.Ev TERM
+.It we Ta str Ta Ta word-erase character
+.El
+.Pp
+The default banner shows the system, the machine, the host name and the
+terminal.
+The escapes that
+.Cm if ,
+.Cm im
+and
+.Cm lm
+may use are described in
+.Xr getty 8 .
+Characters left unset keep the 4.4BSD defaults.
+.Sh FILES
+.Bl -tag -width /etc/gettytab -compact
+.It Pa /etc/gettytab
+.El
+.Sh SEE ALSO
+.Xr getcap 3 ,
+.Xr termios 4 ,
+.Xr ttys 5 ,
+.Xr getty 8
+.Sh HISTORY
+The
+.Nm
+file appeared in
+.Bx 4.1 .

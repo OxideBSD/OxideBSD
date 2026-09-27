@@ -1,0 +1,87 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt PASSWD 5
+.Os OxideBSD
+.Sh NAME
+.Nm passwd ,
+.Nm master.passwd
+.Nd the account database
+.Sh DESCRIPTION
+The file
+.Pa /etc/master.passwd ,
+readable only by the superuser, holds one line per account with ten
+fields separated by colons:
+.Bd -literal -offset indent
+name:password:uid:gid:class:change:expire:gecos:home:shell
+.Ed
+.Bl -tag -width password
+.It Ar name
+The login name.
+.It Ar password
+The
+.Xr crypt 3
+hash of the password.
+Empty means no password is needed; a hash beginning with
+.Ql \&*
+or
+.Ql \&!
+locks the account.
+.It Ar uid , Ar gid
+The user and primary group IDs.
+.It Ar class
+The login class in
+.Xr login.conf 5 .
+.It Ar change
+The time, in seconds since the Epoch, by which the password must be
+changed; 0 for none.
+.It Ar expire
+The time, in seconds since the Epoch, at which the account expires; 0 for
+none.
+.It Ar gecos
+The user's full name and similar information.
+.It Ar home
+The home directory.
+.It Ar shell
+The login shell; empty means
+.Pa /bin/sh .
+.El
+.Pp
+The public
+.Pa /etc/passwd ,
+readable by everyone, is generated from it by
+.Xr pwd_mkdb 8 .
+It has seven fields, with the password replaced by
+.Ql *
+and the class, change and expire fields left out:
+.Bd -literal -offset indent
+name:*:uid:gid:gecos:home:shell
+.Ed
+.Pp
+There is no
+.Pa /etc/shadow .
+The C library's
+.Xr getspnam 3
+reads
+.Pa /etc/master.passwd ,
+reporting the change time as the day the password was last changed with
+a maximum age of 0, and the expire time as the account's expiry day.
+.Sh FILES
+.Bl -tag -width /etc/master.passwd -compact
+.It Pa /etc/master.passwd
+.It Pa /etc/passwd
+.El
+.Sh SEE ALSO
+.Xr login 1 ,
+.Xr passwd 1 ,
+.Xr crypt 3 ,
+.Xr getpwent 3 ,
+.Xr login.conf 5 ,
+.Xr pwd_mkdb 8
+.Sh HISTORY
+A
+.Nm
+file format appeared in
+.At v1 .
+.Pa master.passwd
+appeared in
+.Bx 4.3 Reno .

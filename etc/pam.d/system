@@ -1,0 +1,15 @@
+#
+# /etc/pam.d/system: the policy other services include; see pam.conf(5).
+#
+
+# auth
+auth		required	pam_unix.so		nullok
+
+# account
+account		required	pam_unix.so
+
+# session
+session		required	pam_lastlog.so
+
+# password
+password	required	pam_unix.so

@@ -1,0 +1,122 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 26, 2026
+.Dt LOGIN 1
+.Os OxideBSD
+.Sh NAME
+.Nm login
+.Nd log into the computer
+.Sh SYNOPSIS
+.Nm
+.Op Fl fp
+.Op Fl h Ar hostname
+.Op Ar user
+.Sh DESCRIPTION
+The
+.Nm
+utility authenticates a user and starts a session for them on the
+current terminal.
+.Xr getty 8
+runs it once a name has been typed; it is not normally run by hand.
+.Pp
+Without a
+.Ar user ,
+.Nm
+prompts for one.
+Authentication and account checks go through PAM, using the
+.Dq login
+policy in
+.Pa /etc/pam.d/login ;
+see
+.Xr pam.conf 5 .
+After a failed attempt,
+.Nm
+says
+.Dq Login incorrect
+and asks again.
+Past
+.Cm login-backoff
+failures it waits five seconds longer before each new attempt, and after
+.Cm login-retries
+failures it exits.
+A login that is not finished within
+.Cm login-timeout
+seconds is abandoned.
+The three values come from the
+.Dq default
+class in
+.Xr login.conf 5 .
+.Pp
+A user whose password has passed its change time is made to choose a new
+one before the session starts.
+.Pp
+On success,
+.Nm
+applies the user's login class (resource limits, priority, umask and
+environment), changes the terminal's owner to the user, records the
+session in
+.Pa /var/run/utmpx
+and
+.Pa /var/log/wtmpx ,
+and runs the user's shell as a login shell in the home directory.
+Unless the class sets
+.Cm hushlogin
+or
+.Pa ~/.hushlogin
+exists, it first prints the message of the day.
+.Pp
+.Nm
+waits for the shell to exit, then closes the PAM session, records the
+logout and gives the terminal back to root.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl f
+The user has already been authenticated; skip authentication.
+.It Fl h Ar hostname
+The session comes from
+.Ar hostname .
+.It Fl p
+Keep the environment rather than starting from an empty one.
+.El
+.Pp
+Only the superuser may run
+.Nm .
+.Sh ENVIRONMENT
+The shell starts with
+.Ev HOME ,
+.Ev SHELL ,
+.Ev USER ,
+.Ev LOGNAME ,
+.Ev PATH ,
+.Ev TERM
+and
+.Ev MAIL
+set, plus whatever the login class and the PAM modules add.
+.Sh FILES
+.Bl -tag -width /etc/pam.d/login -compact
+.It Pa /etc/login.conf
+login classes
+.It Pa /etc/motd
+message of the day
+.It Pa /etc/nologin
+refuses logins other than root's while it exists
+.It Pa /etc/pam.d/login
+the PAM policy
+.It Pa /var/run/utmpx
+current sessions
+.It Pa /var/log/wtmpx
+session history
+.El
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr utmpx 3 ,
+.Xr login.conf 5 ,
+.Xr pam.conf 5 ,
+.Xr passwd 5 ,
+.Xr getty 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.At v1 .
+This implementation was written for OxideBSD.
