@@ -172,6 +172,16 @@ impl Parser<'_> {
     fn text_line(&mut self, text: &str) {
         // Trailing whitespace is ignored (and doesn't hide a sentence end).
         let text = text.trim_end_matches([' ', '\t']);
+        // `\c`: the next line continues this one without a space.
+        let cont = text.ends_with(mark::CONT);
+        let text = text.trim_end_matches(mark::CONT);
+        if cont {
+            let mut n = Node::text(text, self.line);
+            n.flags.line_start = true;
+            self.push(n);
+            self.nospace = true;
+            return;
+        }
         let mut n = Node::text(text, self.line);
         n.flags.line_start = true;
         n.flags.eos = ends_sentence(text);

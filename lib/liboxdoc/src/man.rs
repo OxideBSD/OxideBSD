@@ -27,26 +27,22 @@ struct Parser<'a> {
     pending_font: Option<String>,
     /// A `.SH`/`.SS`/`.TP` head waiting for the next line.
     pending_head: bool,
+    /// The last text line ended in `\c`: the next node attaches without a space.
+    nospace: bool,
     line: usize,
 }
 
-/// In man(7), `` `` `` and `''` are opening and closing double quotes (mdoc leaves them as typed).
-fn quotes(s: &str) -> String {
-    if s.contains("``") || s.contains("''") { s.replace("``", "\u{201C}").replace("''", "\u{201D}") } else { s.to_string() }
-}
-
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, line: 0 };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, line: 0 };
     for l in lines {
         match l {
             Line::Macro { name, args, line, .. } => {
                 p.line = line;
-                let args: Vec<String> = args.iter().map(|a| quotes(a)).collect();
                 p.macro_line(&name, &args);
             }
             Line::Text { text, line } => {
                 p.line = line;
-                p.text_line(&quotes(&text));
+                p.text_line(&text);
             }
             Line::Blank { line } => {
                 p.line = line;
@@ -63,7 +59,10 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
 }
 
 impl Parser<'_> {
-    fn push(&mut self, n: Node) {
+    fn push(&mut self, mut n: Node) {
+        if std::mem::take(&mut self.nospace) {
+            n.flags.nospace = true;
+        }
         self.stack.last_mut().unwrap().children.push(n);
         self.head_done();
     }
@@ -116,6 +115,16 @@ impl Parser<'_> {
 
     fn text_line(&mut self, text: &str) {
         let text = text.trim_end_matches([' ', '\t']);
+        // `\c`: the next line continues this one without a space.
+        let cont = text.ends_with(crate::roff::mark::CONT);
+        let text = text.trim_end_matches(crate::roff::mark::CONT);
+        self.text_line_inner(text);
+        if cont {
+            self.nospace = true;
+        }
+    }
+
+    fn text_line_inner(&mut self, text: &str) {
         let mut n = Node::text(text, self.line);
         n.flags.line_start = true;
         n.flags.eos = ends_sentence(text);
@@ -206,10 +215,17 @@ impl Parser<'_> {
                     }
                     // Text after `.UE` on the same line (punctuation) attaches to the link.
                     if let Some(rest) = args.first() {
-                        let mut t = Node::text(rest, self.line);
-                        t.flags.nospace = true;
-                        t.flags.eos = ends_sentence(rest);
-                        self.push(t);
+                        let cont = rest.ends_with(crate::roff::mark::CONT);
+                        let rest = rest.trim_end_matches(crate::roff::mark::CONT);
+                        if !rest.is_empty() {
+                            let mut t = Node::text(rest, self.line);
+                            t.flags.nospace = true;
+                            t.flags.eos = ends_sentence(rest);
+                            self.push(t);
+                        }
+                        if cont {
+                            self.nospace = true;
+                        }
                     }
                 }
             }

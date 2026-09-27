@@ -67,6 +67,8 @@ pub struct Term {
     pub rmargin: usize,
     /// No-fill mode: every input line is an output line.
     pub nofill: bool,
+    /// Columns between tab stops: 8 for mdoc, 5 for man(7).
+    pub tab_width: usize,
     out: String,
     words: Vec<Word>,
     /// Cells already placed on the current, unfinished output line.
@@ -112,6 +114,7 @@ impl Term {
             offset: 0,
             rmargin: width,
             nofill: false,
+            tab_width: 8,
             out: String::new(),
             words: Vec::new(),
             line: Vec::new(),
@@ -148,6 +151,29 @@ impl Term {
     pub fn set_rmargin(&mut self, rmargin: usize) {
         self.layout();
         self.rmargin = rmargin;
+    }
+
+    /// Applies a font change as if `\f` had selected it (`.ft`).
+    pub fn set_font_marker(&mut self, f: char) {
+        self.font_change(f, Style::None);
+    }
+
+    /// Updates the escape font for marker `f` (see [`mark`]); `base` is the style in effect
+    /// when no escape font is set. Returns the new current style, or `None` if `f` isn't a
+    /// font marker.
+    fn font_change(&mut self, f: char, base: Style) -> Option<Style> {
+        let cur = self.esc_font.unwrap_or(base);
+        let new = match f {
+            mark::FONT_R | mark::FONT_CW => Style::None,
+            mark::FONT_B => Style::Bold,
+            mark::FONT_I => Style::Under,
+            mark::FONT_BI => Style::BoldUnder,
+            mark::FONT_P => self.esc_prev.unwrap_or(base),
+            _ => return None,
+        };
+        self.esc_prev = Some(cur);
+        self.esc_font = Some(new);
+        Some(new)
     }
 
     /// Forgets the font `\f` escapes selected: words get the style they're given again.
@@ -197,26 +223,11 @@ impl Term {
         let mut cells = Vec::new();
         let mut cur = self.esc_font.unwrap_or(style);
         for c in text.chars() {
-            let font = match c {
-                mark::FONT_R | mark::FONT_CW => Some(Style::None),
-                mark::FONT_B => Some(Style::Bold),
-                mark::FONT_I => Some(Style::Under),
-                mark::FONT_BI => Some(Style::BoldUnder),
-                _ => None,
-            };
-            if let Some(f) = font {
-                self.esc_prev = Some(cur);
-                self.esc_font = Some(f);
+            if let Some(f) = self.font_change(c, style) {
                 cur = f;
                 continue;
             }
             match c {
-                mark::FONT_P => {
-                    let back = self.esc_prev.unwrap_or(style);
-                    self.esc_prev = Some(cur);
-                    self.esc_font = Some(back);
-                    cur = back;
-                }
                 mark::ZERO | mark::CONT => {}
                 mark::NBSP => cells.push(Cell { ch: ' ', style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: '-', style: cur }),
@@ -460,7 +471,8 @@ impl Term {
             if c.ch == '\t' {
                 // Tab stops every 8 columns from the left margin.
                 let col = visible_len(&self.line);
-                let stop = self.offset + ((col.saturating_sub(self.offset)) / 8 + 1) * 8;
+                let tw = self.tab_width.max(1);
+                let stop = self.offset + ((col.saturating_sub(self.offset)) / tw + 1) * tw;
                 while visible_len(&self.line) < stop {
                     self.line.push(Cell { ch: ' ', style: Style::None });
                 }
@@ -661,5 +673,6 @@ pub fn ascii_for(c: char) -> String {
             return a.to_string();
         }
     }
-    "?".into()
+    // A character with no ASCII form, as mandoc shows it.
+    "<?>".into()
 }

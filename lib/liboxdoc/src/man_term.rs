@@ -19,10 +19,15 @@ struct R<'a> {
     width: usize,
     /// Margins and widths saved by `.RS`, restored by `.RE`.
     levels: Vec<(usize, usize)>,
+    /// The indent `.in` sets, which lasts across sections until changed.
+    indent: isize,
 }
 
 pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
-    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new() };
+    let mut t = t;
+    // man(7) sets tab stops every half inch, five columns.
+    t.tab_width = 5;
+    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), indent: 0 };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {
             if sh.part(Kind::Head).is_some_and(|h| h.plain_text().trim() == "SYNOPSIS")
@@ -59,6 +64,11 @@ fn plain(s: &str) -> String {
 }
 
 impl R<'_> {
+    /// A margin shifted by the `.in` indent.
+    fn at(&self, col: usize) -> usize {
+        (col as isize + self.indent).max(0) as usize
+    }
+
     fn title(&self) -> String {
         format!("{}({})", plain(&self.meta.title), plain(&self.meta.section))
     }
@@ -161,16 +171,17 @@ impl R<'_> {
             "in" => {
                 self.t.flush();
                 let arg = n.args.first().map(String::as_str).unwrap_or("");
-                let cur = self.t.offset;
-                let off = if let Some(v) = arg.strip_prefix('+') {
-                    cur + scaled(v)
+                let old = self.indent;
+                self.indent = if let Some(v) = arg.strip_prefix('+') {
+                    self.indent + scaled(v) as isize
                 } else if let Some(v) = arg.strip_prefix('-') {
-                    cur.saturating_sub(scaled(v))
+                    self.indent - scaled(v) as isize
                 } else if arg.is_empty() {
-                    self.base
+                    0
                 } else {
-                    self.base.saturating_sub(INDENT) + scaled(arg)
+                    scaled(arg) as isize
                 };
+                let off = (self.t.offset as isize + self.indent - old).max(0) as usize;
                 self.t.set_offset(off);
             }
             "ti" => {
@@ -207,8 +218,19 @@ impl R<'_> {
                     self.t.word(p, style);
                 }
             }
+            "ft" => {
+                // `.ft B`: a font for the text that follows, like `\fB`.
+                let f = match n.args.first().map(String::as_str) {
+                    Some("B") | Some("3") => mark::FONT_B,
+                    Some("I") | Some("2") => mark::FONT_I,
+                    Some("BI") | Some("4") => mark::FONT_BI,
+                    Some("R") | Some("1") | Some("CW") | Some("CR") => mark::FONT_R,
+                    _ => mark::FONT_P,
+                };
+                self.t.set_font_marker(f);
+            }
             tok if crate::man::FONT_MACROS.contains(&tok) => {
-                // A font macro sets its own fonts; the escape font resumes after it.
+                // A font macro sets its own fonts and leaves no escape font behind.
                 self.t.reset_font();
                 let (a, b) = fonts(tok);
                 let alternating = tok.len() == 2 && tok != "SB" && tok != "SM";
@@ -233,6 +255,7 @@ impl R<'_> {
                         self.arg_words(arg, st, n.flags.eos && i == last);
                     }
                 }
+                self.t.reset_font();
             }
             "RE" => {
                 // An `.RE` with no `.RS` open still ends the line.
@@ -257,13 +280,15 @@ impl R<'_> {
                 self.base = INDENT;
                 self.width = WIDTH;
                 self.t.nofill = false;
-                self.t.set_offset(if n.tok == "SH" { 0 } else { SS_INDENT });
+                let head = if n.tok == "SH" { 0 } else { SS_INDENT };
+                self.t.set_offset(self.at(head));
                 if let Some(h) = n.part(Kind::Head) {
                     self.children(h, Style::Bold);
                 }
                 self.t.flush();
                 self.t.reset_font();
-                self.t.set_offset(INDENT);
+                self.base = self.at(INDENT);
+                self.t.set_offset(self.base);
                 self.t.no_vspace = true;
                 if let Some(b) = n.part(Kind::Body) {
                     self.children(b, Style::None);

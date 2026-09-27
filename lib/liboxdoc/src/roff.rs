@@ -77,7 +77,6 @@ pub struct Roff<'a> {
     diag: &'a mut Diagnostics,
     /// Reads a `.so` include by its path, relative to the manual tree root.
     include: Option<&'a dyn Fn(&str) -> Option<String>>,
-    pending_cont: bool,
     out: Vec<Line>,
 }
 
@@ -106,7 +105,6 @@ impl<'a> Roff<'a> {
             frames: Vec::new(),
             diag,
             include: None,
-            pending_cont: false,
             out: Vec::new(),
         }
     }
@@ -243,29 +241,8 @@ impl<'a> Roff<'a> {
     }
 
     fn emit(&mut self, line: Line) {
-        // `\c`: join this line onto the previous text.
-        if self.pending_cont {
-            self.pending_cont = false;
-            if let (Some(Line::Text { text: prev, .. }), Line::Text { text, .. }) = (self.out.last_mut(), &line) {
-                prev.push_str(text);
-                if prev.ends_with(mark::CONT) {
-                    prev.pop();
-                    self.pending_cont = true;
-                }
-                return;
-            }
-        }
-        if let Line::Text { text, .. } = &line
-            && text.ends_with(mark::CONT)
-        {
-            self.pending_cont = true;
-            let mut l = line;
-            if let Line::Text { text, .. } = &mut l {
-                text.pop();
-            }
-            self.out.push(l);
-            return;
-        }
+        // A text line ending in `\c` keeps the marker; the language parser joins whatever comes
+        // next, text or macro, to it without a space.
         self.out.push(line);
     }
 
@@ -640,7 +617,8 @@ impl<'a> Roff<'a> {
                     i = next;
                     let name = name.split_whitespace().next().unwrap_or("").to_string();
                     match self.strings.get(&name).cloned() {
-                        Some(v) if depth < MAX_DEPTH => out.push_str(&self.interpolate(&v, lineno, depth + 1)),
+                        // A quote from a string is a literal character, not an argument delimiter.
+                        Some(v) if depth < MAX_DEPTH => out.push_str(&self.interpolate(&v, lineno, depth + 1).replace('"', &format!("{ec}(dq"))),
                         Some(_) => {}
                         None => self.diag.report(Level::Warning, lineno, 0, "undefined string, using \"\"", &name),
                     }
