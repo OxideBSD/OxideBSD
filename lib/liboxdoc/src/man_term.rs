@@ -212,22 +212,7 @@ impl R<'_> {
                 self.t.set_offset(self.base);
             }
             "PD" => {
-                // In vertical spacing units (a line) by default; an exact half rounds down.
-                self.pd = match n.args.first().filter(|a| !a.is_empty()) {
-                    None => 1,
-                    Some(a) => {
-                        let digits: String = a.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-                        let v: f64 = digits.parse().unwrap_or(0.0);
-                        let units = match &a[digits.len()..] {
-                            "" | "v" => v * 40.0,
-                            "u" => v,
-                            "n" | "m" => v * 24.0,
-                            "i" => v * 240.0,
-                            _ => v * 40.0,
-                        };
-                        (units / 40.0 + 0.4995).floor() as usize
-                    }
-                };
+                self.pd = n.args.first().filter(|a| !a.is_empty()).map(|a| vertical_lines(a)).unwrap_or(1);
             }
             "br" => {
                 self.t.flush();
@@ -242,9 +227,9 @@ impl R<'_> {
                         return;
                     }
                 }
-                let count = n.args.first().and_then(|a| a.trim_end_matches(['v', 'n']).parse::<usize>().ok()).unwrap_or(1);
+                let count = n.args.first().filter(|a| !a.is_empty()).map(|a| vertical_lines(a)).unwrap_or(1);
                 self.t.flush();
-                for _ in 0..count.max(1) {
+                for _ in 0..count {
                     self.t.sp_line();
                 }
             }
@@ -457,6 +442,8 @@ impl R<'_> {
             }
             "RS" => {
                 self.t.flush();
+                // A paragraph's space before the `.RS` doesn't absorb the next one's.
+                self.t.keep_blank();
                 // What follows is no longer the start of the section.
                 self.t.no_vspace = false;
                 self.after_sh = None;
@@ -521,6 +508,23 @@ impl R<'_> {
 }
 
 /// A paragraph macro with nothing in it, which mandoc drops (`.TP` right before `.SH`).
+/// A vertical distance in lines: `v` (a line) by default; an exact half rounds down, as
+/// mandoc's does.
+fn vertical_lines(a: &str) -> usize {
+    let digits: String = a.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let v: f64 = digits.parse().unwrap_or(0.0);
+    let units = match &a[digits.len()..] {
+        "u" => v,
+        "n" | "m" => v * 24.0,
+        "i" => v * 240.0,
+        "c" => v * 240.0 / 2.54,
+        "p" => v * 240.0 / 72.0,
+        "P" => v * 40.0,
+        _ => v * 40.0,
+    };
+    (units / 40.0 + 0.4995).floor() as usize
+}
+
 fn is_empty_paragraph(n: &Node) -> bool {
     n.args.first().is_none_or(|a| n.tok != "IP" || a.is_empty()) && n.children.iter().all(|part| part.children.is_empty())
 }

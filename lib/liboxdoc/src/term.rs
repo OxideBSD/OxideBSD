@@ -738,6 +738,13 @@ impl Term {
         }
     }
 
+    /// Makes a blank line just output one that the next paragraph space doesn't absorb.
+    pub fn keep_blank(&mut self) {
+        if self.at_blank {
+            self.blank_explicit = true;
+        }
+    }
+
     /// One more blank line after a space just output (`.PD 2`).
     pub fn extra_blank(&mut self) {
         if self.at_blank {
