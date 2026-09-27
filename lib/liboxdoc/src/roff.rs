@@ -213,6 +213,11 @@ impl<'a> Roff<'a> {
                 name = &name[..p];
             }
             let name = self.interpolate_name(name);
+            if name.is_empty() {
+                // Nothing but a closing `\}`.
+                self.close_conds(raw);
+                return;
+            }
             if self.request(&name, argstr, lineno, depth) {
                 // `.if`/`.ie`/`.el` process their own rest of line, closes included.
                 if !matches!(name.as_str(), "if" | "ie" | "el") {
