@@ -1,0 +1,17 @@
+[package]
+name = "oxdoc"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# The roff formatter behind oxdoc(1), man(1) and apropos(1) (MAN.md in OxideBSD-doc). Plain
+# Rust std, no libc; its own workspace, testable on the host (.cargo/config.toml).
+[workspace]
+
+[[bin]]
+# Host-side driver for the differential tests against mandoc (tests/differential.rs); OxideBSD's
+# own oxdoc(1) is usr.bin/oxdoc.
+name = "oxdoc-host"
+path = "src/bin/oxdoc-host.rs"
+test = false
