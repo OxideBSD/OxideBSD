@@ -75,7 +75,8 @@ pub fn ends_sentence(s: &str) -> bool {
         match c {
             '"' | '\'' | ')' | ']' | '*' | '\u{2019}' | '\u{201D}' => enclosed |= !found,
             '.' | '!' | '?' => found = true,
-            c => return found && (!enclosed || c.is_alphanumeric()),
+            // (A font escape counts as the letter its raw form `\fR` ends with.)
+            c => return found && (!enclosed || c.is_alphanumeric() || mark::is_font(c)),
         }
     }
     found && !enclosed

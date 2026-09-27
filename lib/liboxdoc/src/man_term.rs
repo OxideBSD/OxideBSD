@@ -124,7 +124,7 @@ impl R<'_> {
 
     fn node(&mut self, n: &Node, style: Style) {
         // In no-fill mode each input line, font macro lines included, is an output line.
-        if self.t.nofill && n.kind == Kind::Elem && n.flags.line_start && !self.t.at_line_start() {
+        if self.t.nofill && n.kind == Kind::Elem && n.flags.line_start && !n.flags.continues && !self.t.at_line_start() {
             self.t.flush();
         }
         if n.flags.nospace {

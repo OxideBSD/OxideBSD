@@ -31,11 +31,13 @@ struct Parser<'a> {
     nospace: bool,
     /// The last text line ended in `\c`.
     continued: bool,
+    /// The next node continues the last input line, which ended in `\c`.
+    joined: bool,
     line: usize,
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, line: 0 };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, line: 0 };
     for l in lines {
         match l {
             Line::Macro { name, args, line, .. } => {
@@ -48,6 +50,11 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             }
             Line::Blank { line } => {
                 p.line = line;
+                // Where a head line is expected (after `.TP` or an empty `.SS`), blank lines are
+                // skipped.
+                if p.pending_head {
+                    continue;
+                }
                 // A blank line is `.sp`, even before the first section (unlike in mdoc); marked,
                 // since at the start of a section it is ignored where `.sp` isn't.
                 let mut n = Node::new(Kind::Elem, "sp", line);
@@ -67,6 +74,9 @@ impl Parser<'_> {
     fn push(&mut self, mut n: Node) {
         if std::mem::take(&mut self.nospace) {
             n.flags.nospace = true;
+        }
+        if std::mem::take(&mut self.joined) {
+            n.flags.continues = true;
         }
         self.stack.last_mut().unwrap().children.push(n);
         self.head_done();
@@ -153,6 +163,7 @@ impl Parser<'_> {
         if cont {
             self.nospace = trail == 0;
             self.continued = true;
+            self.joined = true;
         }
     }
 
@@ -263,6 +274,7 @@ impl Parser<'_> {
                         }
                         if cont {
                             self.nospace = true;
+                            self.joined = true;
                         }
                     }
                 }
@@ -303,6 +315,7 @@ impl Parser<'_> {
                 self.push(e);
                 if cont {
                     self.nospace = true;
+                    self.joined = true;
                 }
             }
             "UC" | "AT" => {

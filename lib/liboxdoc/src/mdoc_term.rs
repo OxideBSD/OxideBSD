@@ -847,7 +847,7 @@ fn os_name(tok: &str, args: &[String]) -> String {
 /// the mdoc and man renderers.
 pub fn text_node(t: &mut Term, n: &Node, style: Style) {
     if t.nofill {
-        if n.flags.line_start && !t.at_line_start() {
+        if n.flags.line_start && !n.flags.continues && !t.at_line_start() {
             t.flush();
         }
         // Spaces are kept as they are; an overlong line still wraps.

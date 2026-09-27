@@ -25,6 +25,9 @@ pub struct Flags {
     pub delim: bool,
     /// The first node of an input line: the renderer may need to break (no-fill mode).
     pub line_start: bool,
+    /// The node continues the input line before it, which ended in `\c`: no break before it
+    /// even in no-fill mode.
+    pub continues: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
