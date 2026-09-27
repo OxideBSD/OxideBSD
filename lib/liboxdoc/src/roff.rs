@@ -87,10 +87,23 @@ pub struct Roff<'a> {
     diag: &'a mut Diagnostics,
     /// Reads a `.so` include by its path, relative to the manual tree root.
     include: Option<&'a dyn Fn(&str) -> Option<String>>,
+    /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
+    language: Option<bool>,
     /// `an-margin` values saved by man(7)'s `.RS`, for `.RE` to restore.
     rs_saved: Vec<Option<i64>>,
     out: Vec<Line>,
 }
+
+/// man(7)'s macros, which a page can't redefine. (`.MR` is newer than mandoc 1.14.6, so a
+/// page's own definition, as groff's pages carry for older formatters, is used.)
+const MAN_MACROS: &[&str] = &[
+    "TH", "SH", "SS", "TP", "TQ", "LP", "PP", "P", "IP", "HP", "SM", "SB", "BI", "IB", "BR", "RB", "R", "B", "I", "IR", "RI", "RE", "RS", "DT", "UC", "PD", "AT", "SY", "YS", "OP", "EX", "EE", "UR", "UE", "MT", "ME",
+];
+
+/// mdoc(7)'s macros, which a page can't redefine.
+const MDOC_MACROS: &[&str] = &[
+    "Dd", "Dt", "Os", "Sh", "Ss", "Pp", "D1", "Dl", "Bd", "Ed", "Bl", "El", "It", "Ad", "An", "Ap", "Ar", "Cd", "Cm", "Dv", "Er", "Ev", "Ex", "Fa", "Fd", "Fl", "Fn", "Ft", "Ic", "In", "Li", "Nd", "Nm", "Op", "Ot", "Pa", "Rv", "St", "Va", "Vt", "Xr", "%A", "%B", "%D", "%I", "%J", "%N", "%O", "%P", "%R", "%T", "%V", "Ac", "Ao", "Aq", "At", "Bc", "Bf", "Bo", "Bq", "Bsx", "Bx", "Db", "Dc", "Do", "Dq", "Ec", "Ef", "Em", "Eo", "Fx", "Ms", "No", "Ns", "Nx", "Ox", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Re", "Rs", "Sc", "So", "Sq", "Sm", "Sx", "Sy", "Tn", "Ux", "Xc", "Xo", "Fo", "Fc", "Oo", "Oc", "Bk", "Ek", "Bt", "Hf", "Fr", "Ud", "Lb", "Lp", "Lk", "Mt", "Brq", "Bro", "Brc", "%C", "Es", "En", "Dx", "%Q", "%U", "Ta",
+];
 
 /// Macro expansion depth limit, so a recursive `.de` can't hang.
 const MAX_DEPTH: usize = 64;
@@ -118,6 +131,7 @@ impl<'a> Roff<'a> {
             diag,
             include: None,
             rs_saved: Vec::new(),
+            language: None,
             out: Vec::new(),
         }
     }
@@ -191,10 +205,13 @@ impl<'a> Roff<'a> {
         }
 
         let text = raw;
-        let is_control = text.starts_with(self.cc) || text.starts_with('\'');
+        // An escaped control character (`\.`) at the start of a line still makes it a control
+        // line, as mandoc treats it.
+        let escaped_cc = self.ec.is_some_and(|ec| text.starts_with(ec) && text[ec.len_utf8()..].starts_with('.'));
+        let is_control = text.starts_with(self.cc) || text.starts_with('\'') || escaped_cc;
         if is_control {
             let no_break = text.starts_with('\'');
-            let rest = &text[1..];
+            let rest = if escaped_cc { &text[2..] } else { &text[1..] };
             // `.\"` comment line.
             if rest.trim_start().starts_with("\\\"") || rest.trim_start().starts_with("\\#") {
                 self.close_conds(raw);
@@ -225,7 +242,14 @@ impl<'a> Roff<'a> {
                 }
                 return;
             }
-            if let Some(body) = self.macros.get(&name).cloned() {
+            // Once the language is known, its own macros can't be redefined: mandoc ignores a
+            // page's `.de` of one.
+            let builtin = match self.language {
+                Some(true) => MDOC_MACROS.contains(&name.as_str()),
+                Some(false) => MAN_MACROS.contains(&name.as_str()),
+                None => false,
+            };
+            if let Some(body) = self.macros.get(&name).cloned().filter(|_| !builtin) {
                 if depth >= MAX_DEPTH {
                     self.diag.report(Level::Error, lineno, 0, "input stack limit exceeded, infinite loop?", &name);
                     return;
@@ -243,6 +267,9 @@ impl<'a> Roff<'a> {
             let args = self.macro_args(argstr, lineno);
             self.close_conds(raw);
             self.track_rs(&name, &args);
+            if self.language.is_none() && (name == "Dd" || name == "TH") {
+                self.language = Some(name == "Dd");
+            }
             self.emit(Line::Macro { name, args, line: lineno, no_break });
             return;
         }
