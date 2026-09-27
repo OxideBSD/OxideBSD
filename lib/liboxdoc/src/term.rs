@@ -62,6 +62,8 @@ struct Word {
     hyph: bool,
     /// Nothing but zero-width characters (`\&`): a line holding only such words isn't output.
     phantom: bool,
+    /// Joined to the word before without a space, but the line may break between them (`\:`).
+    brk: bool,
 }
 
 pub struct Term {
@@ -245,7 +247,10 @@ impl Term {
 
     /// Adds a word that ends a sentence when `eos` is set.
     pub fn word_ext(&mut self, text: &str, style: Style, eos: bool) {
+        // The word's parts, split at `\:` break points.
+        let mut parts: Vec<Vec<Cell>> = Vec::new();
         let mut cells = Vec::new();
+        let mut nohyph = false;
         let mut cur = self.esc_font.unwrap_or(style);
         // The drawing character of a `\l` rule, while it is being read.
         let mut rule: Option<Vec<Cell>> = None;
@@ -273,6 +278,8 @@ impl Term {
             }
             match c {
                 mark::ZERO | mark::CONT => {}
+                mark::NOHYPH => nohyph = true,
+                mark::BREAK => parts.push(std::mem::take(&mut cells)),
                 mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
@@ -301,9 +308,13 @@ impl Term {
         if self.keep > 0 {
             self.keep_started = true;
         }
-        let hyph = std::mem::take(&mut self.hyph_next);
-        let phantom = cells.is_empty() && !text.is_empty() && !(self.nofill && self.nofill_zero_lines);
-        self.words.push(Word { cells, space, glue, hyph, phantom });
+        let hyph = std::mem::take(&mut self.hyph_next) && !nohyph;
+        let phantom = parts.is_empty() && cells.is_empty() && !text.is_empty() && !(self.nofill && self.nofill_zero_lines);
+        parts.push(cells);
+        for (i, cells) in parts.into_iter().enumerate() {
+            let space = if i == 0 { space } else { 0 };
+            self.words.push(Word { cells, space, glue: glue && i == 0, hyph, phantom, brk: i > 0 });
+        }
     }
 
     fn push_char(&self, cells: &mut Vec<Cell>, c: char, style: Style) {
@@ -448,7 +459,7 @@ impl Term {
         while i < words.len() {
             // Words joined without a space are placed, and broken, as one.
             let mut j = i + 1;
-            while j < words.len() && (words[j].space == 0 || words[j].glue) {
+            while j < words.len() && ((words[j].space == 0 && !words[j].brk) || words[j].glue) {
                 j += 1;
             }
             let mut cells: Vec<Cell> = Vec::new();

@@ -29,6 +29,10 @@ pub mod mark {
     /// Brackets the character a `\l` of zero or negative length draws: it runs from where the
     /// output line starts to the right margin, which only the formatter knows.
     pub const RULE: char = '\u{E006}';
+    /// `\%` at the start of a word: the word doesn't break at its hyphens.
+    pub const NOHYPH: char = '\u{E007}';
+    /// `\:`: the line may break here, with no hyphen.
+    pub const BREAK: char = '\u{E008}';
     /// Font changes: `\fR`, `\fB`, `\fI`, `\f(BI`, `\fC`..., and `\fP` (previous).
     pub const FONT_R: char = '\u{E010}';
     pub const FONT_B: char = '\u{E011}';
@@ -695,7 +699,9 @@ impl<'a> Roff<'a> {
                 '-' => out.push(mark::MINUS),
                 '&' => out.push(mark::ZERO),
                 ' ' | '~' | '0' => out.push(mark::NBSP),
-                '|' | '^' | '%' | ':' | ',' | '/' | 'a' | 'd' | 'u' | 'r' | 'p' | 'E' | ')' | 'z' | '{' | '}' => {
+                '%' => out.push(mark::NOHYPH),
+                ':' => out.push(mark::BREAK),
+                '|' | '^' | ',' | '/' | 'a' | 'd' | 'u' | 'r' | 'p' | 'E' | ')' | 'z' | '{' | '}' => {
                     // No output on a terminal. (`\{`/`\}` are handled by the condition code.)
                 }
                 'c' => {
