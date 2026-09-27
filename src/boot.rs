@@ -162,7 +162,7 @@ pub fn read_boot_info() -> &'static BootInfo {
         .expect("Limine did not answer the memory map request");
     let has_no_ata_flag = CMDLINE_REQUEST
         .response()
-        .is_some_and(|r| r.cmdline().split_whitespace().any(|tok| tok == "no-ata"));
+        .is_some_and(|r| r.cmdline().split_whitespace().any(|tok| tok == "no-ata" || tok == "no-disk"));
 
     HHDM_OFFSET.store(hhdm.offset, Ordering::Relaxed);
     ATA_DISABLED.store(has_no_ata_flag, Ordering::Relaxed);

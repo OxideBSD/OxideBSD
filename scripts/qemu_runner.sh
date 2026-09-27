@@ -147,9 +147,26 @@ fi
 if [ "$IS_TEST" = 1 ]; then
     DISK_IMAGE="target/oxfs_test_disk.img"
     set -- "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 -display none
+    # Tests keep IDE (tests/ata_smoke.rs drives it directly).
+    DISK_DEFAULT=ide
 else
-    DISK_IMAGE="target/oxfs_disk.img"
+    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (an existing file of
+    # oxfs_disk.img's size), leaving the persistent dev disk alone.
+    DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/oxfs_disk.img}"
+    DISK_DEFAULT=virtio
 fi
+
+# The data disk is IDE or virtio-blk: $OXIDEBSD_QEMU_DISK (`ide`/`virtio`) overrides the default
+# above. virtio is modern-only (`disable-legacy=on`), which is all src/drivers/virtio.rs speaks;
+# the kernel prefers it when both could be present.
+case "${OXIDEBSD_QEMU_DISK:-$DISK_DEFAULT}" in
+    virtio) data_disk="virtio-blk-pci,drive=oxfsdisk,disable-legacy=on" ;;
+    ide) data_disk="ide-hd,drive=oxfsdisk,bus=ide.1,unit=0" ;;
+    *)
+        echo "qemu_runner.sh: OXIDEBSD_QEMU_DISK must be ide or virtio" >&2
+        exit 1
+        ;;
+esac
 
 # Real ATA data disk pinned explicitly to the secondary channel's master (ide.1, unit 0) -- see
 # CLAUDE.md's "Real disk persistence" section. The boot ISO below must NOT be attached via a bare
@@ -161,7 +178,7 @@ fi
 # implicit primary master).
 set -- "$@" \
     -drive "if=none,id=oxfsdisk,format=raw,file=$DISK_IMAGE" \
-    -device ide-hd,drive=oxfsdisk,bus=ide.1,unit=0 \
+    -device "$data_disk" \
     -drive "if=none,id=isocd,media=cdrom,file=$ISO_PATH" \
     -device ide-cd,drive=isocd,bus=ide.0,unit=0
 

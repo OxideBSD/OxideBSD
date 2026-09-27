@@ -45,9 +45,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
     // Must run before oxfs loads, below -- its module_init decides mount-vs-format based on
-    // whether this probe found a data disk. See src/ata.rs's own doc comment for why the disk is
-    // pinned to the secondary channel/master specifically.
-    oxidebsd::drivers::ata::init();
+    // whether this probe found a data disk (`drivers::disk`: virtio-blk, or the IDE disk).
+    oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
     // Populates SYS_EXIT/SYS_READ/SYS_WRITE/SYS_FORK/SYS_WAIT4/SYS_EXECVE/SYS_GETPID -- must load
     // before oxfs-persistence-syscall-smoke, below, is spawned.

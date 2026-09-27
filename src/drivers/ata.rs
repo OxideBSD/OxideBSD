@@ -1,14 +1,17 @@
-//! A minimal ATA PIO (Programmable I/O) disk driver -- classic legacy IDE, LBA28, polling only,
-//! no IRQ. See <https://wiki.osdev.org/ATA_PIO_Mode>. This kernel's first real block device.
+//! A minimal legacy IDE disk driver: LBA28, PIO or bus-master DMA. See
+//! <https://wiki.osdev.org/ATA_PIO_Mode> and <https://wiki.osdev.org/ATA/ATAPI_using_DMA>.
 //!
-//! **Polling, not IRQ-driven, deliberately.** PIO is inherently synchronous and CPU-driven (the
-//! CPU itself shuttles every word across the data port -- there's no DMA to wait on), and this
-//! code must be safely callable from inside a real syscall handler with `RFLAGS::INTERRUPT_FLAG`
-//! masked (oxfs's write-through persistence runs on every file write). Any wait here uses
-//! `core::hint::spin_loop()` against a `crate::tsc`-based deadline, never `hlt()` -- see
-//! `src/tsc.rs`'s own doc comment for why a tick-based wait can never elapse inside a syscall, and
-//! CLAUDE.md's "Real networking" section for the `hlt()`-in-syscall freeze this exact mistake
-//! caused there.
+//! **PIO is slow under virtualization.** Every word of a PIO transfer is an `outsw`/`insw`
+//! through the data port, and each one traps to QEMU: a fresh oxfs format (~259 MiB) took ~17
+//! minutes, with the guest's instruction pointer sampled inside `outsw` nearly every time. So
+//! when the IDE controller is a PCI bus master (`init_dma`), the data disk's transfers go by DMA
+//! through a bounce buffer below 4 GiB, finishing with IRQ 15 (`dma::wait_until`: `hlt` when
+//! interrupts are enabled, polling inside syscalls). PIO remains the fallback, and serves the
+//! other channel/drive combinations `tests/ata_smoke.rs` can name.
+//!
+//! Any PIO wait uses `core::hint::spin_loop()` against a `crate::tsc` deadline, never `hlt()`:
+//! these calls run inside syscall handlers with interrupts masked (oxfs's write-through
+//! persistence), where a tick-based wait can never elapse (CLAUDE.md, "Real networking").
 //!
 //! **Legacy fixed ports, no PCI probing.** QEMU's default `i440fx` machine type's PIIX3 IDE
 //! controller (and every real PC chipset before it) exposes the primary/secondary channels at
@@ -54,12 +57,9 @@ pub enum AtaError {
     DeviceError(u8),
 }
 
-/// Only `io_base` is used -- polling reads the regular status register (`io_base + 7`), never the
-/// alt-status/device-control register at each channel's separate control-base address (0x3F6
-/// primary / 0x376 secondary), so there's nothing here to read/write there. Reading the regular
-/// status register does have the side effect of acknowledging a pending IRQ, which would matter to
-/// an IRQ-driven driver -- irrelevant here since this driver never unmasks IRQ14/15 in the first
-/// place (see this module's own doc comment on why polling, not IRQs).
+/// A channel's command block. Reading its status register (`io_base + 7`) acknowledges the
+/// drive's pending `INTRQ`, which the DMA path's IRQ 15 handler relies on; only `init_dma` touches
+/// the device control register (to clear `nIEN`).
 struct ChannelPorts {
     io_base: u16,
 }
@@ -89,6 +89,8 @@ const STATUS_DF: u8 = 0x20;
 const STATUS_BSY: u8 = 0x80;
 
 const CMD_READ_SECTORS: u8 = 0x20;
+const CMD_READ_DMA: u8 = 0xC8;
+const CMD_WRITE_DMA: u8 = 0xCA;
 const CMD_WRITE_SECTORS: u8 = 0x30;
 const CMD_CACHE_FLUSH: u8 = 0xE7;
 const CMD_IDENTIFY: u8 = 0xEC;
@@ -217,7 +219,7 @@ unsafe fn outsw(port: u16, buf: *const u8, word_count: usize) {
 /// per-sector `DRQ` wait is inherent to the ATA protocol and can't be batched away). `sector_count`
 /// `0` addresses 256 sectors on real hardware (unused by this driver's own callers, which never
 /// batch past 8).
-pub fn read_sectors(
+fn pio_read_sectors(
     channel: Channel,
     drive: Drive,
     lba: u32,
@@ -242,13 +244,9 @@ pub fn read_sectors(
     Ok(())
 }
 
-/// Writes `sector_count` consecutive 512-byte sectors starting at `lba` (LBA28) to
-/// `channel`/`drive` from `buf`, followed by a single real `CACHE FLUSH` covering the whole batch
-/// (not one per sector) so every sector in it is durable in the backing image before this returns
-/// -- otherwise QEMU's own write-back caching could reorder a write past a later read of the same
-/// sector via a different code path. Same one-command/one-flush-for-the-whole-batch reasoning as
-/// `read_sectors`.
-pub fn write_sectors(
+/// Writes `sector_count` consecutive sectors at `lba` by PIO, without flushing (`write_sectors`
+/// adds the `CACHE FLUSH`). Same one-command-for-the-batch shape as `pio_read_sectors`.
+fn pio_write_sectors(
     channel: Channel,
     drive: Drive,
     lba: u32,
@@ -271,19 +269,67 @@ pub fn write_sectors(
         }
     }
 
+    wait_while_busy(p.io_base)?;
+    Ok(())
+}
+
+/// `CACHE FLUSH`: everything written so far is durable in the backing image once this returns --
+/// otherwise QEMU's write-back caching could reorder a write past a later read of the same sector
+/// through another path. Checks `ERR`/`DF` once `BSY` clears (`wait_while_busy` alone doesn't),
+/// so a flush the drive reports as failed isn't mistaken for success.
+fn cache_flush(channel: Channel, drive: Drive) -> Result<(), AtaError> {
+    let p = ports(channel);
+    select_drive_lba28(p.io_base, drive, 0);
+    wait_while_busy(p.io_base)?;
     unsafe {
         Port::<u8>::new(p.io_base + REG_STATUS_COMMAND).write(CMD_CACHE_FLUSH);
     }
-    // `wait_while_busy` only waits for BSY to clear -- it doesn't check ERR/DF (unlike
-    // `wait_for_data`, which does), so a real flush failure the drive reports once BSY clears
-    // used to be silently treated as success: this write-through persistence path (and everything
-    // above it, up through oxfs's own commit logic) would believe a block reached stable storage
-    // when the hardware actually reported otherwise.
     let status = wait_while_busy(p.io_base)?;
     if status & (STATUS_ERR | STATUS_DF) != 0 {
         return Err(AtaError::DeviceError(status));
     }
     Ok(())
+}
+
+/// Reads `sector_count` (1-255) sectors at `lba` into `buf` (`sector_count * 512` bytes): by DMA
+/// when this is the data disk and `init_dma` succeeded, else by PIO.
+pub fn read_sectors(
+    channel: Channel,
+    drive: Drive,
+    lba: u32,
+    sector_count: u8,
+    buf: &mut [u8],
+) -> Result<(), AtaError> {
+    if (channel, drive) == (DATA_DISK_CHANNEL, DATA_DISK_DRIVE) && dma_ready() {
+        return dma_transfer(lba, sector_count, Direction::Read(buf));
+    }
+    pio_read_sectors(channel, drive, lba, sector_count, buf)
+}
+
+/// Writes `sector_count` (1-255) sectors at `lba` from `buf`, then `CACHE FLUSH`es, so they're
+/// durable when this returns. DMA or PIO as `read_sectors`.
+pub fn write_sectors(
+    channel: Channel,
+    drive: Drive,
+    lba: u32,
+    sector_count: u8,
+    buf: &[u8],
+) -> Result<(), AtaError> {
+    write_sectors_unflushed(channel, drive, lba, sector_count, buf)?;
+    cache_flush(channel, drive)
+}
+
+fn write_sectors_unflushed(
+    channel: Channel,
+    drive: Drive,
+    lba: u32,
+    sector_count: u8,
+    buf: &[u8],
+) -> Result<(), AtaError> {
+    if (channel, drive) == (DATA_DISK_CHANNEL, DATA_DISK_DRIVE) && dma_ready() {
+        return dma_transfer(lba, sector_count, Direction::Write(buf));
+    }
+    pio_write_sectors(channel, drive, lba, sector_count, buf)
 }
 
 /// Reads one 512-byte sector at `lba` (LBA28) from `channel`/`drive`. A thin `read_sectors(...,
@@ -379,52 +425,233 @@ pub fn init() {
     }
 }
 
-/// Whether the data disk (`oxidebsd_block_read`/`_write`'s fixed target) is present this boot.
-/// Exported to modules -- see `src/module.rs`'s `resolve_external_symbol`. `0`/`1`, not
-/// `bool`/`Result`: matches every other `oxidebsd_*` module-boundary function's plain-integer
-/// convention (modules have no `alloc`, so richer return types can't cross this boundary).
-pub extern "C" fn oxidebsd_block_device_present() -> i64 {
-    if DATA_DISK_PRESENT.load(Ordering::Relaxed) {
-        1
-    } else {
-        0
+/// Whether the data disk (secondary master) answered `IDENTIFY` at boot.
+pub fn present() -> bool {
+    DATA_DISK_PRESENT.load(Ordering::Relaxed)
+}
+
+/// Blocks per command: `31 * 8 = 248` sectors, under LBA28's 255-per-command ceiling (`0`
+/// meaning 256 is never used), and the size of the DMA bounce buffer.
+const MAX_BLOCKS_PER_COMMAND: u64 = 31;
+
+/// Reads `count` consecutive 4 KiB blocks from `start_block` into `buf` (`count * 4096` bytes),
+/// one command per `MAX_BLOCKS_PER_COMMAND` -- the per-command overhead (drive select, status
+/// polling) is fixed, so fewer, larger commands are faster.
+pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> Result<(), AtaError> {
+    for (i, chunk) in buf.chunks_mut((MAX_BLOCKS_PER_COMMAND * 4096) as usize).enumerate() {
+        let block = start_block + i as u64 * MAX_BLOCKS_PER_COMMAND;
+        let sectors = (chunk.len() / 512) as u8;
+        read_sectors(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, (block * 8) as u32, sectors, chunk)?;
+    }
+    Ok(())
+}
+
+/// Writes `count` consecutive blocks from `buf`, then one `CACHE FLUSH` for all of them.
+pub fn write_blocks(start_block: u64, buf: &[u8]) -> Result<(), AtaError> {
+    for (i, chunk) in buf.chunks((MAX_BLOCKS_PER_COMMAND * 4096) as usize).enumerate() {
+        let block = start_block + i as u64 * MAX_BLOCKS_PER_COMMAND;
+        let sectors = (chunk.len() / 512) as u8;
+        write_sectors_unflushed(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, (block * 8) as u32, sectors, chunk)?;
+    }
+    cache_flush(DATA_DISK_CHANNEL, DATA_DISK_DRIVE)
+}
+
+// --- bus-master DMA --------------------------------------------------------------------------
+
+/// The secondary channel's bus-master registers, at `BAR4 + 8`.
+const BM_SECONDARY: u16 = 8;
+const BM_COMMAND: u16 = 0;
+const BM_STATUS: u16 = 2;
+const BM_PRDT: u16 = 4;
+const BM_CMD_START: u8 = 1 << 0;
+/// Direction: the controller writes memory (a disk read).
+const BM_CMD_TO_MEMORY: u8 = 1 << 3;
+const BM_STATUS_ERROR: u8 = 1 << 1;
+const BM_STATUS_INTERRUPT: u8 = 1 << 2;
+/// The secondary channel's device control register (`nIEN` is bit 1).
+const SECONDARY_CONTROL: u16 = 0x376;
+/// The secondary channel's legacy IRQ.
+const SECONDARY_IRQ: u8 = 15;
+/// Physical Region Descriptors must not cross a 64 KiB boundary.
+const PRD_BOUNDARY: u64 = 0x1_0000;
+const PRD_END_OF_TABLE: u32 = 1 << 31;
+
+struct BusMaster {
+    /// The data channel's bus-master register block.
+    base: u16,
+    prdt: crate::drivers::dma::DmaBuffer,
+    buffer: crate::drivers::dma::DmaBuffer,
+}
+
+static BUS_MASTER: spin::Mutex<Option<BusMaster>> = spin::Mutex::new(None);
+/// The data channel's bus-master register block, for the IRQ handler (which can't take
+/// `BUS_MASTER`: it may interrupt a holder). `0` until `init_dma` succeeds.
+static BM_BASE: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// Set by the IRQ handler when the channel raised its interrupt; cleared before each transfer.
+static DMA_IRQ_SEEN: AtomicBool = AtomicBool::new(false);
+static DMA_TRANSFERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DMA_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn dma_ready() -> bool {
+    BM_BASE.load(Ordering::Relaxed) != 0
+}
+
+/// `(transfers, completion interrupts)` by DMA so far -- how much the interrupt path is used.
+pub fn dma_stats() -> (u64, u64) {
+    (DMA_TRANSFERS.load(Ordering::Relaxed), DMA_IRQS.load(Ordering::Relaxed))
+}
+
+fn bm_read_status(base: u16) -> u8 {
+    unsafe { Port::<u8>::new(base + BM_STATUS).read() }
+}
+
+/// Clears the status register's write-1-to-clear error and interrupt bits, keeping the rest.
+fn bm_clear_status(base: u16) {
+    let status = bm_read_status(base);
+    unsafe { Port::<u8>::new(base + BM_STATUS).write(status | BM_STATUS_ERROR | BM_STATUS_INTERRUPT) };
+}
+
+/// IRQ 15: the data channel finished (or a PIO command raised `INTRQ`). Reads the drive's status
+/// register, which acknowledges `INTRQ`, and clears the bus-master interrupt bit, so the line
+/// drops before EOI.
+fn secondary_irq_handler() {
+    let base = BM_BASE.load(Ordering::Relaxed);
+    if base == 0 {
+        let _ = read_status(SECONDARY.io_base);
+        return;
+    }
+    if bm_read_status(base) & BM_STATUS_INTERRUPT != 0 {
+        let _ = read_status(SECONDARY.io_base);
+        bm_clear_status(base);
+        DMA_IRQ_SEEN.store(true, Ordering::Release);
+        DMA_IRQS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Reads oxfs block `block_no` (4096 bytes) into `buf_ptr` as a single real 8-sector `READ
-/// SECTORS` command (see `read_sectors`'s own doc comment for why this beats 8 separate
-/// single-sector commands) against the fixed data-disk channel/drive. `-1` on any failure (no
-/// device, timeout, device error) or if no data disk is attached at all; `0` on success. `buf_ptr`
-/// is a raw pointer into the calling module's own memory (a `static mut` block buffer, in oxfs's
-/// case, always exactly `BLOCK_SIZE = 4096` bytes) -- modules have no `alloc`, so this is the same
-/// `ptr`+implicit-fixed-length convention every other `oxidebsd_*` bulk-data function here already
-/// uses.
-pub extern "C" fn oxidebsd_block_read(block_no: u64, buf_ptr: u64) -> i64 {
-    if !DATA_DISK_PRESENT.load(Ordering::Relaxed) {
-        return -1;
+/// Sets up bus-master DMA for the data disk, if the IDE controller is a PCI bus master and a
+/// DMA buffer below 4 GiB can be had. Call after `init`. Logged either way; without it the data
+/// disk keeps using PIO.
+pub fn init_dma(
+    frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<x86_64::structures::paging::Size4KiB>,
+    phys_mem_offset: x86_64::VirtAddr,
+) {
+    use crate::drivers::dma::DmaBuffer;
+    if !present() {
+        return;
     }
-    let base_lba = (block_no * 8) as u32;
-    // SAFETY: caller (oxfs) always passes a pointer to a live 4096-byte `static mut` block buffer.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 4096) };
-    match read_sectors(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, base_lba, 8, buf) {
-        Ok(()) => 0,
-        Err(_) => -1,
+    // Mass storage (0x01), IDE (0x01); prog-if bit 7: bus-master capable.
+    let Some(ide) = crate::drivers::pci::find_by_class(0x01, 0x01) else {
+        serial_println!("[boot] ata: no PCI IDE controller -- data disk uses PIO");
+        return;
+    };
+    let Some(bar4) = ide.io_bar(4).filter(|_| ide.prog_if & 0x80 != 0) else {
+        serial_println!("[boot] ata: IDE controller isn't a bus master -- data disk uses PIO");
+        return;
+    };
+    let prdt = DmaBuffer::alloc(frame_allocator, phys_mem_offset, 1, true);
+    let buffer = DmaBuffer::alloc(frame_allocator, phys_mem_offset, MAX_BLOCKS_PER_COMMAND as usize, true);
+    let (Some(prdt), Some(buffer)) = (prdt, buffer) else {
+        serial_println!("[boot] ata: no DMA buffer below 4 GiB -- data disk uses PIO");
+        return;
+    };
+    ide.enable_bus_mastering();
+    let base = bar4 + BM_SECONDARY;
+
+    // The Physical Region Descriptor table for the whole bounce buffer, split at 64 KiB
+    // boundaries. A transfer shorter than the buffer ends early; the controller stops at the
+    // drive's byte count, not the table's.
+    let entries = prdt.as_mut_ptr::<u32>();
+    let mut addr = buffer.phys.as_u64();
+    let end = addr + buffer.len as u64;
+    let mut i = 0;
+    while addr < end {
+        let len = (PRD_BOUNDARY - addr % PRD_BOUNDARY).min(end - addr);
+        let last = addr + len == end;
+        // SAFETY: a few entries in a zeroed 4 KiB table this driver owns.
+        unsafe {
+            entries.add(i * 2).write_volatile(addr as u32);
+            entries.add(i * 2 + 1).write_volatile((len as u32 & 0xFFFF) | if last { PRD_END_OF_TABLE } else { 0 });
+        }
+        addr += len;
+        i += 1;
     }
+
+    unsafe {
+        Port::<u8>::new(base + BM_COMMAND).write(0);
+        Port::<u32>::new(base + BM_PRDT).write(prdt.phys.as_u64() as u32);
+        // nIEN clear: the drive raises INTRQ when a command completes.
+        Port::<u8>::new(SECONDARY_CONTROL).write(0);
+    }
+    bm_clear_status(base);
+    *BUS_MASTER.lock() = Some(BusMaster { base, prdt, buffer });
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::cpu::interrupts::register_irq_handler(SECONDARY_IRQ, secondary_irq_handler);
+        BM_BASE.store(base, Ordering::Release);
+        // SAFETY: the handler is registered just above.
+        unsafe { crate::cpu::pic::unmask_irq(SECONDARY_IRQ) };
+    });
+    serial_println!(
+        "[boot] ata: bus-master DMA on {:02x}:{:02x}.{} (registers {:#06x}, IRQ {}) -- data disk uses DMA",
+        ide.bus,
+        ide.device,
+        ide.function,
+        base,
+        SECONDARY_IRQ
+    );
 }
 
-/// Writes oxfs block `block_no` (4096 bytes) from `buf_ptr` to disk as a single real 8-sector
-/// `WRITE SECTORS` command with one `CACHE FLUSH` covering the whole block (see `write_sectors`'s
-/// own doc comment) against the fixed data-disk channel/drive. Same `-1`/`0` and `buf_ptr`
-/// conventions as `oxidebsd_block_read`.
-pub extern "C" fn oxidebsd_block_write(block_no: u64, buf_ptr: u64) -> i64 {
-    if !DATA_DISK_PRESENT.load(Ordering::Relaxed) {
-        return -1;
+enum Direction<'a> {
+    Read(&'a mut [u8]),
+    Write(&'a [u8]),
+}
+
+/// One DMA command on the data disk, through the bounce buffer.
+fn dma_transfer(lba: u32, sector_count: u8, dir: Direction) -> Result<(), AtaError> {
+    let guard = BUS_MASTER.lock();
+    let bm = guard.as_ref().expect("dma_ready without a bus master");
+    let len = sector_count as usize * 512;
+    assert!(len <= bm.buffer.len);
+    let to_memory = matches!(dir, Direction::Read(_));
+    if let Direction::Write(src) = &dir {
+        // SAFETY: the controller is idle between transfers.
+        unsafe { bm.buffer.slice_mut(0, len) }.copy_from_slice(&src[..len]);
     }
-    let base_lba = (block_no * 8) as u32;
-    // SAFETY: caller (oxfs) always passes a pointer to a live 4096-byte block buffer.
-    let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, 4096) };
-    match write_sectors(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, base_lba, 8, buf) {
-        Ok(()) => 0,
-        Err(_) => -1,
+
+    let io_base = ports(DATA_DISK_CHANNEL).io_base;
+    select_drive_lba28(io_base, DATA_DISK_DRIVE, lba);
+    wait_while_busy(io_base)?;
+    unsafe {
+        Port::<u8>::new(bm.base + BM_COMMAND).write(if to_memory { BM_CMD_TO_MEMORY } else { 0 });
+        Port::<u32>::new(bm.base + BM_PRDT).write(bm.prdt.phys.as_u64() as u32);
     }
+    bm_clear_status(bm.base);
+    DMA_IRQ_SEEN.store(false, Ordering::Release);
+    setup_lba28(io_base, lba, sector_count);
+    unsafe {
+        Port::<u8>::new(io_base + REG_STATUS_COMMAND).write(if to_memory { CMD_READ_DMA } else { CMD_WRITE_DMA });
+        Port::<u8>::new(bm.base + BM_COMMAND).write(BM_CMD_START | if to_memory { BM_CMD_TO_MEMORY } else { 0 });
+    }
+
+    // Done once the drive raised its interrupt: seen by the IRQ handler, or still set in the
+    // bus-master status when interrupts are masked.
+    let base = bm.base;
+    let finished = crate::drivers::dma::wait_until(TIMEOUT_MS, || {
+        DMA_IRQ_SEEN.load(Ordering::Acquire) || bm_read_status(base) & (BM_STATUS_INTERRUPT | BM_STATUS_ERROR) != 0
+    });
+    let bm_status = bm_read_status(base);
+    unsafe { Port::<u8>::new(base + BM_COMMAND).write(0) };
+    let status = wait_while_busy(io_base)?; // also acknowledges INTRQ
+    bm_clear_status(base);
+    DMA_TRANSFERS.fetch_add(1, Ordering::Relaxed);
+    if !finished {
+        return Err(AtaError::Timeout);
+    }
+    if bm_status & BM_STATUS_ERROR != 0 || status & (STATUS_ERR | STATUS_DF) != 0 {
+        return Err(AtaError::DeviceError(status));
+    }
+    if let Direction::Read(dst) = dir {
+        // SAFETY: the transfer is over.
+        dst[..len].copy_from_slice(unsafe { bm.buffer.slice_mut(0, len) });
+    }
+    Ok(())
 }

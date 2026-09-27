@@ -633,15 +633,19 @@ descriptor not per open-file description (`dup`/`dup2` don't copy it, `fork_inhe
 (`OpenFile::Write::readonly`) on write/`ftruncate`/`fallocate` — `open(path, O_CREAT)` with no
 explicit `O_WRONLY`/`O_RDWR` now genuinely produces a read-only fd rather than silently writable.
 
-## Real disk persistence (`src/drivers/ata.rs`, `modules/oxfs`)
+## Real disk persistence (`src/drivers/{disk,ata,virtio,virtio_blk,dma}.rs`, `modules/oxfs`)
 
 Scoped deliberately: real disk I/O and oxfs mount/format persistence, not a general VFS/mount-table
 layer.
 
-- **`src/drivers/ata.rs`**: hand-rolled ATA PIO driver, kernel-resident — classic legacy IDE,
-  LBA28, **polling only, no IRQ**, fixed legacy ports. Every BSY/DRQ wait is bounded by a real
-  `crate::tsc`-based deadline (never `hlt()`, never unbounded) — reachable from inside a real
-  syscall handler with interrupts masked.
+- **`drivers::disk`** owns oxfs's `oxidebsd_block_*` exports and picks one data disk at boot:
+  virtio-blk (modern virtio 1.x only), else the IDE secondary master — by bus-master DMA when the
+  PIIX controller allows it, else PIO. `cargo run` attaches virtio-blk (`disable-legacy=on`);
+  tests attach IDE; `OXIDEBSD_QEMU_DISK=ide|virtio` overrides either, `OXIDEBSD_DISK_IMAGE` swaps
+  the image. `no-ata`/`no-disk` skips the whole probe. Backported from master (`2992d55`).
+- **Why**: IDE PIO traps to QEMU per 16-bit word; a fresh format took many minutes. Completion is
+  interrupt-driven with a polling fallback (`dma::wait_until`: `hlt` when IF=1, spin inside
+  syscalls, `tsc`-bounded); the IRQ registry holds several handlers per (shared) line.
 - **One fixed target: secondary channel, master** — `scripts/qemu_runner.sh` attaches the real
   ATA data disk at the primary channel's master instead (`ide.0`, unit 0), since QEMU's own
   `-cdrom` convenience default for the Limine boot ISO already claims the secondary master's
