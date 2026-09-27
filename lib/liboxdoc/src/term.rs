@@ -606,21 +606,51 @@ impl Term {
         self.blank_header = false;
     }
 
-    /// A man(7) footer: like [`Term::three_part`], but when the parts don't fit, the right one
-    /// goes flush right on a line of its own.
-    pub fn footer_three_part(&mut self, left: &str, center: &str, right: &str) {
-        let (ll, cl, rl) = (left.chars().count(), center.chars().count(), right.chars().count());
-        // Where the center part ends up, centered but after the left part.
-        let cend = ((self.width + 1).saturating_sub(cl) / 2).max(ll + 1) + cl;
-        if cend + 1 <= self.width.saturating_sub(rl) || right.is_empty() {
-            self.three_part(left, center, right);
-            return;
+    /// Header and footer text set in columns, each `(text, start, end)`. A column's words fill
+    /// from its start and wrap at the full width; the next column follows on the same line if
+    /// the last line leaves room before `end`, else on a new line.
+    pub fn columns(&mut self, cols: &[(&str, usize, usize)]) {
+        self.flush();
+        let mut s = String::new();
+        let mut col = 0;
+        let pad = |s: &mut String, col: &mut usize, to: usize| {
+            while *col < to {
+                s.push(' ');
+                *col += 1;
+            }
+        };
+        for (k, &(text, start, end)) in cols.iter().enumerate() {
+            pad(&mut s, &mut col, start);
+            let mut first = true;
+            for w in text.split(' ').filter(|w| !w.is_empty()) {
+                let wl = w.chars().count();
+                if !first && col + 1 + wl > self.width {
+                    s.push('\n');
+                    col = 0;
+                    pad(&mut s, &mut col, start);
+                } else if !first {
+                    s.push(' ');
+                    col += 1;
+                }
+                s.push_str(w);
+                col += wl;
+                first = false;
+            }
+            if k + 1 < cols.len() && col + 1 > end {
+                s.push('\n');
+                col = 0;
+            }
         }
-        self.three_part(left, center, "");
-        let pad = self.width.saturating_sub(rl);
-        self.out.push_str(&" ".repeat(pad));
-        self.out.push_str(right);
-        self.out.push('\n');
+        for line in s.split('\n') {
+            let line = line.trim_end();
+            let line: String = if self.encoding == Encoding::Ascii { line.chars().map(|c| if c.is_ascii() { c.to_string() } else { ascii_for(c) }).collect() } else { line.to_string() };
+            self.out.push_str(&line);
+            self.out.push('\n');
+            self.lines_out += 1;
+        }
+        self.at_blank = false;
+        self.blank_explicit = false;
+        self.blank_header = false;
     }
 
     /// Indentation for a text line starting with `lead` spaces: on a line nothing has been

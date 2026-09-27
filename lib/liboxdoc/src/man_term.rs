@@ -88,7 +88,21 @@ impl R<'_> {
                 v => v.to_string(),
             }
         };
-        self.t.three_part(&title, &vol, &title);
+        // The title at the left, the volume centered and the title again at the right, if they
+        // fit; else the volume flush right, and the title only on the left.
+        let w = self.t.width;
+        let (tl, vl) = (title.chars().count(), vol.chars().count());
+        let r1 = if 2 * (tl + 1) + vl < w {
+            (w + 1 - vl) / 2
+        } else {
+            w.saturating_sub(vl)
+        };
+        let r2 = if r1 + vl + tl < w { w - tl } else { w };
+        if r2 + tl <= w {
+            self.t.columns(&[(&title, 0, r1), (&vol, r1, r2), (&title, r2, w)]);
+        } else {
+            self.t.columns(&[(&title, 0, r1), (&vol, r1, r2)]);
+        }
         self.t.raw_blank();
     }
 
@@ -98,7 +112,12 @@ impl R<'_> {
         let date = plain(&crate::format_date(&self.meta.date));
         self.t.no_vspace = false;
         self.t.section_vspace();
-        self.t.footer_three_part(&source, &date, &title);
+        // The source at the left, the date centered and the title at the right.
+        let w = self.t.width;
+        let (dl, tl) = (date.chars().count(), title.chars().count());
+        let r1 = (w + 1).saturating_sub(dl) / 2;
+        let r2 = w.saturating_sub(tl);
+        self.t.columns(&[(&source, 0, r1), (&date, r1, r2), (&title, r2, w)]);
     }
 
     fn children(&mut self, n: &Node, style: Style) {
