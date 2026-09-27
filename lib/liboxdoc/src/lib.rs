@@ -6,6 +6,8 @@
 pub mod chars;
 pub mod diag;
 pub mod libraries;
+pub mod man;
+pub mod man_term;
 pub mod mdoc;
 pub mod mdoc_term;
 pub mod roff;
@@ -33,11 +35,13 @@ pub struct Options {
     pub styling: Styling,
     /// The operating system name for a page with an empty `.Os`.
     pub os: Option<String>,
+    /// Only the SYNOPSIS section, without heading, header or footer (`man -h`).
+    pub synopsis_only: bool,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None }
+        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None, synopsis_only: false }
     }
 }
 
@@ -46,7 +50,8 @@ pub fn parse(input: &str, diag: &mut Diagnostics) -> Document {
     let lines = roff::Roff::new(diag).run(input);
     let language = detect(&lines);
     match language {
-        Language::Mdoc | Language::Man => mdoc::parse(lines, diag),
+        Language::Mdoc => mdoc::parse(lines, diag),
+        Language::Man => man::parse(lines, diag),
     }
 }
 
@@ -72,7 +77,11 @@ pub fn format(input: &str, file: &str, opts: &Options) -> (String, Diagnostics) 
     let out = match opts.device {
         Device::Ascii | Device::Utf8 => {
             let enc = if opts.device == Device::Ascii { Encoding::Ascii } else { Encoding::Utf8 };
-            mdoc_term::render(&doc, Term::new(opts.width, enc, opts.styling))
+            let t = Term::new(opts.width, enc, opts.styling);
+            match doc.language {
+                Language::Mdoc => mdoc_term::render(&doc, t, opts.synopsis_only),
+                Language::Man => man_term::render(&doc, t, opts.synopsis_only),
+            }
         }
         Device::Lint => String::new(),
         Device::Tree => {

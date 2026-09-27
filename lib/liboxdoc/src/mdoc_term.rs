@@ -81,7 +81,21 @@ struct R<'a> {
     last_line: usize,
 }
 
-pub fn render(doc: &Document, t: Term) -> String {
+pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
+    if synopsis_only {
+        // `man -h`: the SYNOPSIS section's body at the left margin, and nothing else.
+        let mut r = R { t, meta: &doc.meta, synopsis: true, prev: String::new(), authors: false, see_also: false, split: None, seen_an: false, last_line: 0 };
+        for sh in doc.root.children.iter().filter(|n| n.tok == "Sh") {
+            if sh.part(Kind::Head).is_some_and(|h| h.plain_text() == "SYNOPSIS")
+                && let Some(b) = sh.part(Kind::Body)
+            {
+                r.t.no_vspace = true;
+                r.children(b, Style::None);
+            }
+        }
+        r.t.flush();
+        return r.t.finish();
+    }
     let mut r = R { t, meta: &doc.meta, synopsis: false, prev: String::new(), authors: false, see_also: false, split: None, seen_an: false, last_line: 0 };
     r.header();
     for n in &doc.root.children {
@@ -131,6 +145,8 @@ impl R<'_> {
     }
 
     fn node(&mut self, n: &Node, style: Style) {
+        // In mdoc a font escape lasts only to the end of its own macro argument or text line.
+        self.t.reset_font();
         // In no-fill mode every input line, macro lines included, is an output line.
         if self.t.nofill && n.line != self.last_line && self.last_line != 0 && n.kind != Kind::Text {
             self.t.flush();
@@ -148,82 +164,7 @@ impl R<'_> {
     }
 
     fn text(&mut self, n: &Node, style: Style) {
-        if self.t.nofill {
-            if n.flags.line_start {
-                self.t.flush();
-            }
-            // Spaces are kept as they are; an overlong line still wraps.
-            let text = &n.text;
-            let lead = text.len() - text.trim_start_matches(' ').len();
-            if lead > 0 {
-                let at = self.t.offset + lead;
-                self.t.begin_line_at(at);
-            }
-            let mut spaces = 0;
-            let mut first = true;
-            for w in text.trim_start_matches(' ').split(' ') {
-                if w.is_empty() {
-                    spaces += 1;
-                    continue;
-                }
-                if !first {
-                    self.t.set_space(spaces + 1);
-                }
-                self.t.word(w, style);
-                spaces = 0;
-                first = false;
-            }
-            if first {
-                // An empty line.
-                self.t.word("", style);
-            }
-            return;
-        }
-        if !n.flags.line_start && (n.text.starts_with(' ') || n.text.ends_with(' ')) && n.text.trim() != "" {
-            // A macro argument with spaces at its edges (`.Dq "Password: "`) keeps them.
-            let lead = n.text.len() - n.text.trim_start_matches(' ').len();
-            let trail = n.text.len() - n.text.trim_end_matches(' ').len();
-            let words: Vec<&str> = n.text.split(' ').filter(|w| !w.is_empty()).collect();
-            let last = words.len().saturating_sub(1);
-            for (i, w) in words.iter().enumerate() {
-                let mut word = w.to_string();
-                if i == 0 {
-                    word = format!("{}{word}", mark::NBSP.to_string().repeat(lead));
-                }
-                if i == last {
-                    word.push_str(&mark::NBSP.to_string().repeat(trail));
-                }
-                self.t.word_ext(&word, style, i == last && n.flags.eos);
-            }
-            return;
-        }
-        let text = n.text.trim_end_matches([' ', '\t']);
-        if n.flags.line_start && text.starts_with(' ') {
-            // A line starting with spaces breaks, and its first output line is indented by them.
-            let lead = text.len() - text.trim_start_matches(' ').len();
-            let at = self.t.offset + lead;
-            self.t.begin_line_at(at);
-        }
-        let text = text.trim_start_matches(' ');
-        // Spaces between words are kept as typed, as roff does in fill mode.
-        let mut words: Vec<(&str, usize)> = Vec::new();
-        let mut spaces = 0;
-        for w in text.split(' ') {
-            if w.is_empty() {
-                spaces += 1;
-                continue;
-            }
-            words.push((w, spaces + 1));
-            spaces = 0;
-        }
-        let last = words.len().saturating_sub(1);
-        for (i, (w, sp)) in words.iter().enumerate() {
-            if i > 0 {
-                self.t.set_space(*sp);
-            }
-            self.t.hyphenate_next();
-            self.t.word_ext(w, style, i == last && n.flags.eos);
-        }
+        text_node(&mut self.t, n, style);
     }
 
     fn words_of(&mut self, n: &Node, style: Style) {
@@ -881,6 +822,87 @@ fn os_name(tok: &str, args: &[String]) -> String {
         },
         "St" => crate::standards::name(args.first().map(String::as_str).unwrap_or("")).to_string(),
         _ => v,
+    }
+}
+
+/// A text node on the terminal: in fill mode its words, with the spacing typed between them,
+/// breaking before a line that starts with spaces; in no-fill mode the line as typed. Shared by
+/// the mdoc and man renderers.
+pub fn text_node(t: &mut Term, n: &Node, style: Style) {
+    if t.nofill {
+        if n.flags.line_start {
+            t.flush();
+        }
+        // Spaces are kept as they are; an overlong line still wraps.
+        let text = &n.text;
+        let lead = text.len() - text.trim_start_matches(' ').len();
+        if lead > 0 {
+            let at = t.offset + lead;
+            t.begin_line_at(at);
+        }
+        let mut spaces = 0;
+        let mut first = true;
+        for w in text.trim_start_matches(' ').split(' ') {
+            if w.is_empty() {
+                spaces += 1;
+                continue;
+            }
+            if !first {
+                t.set_space(spaces + 1);
+            }
+            t.word(w, style);
+            spaces = 0;
+            first = false;
+        }
+        if first {
+            // An empty line.
+            t.word("", style);
+        }
+        return;
+    }
+    if !n.flags.line_start && (n.text.starts_with(' ') || n.text.ends_with(' ')) && n.text.trim() != "" {
+        // A macro argument with spaces at its edges (`.Dq "Password: "`) keeps them.
+        let lead = n.text.len() - n.text.trim_start_matches(' ').len();
+        let trail = n.text.len() - n.text.trim_end_matches(' ').len();
+        let words: Vec<&str> = n.text.split(' ').filter(|w| !w.is_empty()).collect();
+        let last = words.len().saturating_sub(1);
+        for (i, w) in words.iter().enumerate() {
+            let mut word = w.to_string();
+            if i == 0 {
+                word = format!("{}{word}", mark::NBSP.to_string().repeat(lead));
+            }
+            if i == last {
+                word.push_str(&mark::NBSP.to_string().repeat(trail));
+            }
+            t.word_ext(&word, style, i == last && n.flags.eos);
+        }
+        return;
+    }
+    let text = n.text.trim_end_matches([' ', '\t']);
+    if n.flags.line_start && text.starts_with(' ') {
+        // A line starting with spaces breaks, and its first output line is indented by them.
+        let lead = text.len() - text.trim_start_matches(' ').len();
+        t.leading_space(lead);
+    }
+    let text = text.trim_start_matches(' ');
+    // Spaces between words are kept as typed, as roff does in fill mode.
+    let mut words: Vec<(&str, usize)> = Vec::new();
+    let mut spaces = 0;
+    for w in text.split(' ') {
+        if w.is_empty() {
+            spaces += 1;
+            continue;
+        }
+        words.push((w, spaces + 1));
+        spaces = 0;
+    }
+    let last = words.len().saturating_sub(1);
+    for (i, (w, sp)) in words.iter().enumerate() {
+        if i > 0 {
+            t.set_space(*sp);
+        }
+        t.hyphenate_next();
+        t.word_ext(w, style, i == last && n.flags.eos);
     }
 }
 

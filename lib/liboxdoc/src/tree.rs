@@ -95,8 +95,10 @@ pub struct Meta {
     pub title: String,
     pub section: String,
     pub arch: String,
-    /// The volume (`.Dt`'s third argument or `.TH`'s fifth); empty means the section's default.
+    /// The volume (`.Dt`'s third argument or `.TH`'s fifth); empty means the section's default,
+    /// unless `volume_given` says it was given empty on purpose.
     pub volume: String,
+    pub volume_given: bool,
     pub date: String,
     pub os: String,
     /// Whether the page has an `.Os` line at all: an empty one means this system's name, a

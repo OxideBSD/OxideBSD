@@ -1,8 +1,8 @@
 //! A host-side driver for testing: `oxdoc-host [-T device] [-O option] [-W level] file`.
 
-use oxdoc::diag::Level;
-use oxdoc::term::Styling;
-use oxdoc::{Device, Options};
+use liboxdoc::diag::Level;
+use liboxdoc::term::Styling;
+use liboxdoc::{Device, Options};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,7 +42,7 @@ fn main() {
     }
     for f in files {
         let input = std::fs::read_to_string(&f).expect("read");
-        let (out, diag) = oxdoc::format(&input, &f, &opts);
+        let (out, diag) = liboxdoc::format(&input, &f, &opts);
         print!("{out}");
         eprint!("{}", diag.format(min));
     }

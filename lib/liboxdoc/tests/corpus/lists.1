@@ -1,0 +1,84 @@
+.Dd x
+.Dt X 1
+.Os T
+.Sh A
+.Bl -tag -width Ds
+.It abcd
+w-Ds
+.It abcde
+x
+.El
+.Bl -tag -width 10n -compact
+.It ab
+w-10n
+.It abc
+y
+.El
+.Bl -tag -width "abc"
+.It a
+w-abc
+.El
+.Bl -tag -width Fl
+.It a
+w-Fl
+.El
+.Bl -tag -width indent
+.It indent
+exact
+.It indent7
+x
+.El
+.Bl -tag
+.It a
+nowidth
+.El
+.Bl -bullet
+.It
+bullet
+.El
+.Bl -dash -compact
+.It
+dash
+.El
+.Bl -enum
+.It
+one
+.It
+two
+.El
+.Bl -item -offset indent
+.It
+item
+.El
+.Bl -hang -width 4n
+.It hang
+h
+.El
+.Bl -ohang
+.It oh
+o
+.El
+.Bl -inset
+.It in
+i
+.El
+.Bl -diag
+.It dg
+d
+.El
+.Bl -column "aaaa" "bb"
+.It x Ta y Ta z
+.It "long cell" Ta b
+.El
+.Bd -literal -offset indent
+lit  a
+  b
+.Ed
+.D1 one
+.Dl lit
+.Bd -ragged -offset Ds
+rag
+.Ed
+text
+.Ss Sub
+more

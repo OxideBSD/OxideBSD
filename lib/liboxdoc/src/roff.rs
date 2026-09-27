@@ -755,6 +755,19 @@ impl<'a> Roff<'a> {
                     let arg: String = chars[start..i.min(chars.len())].iter().collect();
                     i += 1;
                     match e {
+                        'l' => {
+                            // A horizontal line: its length, then optionally the character to
+                            // draw it with (an underscore by default).
+                            let digits: String = arg.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                            let rest = &arg[digits.len()..];
+                            let unit_len = rest.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+                            let n = scale_cols(&arg[..digits.len() + unit_len.min(1)]);
+                            let draw = &rest[unit_len.min(1)..];
+                            let ch = if draw.is_empty() { "_".to_string() } else { self.expand_depth(draw, lineno, depth + 1) };
+                            for _ in 0..n.min(200) {
+                                out.push_str(&ch);
+                            }
+                        }
                         'h' => {
                             // Horizontal motion: whole ens become spaces, as mandoc does.
                             let n = self.number(&arg);
@@ -911,6 +924,22 @@ impl<'a> Roff<'a> {
 
 fn is_marker(c: char) -> bool {
     ('\u{E000}'..='\u{E01F}').contains(&c)
+}
+
+/// A roff length in terminal columns: `n`/`m` and no unit are columns, `i` ten, `c` about four,
+/// `p` a seventh.
+fn scale_cols(s: &str) -> usize {
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let v: f64 = digits.parse().unwrap_or(0.0);
+    let cols = match &s[digits.len()..] {
+        "i" => v * 10.0,
+        "c" => v * 10.0 / 2.54,
+        "p" => v / 7.2,
+        "P" => v * 10.0 / 6.0,
+        "u" => v / 24.0,
+        _ => v,
+    };
+    cols.round() as usize
 }
 
 /// The font marker for a `\f` name.

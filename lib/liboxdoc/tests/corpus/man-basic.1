@@ -1,0 +1,47 @@
+.TH FOO 1 "2024-01-02" "foo 1.2" "User Commands"
+.SH NAME
+foo \- do things
+.SH SYNOPSIS
+.B foo
+[\fB\-a\fR]
+.I file
+\&...
+.SH DESCRIPTION
+Some text here that is long enough to wrap around the right margin at least once or twice.
+.PP
+New paragraph.
+.TP
+.B \-a
+Option a.
+.TP 12
+.BI \-f " file"
+Option f with a longer description that wraps around the margin for sure yes.
+.IP \(bu 4
+Bullet item.
+.IP "tag" 
+Indented para.
+.HP
+Hanging para that is long enough to wrap around the right margin at least once.
+.RS
+Indented block.
+.RS 4
+More.
+.RE
+.RE
+Back.
+.SS Subsection
+.BR bold roman bold
+.IR italic roman
+.RB [ bold ]
+.nf
+no  fill
+  line
+.fi
+filled
+again.
+.EX
+example  code
+.EE
+.SH SEE ALSO
+.BR bar (1),
+.MR baz 8 .

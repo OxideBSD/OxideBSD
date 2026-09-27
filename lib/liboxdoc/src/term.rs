@@ -83,6 +83,10 @@ pub struct Term {
     eos: bool,
     /// The exact spacing before the next word, overriding the usual one or two.
     space: Option<usize>,
+    /// The font a `\f` escape selected, overriding the style words are given, and the one before
+    /// it (for `\fP`). It lasts until the next font escape or [`Term::reset_font`].
+    esc_font: Option<Style>,
+    esc_prev: Option<Style>,
     /// Inside a kept group (`.Bk -words`, a SYNOPSIS enclosure): no breaks between words.
     keep: usize,
     keep_started: bool,
@@ -91,6 +95,8 @@ pub struct Term {
     /// The output so far ends with a blank line (or nothing has been output), so vertical space
     /// isn't doubled.
     at_blank: bool,
+    /// The blank line the output ends with was an explicit one (`.sp`, a blank input line).
+    blank_explicit: bool,
     /// Vertical space is suppressed until the next text (right after a section heading).
     pub no_vspace: bool,
 }
@@ -113,10 +119,13 @@ impl Term {
             nospace: false,
             eos: false,
             space: None,
+            esc_font: None,
+            esc_prev: None,
             keep: 0,
             keep_started: false,
             hyph_next: false,
             at_blank: true,
+            blank_explicit: false,
             no_vspace: false,
         }
     }
@@ -136,6 +145,12 @@ impl Term {
     pub fn set_rmargin(&mut self, rmargin: usize) {
         self.layout();
         self.rmargin = rmargin;
+    }
+
+    /// Forgets the font `\f` escapes selected: words get the style they're given again.
+    pub fn reset_font(&mut self) {
+        self.esc_font = None;
+        self.esc_prev = None;
     }
 
     /// Starts a group of words the line may not break inside.
@@ -177,31 +192,28 @@ impl Term {
     /// Adds a word that ends a sentence when `eos` is set.
     pub fn word_ext(&mut self, text: &str, style: Style, eos: bool) {
         let mut cells = Vec::new();
-        let mut cur = style;
-        let mut prev = style;
+        let mut cur = self.esc_font.unwrap_or(style);
         for c in text.chars() {
+            let font = match c {
+                mark::FONT_R | mark::FONT_CW => Some(Style::None),
+                mark::FONT_B => Some(Style::Bold),
+                mark::FONT_I => Some(Style::Under),
+                mark::FONT_BI => Some(Style::BoldUnder),
+                _ => None,
+            };
+            if let Some(f) = font {
+                self.esc_prev = Some(cur);
+                self.esc_font = Some(f);
+                cur = f;
+                continue;
+            }
             match c {
-                mark::FONT_R => {
-                    prev = cur;
-                    cur = Style::None;
+                mark::FONT_P => {
+                    let back = self.esc_prev.unwrap_or(style);
+                    self.esc_prev = Some(cur);
+                    self.esc_font = Some(back);
+                    cur = back;
                 }
-                mark::FONT_B => {
-                    prev = cur;
-                    cur = Style::Bold;
-                }
-                mark::FONT_I => {
-                    prev = cur;
-                    cur = Style::Under;
-                }
-                mark::FONT_BI => {
-                    prev = cur;
-                    cur = Style::BoldUnder;
-                }
-                mark::FONT_CW => {
-                    prev = cur;
-                    cur = Style::None;
-                }
-                mark::FONT_P => std::mem::swap(&mut cur, &mut prev),
                 mark::ZERO | mark::CONT => {}
                 mark::NBSP => cells.push(Cell { ch: ' ', style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: '-', style: cur }),
@@ -318,6 +330,7 @@ impl Term {
         }
         self.out.push('\n');
         self.at_blank = true;
+        self.blank_explicit = false;
     }
 
     /// A blank line even at the start of a section.
@@ -325,6 +338,19 @@ impl Term {
         self.flush();
         self.out.push('\n');
         self.at_blank = true;
+        self.blank_explicit = true;
+    }
+
+    /// The space before a man(7) section heading: like [`Term::vspace`], but not absorbed by an
+    /// explicit blank line before it.
+    pub fn section_vspace(&mut self) {
+        self.flush();
+        if self.no_vspace || (self.at_blank && !self.blank_explicit) {
+            return;
+        }
+        self.out.push('\n');
+        self.at_blank = true;
+        self.blank_explicit = false;
     }
 
     fn layout(&mut self) {
@@ -474,6 +500,7 @@ impl Term {
         self.out.push_str(&s);
         self.out.push('\n');
         self.at_blank = false;
+        self.blank_explicit = false;
         self.no_vspace = false;
     }
 
@@ -515,6 +542,37 @@ impl Term {
         self.out.push_str(&s);
         self.out.push('\n');
         self.at_blank = false;
+        self.blank_explicit = false;
+    }
+
+    /// A man(7) footer: like [`Term::three_part`], but when the parts don't fit, the right one
+    /// goes flush right on a line of its own.
+    pub fn footer_three_part(&mut self, left: &str, center: &str, right: &str) {
+        let (ll, cl, rl) = (left.chars().count(), center.chars().count(), right.chars().count());
+        // Where the center part ends up, centered but after the left part.
+        let cend = ((self.width + 1).saturating_sub(cl) / 2).max(ll + 1) + cl;
+        if cend + 1 <= self.width.saturating_sub(rl) || right.is_empty() {
+            self.three_part(left, center, right);
+            return;
+        }
+        self.three_part(left, center, "");
+        let pad = self.width.saturating_sub(rl);
+        self.out.push_str(&" ".repeat(pad));
+        self.out.push_str(right);
+        self.out.push('\n');
+    }
+
+    /// Indentation for a text line starting with `lead` spaces: on a line nothing has been
+    /// written to yet, from where it starts; otherwise a break, then from the left margin.
+    pub fn leading_space(&mut self, lead: usize) {
+        self.layout();
+        if self.line_open && self.fresh && !self.dirty {
+            let col = visible_len(&self.line) + lead;
+            self.pad_to(col);
+        } else {
+            let at = self.offset + lead;
+            self.begin_line_at(at);
+        }
     }
 
     pub fn raw_blank(&mut self) {

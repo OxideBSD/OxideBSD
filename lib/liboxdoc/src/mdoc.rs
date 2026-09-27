@@ -9,7 +9,7 @@
 
 use crate::diag::{Diagnostics, Level};
 use crate::roff::{Line, mark};
-use crate::tree::{Document, Flags, Kind, Language, Meta, Node};
+use crate::tree::{Document, Kind, Language, Meta, Node};
 
 /// Macros that may be called from another macro's arguments.
 const CALLABLE: &[&str] = &[
@@ -513,16 +513,6 @@ impl Parser<'_> {
         rest.len()
     }
 
-    /// Adds an element with one text child.
-    fn elem(&mut self, tok: &str, words: &[String]) {
-        self.open(Kind::Elem, tok);
-        for w in words {
-            let n = Node::text(w, self.line);
-            self.push(n);
-        }
-        self.close_top();
-    }
-
     /// An in-line macro: its arguments up to the next callable macro, with delimiters split off.
     fn inline_elem(&mut self, name: &str, rest: &[String]) -> usize {
         if name == "Nm" && self.meta.name.is_empty()
@@ -644,13 +634,6 @@ fn prepend(name: &str, args: &[String]) -> Vec<String> {
     v
 }
 
-fn split_first_word(args: &[String]) -> (Vec<String>, Vec<String>) {
-    match args.first() {
-        Some(a) if !is_callable(a) && !is_delim(a) => (vec![a.clone()], args[1..].to_vec()),
-        _ => (Vec::new(), args.to_vec()),
-    }
-}
-
 /// A list's type option (`-tag`, `-bullet`...), `-item` by default.
 pub fn list_type(args: &[String]) -> &str {
     args.iter()
@@ -667,6 +650,3 @@ pub fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 pub fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
-
-#[allow(dead_code)]
-fn unused(_: Flags) {}
