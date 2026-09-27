@@ -104,9 +104,10 @@ xorriso -as mkisofs -R -r -J \
 
 if [ "$IS_TEST" = 1 ]; then
     QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
+    QEMU_DISK_FRESH=1
 else
-    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (an existing file of
-    # oxfs_disk.img's size), leaving the persistent dev disk alone.
+    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (created if missing), leaving
+    # the persistent dev disk alone.
     QEMU_DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/oxfs_disk.img}"
     # Tests keep IDE (tests/ata_smoke.rs drives it directly); `cargo run` gets the fast disk.
     QEMU_DISK_DEFAULT=virtio

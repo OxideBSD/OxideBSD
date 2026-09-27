@@ -808,12 +808,17 @@ layer.
 - DMA goes through physically contiguous bounce buffers (`dma::DmaBuffer`; below 4 GiB for IDE's
   32-bit PRDs). One request in flight at a time. Writes end with `CACHE FLUSH`/`VIRTIO_BLK_T_FLUSH`.
 - Real hardware would need `SET FEATURES` (UDMA mode) before IDE DMA; QEMU doesn't.
-- **One fixed target: secondary channel, master** — `scripts/qemu_runner.sh` attaches the real
-  ATA data disk at the primary channel's master instead (`ide.0`, unit 0), since QEMU's own
-  `-cdrom` convenience default for the Limine boot ISO already claims the secondary master's
-  usual slot (`ide.1`, unit 0) and collides if both target it. Disk image at
-  `target/oxfs_disk.img` (created only if missing) for `cargo run`, `target/oxfs_test_disk.img`
-  (always freshly zeroed) for `cargo test`.
+- **QEMU topology** (`scripts/qemu_common.sh`): the IDE data disk is the secondary master
+  (`ide.1`, unit 0); the boot ISO is on virtio-scsi (`OXIDEBSD_QEMU_CDROM=ide` puts it back on
+  `ide.0`) — firmware reads an IDE CD by PIO, which made Limine's load of the ~257 MiB kernel take
+  ~34 s; virtio-scsi takes ~2 s, BIOS and UEFI alike. Images: `target/oxfs_disk.img` (`cargo run`)
+  is created if missing and grown in place, never rewritten; `target/oxfs_test_disk.img` is fresh
+  (sparse) every test boot. `qemu_common.sh` makes both, sized by `build.rs`'s
+  `target/oxfs_disk.bytes`.
+- **Build-script rerun traps, found costing ~2 min per no-op build**: never `rerun-if-changed` a
+  path that may not exist (cargo treats missing as changed — watch the containing directory) or a
+  file something else writes every run (the old `oxfs_disk.img` watch). `cargo build -v` names
+  the dirty path.
 - **On-disk layout**: physical block `0` is the superblock (magic `b"OXFS"` + version + layout);
   packed inode table follows; then the block-used bitmap; real data after that. **Never a raw
   transmute/memcpy of `Inode`** — `pack_inode`/`unpack_inode` serialize by hand.

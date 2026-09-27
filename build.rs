@@ -4290,22 +4290,11 @@ fn build_crate_at_with_rustflags(relative_dir: &str, env_var: &str, extra_rustfl
         .unwrap_or_else(|| panic!("build_crate_at: {relative_dir:?} has no final path component"));
     let target_dir = Path::new(manifest_dir).join("target/userland");
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        userland_dir.join("src").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        userland_dir.join("Cargo.toml").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        userland_dir.join("linker.ld").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        userland_dir.join("build.rs").display()
-    );
+    // The whole crate directory (cargo scans it recursively): `src/`, `Cargo.toml`, and a
+    // `linker.ld`/`build.rs` if it has them. Naming those two individually made every build rerun
+    // this script and recompile the kernel: PIE crates have no `linker.ld`, several regress crates
+    // no `build.rs`, and cargo treats a missing watched path as changed.
+    println!("cargo:rerun-if-changed={}", userland_dir.display());
 
     let cargo = cargo_bin();
     let status = Command::new(&cargo)
@@ -4954,77 +4943,24 @@ const OXFS_METADATA_BLOCKS: u64 =
     1 + (OXFS_MAX_INODES * OXFS_INODE_STRIDE).div_ceil(OXFS_BLOCK_SIZE) + OXFS_BITMAP_BLOCKS;
 const OXFS_DISK_IMAGE_BYTES: u64 = (OXFS_METADATA_BLOCKS + OXFS_NUM_BLOCKS) * OXFS_BLOCK_SIZE;
 
-/// Writes the two raw disk images `Cargo.toml`'s `run-args`/`test-args` attach to QEMU as
-/// `sys/drivers/ata.rs`'s fixed data-disk target (see that module's own doc comment for why secondary
-/// channel/master specifically).
+/// Records the size the data disk images must have (`target/oxfs_disk.bytes`) for
+/// `scripts/qemu_common.sh`, which creates them: `oxfs_disk.img` (the persistent `cargo run` disk)
+/// if it's missing, grown in place if an older, smaller layout left it too small, and never
+/// rewritten; `oxfs_test_disk.img` fresh (sparse, zeroed) for every test boot.
 ///
-/// `oxfs_disk.img` is the real, persistent dev disk `cargo run` uses -- created **only if it
-/// doesn't already exist**. That's load-bearing, not an optimization: this is what makes it
-/// survive across `cargo run` invocations at all, the entire point of real disk persistence. A
-/// rebuild must never re-zero it, or there would be nothing left to prove "install OxideBSD"
-/// actually works (see the implementation plan's own manual verification steps).
-///
-/// `oxfs_test_disk.img` is the opposite: always freshly regenerated (zeroed) on every build, so
-/// `tests/ata_smoke.rs`/`tests/oxfs_persistence_syscall_smoke.rs` always start from the same
-/// known-empty state, independent of whatever a previous test run left behind.
+/// This script used to write the images itself and watch `oxfs_disk.img` so a deleted one would
+/// be recreated -- but QEMU writes that image on every `cargo run`, so the next build always
+/// reran this script and recompiled the whole kernel crate (~2 min for a no-op build).
 fn write_data_disk_images() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let target_dir = Path::new(manifest_dir).join("target");
     std::fs::create_dir_all(&target_dir).expect("failed to create target/");
-    let zeroed = vec![0u8; OXFS_DISK_IMAGE_BYTES as usize];
-
-    let dev_disk_path = target_dir.join("oxfs_disk.img");
-    // Load-bearing, not a nicety: this file lives under `target/`, never touched by any other
-    // `rerun-if-changed` path this build script declares, so a plain `cargo run` after someone
-    // deletes it (e.g. to force a reformat/reseed) would otherwise skip this whole function --
-    // cargo only reruns a build script when a declared watched path actually changed, and an
-    // untracked deletion doesn't qualify. Cargo's own documented behavior for a `rerun-if-changed`
-    // path that doesn't exist is "always rerun the build script" -- exactly the case that needs
-    // covering here. Emitted unconditionally (both branches below), not just in the `Err` arm, so
-    // this stays watched on every future run too, including the ordinary case where the file
-    // already exists at the right size and nothing else needs to happen to it.
-    println!("cargo:rerun-if-changed={}", dev_disk_path.display());
-    match std::fs::metadata(&dev_disk_path) {
-        Err(_) => {
-            std::fs::write(&dev_disk_path, &zeroed)
-                .unwrap_or_else(|e| panic!("failed to write {}: {e}", dev_disk_path.display()));
-            println!(
-                "cargo:warning=oxfs: created a fresh persistent dev disk at {}",
-                dev_disk_path.display()
-            );
-        }
-        Ok(meta) if meta.len() < OXFS_DISK_IMAGE_BYTES => {
-            // An existing disk written under an older, smaller layout (e.g. a prior
-            // `OXFS_METADATA_BLOCKS`/`NUM_BLOCKS`/`MAX_INODES`) -- grow it in place by appending
-            // zeros rather than truncating/rewriting, so real existing content stays intact for
-            // `mount_from_disk`'s own superblock-layout check (see that function's doc comment in
-            // `sys/modules/oxfs/src/lib.rs`) to accept or reject on its own terms. A superblock that
-            // no longer matches this build's layout still cleanly falls back to reformatting; a
-            // file left too small would instead fail with a real, physical out-of-bounds read
-            // before that check ever gets the chance to run.
-            use std::io::{Seek, SeekFrom, Write};
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&dev_disk_path)
-                .unwrap_or_else(|e| panic!("failed to open {}: {e}", dev_disk_path.display()));
-            let old_len = meta.len();
-            f.seek(SeekFrom::End(0)).expect("failed to seek dev disk");
-            let padding = vec![0u8; (OXFS_DISK_IMAGE_BYTES - old_len) as usize];
-            f.write_all(&padding)
-                .unwrap_or_else(|e| panic!("failed to grow {}: {e}", dev_disk_path.display()));
-            println!(
-                "cargo:warning=oxfs: grew existing persistent dev disk at {} from {} to {} bytes",
-                dev_disk_path.display(),
-                old_len,
-                OXFS_DISK_IMAGE_BYTES
-            );
-        }
-        Ok(_) => {}
+    let size_path = target_dir.join("oxfs_disk.bytes");
+    let size = format!("{OXFS_DISK_IMAGE_BYTES}\n");
+    if std::fs::read_to_string(&size_path).ok().as_deref() != Some(size.as_str()) {
+        std::fs::write(&size_path, size)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", size_path.display()));
     }
-
-    let test_disk_path = target_dir.join("oxfs_test_disk.img");
-    std::fs::write(&test_disk_path, &zeroed)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", test_disk_path.display()));
 }
 
 /// Finds the file matching `<prefix>*<suffix>` most recently modified in `dir` -- filenames under

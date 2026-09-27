@@ -13,7 +13,8 @@
 # caller, along with `qemu_runner.sh`'s own interactive `cargo run` vs `cargo test` split
 # (`run_multiboot2_smoke.sh` is always test-shaped, so it never needs that split at all).
 #
-# Caller contract: set $QEMU_DISK_IMAGE, $QEMU_ISO_PATH, and $QEMU_HEADLESS_TEST (1 to add
+# Caller contract: set $QEMU_DISK_IMAGE (and $QEMU_DISK_FRESH=1 for a disk zeroed every boot),
+# $QEMU_ISO_PATH, and $QEMU_HEADLESS_TEST (1 to add
 # `-device isa-debug-exit` + `-display none` up front, 0/unset for an interactive display) *before*
 # sourcing this file. After sourcing, "$@" holds the complete, ready-to-exec QEMU argv; a caller
 # either `exec`s it directly (interactive mode) or passes it to
@@ -25,6 +26,20 @@
 
 : "${QEMU_DISK_IMAGE:?qemu_common.sh: QEMU_DISK_IMAGE must be set before sourcing}"
 : "${QEMU_ISO_PATH:?qemu_common.sh: QEMU_ISO_PATH must be set before sourcing}"
+
+# The data disk image, sized by build.rs (target/oxfs_disk.bytes). $QEMU_DISK_FRESH=1 (tests)
+# starts it zeroed every boot; otherwise it's created if missing and grown in place if a newer
+# oxfs layout needs more room, keeping what's on it. Sparse, so creating one is instant.
+disk_bytes=$(cat target/oxfs_disk.bytes 2>/dev/null) || {
+    echo "qemu_common.sh: target/oxfs_disk.bytes is missing -- run cargo build first" >&2
+    exit 1
+}
+if [ "${QEMU_DISK_FRESH:-0}" = 1 ]; then
+    rm -f "$QEMU_DISK_IMAGE"
+fi
+if [ ! -e "$QEMU_DISK_IMAGE" ] || [ "$(stat -c %s "$QEMU_DISK_IMAGE")" -lt "$disk_bytes" ]; then
+    truncate -s "$disk_bytes" "$QEMU_DISK_IMAGE"
+fi
 
 set -- -accel kvm -accel tcg -serial stdio -m 8192 -nic user,model=rtl8139
 
@@ -63,11 +78,20 @@ case "${OXIDEBSD_QEMU_DISK:-${QEMU_DISK_DEFAULT:-ide}}" in
         exit 1
         ;;
 esac
+case "${OXIDEBSD_QEMU_CDROM:-virtio-scsi}" in
+    virtio-scsi) boot_cd="-device virtio-scsi-pci,id=scsi0 -device scsi-cd,drive=isocd,bus=scsi0.0" ;;
+    ide) boot_cd="-device ide-cd,drive=isocd,bus=ide.0,unit=0" ;;
+    *)
+        echo "qemu_common.sh: OXIDEBSD_QEMU_CDROM must be ide or virtio-scsi" >&2
+        exit 1
+        ;;
+esac
+# shellcheck disable=SC2086 # $boot_cd is deliberately several words
 set -- "$@" \
     -drive "if=none,id=oxfsdisk,format=raw,file=$QEMU_DISK_IMAGE" \
     -device "$data_disk" \
     -drive "if=none,id=isocd,media=cdrom,file=$QEMU_ISO_PATH" \
-    -device ide-cd,drive=isocd,bus=ide.0,unit=0
+    $boot_cd
 
 qemu_common_find_ovmf() {
     if [ -n "${OXIDEBSD_OVMF_PATH:-}" ]; then

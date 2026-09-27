@@ -100,6 +100,7 @@ case "$LOADER" in
 esac
 
 QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
+QEMU_DISK_FRESH=1
 QEMU_ISO_PATH="$ISO_PATH"
 QEMU_HEADLESS_TEST=1
 # shellcheck source=./qemu_common.sh
