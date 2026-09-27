@@ -29,7 +29,8 @@ pub mod mark {
     /// Brackets the character a `\l` of zero or negative length draws: it runs from where the
     /// output line starts to the right margin, which only the formatter knows.
     pub const RULE: char = '\u{E006}';
-    /// `\%` at the start of a word: the word doesn't break at its hyphens.
+    /// `\%`: in troff, the word doesn't break at its hyphens; mandoc (and so this formatter)
+    /// ignores it.
     pub const NOHYPH: char = '\u{E007}';
     /// `\:`: the line may break here, with no hyphen.
     pub const BREAK: char = '\u{E008}';

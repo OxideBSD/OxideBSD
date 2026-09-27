@@ -250,7 +250,6 @@ impl Term {
         // The word's parts, split at `\:` break points.
         let mut parts: Vec<Vec<Cell>> = Vec::new();
         let mut cells = Vec::new();
-        let mut nohyph = false;
         let mut cur = self.esc_font.unwrap_or(style);
         // The drawing character of a `\l` rule, while it is being read.
         let mut rule: Option<Vec<Cell>> = None;
@@ -278,7 +277,8 @@ impl Term {
             }
             match c {
                 mark::ZERO | mark::CONT => {}
-                mark::NOHYPH => nohyph = true,
+                // mandoc ignores `\%`: a word still breaks at its hyphens.
+                mark::NOHYPH => {}
                 mark::BREAK => parts.push(std::mem::take(&mut cells)),
                 mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
@@ -308,7 +308,7 @@ impl Term {
         if self.keep > 0 {
             self.keep_started = true;
         }
-        let hyph = std::mem::take(&mut self.hyph_next) && !nohyph;
+        let hyph = std::mem::take(&mut self.hyph_next);
         let phantom = parts.is_empty() && cells.is_empty() && !text.is_empty() && !(self.nofill && self.nofill_zero_lines);
         parts.push(cells);
         for (i, cells) in parts.into_iter().enumerate() {
