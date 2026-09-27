@@ -92,6 +92,9 @@ pub struct Term {
     eos: bool,
     /// The exact spacing before the next word, overriding the usual one or two.
     space: Option<usize>,
+    /// Spaces added before the next word whatever else decides its spacing (spaces at the edge
+    /// of a macro argument); dropped at a line break like any other.
+    extra_space: usize,
     /// The font a `\f` escape selected, overriding the style words are given, and the one before
     /// it (for `\fP`). It lasts until the next font escape or [`Term::reset_font`].
     esc_font: Option<Style>,
@@ -137,6 +140,7 @@ impl Term {
             nospace: false,
             eos: false,
             space: None,
+            extra_space: 0,
             esc_font: None,
             esc_prev: None,
             keep: 0,
@@ -220,6 +224,11 @@ impl Term {
         self.space = Some(n);
     }
 
+    /// Adds `n` spaces before the next word, on top of its own spacing.
+    pub fn add_space(&mut self, n: usize) {
+        self.extra_space += n;
+    }
+
     /// Suppresses the space before the next word.
     pub fn nospace(&mut self) {
         self.nospace = true;
@@ -275,15 +284,16 @@ impl Term {
                 }
             }
         }
-        let space = if self.nospace {
-            0
-        } else if let Some(n) = self.space {
-            n
-        } else if self.eos {
-            2
-        } else {
-            1
-        };
+        let space = std::mem::take(&mut self.extra_space)
+            + if self.nospace {
+                0
+            } else if let Some(n) = self.space {
+                n
+            } else if self.eos {
+                2
+            } else {
+                1
+            };
         self.nospace = false;
         self.space = None;
         self.eos = eos;

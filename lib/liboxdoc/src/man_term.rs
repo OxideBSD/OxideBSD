@@ -139,8 +139,8 @@ impl R<'_> {
     }
 
     /// Words of one macro argument, which may contain spaces.
-    /// A macro argument's words. Its spaces are all kept, as mandoc does: those at its edges
-    /// don't break, and a run of them between words is that many spaces.
+    /// A macro argument's words. Its spaces are all kept, as mandoc does, and the line may
+    /// break at any of them; at the start of a line, leading ones are printed.
     fn arg_words(&mut self, text: &str, style: Style, eos: bool) {
         let body = text.trim_matches(' ');
         if body.is_empty() {
@@ -160,14 +160,18 @@ impl R<'_> {
             spaces = 0;
         }
         let last = words.len() - 1;
-        words[0].0.insert_str(0, &nbsp(lead));
-        words[last].0.push_str(&nbsp(trail));
+        if self.t.at_line_start() {
+            words[0].0.insert_str(0, &nbsp(lead));
+        } else {
+            self.t.add_space(lead);
+        }
         for (i, (w, sp)) in words.iter().enumerate() {
             if i > 0 {
                 self.t.set_space(*sp);
             }
             self.t.word_ext(w, style, eos && i == last);
         }
+        self.t.add_space(trail);
     }
 
     fn elem(&mut self, n: &Node, style: Style) {
