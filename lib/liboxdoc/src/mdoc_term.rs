@@ -155,12 +155,20 @@ impl R<'_> {
         if n.flags.nospace {
             self.t.nospace();
         }
+        if n.kind == Kind::Text {
+            return self.text(n, style);
+        }
+        // The arguments of these macros break at hyphens like text; nested macros' don't.
+        let saved = self.t.hyph_args;
+        if matches!(n.kind, Kind::Elem | Kind::Block) {
+            self.t.hyph_args = matches!(n.tok.as_str(), "Nd" | "D1" | "Sh" | "Ss");
+        }
         match n.kind {
-            Kind::Text => self.text(n, style),
             Kind::Elem => self.elem(n, style),
             Kind::Block => self.block(n, style),
             _ => self.children(n, style),
         }
+        self.t.hyph_args = saved;
     }
 
     fn text(&mut self, n: &Node, style: Style) {
@@ -516,7 +524,7 @@ impl R<'_> {
             self.t.vspace();
         }
         let quoted_title = !field("%B").is_empty() || !field("%J").is_empty();
-        let mut parts: Vec<(Vec<String>, Style, bool)> = Vec::new();
+        let mut parts: Vec<(Vec<String>, Style, bool, bool)> = Vec::new();
         let authors = field("%A");
         if !authors.is_empty() {
             let mut text = Vec::new();
@@ -529,7 +537,7 @@ impl R<'_> {
                 }
                 text.push(format!(" {a}"));
             }
-            parts.push((vec![text.concat().trim_start().to_string()], style, false));
+            parts.push((vec![text.concat().trim_start().to_string()], style, false, false));
         }
         for tok in ["%T", "%B", "%I", "%J", "%R", "%N", "%V", "%U", "%P", "%Q", "%C", "%D", "%O"] {
             for v in field(tok) {
@@ -538,11 +546,12 @@ impl R<'_> {
                     "%T" | "%B" | "%I" | "%J" => (Style::Under, false),
                     _ => (style, false),
                 };
-                parts.push((vec![v], st, quote));
+                // Titles, numbers and notes break at hyphens like text.
+                parts.push((vec![v], st, quote, matches!(tok, "%T" | "%B" | "%R" | "%N" | "%O")));
             }
         }
         let count = parts.len();
-        for (i, (texts, st, quote)) in parts.into_iter().enumerate() {
+        for (i, (texts, st, quote, hyph)) in parts.into_iter().enumerate() {
             let text = texts.concat();
             let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
             let last_part = i + 1 == count;
@@ -555,6 +564,9 @@ impl R<'_> {
                     word.push('\u{201D}');
                 }
                 // Punctuation after a styled word isn't styled.
+                if hyph {
+                    self.t.hyphenate_next();
+                }
                 self.t.word(&word, st);
                 if k + 1 == words.len() {
                     self.t.nospace();
@@ -901,7 +913,11 @@ pub fn text_node(t: &mut Term, n: &Node, style: Style) {
         if i > 0 {
             t.set_space(*sp);
         }
-        t.hyphenate_next();
+        // Only a text line's hyphens are break points, not a macro argument's (with a few
+        // exceptions, see `hyph_args`).
+        if n.flags.line_start || t.hyph_args {
+            t.hyphenate_next();
+        }
         t.word_ext(w, style, i == last && n.flags.eos);
     }
 }

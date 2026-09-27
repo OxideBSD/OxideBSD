@@ -40,6 +40,9 @@ pub enum Styling {
     Sgr,
 }
 
+/// A `-` that is not a break point (`\-`, `\(hy`), printed as `-`.
+const HARD_HYPHEN: char = '\u{E0FE}';
+
 #[derive(Clone, Copy, Debug)]
 struct Cell {
     ch: char,
@@ -103,6 +106,8 @@ pub struct Term {
     blank_header: bool,
     /// Vertical space is suppressed until the next text (right after a section heading).
     pub no_vspace: bool,
+    /// The words of the macro being rendered break at hyphens, as a text line's do.
+    pub hyph_args: bool,
     /// Lines output so far, so a renderer can tell whether anything came after a point.
     pub lines_out: usize,
 }
@@ -135,6 +140,7 @@ impl Term {
             blank_explicit: false,
             blank_header: false,
             no_vspace: false,
+            hyph_args: false,
             lines_out: 0,
         }
     }
@@ -233,7 +239,7 @@ impl Term {
             match c {
                 mark::ZERO | mark::CONT => {}
                 mark::NBSP => cells.push(Cell { ch: ' ', style: Style::None }),
-                mark::MINUS => cells.push(Cell { ch: '-', style: cur }),
+                mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
                 '\t' => cells.push(Cell { ch: '\t', style: Style::None }),
                 c => {
@@ -273,7 +279,7 @@ impl Term {
                 return;
             }
             for f in fallback.chars() {
-                cells.push(Cell { ch: f, style });
+                cells.push(Cell { ch: if fallback == "-" { HARD_HYPHEN } else { f }, style });
             }
             return;
         }
@@ -486,8 +492,11 @@ impl Term {
     }
 
     fn emit_line(&mut self) {
-        let line = std::mem::take(&mut self.line);
+        let mut line = std::mem::take(&mut self.line);
         self.line_open = false;
+        for c in line.iter_mut().filter(|c| c.ch == HARD_HYPHEN) {
+            c.ch = '-';
+        }
         // Trailing spaces are dropped.
         let end = line.iter().rposition(|c| c.ch != ' ').map(|i| i + 1).unwrap_or(0);
         let mut s = String::new();
@@ -631,8 +640,10 @@ impl Term {
 fn hyphen_break(cells: &[Cell], room: usize) -> Option<usize> {
     let mut best = None;
     for k in 1..cells.len().saturating_sub(1) {
-        let plain = cells[k - 1].style == Style::None && cells[k].style == Style::None && cells[k + 1].style == Style::None;
-        if plain && cells[k].ch == '-' && cells[k - 1].ch.is_alphabetic() && cells[k + 1].ch.is_alphabetic() && visible_len(&cells[..=k]) <= room {
+        // The hyphen's neighbours must be letters in the input: a font change next to it (a
+        // change of style here) doesn't count.
+        let same = cells[k - 1].style == cells[k].style && cells[k].style == cells[k + 1].style;
+        if same && cells[k].ch == '-' && cells[k - 1].ch.is_alphabetic() && cells[k + 1].ch.is_alphabetic() && visible_len(&cells[..=k]) <= room {
             best = Some(k + 1);
         }
     }
