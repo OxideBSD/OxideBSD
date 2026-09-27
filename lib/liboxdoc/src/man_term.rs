@@ -204,6 +204,11 @@ impl R<'_> {
                 _ => (Style::None, Style::None),
             }
         };
+        // Anything but a break in a paragraph makes it non-empty: its space then stays, rather
+        // than being absorbed by the next paragraph's.
+        if !matches!(n.tok.as_str(), "PP" | "br" | "sp") {
+            self.t.keep_blank();
+        }
         match n.tok.as_str() {
             "PP" => {
                 self.t.reset_font();

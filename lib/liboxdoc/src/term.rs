@@ -740,7 +740,7 @@ impl Term {
 
     /// Makes a blank line just output one that the next paragraph space doesn't absorb.
     pub fn keep_blank(&mut self) {
-        if self.at_blank {
+        if self.at_blank && !self.blank_header {
             self.blank_explicit = true;
         }
     }
