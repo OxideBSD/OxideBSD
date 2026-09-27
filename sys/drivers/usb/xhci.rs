@@ -27,7 +27,7 @@
 //! the same way `memory::BootInfoFrameAllocator`'s own free-list already does: a plain
 //! `phys_mem_offset + physical_address` pointer.
 //!
-//! **The controller's own MMIO BAR is a real, separate case, explicitly mapped by `map_bar_pages`
+//! **The controller's own MMIO BAR is a real, separate case, explicitly mapped by `pci::map_mmio`
 //! -- found live, not assumed.** An early version of this driver trusted the same HHDM window for
 //! the BAR too, reasoning it would sit "within the first few GiB" like `console::framebuffer`'s
 //! own doc comment establishes for Limine's linear framebuffer. **That's wrong for a 64-bit BAR**:
@@ -47,10 +47,7 @@
 //! primitive `module::map_region` already uses for module code pages -- this is genuinely the
 //! second real use of that primitive in this codebase, not a new pattern.
 
-use x86_64::structures::paging::mapper::MapToError;
-use x86_64::structures::paging::{
-    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
-};
+use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::cpu::tsc;
@@ -108,37 +105,6 @@ pub(crate) fn alloc_zeroed_page(
     let virt = phys_mem_offset + phys.as_u64();
     unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0u8, 4096) };
     Some((virt, phys))
-}
-
-/// Maps `page_count` pages of real, existing MMIO, `virt_base`/`phys_base` (both already page-
-/// aligned) onward -- the explicit BAR-mapping primitive `Xhci::init` needs; see this module's own
-/// doc comment for why the HHDM alone can't be trusted for this. `NO_CACHE` since this is genuine
-/// device-register space, not RAM. Tolerates a page that's already mapped (harmless -- this
-/// function is called twice during `init`, with the second call's range overlapping the first
-/// call's single page); any other mapping failure is logged and left unmapped, so a subsequent
-/// real access to it page-faults visibly rather than silently reading garbage.
-fn map_bar_pages(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    virt_base: VirtAddr,
-    phys_base: PhysAddr,
-    page_count: u64,
-) {
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
-    for i in 0..page_count {
-        let page = Page::<Size4KiB>::containing_address(virt_base + i * 4096);
-        let frame = PhysFrame::<Size4KiB>::containing_address(phys_base + i * 4096);
-        // SAFETY: `frame` is the controller's own real MMIO BAR range (never RAM this kernel
-        // hands out for anything else), and `page` is that same range's own dedicated HHDM-offset
-        // virtual address -- mapping it there can't alias any other live mapping.
-        match unsafe { mapper.map_to(page, frame, flags, frame_allocator) } {
-            Ok(flush) => flush.ignore(), // never-before-mapped MMIO page -- no stale TLB entry.
-            Err(MapToError::PageAlreadyMapped(_)) => {}
-            Err(e) => {
-                serial_println!("[usb] failed to map MMIO page {}: {:?}", i, e);
-            }
-        }
-    }
 }
 
 /// One raw 16-byte TRB (Transfer Request Block), the one data unit every xHCI ring (command,
@@ -362,7 +328,7 @@ impl Xhci {
         // Phase 1: map just enough to safely read the Capability registers themselves (always
         // under 32 bytes) -- see this module's own doc comment for why the HHDM can't be trusted
         // here at all, real BAR placement included.
-        map_bar_pages(mapper, frame_allocator, cap_base, bar0_phys, 1);
+        crate::drivers::pci::map_mmio(mapper, frame_allocator, phys_mem_offset, bar0_phys, 1);
 
         let caplength = unsafe { core::ptr::read_volatile(cap_base.as_ptr::<u8>()) };
         let hcsparams1 = read32(cap_base + 0x04);
@@ -398,7 +364,7 @@ impl Xhci {
             .max(rt_extent)
             .div_ceil(4096)
             .max(1);
-        map_bar_pages(mapper, frame_allocator, cap_base, bar0_phys, needed_pages);
+        crate::drivers::pci::map_mmio(mapper, frame_allocator, phys_mem_offset, bar0_phys, needed_pages);
 
         serial_println!(
             "[usb] xHCI controller found at {:02x}:{:02x}.{} (BAR0 {:#x}, {} slots, {} ports)",

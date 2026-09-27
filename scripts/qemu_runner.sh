@@ -108,6 +108,8 @@ else
     # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (an existing file of
     # oxfs_disk.img's size), leaving the persistent dev disk alone.
     QEMU_DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/oxfs_disk.img}"
+    # Tests keep IDE (tests/ata_smoke.rs drives it directly); `cargo run` gets the fast disk.
+    QEMU_DISK_DEFAULT=virtio
 fi
 QEMU_ISO_PATH="$ISO_PATH"
 QEMU_HEADLESS_TEST="$IS_TEST"

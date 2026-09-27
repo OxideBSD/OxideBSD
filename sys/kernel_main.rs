@@ -146,19 +146,15 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
-    // Probes for a real ATA disk (see src/ata.rs's own doc comment) before oxfs loads, below --
-    // oxfs's module_init needs to know whether a data disk is attached to decide between its
-    // mount-existing-disk and format-fresh-disk/pure-in-memory paths. Never fatal: absence just
-    // means oxfs falls back to its original 100%-in-memory behavior for this boot.
+    // Finds the data disk (`drivers::disk`: virtio-blk, else the IDE disk by DMA or PIO) before
+    // oxfs loads, below -- its module_init mounts it, formats it, or, with none, runs in memory.
     //
-    // Skipped entirely when booted with `no-ata` on the Limine command line -- see
-    // `boot::ata_disabled`'s own doc comment for why this exists (a real safety gate for a first
-    // real-hardware boot attempt, not something this project's own QEMU workflow needs). Skipping
-    // the probe forces oxfs into its always-safe in-memory fallback below.
+    // Skipped entirely with `no-ata`/`no-disk` on the kernel command line: a safety gate for
+    // real hardware, where oxfs would format whatever disk it found (`boot::ata_disabled`).
     if crate::boot::ata_disabled() {
-        serial_println!("[boot] no-ata on kernel command line: skipping ATA disk probe");
+        serial_println!("[boot] no-ata on kernel command line: skipping the data disk probe");
     } else {
-        crate::drivers::ata::init();
+        crate::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
     }
 
     // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
@@ -184,6 +180,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
+    let (transfers, irqs) = crate::drivers::disk::stats();
+    serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
 
     // Registers SYS_SOCKET/SYS_BIND/SYS_SENDTO/SYS_RECVFROM/SYS_SETSOCKOPT -- UDP sockets (see
     // CLAUDE.md's networking plan; sys/net/udp.rs holds the real logic, this module is just the

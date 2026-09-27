@@ -789,15 +789,25 @@ clears its `AT_BASE_OVERRIDE` around the call. **Real per-fd access-mode enforce
 (`OpenFile::Write::readonly`) on write/`ftruncate`/`fallocate` — `open(path, O_CREAT)` with no
 explicit `O_WRONLY`/`O_RDWR` now genuinely produces a read-only fd rather than silently writable.
 
-## Real disk persistence (`sys/drivers/ata.rs`, `sys/modules/oxfs`)
+## Real disk persistence (`sys/drivers/{disk,ata,virtio,virtio_blk,dma}.rs`, `sys/modules/oxfs`)
 
 Scoped deliberately: real disk I/O and oxfs mount/format persistence, not a general VFS/mount-table
 layer.
 
-- **`sys/drivers/ata.rs`**: hand-rolled ATA PIO driver, kernel-resident — classic legacy IDE,
-  LBA28, **polling only, no IRQ**, fixed legacy ports. Every BSY/DRQ wait is bounded by a real
-  `crate::tsc`-based deadline (never `hlt()`, never unbounded) — reachable from inside a real
-  syscall handler with interrupts masked.
+- **`drivers::disk`** owns oxfs's `oxidebsd_block_*` exports and picks one data disk at boot:
+  virtio-blk (modern virtio 1.x only), else the IDE secondary master — by bus-master DMA when the
+  PIIX controller allows it, else PIO. `cargo run` attaches virtio-blk (`disable-legacy=on`);
+  tests attach IDE; `OXIDEBSD_QEMU_DISK=ide|virtio` overrides either, `OXIDEBSD_DISK_IMAGE` swaps
+  the image. `no-ata`/`no-disk` skips the whole probe.
+- **Why**: IDE PIO traps to QEMU per 16-bit word — a fresh format (66254 blocks, ~259 MiB) took
+  ~1035 s, IP-sampled inside `outsw` nearly every time. DMA or virtio: ~1.5 s.
+- **Completion is interrupt-driven with a polling fallback** (`dma::wait_until`): the IRQ handler
+  (IRQ 15 for IDE, the PCI line for virtio — shared lines are fine, the IRQ registry holds several
+  handlers per line) only acks and wakes; the waiter re-checks device state, `hlt`s when IF=1
+  (boot, `module_init`) and spins when masked (syscalls). All waits are `tsc`-bounded.
+- DMA goes through physically contiguous bounce buffers (`dma::DmaBuffer`; below 4 GiB for IDE's
+  32-bit PRDs). One request in flight at a time. Writes end with `CACHE FLUSH`/`VIRTIO_BLK_T_FLUSH`.
+- Real hardware would need `SET FEATURES` (UDMA mode) before IDE DMA; QEMU doesn't.
 - **One fixed target: secondary channel, master** — `scripts/qemu_runner.sh` attaches the real
   ATA data disk at the primary channel's master instead (`ide.0`, unit 0), since QEMU's own
   `-cdrom` convenience default for the Limine boot ISO already claims the secondary master's
@@ -829,10 +839,8 @@ layer.
   independent of transfer size — `oxidebsd_block_{read,write}_batch` (`sys/drivers/ata.rs`) cut
   this by issuing one real command (and, for writes, one `CACHE FLUSH`) per *contiguous* run of
   oxfs blocks instead of one per individual 4 KiB block; `mount_from_disk`/`flush_all_to_disk` use
-  these instead of the single-block API for their own data-block loops. A full fresh-format-and-
-  flush of this kernel's real seed content is still genuinely slow in absolute terms (tens of
-  thousands of real blocks) — confirmed via direct baseline comparison to be pre-existing behavior,
-  not a regression from either this change or oxfs's own kernel-allocated-pool refactor above.
+  these instead of the single-block API for their own data-block loops. That batching barely
+  mattered in the end: the real cost was PIO's per-word trap, gone with DMA/virtio (see above).
 - **The same batching extended to live per-syscall writes, not just the bulk mount/format pass**
   (`write_inode_at`'s own `persist_data_run_if_ready`, `sys/modules/oxfs`) — found live chasing
   real disk-I/O slowness while self-hosting bmake (see the bmake section above): every real
@@ -1774,7 +1782,7 @@ musl's own real `ld.so` running as the interpreter — not this kernel doing the
   `#!` script or an `ET_EXEC`/`ET_DYN` ELF (static binaries, PIEs, `libc.so`) — else `0644` (data,
   headers, `.a`, relocatable `.o`); `/etc/shadow` stays `0600`. It used to be `0755` for everything.
 - **Gotcha**: a persistent `target/oxfs_disk.img` keeps its old seeded binaries — the native
-  utilities only appear after a fresh format (delete the image; formatting takes ~10 min).
+  utilities only appear after a fresh format (delete the image; formatting takes a few seconds with DMA/virtio).
 - Verified by `tests/pie_aslr_smoke.rs` (real per-exec randomization, fork inherits),
   `tests/native_bin_syscall_smoke.rs` (all 12, flags + error paths), and `sh /test_busybox.sh`
   through real hush (104/104), driven headlessly via `OXIDEBSD_QEMU_MONITOR` `sendkey`.

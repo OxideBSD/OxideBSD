@@ -33,14 +33,19 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-type IrqHandlerSlot = Mutex<Option<fn()>>;
+/// Handlers sharing one line: PCI INTx lines are shared (a virtio disk and the rtl8139 routinely
+/// land on the same one), so every handler on a line runs for each interrupt and must check its
+/// own device's status before acting.
+const HANDLERS_PER_IRQ: usize = 4;
+
+type IrqHandlerSlot = Mutex<[Option<fn()>; HANDLERS_PER_IRQ]>;
 
 /// One slot per possible IRQ line (0-15); only 2-15 are ever populated -- 0/1 are permanently
 /// owned by the timer/keyboard's own dedicated handlers below, never routed through this table.
 /// Lets a driver whose IRQ line isn't known until runtime (e.g. read from a PCI device's
 /// interrupt-line register during `net::rtl8139::probe_and_init`) claim a vector without the
 /// static `IDT` needing to change shape.
-static IRQ_HANDLERS: [IrqHandlerSlot; 16] = [const { Mutex::new(None) }; 16];
+static IRQ_HANDLERS: [IrqHandlerSlot; 16] = [const { Mutex::new([None; HANDLERS_PER_IRQ]) }; 16];
 
 /// Registers `handler` to be called whenever `irq` fires. Must be paired with a subsequent
 /// `pic::unmask_irq(irq)` -- until that call, the line stays masked at the controller and
@@ -52,7 +57,12 @@ pub fn register_irq_handler(irq: u8, handler: fn()) {
         (2..16).contains(&irq),
         "IRQ 0/1 are reserved for the timer/keyboard"
     );
-    *IRQ_HANDLERS[irq as usize].lock() = Some(handler);
+    let mut slots = IRQ_HANDLERS[irq as usize].lock();
+    if slots.contains(&Some(handler)) {
+        return;
+    }
+    let free = slots.iter_mut().find(|s| s.is_none()).expect("too many handlers sharing one IRQ line");
+    *free = Some(handler);
 }
 
 /// Defines one `extern "x86-interrupt"` trampoline per listed IRQ line (each must be a distinct
@@ -66,8 +76,8 @@ macro_rules! define_irq_trampolines {
     ($( $name:ident => $irq:literal ),+ $(,)?) => {
         $(
             extern "x86-interrupt" fn $name(_stack_frame: InterruptStackFrame) {
-                let handler = *IRQ_HANDLERS[$irq].lock();
-                if let Some(handler) = handler {
+                let handlers = *IRQ_HANDLERS[$irq].lock();
+                for handler in handlers.into_iter().flatten() {
                     handler();
                 }
                 unsafe {

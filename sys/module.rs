@@ -1085,17 +1085,17 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_unix_time" => Some(crate::cpu::rtc::oxidebsd_unix_time as *const () as u64),
         "oxidebsd_block_device_present" => {
-            Some(crate::drivers::ata::oxidebsd_block_device_present as *const () as u64)
+            Some(crate::drivers::disk::oxidebsd_block_device_present as *const () as u64)
         }
-        "oxidebsd_block_read" => Some(crate::drivers::ata::oxidebsd_block_read as *const () as u64),
+        "oxidebsd_block_read" => Some(crate::drivers::disk::oxidebsd_block_read as *const () as u64),
         "oxidebsd_block_write" => {
-            Some(crate::drivers::ata::oxidebsd_block_write as *const () as u64)
+            Some(crate::drivers::disk::oxidebsd_block_write as *const () as u64)
         }
         "oxidebsd_block_read_batch" => {
-            Some(crate::drivers::ata::oxidebsd_block_read_batch as *const () as u64)
+            Some(crate::drivers::disk::oxidebsd_block_read_batch as *const () as u64)
         }
         "oxidebsd_block_write_batch" => {
-            Some(crate::drivers::ata::oxidebsd_block_write_batch as *const () as u64)
+            Some(crate::drivers::disk::oxidebsd_block_write_batch as *const () as u64)
         }
         _ => None,
     }

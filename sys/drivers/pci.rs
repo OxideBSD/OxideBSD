@@ -6,6 +6,9 @@
 //! at PCI's own fixed 256*32*8 upper bound, cheap enough not to need one.
 
 use x86_64::instructions::port::Port;
+use x86_64::structures::paging::mapper::MapToError;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::{PhysAddr, VirtAddr};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -54,6 +57,49 @@ impl PciDevice {
             }
             _ => None,
         }
+    }
+
+    pub fn config_read_u32(&self, offset: u8) -> u32 {
+        config_read_u32(self.bus, self.device, self.function, offset)
+    }
+
+    pub fn config_read_u8(&self, offset: u8) -> u8 {
+        (self.config_read_u32(offset & !3) >> ((offset & 3) * 8)) as u8
+    }
+
+    /// The offsets of this function's capabilities with id `cap_id`, in list order (a device can
+    /// carry several, e.g. virtio's vendor-specific ones).
+    pub fn capabilities(&self, cap_id: u8) -> alloc::vec::Vec<u8> {
+        const STATUS_CAP_LIST: u32 = 1 << 20;
+        let mut found = alloc::vec::Vec::new();
+        if self.config_read_u32(0x04) & STATUS_CAP_LIST == 0 {
+            return found;
+        }
+        let mut ptr = self.config_read_u8(0x34) & 0xFC;
+        // Bounded: a malformed list could loop.
+        for _ in 0..48 {
+            if ptr == 0 {
+                break;
+            }
+            if self.config_read_u8(ptr) == cap_id {
+                found.push(ptr);
+            }
+            ptr = self.config_read_u8(ptr + 1) & 0xFC;
+        }
+        found
+    }
+
+    /// Enables memory-space decoding and bus mastering, and clears INTx disable (command register
+    /// bits 1, 2 and 10), for a DMA device driven through a memory BAR.
+    pub fn enable_memory_and_bus_mastering(&self) {
+        let command = config_read_u32(self.bus, self.device, self.function, 0x04) & 0xFFFF;
+        config_write_u32(
+            self.bus,
+            self.device,
+            self.function,
+            0x04,
+            (command | (1 << 1) | (1 << 2)) & !(1 << 10),
+        );
     }
 
     /// Sets the bus-mastering bit (command register bit 2), letting this device initiate DMA.
@@ -176,4 +222,35 @@ pub fn find_by_id(vendor: u16, device_id: u16) -> Option<PciDevice> {
         }
     });
     found
+}
+
+/// Maps `page_count` pages of device registers at physical `phys_base` to their HHDM address
+/// (`phys_mem_offset + phys_base`) as uncached, and returns that address. The HHDM alone can't be
+/// trusted to cover them: firmware parks large or 64-bit BARs in a high MMIO window above what
+/// the boot loader maps (found live with `qemu-xhci` under OVMF, at 32 GiB). A page that's
+/// already mapped is left as it is; any other failure is logged and left unmapped, so a real
+/// access page-faults visibly rather than reading garbage.
+pub fn map_mmio(
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    phys_mem_offset: VirtAddr,
+    phys_base: PhysAddr,
+    page_count: u64,
+) -> VirtAddr {
+    let virt_base = phys_mem_offset + phys_base.as_u64();
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+    for i in 0..page_count {
+        let page = Page::<Size4KiB>::containing_address(virt_base + i * 4096);
+        let frame = PhysFrame::<Size4KiB>::containing_address(phys_base + i * 4096);
+        // SAFETY: `frame` is device register space, never RAM handed out for anything else, and
+        // `page` is its own HHDM address -- mapping it there can't alias another live mapping.
+        match unsafe { mapper.map_to(page, frame, flags, frame_allocator) } {
+            Ok(flush) => flush.ignore(), // never-before-mapped page: no stale TLB entry
+            Err(MapToError::PageAlreadyMapped(_)) => {}
+            Err(e) => {
+                crate::serial_println!("[pci] failed to map MMIO page {:#x}: {:?}", (phys_base + i * 4096).as_u64(), e);
+            }
+        }
+    }
+    virt_base
 }

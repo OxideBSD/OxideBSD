@@ -197,8 +197,9 @@ pub fn rsdp_address() -> Option<u64> {
 /// on physical hardware that still exposes a legacy-IDE-compatible/CSM mode mapping an actual
 /// drive onto those same ports. Set this flag (rather than trusting real hardware's own firmware
 /// CSM/legacy-IDE setting alone) to skip `ata::init()` entirely and force `oxfs` into its
-/// original, always-safe, pure-in-memory fallback. Checked once by `sys/main.rs`'s own
-/// `#[cfg(not(test))] kernel_main`, right before it would otherwise call `ata::init()`.
+/// original, always-safe, pure-in-memory fallback. It skips every data-disk probe
+/// (`drivers::disk::init`), virtio-blk included, since a hypervisor's virtio disk is just as real
+/// to format; `no-disk` is the same token under a name that says so.
 static ATA_DISABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn ata_disabled() -> bool {
@@ -216,7 +217,7 @@ pub fn single_user() -> bool {
 /// the rest are kernel options. Unknown tokens of either kind are ignored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BootFlags {
-    /// `no-ata`: see `ata_disabled`.
+    /// `no-ata` (or `no-disk`): see `ata_disabled`.
     pub no_ata: bool,
     /// `-s`, alone or combined (`-sv`): see `single_user`.
     pub single_user: bool,
@@ -225,7 +226,7 @@ pub struct BootFlags {
 pub fn parse_cmdline(cmdline: &str) -> BootFlags {
     let mut flags = BootFlags::default();
     for token in cmdline.split_whitespace() {
-        if token == "no-ata" {
+        if token == "no-ata" || token == "no-disk" {
             flags.no_ata = true;
         } else if let Some(letters) = token.strip_prefix('-')
             && letters.contains('s')

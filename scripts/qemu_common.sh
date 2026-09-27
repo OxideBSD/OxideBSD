@@ -51,9 +51,21 @@ fi
 # legacy PIIX IDE controller the real ATA disk-persistence device below depends on -- staying on
 # the default (unstated) i440fx machine type keeps this working under both BIOS and UEFI, since
 # OVMF loads fine there via a single combined `-bios` image with no `-M` change needed.
+#
+# The data disk is IDE or virtio-blk: $OXIDEBSD_QEMU_DISK (`ide`/`virtio`) overrides the caller's
+# $QEMU_DISK_DEFAULT (`ide` unless set). virtio is modern-only (`disable-legacy=on`), which is all
+# sys/drivers/virtio.rs speaks; the kernel prefers it when both could be present.
+case "${OXIDEBSD_QEMU_DISK:-${QEMU_DISK_DEFAULT:-ide}}" in
+    virtio) data_disk="virtio-blk-pci,drive=oxfsdisk,disable-legacy=on" ;;
+    ide) data_disk="ide-hd,drive=oxfsdisk,bus=ide.1,unit=0" ;;
+    *)
+        echo "qemu_common.sh: OXIDEBSD_QEMU_DISK must be ide or virtio" >&2
+        exit 1
+        ;;
+esac
 set -- "$@" \
     -drive "if=none,id=oxfsdisk,format=raw,file=$QEMU_DISK_IMAGE" \
-    -device ide-hd,drive=oxfsdisk,bus=ide.1,unit=0 \
+    -device "$data_disk" \
     -drive "if=none,id=isocd,media=cdrom,file=$QEMU_ISO_PATH" \
     -device ide-cd,drive=isocd,bus=ide.0,unit=0
 
