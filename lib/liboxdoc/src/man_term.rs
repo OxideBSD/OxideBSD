@@ -32,6 +32,7 @@ pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     let mut t = t;
     // man(7) sets tab stops every half inch, five columns.
     t.tab_width = 5;
+    t.nofill_zero_lines = true;
     let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), indent: 0, after_sh: None, sp_swallowed: false };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {

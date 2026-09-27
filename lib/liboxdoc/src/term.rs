@@ -58,6 +58,8 @@ struct Word {
     glue: bool,
     /// The word may break after a hyphen (text lines only, as in mandoc).
     hyph: bool,
+    /// Nothing but zero-width characters (`\&`): a line holding only such words isn't output.
+    phantom: bool,
 }
 
 pub struct Term {
@@ -108,6 +110,8 @@ pub struct Term {
     pub no_vspace: bool,
     /// The words of the macro being rendered break at hyphens, as a text line's do.
     pub hyph_args: bool,
+    /// In no-fill mode, a line of zero-width characters is output (empty), as man(7) does.
+    pub nofill_zero_lines: bool,
     /// Lines output so far, so a renderer can tell whether anything came after a point.
     pub lines_out: usize,
 }
@@ -141,6 +145,7 @@ impl Term {
             blank_header: false,
             no_vspace: false,
             hyph_args: false,
+            nofill_zero_lines: false,
             lines_out: 0,
         }
     }
@@ -266,7 +271,8 @@ impl Term {
             self.keep_started = true;
         }
         let hyph = std::mem::take(&mut self.hyph_next);
-        self.words.push(Word { cells, space, glue, hyph });
+        let phantom = cells.is_empty() && !text.is_empty() && !(self.nofill && self.nofill_zero_lines);
+        self.words.push(Word { cells, space, glue, hyph, phantom });
     }
 
     fn push_char(&self, cells: &mut Vec<Cell>, c: char, style: Style) {
@@ -418,7 +424,12 @@ impl Term {
                 cells.extend(w.cells.iter().copied());
             }
             let hyph = j == i + 1 && words[i].hyph;
+            // (A line `place` opens starts clean.)
+            let dirty = self.line_open && self.dirty;
             self.place(cells, words[i].space, hyph);
+            if words[i..j].iter().all(|w| w.phantom) {
+                self.dirty = dirty;
+            }
             i = j;
         }
     }
