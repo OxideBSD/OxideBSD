@@ -67,8 +67,18 @@ fn is_callable(s: &str) -> bool {
 /// Whether text ends a sentence: a final `.`, `!` or `?`, possibly followed by closing
 /// punctuation, and not escaped with `\&`.
 pub fn ends_sentence(s: &str) -> bool {
-    let t = s.trim_end_matches(['"', '\'', ')', ']', '*', '\u{2019}', '\u{201D}']);
-    t.ends_with(['.', '!', '?']) && !t.ends_with(mark::ZERO)
+    // A period, `!` or `?` among the trailing punctuation. Closing punctuation after it
+    // (`x.)`) passes the end of sentence on only when the run follows a letter or digit: `.)`
+    // alone doesn't end one.
+    let (mut found, mut enclosed) = (false, false);
+    for c in s.chars().rev() {
+        match c {
+            '"' | '\'' | ')' | ']' | '*' | '\u{2019}' | '\u{201D}' => enclosed |= !found,
+            '.' | '!' | '?' => found = true,
+            c => return found && (!enclosed || c.is_alphanumeric()),
+        }
+    }
+    found && !enclosed
 }
 
 struct Parser<'a> {
