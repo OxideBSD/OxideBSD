@@ -206,7 +206,9 @@ Migrated off the `bootloader` v0.9 crate (BIOS-only, unmaintained) to the Limine
   values.
 - **Kernel command line** (`boot::parse_cmdline`, fed by Limine's cmdline response or the Multiboot2
   cmdline tag): `no-ata`, `console.underline=color` (SGR 4 as cyan, Linux-console style, instead of
-  a stroke under the glyph), and BSD-style boot flags — `-s` (single-user). `boot::init_argv()` is
+  a stroke under the glyph), and FreeBSD's boot flags: `-s` (single-user), `-D` (dual console: `ttyv0`
+  output also to COM1), `-h` (serial console, output only). Without `-D` the serial log shows only
+  kernel messages; `qemu_runner.sh` adds `-D` for tests and headless runs. `boot::init_argv()` is
   pid 1's argv as FreeBSD/OpenBSD build it (`/sbin/init` [`-s`], empty environment); unused until
   `/sbin/init` replaces `/bin/sh` as pid 1. `OXIDEBSD_KERNEL_CMDLINE=-s cargo run` or `cargo run -- -s` sets it.
 

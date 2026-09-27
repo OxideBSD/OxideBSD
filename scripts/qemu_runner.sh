@@ -80,6 +80,11 @@ shift
 if [ "$IS_TEST" = 0 ] && [ $# -gt 0 ]; then
     KERNEL_CMDLINE="${KERNEL_CMDLINE:+$KERNEL_CMDLINE }$*"
 fi
+# The console goes to the screen only unless booted with -D (dual console: screen and COM1, as in
+# FreeBSD). Tests and headless runs read the console through the serial log, so they get -D.
+if [ "$IS_TEST" = 1 ] || [ "${OXIDEBSD_QEMU_DISPLAY:-}" = none ]; then
+    KERNEL_CMDLINE="${KERNEL_CMDLINE:+$KERNEL_CMDLINE }-D"
+fi
 
 # Deliberately no `resolution:` override here: `console::vga`'s text grid sizes itself
 # dynamically at boot from whatever real framebuffer resolution Limine/the firmware's own GOP/VBE

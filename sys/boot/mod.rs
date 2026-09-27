@@ -213,8 +213,9 @@ pub fn single_user() -> bool {
     SINGLE_USER.load(Ordering::Relaxed)
 }
 
-/// What the kernel command line asks for. Dash tokens are boot flags in the BSD `boot -s` style;
-/// the rest are kernel options. Unknown tokens of either kind are ignored.
+/// What the kernel command line asks for. Dash tokens are boot flags in the BSD `boot -s` style
+/// (`-s` single-user, `-D` dual console, `-h` serial console, as in FreeBSD; they combine, as in
+/// `-sD`); the rest are kernel options. Unknown tokens of either kind are ignored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BootFlags {
     /// `no-ata` (or `no-disk`): see `ata_disabled`.
@@ -223,6 +224,10 @@ pub struct BootFlags {
     pub single_user: bool,
     /// `console.underline=color`: show underlined console text as a color, not a stroke.
     pub underline_color: bool,
+    /// `-D`: a dual console, the screen and COM1 (FreeBSD's `RB_MULTIPLE`).
+    pub dual_console: bool,
+    /// `-h`: the serial console, COM1 only (FreeBSD's `RB_SERIAL`).
+    pub serial_console: bool,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootFlags {
@@ -232,10 +237,14 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
             flags.no_ata = true;
         } else if let Some(mode) = token.strip_prefix("console.underline=") {
             flags.underline_color = mode == "color";
+
         } else if let Some(letters) = token.strip_prefix('-')
-            && letters.contains('s')
+            && !letters.is_empty()
+            && letters.chars().all(|c| c.is_ascii_alphabetic())
         {
-            flags.single_user = true;
+            flags.single_user |= letters.contains('s');
+            flags.dual_console |= letters.contains('D');
+            flags.serial_console |= letters.contains('h');
         }
     }
     flags
@@ -250,6 +259,10 @@ pub(crate) fn apply_cmdline(cmdline: &str) {
     if flags.underline_color {
         crate::console::vga::set_underline_mode(crate::console::vga::UnderlineMode::Color);
     }
+    crate::tty::console::set_outputs(
+        !flags.serial_console || flags.dual_console,
+        flags.serial_console || flags.dual_console,
+    );
 }
 
 /// Path pid 1 is started from.

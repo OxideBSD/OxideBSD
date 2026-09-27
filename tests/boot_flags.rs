@@ -26,6 +26,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     assert_eq!(parse_cmdline("s single no-atax"), none, "non-flags aren't flags");
     assert_eq!(parse_cmdline("console.underline=color"), BootFlags { underline_color: true, ..none });
     assert_eq!(parse_cmdline("console.underline=line"), none);
+    assert_eq!(parse_cmdline("-D"), BootFlags { dual_console: true, ..none });
+    assert_eq!(parse_cmdline("-sD"), BootFlags { single_user: true, dual_console: true, ..none });
+    assert_eq!(parse_cmdline("-h"), BootFlags { serial_console: true, ..none });
 
     let argv = init_argv();
     if single_user() {

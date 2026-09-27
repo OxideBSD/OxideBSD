@@ -8,11 +8,28 @@ use super::{B38400, Driver, TTYV0, TtyId, Winsize};
 
 struct Console;
 
+/// Where the console's output goes (§2.5), set from the boot flags: the screen by default, the
+/// screen and COM1 with `-D` (dual console), COM1 alone with `-h` (serial console), as in
+/// FreeBSD. Each byte to COM1 is a port write, an exit to the hypervisor under a VM, so copying
+/// is opt-in. Kernel messages go to COM1 regardless. Input is always the keyboard for now; the
+/// kernel doesn't read the serial port yet.
+static TO_SCREEN: AtomicBool = AtomicBool::new(true);
+static TO_SERIAL: AtomicBool = AtomicBool::new(false);
+
+pub fn set_outputs(screen: bool, serial: bool) {
+    TO_SCREEN.store(screen, Ordering::Relaxed);
+    TO_SERIAL.store(serial, Ordering::Relaxed);
+}
+
 impl Driver for Console {
     fn output(&self, raw: &[u8], cooked: &[u8]) {
-        crate::console::serial::write_bytes(raw);
-        crate::console::vga::write_bytes(cooked);
-        crate::console::framebuffer::redraw();
+        if TO_SERIAL.load(Ordering::Relaxed) {
+            crate::console::serial::write_bytes(raw);
+        }
+        if TO_SCREEN.load(Ordering::Relaxed) {
+            crate::console::vga::write_bytes(cooked);
+            crate::console::framebuffer::redraw();
+        }
         // A cursor-position query answers through the input (§7.3); the writer queues the
         // reply rather than feeding it in while it holds its own lock.
         let reply = crate::console::vga::take_replies();
