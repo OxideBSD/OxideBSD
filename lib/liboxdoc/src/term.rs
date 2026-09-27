@@ -97,6 +97,8 @@ pub struct Term {
     at_blank: bool,
     /// The blank line the output ends with was an explicit one (`.sp`, a blank input line).
     blank_explicit: bool,
+    /// The blank line the output ends with is the one after the header.
+    blank_header: bool,
     /// Vertical space is suppressed until the next text (right after a section heading).
     pub no_vspace: bool,
 }
@@ -126,6 +128,7 @@ impl Term {
             hyph_next: false,
             at_blank: true,
             blank_explicit: false,
+            blank_header: false,
             no_vspace: false,
         }
     }
@@ -331,6 +334,7 @@ impl Term {
         self.out.push('\n');
         self.at_blank = true;
         self.blank_explicit = false;
+        self.blank_header = false;
     }
 
     /// A blank line even at the start of a section.
@@ -339,6 +343,26 @@ impl Term {
         self.out.push('\n');
         self.at_blank = true;
         self.blank_explicit = true;
+        self.blank_header = false;
+    }
+
+    /// A man(7) `.sp`: a blank line, unless paragraph space was just output, which absorbs it.
+    pub fn sp_line(&mut self) {
+        self.flush();
+        if self.at_blank && !self.blank_explicit && !self.blank_header {
+            self.blank_explicit = true;
+            return;
+        }
+        self.out.push('\n');
+        self.at_blank = true;
+        self.blank_explicit = true;
+        self.blank_header = false;
+    }
+
+    /// Whether the open line has nothing on it since it was started or padded: a new input
+    /// line in no-fill mode continues there instead of breaking.
+    pub fn at_line_start(&self) -> bool {
+        self.words.is_empty() && (!self.line_open || self.fresh)
     }
 
     /// The space before a man(7) section heading: like [`Term::vspace`], but not absorbed by an
@@ -351,6 +375,7 @@ impl Term {
         self.out.push('\n');
         self.at_blank = true;
         self.blank_explicit = false;
+        self.blank_header = false;
     }
 
     fn layout(&mut self) {
@@ -501,6 +526,7 @@ impl Term {
         self.out.push('\n');
         self.at_blank = false;
         self.blank_explicit = false;
+        self.blank_header = false;
         self.no_vspace = false;
     }
 
@@ -543,6 +569,7 @@ impl Term {
         self.out.push('\n');
         self.at_blank = false;
         self.blank_explicit = false;
+        self.blank_header = false;
     }
 
     /// A man(7) footer: like [`Term::three_part`], but when the parts don't fit, the right one
@@ -578,6 +605,7 @@ impl Term {
     pub fn raw_blank(&mut self) {
         self.out.push('\n');
         self.at_blank = true;
+        self.blank_header = true;
     }
 }
 

@@ -184,7 +184,9 @@ impl Parser<'_> {
             "RE" => {
                 // Closes the innermost `.RS` (or the one numbered by the argument).
                 let Some(pos) = self.stack.iter().rposition(|n| n.kind == Kind::Block && n.tok == "RS") else {
-                    self.diag.report(Level::Error, self.line, 0, "skipping end of block that is not open", "RE");
+                    self.diag.report(Level::Error, self.line, 0, "no matching RS, ending the paragraph", "RE");
+                    self.close_paragraph();
+                    self.push(Node::new(Kind::Elem, "RE", self.line));
                     return;
                 };
                 while self.stack.len() > pos {

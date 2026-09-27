@@ -94,7 +94,7 @@ impl R<'_> {
 
     fn node(&mut self, n: &Node, style: Style) {
         // In no-fill mode each input line, font macro lines included, is an output line.
-        if self.t.nofill && n.kind == Kind::Elem && n.flags.line_start {
+        if self.t.nofill && n.kind == Kind::Elem && n.flags.line_start && !self.t.at_line_start() {
             self.t.flush();
         }
         if n.flags.nospace {
@@ -134,7 +134,7 @@ impl R<'_> {
         match n.tok.as_str() {
             "PP" => {
                 self.t.reset_font();
-                self.t.vspace();
+                self.t.section_vspace();
                 self.width = WIDTH;
                 self.t.set_offset(self.base);
             }
@@ -147,7 +147,7 @@ impl R<'_> {
                 let count = n.args.first().and_then(|a| a.trim_end_matches(['v', 'n']).parse::<usize>().ok()).unwrap_or(1);
                 self.t.flush();
                 for _ in 0..count.max(1) {
-                    self.t.blank_line();
+                    self.t.sp_line();
                 }
             }
             "nf" | "EX" | "Vb" => {
@@ -234,6 +234,11 @@ impl R<'_> {
                     }
                 }
             }
+            "RE" => {
+                // An `.RE` with no `.RS` open still ends the line.
+                self.t.flush();
+                self.t.set_offset(self.base);
+            }
             _ => {}
         }
     }
@@ -267,7 +272,7 @@ impl R<'_> {
             }
             "TP" | "TQ" | "IP" => {
                 if n.tok != "TQ" {
-                    self.t.vspace();
+                    self.t.section_vspace();
                 } else {
                     self.t.flush();
                 }
@@ -297,7 +302,7 @@ impl R<'_> {
                 self.t.set_offset(base);
             }
             "HP" => {
-                self.t.vspace();
+                self.t.section_vspace();
                 if let Some(w) = n.args.first().filter(|w| !w.is_empty()) {
                     self.width = scaled(w);
                 }
