@@ -21,13 +21,18 @@ struct R<'a> {
     levels: Vec<(usize, usize)>,
     /// The indent `.in` sets, which lasts across sections until changed.
     indent: isize,
+    /// `lines_out` just after the last `.SH` heading: if nothing has been output since, the next
+    /// heading follows it without space.
+    after_sh: Option<(usize, bool)>,
+    /// The `.sp` at the start of this section has been swallowed.
+    sp_swallowed: bool,
 }
 
 pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     let mut t = t;
     // man(7) sets tab stops every half inch, five columns.
     t.tab_width = 5;
-    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), indent: 0 };
+    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), indent: 0, after_sh: None, sp_swallowed: false };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {
             if sh.part(Kind::Head).is_some_and(|h| h.plain_text().trim() == "SYNOPSIS")
@@ -92,7 +97,7 @@ impl R<'_> {
         let source = plain(&self.meta.os);
         let date = plain(&crate::format_date(&self.meta.date));
         self.t.no_vspace = false;
-        self.t.vspace();
+        self.t.section_vspace();
         self.t.footer_three_part(&source, &date, &title);
     }
 
@@ -150,9 +155,13 @@ impl R<'_> {
             }
             "br" => self.t.flush(),
             "sp" => {
-                // Swallowed at the start of a section, like paragraph space.
+                // At the start of a section a blank line is ignored, and the first `.sp` is
+                // swallowed, like paragraph space.
                 if self.t.no_vspace && !self.t.has_pending() {
-                    return;
+                    if !self.sp_swallowed {
+                        self.sp_swallowed |= n.text != "blank";
+                        return;
+                    }
                 }
                 let count = n.args.first().and_then(|a| a.trim_end_matches(['v', 'n']).parse::<usize>().ok()).unwrap_or(1);
                 self.t.flush();
@@ -163,10 +172,15 @@ impl R<'_> {
             "nf" | "EX" | "Vb" => {
                 self.t.flush();
                 self.t.nofill = true;
+                // A paragraph after this is no longer the first thing in its section.
+                self.t.no_vspace = false;
+                self.after_sh = None;
             }
             "fi" | "EE" | "Ve" => {
                 self.t.flush();
                 self.t.nofill = false;
+                self.t.no_vspace = false;
+                self.after_sh = None;
             }
             "in" => {
                 self.t.flush();
@@ -271,11 +285,18 @@ impl R<'_> {
             "SH" | "SS" => {
                 self.t.flush();
                 self.t.reset_font();
-                // A subsection first in its section follows the heading directly.
-                if n.tok == "SH" {
+                // A heading gets space before it unless nothing has been output since the last
+                // `.SH` heading (an empty section, or a subsection first in its section).
+                self.t.flush();
+                // (After an empty `.SS`, a `.SH` still gets its space.)
+                let skip = matches!(self.after_sh, Some((lines, was_sh)) if lines == self.t.lines_out && (was_sh || n.tok == "SS"));
+                if !skip {
+                    let saved = self.t.no_vspace;
                     self.t.no_vspace = false;
+                    self.t.section_vspace();
+                    self.t.no_vspace = saved;
                 }
-                self.t.section_vspace();
+                self.sp_swallowed = false;
                 self.levels.clear();
                 self.base = INDENT;
                 self.width = WIDTH;
@@ -286,6 +307,7 @@ impl R<'_> {
                     self.children(h, Style::Bold);
                 }
                 self.t.flush();
+                self.after_sh = Some((self.t.lines_out, n.tok == "SH"));
                 self.t.reset_font();
                 self.base = self.at(INDENT);
                 self.t.set_offset(self.base);
@@ -295,6 +317,7 @@ impl R<'_> {
                 }
                 self.t.flush();
             }
+            "TP" | "TQ" | "IP" | "HP" if is_empty_paragraph(n) => {}
             "TP" | "TQ" | "IP" => {
                 if n.tok != "TQ" {
                     self.t.section_vspace();
@@ -342,6 +365,9 @@ impl R<'_> {
             }
             "RS" => {
                 self.t.flush();
+                // What follows is no longer the start of the section.
+                self.t.no_vspace = false;
+                self.after_sh = None;
                 self.levels.push((self.base, self.width));
                 // A negative width moves the margin left.
                 match n.args.first().filter(|a| !a.is_empty()) {
@@ -397,4 +423,9 @@ impl R<'_> {
             }
         }
     }
+}
+
+/// A paragraph macro with nothing in it, which mandoc drops (`.TP` right before `.SH`).
+fn is_empty_paragraph(n: &Node) -> bool {
+    n.args.first().is_none_or(|a| n.tok != "IP" || a.is_empty()) && n.children.iter().all(|part| part.children.is_empty())
 }

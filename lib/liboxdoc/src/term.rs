@@ -103,6 +103,8 @@ pub struct Term {
     blank_header: bool,
     /// Vertical space is suppressed until the next text (right after a section heading).
     pub no_vspace: bool,
+    /// Lines output so far, so a renderer can tell whether anything came after a point.
+    pub lines_out: usize,
 }
 
 impl Term {
@@ -133,6 +135,7 @@ impl Term {
             blank_explicit: false,
             blank_header: false,
             no_vspace: false,
+            lines_out: 0,
         }
     }
 
@@ -361,7 +364,7 @@ impl Term {
     pub fn sp_line(&mut self) {
         self.flush();
         if self.at_blank && !self.blank_explicit && !self.blank_header {
-            self.blank_explicit = true;
+            // Absorbed by the paragraph space before it, which stays what the output ends with.
             return;
         }
         self.out.push('\n');
@@ -536,6 +539,7 @@ impl Term {
         }
         self.out.push_str(&s);
         self.out.push('\n');
+        self.lines_out += 1;
         self.at_blank = false;
         self.blank_explicit = false;
         self.blank_header = false;
@@ -579,6 +583,7 @@ impl Term {
         let s = if self.encoding == Encoding::Ascii { s.chars().map(|c| if c.is_ascii() { c.to_string() } else { ascii_for(c).to_string() }).collect() } else { s };
         self.out.push_str(&s);
         self.out.push('\n');
+        self.lines_out += 1;
         self.at_blank = false;
         self.blank_explicit = false;
         self.blank_header = false;

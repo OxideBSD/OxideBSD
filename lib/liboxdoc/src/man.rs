@@ -46,8 +46,11 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             }
             Line::Blank { line } => {
                 p.line = line;
-                // A blank line is `.sp`, even before the first section (unlike in mdoc).
-                p.push(Node::new(Kind::Elem, "sp", line));
+                // A blank line is `.sp`, even before the first section (unlike in mdoc); marked,
+                // since at the start of a section it is ignored where `.sp` isn't.
+                let mut n = Node::new(Kind::Elem, "sp", line);
+                n.text = "blank".to_string();
+                p.push(n);
             }
         }
     }
@@ -98,8 +101,19 @@ impl Parser<'_> {
         self.pending_head = false;
     }
 
+    /// Drops a `.PP` that ends the current node: an empty paragraph (before `.SH`, `.SS`, `.RE`
+    /// or the end), which mandoc drops.
+    fn drop_trailing_pp(&mut self) {
+        if let Some(top) = self.stack.last_mut()
+            && top.children.last().is_some_and(|c| c.kind == Kind::Elem && c.tok == "PP")
+        {
+            top.children.pop();
+        }
+    }
+
     /// Closes everything inside the current section (for `.SS`) or everything (for `.SH`).
     fn close_to_section(&mut self, sh: bool) {
+        self.drop_trailing_pp();
         loop {
             let Some(top) = self.stack.last() else { break };
             if top.kind == Kind::Root {
@@ -194,10 +208,12 @@ impl Parser<'_> {
                 // Closes the innermost `.RS` (or the one numbered by the argument).
                 let Some(pos) = self.stack.iter().rposition(|n| n.kind == Kind::Block && n.tok == "RS") else {
                     self.diag.report(Level::Error, self.line, 0, "no matching RS, ending the paragraph", "RE");
+                    self.drop_trailing_pp();
                     self.close_paragraph();
                     self.push(Node::new(Kind::Elem, "RE", self.line));
                     return;
                 };
+                self.drop_trailing_pp();
                 while self.stack.len() > pos {
                     self.close_top();
                 }
