@@ -206,7 +206,12 @@ impl<'a> Roff<'a> {
                 // A lone control character is ignored.
                 return;
             }
-            let (name, argstr) = split_name(rest);
+            let (mut name, mut argstr) = split_name(rest);
+            // An escape ends the name too: `.el\{\`.
+            if let Some(p) = self.ec.and_then(|ec| name.find(ec)).filter(|p| *p > 0) {
+                argstr = &rest[p..];
+                name = &name[..p];
+            }
             let name = self.interpolate_name(name);
             if self.request(&name, argstr, lineno, depth) {
                 // `.if`/`.ie`/`.el` process their own rest of line, closes included.

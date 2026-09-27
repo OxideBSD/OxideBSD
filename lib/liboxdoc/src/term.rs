@@ -226,6 +226,14 @@ impl Term {
         self.space = Some(n);
     }
 
+    /// A break right after the header (before the first section): the header's blank line then
+    /// doesn't absorb the next section's space, as in mandoc.
+    pub fn break_after_header(&mut self) {
+        if self.blank_header {
+            self.blank_explicit = true;
+        }
+    }
+
     /// Adds `n` spaces before the next word, on top of its own spacing.
     pub fn add_space(&mut self, n: usize) {
         self.extra_space += n;
@@ -727,6 +735,13 @@ impl Term {
         } else {
             let at = self.offset + lead;
             self.begin_line_at(at);
+        }
+    }
+
+    /// One more blank line after a space just output (`.PD 2`).
+    pub fn extra_blank(&mut self) {
+        if self.at_blank {
+            self.out.push('\n');
         }
     }
 

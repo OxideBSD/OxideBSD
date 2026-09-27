@@ -19,6 +19,8 @@ struct R<'a> {
     width: usize,
     /// Margins and widths saved by `.RS`, restored by `.RE`.
     levels: Vec<(usize, usize)>,
+    /// Blank lines before a paragraph or heading (`.PD`).
+    pd: usize,
     /// `lines_out` just after the last `.SH` heading: if nothing has been output since, the next
     /// heading follows it without space.
     after_sh: Option<(usize, bool)>,
@@ -31,7 +33,7 @@ pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     // man(7) sets tab stops every half inch, five columns.
     t.tab_width = 5;
     t.nofill_zero_lines = true;
-    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), after_sh: None, sp_swallowed: false };
+    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), pd: 1, after_sh: None, sp_swallowed: false };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {
             if sh.part(Kind::Head).is_some_and(|h| h.plain_text().trim() == "SYNOPSIS")
@@ -70,6 +72,18 @@ fn plain(s: &str) -> String {
 }
 
 impl R<'_> {
+    /// The space before a heading or paragraph: `.PD` blank lines, one by default.
+    fn para_space(&mut self) {
+        if self.pd == 0 {
+            self.t.flush();
+            return;
+        }
+        self.t.section_vspace();
+        for _ in 1..self.pd {
+            self.t.extra_blank();
+        }
+    }
+
     fn title(&self) -> String {
         format!("{}({})", plain(&self.meta.title), plain(&self.meta.section))
     }
@@ -193,11 +207,32 @@ impl R<'_> {
         match n.tok.as_str() {
             "PP" => {
                 self.t.reset_font();
-                self.t.section_vspace();
+                self.para_space();
                 self.width = WIDTH;
                 self.t.set_offset(self.base);
             }
-            "br" => self.t.flush(),
+            "PD" => {
+                // In vertical spacing units (a line) by default; an exact half rounds down.
+                self.pd = match n.args.first().filter(|a| !a.is_empty()) {
+                    None => 1,
+                    Some(a) => {
+                        let digits: String = a.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                        let v: f64 = digits.parse().unwrap_or(0.0);
+                        let units = match &a[digits.len()..] {
+                            "" | "v" => v * 40.0,
+                            "u" => v,
+                            "n" | "m" => v * 24.0,
+                            "i" => v * 240.0,
+                            _ => v * 40.0,
+                        };
+                        (units / 40.0 + 0.4995).floor() as usize
+                    }
+                };
+            }
+            "br" => {
+                self.t.flush();
+                self.t.break_after_header();
+            }
             "sp" => {
                 // At the start of a section a blank line is ignored, and the first `.sp` is
                 // swallowed, like paragraph space.
@@ -215,6 +250,7 @@ impl R<'_> {
             }
             "nf" | "EX" | "Vb" => {
                 self.t.flush();
+                self.t.break_after_header();
                 self.t.nofill = true;
                 // A paragraph after this is no longer the first thing in its section.
                 self.t.no_vspace = false;
@@ -222,12 +258,14 @@ impl R<'_> {
             }
             "fi" | "EE" | "Ve" => {
                 self.t.flush();
+                self.t.break_after_header();
                 self.t.nofill = false;
                 self.t.no_vspace = false;
                 self.after_sh = None;
             }
             "in" => {
                 self.t.flush();
+                self.t.break_after_header();
                 // An absolute indent counts from the page's left edge; with no argument, the
                 // paragraph's own margin. The next paragraph macro resets it.
                 let arg = n.args.first().map(String::as_str).unwrap_or("");
@@ -340,7 +378,7 @@ impl R<'_> {
                 if !skip {
                     let saved = self.t.no_vspace;
                     self.t.no_vspace = false;
-                    self.t.section_vspace();
+                    self.para_space();
                     self.t.no_vspace = saved;
                 }
                 self.sp_swallowed = false;
@@ -372,7 +410,7 @@ impl R<'_> {
             "TP" | "TQ" | "IP" | "HP" if is_empty_paragraph(n) => {}
             "TP" | "TQ" | "IP" => {
                 if n.tok != "TQ" {
-                    self.t.section_vspace();
+                    self.para_space();
                 } else {
                     self.t.flush();
                 }
@@ -404,7 +442,7 @@ impl R<'_> {
                 self.t.set_offset(base);
             }
             "HP" => {
-                self.t.section_vspace();
+                self.para_space();
                 if let Some(w) = n.args.first().filter(|w| !w.is_empty()) {
                     self.width = scaled(w);
                 }
