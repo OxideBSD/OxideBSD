@@ -241,6 +241,7 @@ impl Term {
                 mark::NBSP => cells.push(Cell { ch: ' ', style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
+                mark::BACK => cells.push(Cell { ch: mark::BACK, style: Style::None }),
                 '\t' => cells.push(Cell { ch: '\t', style: Style::None }),
                 c => {
                     let s = if c == ' ' { Style::None } else { cur };
@@ -477,7 +478,14 @@ impl Term {
     fn push_cells(&mut self, cells: &[Cell]) {
         self.dirty = true;
         for c in cells {
-            if c.ch == '\t' {
+            if c.ch == mark::BACK {
+                // Moving left: over the last cell, or into the indent at the start of a line.
+                if self.line.len() >= 3 && self.line[self.line.len() - 2].ch == '\u{8}' {
+                    self.line.truncate(self.line.len() - 3);
+                } else {
+                    self.line.pop();
+                }
+            } else if c.ch == '\t' {
                 // Tab stops every 8 columns from the left margin.
                 let col = visible_len(&self.line);
                 let tw = self.tab_width.max(1);
@@ -665,7 +673,8 @@ fn space_break(cells: &[Cell], room: usize) -> Option<usize> {
 /// Printed width of cells: an overstrike (`+\bo`) is one column.
 fn visible_len(cells: &[Cell]) -> usize {
     let bs = cells.iter().filter(|c| c.ch == '\u{8}').count();
-    cells.len() - 2 * bs
+    let back = cells.iter().filter(|c| c.ch == mark::BACK).count();
+    (cells.len() - 2 * bs).saturating_sub(2 * back)
 }
 
 /// The ASCII rendering of a non-ASCII character, as `-T ascii` prints it.

@@ -124,10 +124,33 @@ impl R<'_> {
     }
 
     /// Words of one macro argument, which may contain spaces.
+    /// A macro argument's words. Its spaces are all kept, as mandoc does: those at its edges
+    /// don't break, and a run of them between words is that many spaces.
     fn arg_words(&mut self, text: &str, style: Style, eos: bool) {
-        let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
-        let last = words.len().saturating_sub(1);
-        for (i, w) in words.iter().enumerate() {
+        let body = text.trim_matches(' ');
+        if body.is_empty() {
+            return;
+        }
+        let lead = text.len() - text.trim_start_matches(' ').len();
+        let trail = text.len() - text.trim_end_matches(' ').len();
+        let nbsp = |n: usize| mark::NBSP.to_string().repeat(n);
+        let mut words: Vec<(String, usize)> = Vec::new();
+        let mut spaces = 0;
+        for w in body.split(' ') {
+            if w.is_empty() {
+                spaces += 1;
+                continue;
+            }
+            words.push((w.to_string(), spaces + 1));
+            spaces = 0;
+        }
+        let last = words.len() - 1;
+        words[0].0.insert_str(0, &nbsp(lead));
+        words[last].0.push_str(&nbsp(trail));
+        for (i, (w, sp)) in words.iter().enumerate() {
+            if i > 0 {
+                self.t.set_space(*sp);
+            }
             self.t.word_ext(w, style, eos && i == last);
         }
     }

@@ -24,6 +24,8 @@ pub mod mark {
     pub const MINUS: char = '\u{E003}';
     /// `\(hy`-style hyphen from `\%`-free text is plain `-`; this is `\e` (a printable backslash).
     pub const BACKSLASH: char = '\u{E004}';
+    /// One column of leftward motion (`\h` with a negative distance).
+    pub const BACK: char = '\u{E005}';
     /// Font changes: `\fR`, `\fB`, `\fI`, `\f(BI`, `\fC`..., and `\fP` (previous).
     pub const FONT_R: char = '\u{E010}';
     pub const FONT_B: char = '\u{E011}';
@@ -749,8 +751,9 @@ impl<'a> Roff<'a> {
                         'h' => {
                             // Horizontal motion: whole ens become spaces, as mandoc does.
                             let n = self.number(&arg);
-                            for _ in 0..n.clamp(0, 80) {
-                                out.push(mark::NBSP);
+                            let c = if n < 0 { mark::BACK } else { mark::NBSP };
+                            for _ in 0..n.unsigned_abs().min(80) {
+                                out.push(c);
                             }
                         }
                         'w' => {
