@@ -308,14 +308,10 @@ impl R<'_> {
             }
             "ft" => {
                 // `.ft B`: a font for the text that follows, like `\fB`.
-                let f = match n.args.first().map(String::as_str) {
-                    Some("B") | Some("3") => mark::FONT_B,
-                    Some("I") | Some("2") => mark::FONT_I,
-                    Some("BI") | Some("4") => mark::FONT_BI,
-                    Some("R") | Some("1") | Some("CW") | Some("CR") => mark::FONT_R,
-                    _ => mark::FONT_P,
-                };
-                self.t.set_font_marker(f);
+                // An unknown name is ignored.
+                if let Some(f) = crate::roff::font_mark(n.args.first().map(String::as_str).unwrap_or("")) {
+                    self.t.set_font_marker(f);
+                }
             }
             tok if crate::man::FONT_MACROS.contains(&tok) => {
                 // A font macro sets its own fonts and leaves no escape font behind.
@@ -347,7 +343,7 @@ impl R<'_> {
                 self.t.reset_font();
             }
             "RE" => {
-                // An `.RE` with no `.RS` open still ends the line.
+                // An `.RE` with no `.RS` open still ends the line (but keeps the font).
                 self.t.flush();
                 self.t.set_offset(self.base);
             }
@@ -399,6 +395,8 @@ impl R<'_> {
             }
             "TP" | "TQ" | "IP" | "HP" if is_empty_paragraph(n) => {}
             "TP" | "TQ" | "IP" => {
+                // Each paragraph, and its body after the tag, starts in the regular font.
+                self.t.reset_font();
                 if n.tok != "TQ" {
                     self.para_space();
                 } else {
@@ -419,6 +417,7 @@ impl R<'_> {
                     self.children(h, style);
                 }
                 let col = self.t.flush_open();
+                self.t.reset_font();
                 self.t.set_offset(body_at);
                 if col < body_at {
                     self.t.pad_to(body_at);
@@ -432,6 +431,7 @@ impl R<'_> {
                 self.t.set_offset(base);
             }
             "HP" => {
+                self.t.reset_font();
                 self.para_space();
                 if let Some(w) = n.args.first().filter(|w| !w.is_empty()) {
                     self.width = scaled(w);
@@ -447,6 +447,7 @@ impl R<'_> {
             }
             "RS" => {
                 self.t.flush();
+                self.t.reset_font();
                 // A paragraph's space before the `.RS` doesn't absorb the next one's.
                 self.t.keep_blank();
                 // What follows is no longer the start of the section.
@@ -465,6 +466,7 @@ impl R<'_> {
                     self.children(b, style);
                 }
                 self.t.flush();
+                self.t.reset_font();
                 if let Some((base, width)) = self.levels.pop() {
                     self.base = base;
                     self.width = width;

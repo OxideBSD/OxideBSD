@@ -757,9 +757,16 @@ impl<'a> Roff<'a> {
                 '_' => out.push('_'),
                 '!' => {}
                 'f' => {
-                    let (name, next) = read_name(&chars, i);
+                    // The name may come from a string: `\f\*[B-Font]`.
+                    let (name, next) = if chars.get(i) == Some(&ec) && chars.get(i + 1) == Some(&'*') {
+                        let (sname, after) = read_name(&chars, i + 2);
+                        let v: Vec<char> = self.strings.get(&sname).map(|v| v.chars().collect()).unwrap_or_default();
+                        (read_name(&v, 0).0, after)
+                    } else {
+                        read_name(&chars, i)
+                    };
                     i = next;
-                    out.push(font_mark(&name));
+                    out.extend(font_mark(&name));
                 }
                 's' => {
                     // Size: \sN, \s±N, \s(NN, \s[N], \s'N'.
@@ -1006,16 +1013,17 @@ fn scale_cols(s: &str) -> usize {
     cols.round() as usize
 }
 
-/// The font marker for a `\f` name.
-fn font_mark(name: &str) -> char {
-    match name {
+/// The font marker for a `\f` name; `None` for a name mandoc doesn't know, which it ignores.
+pub fn font_mark(name: &str) -> Option<char> {
+    Some(match name {
         "B" | "3" | "CB" => mark::FONT_B,
         "I" | "2" | "CI" => mark::FONT_I,
         "BI" | "4" => mark::FONT_BI,
-        "CW" | "C" | "CR" | "CO" | "L" => mark::FONT_CW,
+        "CW" | "CR" => mark::FONT_CW,
         "P" | "" => mark::FONT_P,
-        _ => mark::FONT_R,
-    }
+        "R" | "1" => mark::FONT_R,
+        _ => return None,
+    })
 }
 
 /// Reads an escape's name at `chars[i]`: one character, `(xx`, or `[name]`. Returns the name and
