@@ -91,6 +91,8 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             Line::Macro { name, args, line, .. } => {
                 p.line = line;
                 p.macro_line(&name, &args, first);
+                // An `.Xc` may have closed the last open part of an `.It` head.
+                p.end_item_head();
                 first = false;
             }
             Line::Text { text, line } => {
@@ -99,6 +101,10 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             }
             Line::Blank { line } => {
                 p.line = line;
+                // Blank lines before the first section are ignored.
+                if p.stack.len() == 1 && !p.stack[0].children.iter().any(|c| c.tok == "Sh") {
+                    continue;
+                }
                 // A blank line is a paragraph break, except in literal displays.
                 if p.in_literal() {
                     let mut n = Node::text("", line);
@@ -164,6 +170,8 @@ impl Parser<'_> {
     }
 
     fn text_line(&mut self, text: &str) {
+        // Trailing whitespace is ignored (and doesn't hide a sentence end).
+        let text = text.trim_end_matches([' ', '\t']);
         let mut n = Node::text(text, self.line);
         n.flags.line_start = true;
         n.flags.eos = ends_sentence(text);
@@ -185,6 +193,7 @@ impl Parser<'_> {
                 self.meta.arch = args.get(2).cloned().unwrap_or_default();
             }
             "Os" => {
+                self.meta.os_given = true;
                 self.meta.os = args.join(" ");
             }
             "Sh" | "Ss" => {
@@ -255,8 +264,18 @@ impl Parser<'_> {
                 };
             }
             "Db" => {}
-            "Hf" | "Ot" | "Fr" | "Bt" | "Ud" | "Lb" | "Rv" | "Ex" | "In" | "Fd" | "Cd" | "An" => {
-                self.inline_elem(name, args);
+            "An" if args.first().is_some_and(|a| a == "-split" || a == "-nosplit") => {
+                let mut n = Node::new(Kind::Elem, "An", self.line);
+                n.args = vec![args[0].clone()];
+                self.push(n);
+            }
+            "In" | "Lb" | "Rv" | "Ex" => {
+                self.special_elem(name, args);
+            }
+            "Hf" | "Ot" | "Fr" | "Bt" | "Ud" | "Fd" | "Cd" | "An" => {
+                // The element takes its words; a callable macro after them runs as usual.
+                let used = self.inline_elem(name, args);
+                self.words(&args[used..], None);
             }
             "br" | "sp" => self.push(Node::new(Kind::Elem, name, self.line)),
             _ if name.starts_with('%') => {
@@ -336,11 +355,19 @@ impl Parser<'_> {
             _ => {
                 self.open(Kind::Head, "It");
                 self.words(args, None);
-                self.close_top();
-                self.open(Kind::Body, "It");
+                // A head extended with `.Xo` stays open until its `.Xc`.
+                self.end_item_head();
             }
         }
         self.nospace = false;
+    }
+
+    /// Closes an `.It` head and opens its body, unless an `.Xo` in the head is still open.
+    fn end_item_head(&mut self) {
+        if self.stack.last().is_some_and(|t| t.kind == Kind::Head && t.tok == "It") {
+            self.close_top();
+            self.open(Kind::Body, "It");
+        }
     }
 
     /// Parses a line's arguments as words and callable macros into the current node. `in_elem`
@@ -354,13 +381,13 @@ impl Parser<'_> {
                 i = self.call(a, &args[i + 1..]) + i + 1;
                 continue;
             }
-            self.plain_word(a);
+            self.plain_word(a, i + 1 == args.len());
             i += 1;
         }
     }
 
-    /// A word outside any in-line macro.
-    fn plain_word(&mut self, a: &str) {
+    /// A word outside any in-line macro; `last` if it ends the input line.
+    fn plain_word(&mut self, a: &str, last: bool) {
         let mut n = Node::text(a, self.line);
         if is_delim(a) {
             n.flags.delim = true;
@@ -368,9 +395,8 @@ impl Parser<'_> {
                 n.flags.nospace = true;
             }
         }
-        if ends_sentence(a) && (is_delim_close(a) || !a.is_empty()) {
-            n.flags.eos = is_delim_close(a) || ends_sentence(a);
-        }
+        // On a macro line, only a final closing delimiter (`.Ev PATH .`) ends a sentence.
+        n.flags.eos = last && is_delim_close(a) && ends_sentence(a);
         if self.spacing_off {
             n.flags.nospace = true;
         }
@@ -384,7 +410,14 @@ impl Parser<'_> {
     /// Runs macro `name` with the words `rest` that follow it. Returns how many words it used.
     fn call(&mut self, name: &str, rest: &[String]) -> usize {
         if let Some(&(_, open, close)) = PARTIAL_IMPLICIT.iter().find(|(t, ..)| *t == name) {
-            // The rest of the line, less trailing closing delimiters, goes inside.
+            // Leading opening delimiters go before it; the rest of the line, less trailing
+            // closing delimiters, goes inside.
+            let mut start = 0;
+            while start < rest.len() && is_delim_open(&rest[start]) {
+                self.plain_word(&rest[start], false);
+                start += 1;
+            }
+            let rest = &rest[start..];
             let mut end = rest.len();
             while end > 0 && is_delim_close(&rest[end - 1]) {
                 end -= 1;
@@ -396,10 +429,10 @@ impl Parser<'_> {
             self.words(&rest[..end], None);
             self.close_top();
             self.close_top();
-            for d in &rest[end..] {
-                self.plain_word(d);
+            for (k, d) in rest[end..].iter().enumerate() {
+                self.plain_word(d, end + k + 1 == rest.len());
             }
-            return rest.len();
+            return start + rest.len();
         }
         if let Some(&(open_tok, close_tok, open, close)) = PARTIAL_EXPLICIT.iter().find(|(o, c, ..)| *o == name || *c == name) {
             if name == open_tok {
@@ -465,7 +498,7 @@ impl Parser<'_> {
                 }
                 self.words_count(rest)
             }
-            "Xr" | "Fn" | "Lk" | "Mt" | "St" | "At" | "Bx" | "Bsx" | "Dx" | "Fx" | "Nx" | "Ox" | "Ux" => self.special_elem(name, rest),
+            "Xr" | "Fn" | "Lk" | "Mt" | "St" | "At" | "Bx" | "Bsx" | "Dx" | "Fx" | "Nx" | "Ox" | "Ux" | "In" => self.special_elem(name, rest),
             _ => self.inline_elem(name, rest),
         }
     }
@@ -495,7 +528,7 @@ impl Parser<'_> {
         let mut i = 0;
         // Leading opening delimiters print before the element.
         while i < rest.len() && is_delim_open(&rest[i]) {
-            self.plain_word(&rest[i]);
+            self.plain_word(&rest[i], false);
             i += 1;
         }
         let mut open = false;
@@ -521,7 +554,7 @@ impl Parser<'_> {
                     self.close_top();
                     open = false;
                 }
-                self.plain_word(a);
+                self.plain_word(a, i + 1 == rest.len());
                 i += 1;
                 // Only delimiters left (or a macro): they all stay outside.
                 continue;
@@ -531,7 +564,6 @@ impl Parser<'_> {
             if self.spacing_off {
                 n.flags.nospace = true;
             }
-            n.flags.eos = ends_sentence(a);
             self.push(n);
             produced = true;
             i += 1;
@@ -566,12 +598,15 @@ impl Parser<'_> {
     /// Macros whose arguments form one formatted unit.
     fn special_elem(&mut self, name: &str, rest: &[String]) -> usize {
         // Their own arguments end at the first delimiter or callable macro.
-        let mut end = 0;
+        // `.Fn`'s first argument is the function's name, whatever it looks like.
+        let mut end = if name == "Fn" && !rest.is_empty() { 1 } else { 0 };
         while end < rest.len() && !is_delim(&rest[end]) && !is_callable(&rest[end]) {
             end += 1;
         }
         let take = match name {
             "Xr" => end.min(2),
+            "In" | "Lb" => end.min(1),
+            "Rv" | "Ex" => end,
             "Lk" | "Mt" | "Fn" | "St" | "At" | "Bx" | "Bsx" | "Dx" | "Fx" | "Nx" | "Ox" | "Ux" => end,
             _ => end,
         };

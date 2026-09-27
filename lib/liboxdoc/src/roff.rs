@@ -87,8 +87,9 @@ const MAX_DEPTH: usize = 64;
 impl<'a> Roff<'a> {
     pub fn new(diag: &'a mut Diagnostics) -> Roff<'a> {
         let mut strings = HashMap::new();
-        // The predefined strings mandoc and groff both provide.
-        for (k, v) in [("Am", "&"), ("Ba", "|"), ("Ge", "\u{2265}"), ("Le", "\u{2264}"), ("Lq", "\u{201C}"), ("Rq", "\u{201D}"), ("Ne", "\u{2260}"), ("Pi", "\u{03C0}"), ("Pm", "\u{00B1}"), ("Na", "NaN"), ("If", "infinity"), ("Gt", ">"), ("Lt", "<"), ("Ua", "\u{2191}"), ("Da", "\u{2193}"), ("Tm", "\u{2122}"), ("R", "\u{00AE}"), ("S", "\u{E010}"), ("lq", "\u{201C}"), ("rq", "\u{201D}"), ("q", "\""), ("Aq", "'")] {
+        // The predefined strings, exactly mandoc's set (found by probing every one- and
+        // two-letter name).
+        for (k, v) in [("Ai", "ANSI"), ("Am", "&"), ("Ba", "|"), ("Ge", "\u{2265}"), ("Gt", ">"), ("If", "infinity"), ("Le", "\u{2264}"), ("Lq", "\u{201C}"), ("Lt", "<"), ("Na", "NaN"), ("Ne", "\u{2260}"), ("Pi", "pi"), ("Pm", "\u{00B1}"), ("Px", "POSIX"), ("R", "\u{00AE}"), ("Rq", "\u{201D}"), ("Tm", "(Tm)"), ("aa", "\u{00B4}"), ("ga", "`"), ("lp", "("), ("lq", "\u{201C}"), ("q", "\""), ("rp", ")"), ("rq", "\u{201D}"), ("ua", "\u{2191}"), ("va", "\u{2195}")] {
             strings.insert(k.to_string(), v.to_string());
         }
         Roff {
@@ -117,8 +118,26 @@ impl<'a> Roff<'a> {
     /// Processes a whole document.
     pub fn run(mut self, input: &str) -> Vec<Line> {
         let input = input.strip_suffix('\n').unwrap_or(input);
+        let mut pending = String::new();
+        let mut start = 0;
         for (i, line) in input.split('\n').enumerate() {
-            self.line(line, i + 1, 0);
+            // A line ending in an unescaped backslash continues on the next one.
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let trailing = line.len() - line.trim_end_matches('\\').len();
+            if pending.is_empty() {
+                start = i + 1;
+            }
+            if trailing % 2 == 1 && self.ec == Some('\\') {
+                pending.push_str(&line[..line.len() - 1]);
+                continue;
+            }
+            pending.push_str(line);
+            let l = std::mem::take(&mut pending);
+            self.line(&l, start, 0);
+        }
+        if !pending.is_empty() {
+            let l = std::mem::take(&mut pending);
+            self.line(&l, start, 0);
         }
         if self.defining.is_some() {
             self.diag.report(Level::Error, 0, 0, "end of input in macro definition", "");
@@ -190,7 +209,7 @@ impl<'a> Roff<'a> {
                     self.diag.report(Level::Error, lineno, 0, "input stack limit exceeded, infinite loop?", &name);
                     return;
                 }
-                let args = split_args(&self.expand(argstr, lineno), true);
+                let args = self.macro_args(argstr, lineno);
                 for l in body {
                     let l = self.substitute_args(&l, &args);
                     self.frames.push(args.clone());
@@ -200,8 +219,7 @@ impl<'a> Roff<'a> {
                 self.close_conds(raw);
                 return;
             }
-            let expanded = self.expand(argstr, lineno);
-            let args = split_args(&expanded, true);
+            let args = self.macro_args(argstr, lineno);
             self.close_conds(raw);
             self.emit(Line::Macro { name, args, line: lineno, no_break });
             return;
@@ -594,6 +612,61 @@ impl<'a> Roff<'a> {
         if name.contains('\\') { self.expand(name, 0) } else { name.to_string() }
     }
 
+    /// A macro line's arguments, as roff finds them: strings, registers and macro arguments
+    /// are interpolated first (so a string holding spaces yields several arguments), then the
+    /// line is split at unescaped spaces and quotes, then each argument's remaining escapes are
+    /// decoded. Splitting after full decoding would take an escaped quote (`\(dq`) for a real one.
+    fn macro_args(&mut self, argstr: &str, lineno: usize) -> Vec<String> {
+        let raw = self.interpolate(argstr, lineno, 0);
+        let Some(ec) = self.ec else { return split_args(&raw, true) };
+        split_raw(&raw, ec).into_iter().map(|a| self.expand(&a, lineno)).collect()
+    }
+
+    /// Replaces `\*` strings, `\n` registers and `\$` arguments, leaving other escapes as typed.
+    fn interpolate(&mut self, s: &str, lineno: usize, depth: usize) -> String {
+        let Some(ec) = self.ec else { return s.to_string() };
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != ec || i + 1 >= chars.len() {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            match chars[i + 1] {
+                '*' => {
+                    let (name, next) = read_name(&chars, i + 2);
+                    i = next;
+                    let name = name.split_whitespace().next().unwrap_or("").to_string();
+                    match self.strings.get(&name).cloned() {
+                        Some(v) if depth < MAX_DEPTH => out.push_str(&self.interpolate(&v, lineno, depth + 1)),
+                        Some(_) => {}
+                        None => self.diag.report(Level::Warning, lineno, 0, "undefined string, using \"\"", &name),
+                    }
+                }
+                'n' | '$' => {
+                    // Decoded here, with the full escape expander, so that they can't split.
+                    let start = i;
+                    let mut j = i + 2;
+                    if matches!(chars.get(j), Some('+') | Some('-')) && chars[i + 1] == 'n' {
+                        j += 1;
+                    }
+                    let (_, next) = if chars.get(j) == Some(&ec) { (String::new(), (j + 3).min(chars.len())) } else { read_name(&chars, j) };
+                    let esc: String = chars[start..next].iter().collect();
+                    out.push_str(&self.expand_depth(&esc, lineno, depth + 1));
+                    i = next;
+                }
+                c => {
+                    out.push(ec);
+                    out.push(c);
+                    i += 2;
+                }
+            }
+        }
+        out
+    }
+
     /// Decodes escapes in `s` (see the module comment).
     pub fn expand(&mut self, s: &str, lineno: usize) -> String {
         self.expand_depth(s, lineno, 0)
@@ -748,7 +821,22 @@ impl<'a> Roff<'a> {
                         incr = if chars[i] == '+' { 1 } else { -1 };
                         i += 1;
                     }
-                    let (name, next) = read_name(&chars, i);
+                    let (name, next) = if chars.get(i) == Some(&ec) {
+                        // An escape as the name (`\n\n"`): the name is what it interpolates to.
+                        let mut j = i + 1;
+                        let nested: String = if chars.get(j) == Some(&'n') {
+                            j += 1;
+                            let (inner, after) = read_name(&chars, j);
+                            j = after;
+                            self.registers.get(&inner).copied().unwrap_or(0).to_string()
+                        } else {
+                            j += 1;
+                            String::new()
+                        };
+                        (nested, j)
+                    } else {
+                        read_name(&chars, i)
+                    };
                     i = next;
                     let v = self.registers.entry(name.clone()).or_insert(0);
                     *v += incr;
@@ -886,6 +974,52 @@ fn is_end_marker(raw: &str, cc: char, end: &str) -> bool {
 fn split_name(s: &str) -> (&str, &str) {
     let end = s.find([' ', '\t']).unwrap_or(s.len());
     (&s[..end], s[end..].trim_start_matches([' ', '\t']))
+}
+
+/// Splits raw (still escaped) macro arguments at unescaped spaces, honoring double quotes
+/// (`""` inside quotes is one quote). Escapes are copied through for decoding later.
+fn split_raw(s: &str, ec: char) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut args = Vec::new();
+    let mut i = 0;
+    loop {
+        while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let mut arg = String::new();
+        let quoted = chars[i] == '"';
+        if quoted {
+            i += 1;
+        }
+        while i < chars.len() {
+            let c = chars[i];
+            if c == ec && i + 1 < chars.len() {
+                arg.push(c);
+                arg.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if quoted && c == '"' {
+                if chars.get(i + 1) == Some(&'"') {
+                    arg.push('"');
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                break;
+            }
+            if !quoted && (c == ' ' || c == '\t') {
+                break;
+            }
+            arg.push(c);
+            i += 1;
+        }
+        args.push(arg);
+    }
+    args
 }
 
 /// Splits macro arguments at spaces, honoring double quotes (`""` inside quotes is one quote).

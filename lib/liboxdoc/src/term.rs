@@ -51,6 +51,10 @@ struct Word {
     cells: Vec<Cell>,
     /// Spaces before this word when it isn't first on a line.
     space: usize,
+    /// The line may not break before this word (inside a kept group).
+    glue: bool,
+    /// The word may break after a hyphen (text lines only, as in mandoc).
+    hyph: bool,
 }
 
 pub struct Term {
@@ -70,10 +74,20 @@ pub struct Term {
     line_open: bool,
     /// No word has been placed on the open line yet: the next one gets no space before it.
     fresh: bool,
+    /// Something (a word, or a tag's padding) has been placed on the open line, so ending it
+    /// outputs a line.
+    dirty: bool,
     /// The next word attaches to the previous one.
     nospace: bool,
     /// The previous word ended a sentence.
     eos: bool,
+    /// The exact spacing before the next word, overriding the usual one or two.
+    space: Option<usize>,
+    /// Inside a kept group (`.Bk -words`, a SYNOPSIS enclosure): no breaks between words.
+    keep: usize,
+    keep_started: bool,
+    /// The next word may break at a hyphen.
+    hyph_next: bool,
     /// The output so far ends with a blank line (or nothing has been output), so vertical space
     /// isn't doubled.
     at_blank: bool,
@@ -95,8 +109,13 @@ impl Term {
             line: Vec::new(),
             line_open: false,
             fresh: false,
+            dirty: false,
             nospace: false,
             eos: false,
+            space: None,
+            keep: 0,
+            keep_started: false,
+            hyph_next: false,
             at_blank: true,
             no_vspace: false,
         }
@@ -117,6 +136,28 @@ impl Term {
     pub fn set_rmargin(&mut self, rmargin: usize) {
         self.layout();
         self.rmargin = rmargin;
+    }
+
+    /// Starts a group of words the line may not break inside.
+    pub fn keep_begin(&mut self) {
+        self.keep += 1;
+        if self.keep == 1 {
+            self.keep_started = false;
+        }
+    }
+
+    pub fn keep_end(&mut self) {
+        self.keep = self.keep.saturating_sub(1);
+    }
+
+    /// Marks the next word as breakable after a hyphen.
+    pub fn hyphenate_next(&mut self) {
+        self.hyph_next = true;
+    }
+
+    /// Sets the spacing before the next word (spaces typed between words on one input line).
+    pub fn set_space(&mut self, n: usize) {
+        self.space = Some(n);
     }
 
     /// Suppresses the space before the next word.
@@ -174,14 +215,22 @@ impl Term {
         }
         let space = if self.nospace {
             0
+        } else if let Some(n) = self.space {
+            n
         } else if self.eos {
             2
         } else {
             1
         };
         self.nospace = false;
+        self.space = None;
         self.eos = eos;
-        self.words.push(Word { cells, space });
+        let glue = self.keep > 0 && self.keep_started;
+        if self.keep > 0 {
+            self.keep_started = true;
+        }
+        let hyph = std::mem::take(&mut self.hyph_next);
+        self.words.push(Word { cells, space, glue, hyph });
     }
 
     fn push_char(&self, cells: &mut Vec<Cell>, c: char, style: Style) {
@@ -206,7 +255,13 @@ impl Term {
     pub fn flush(&mut self) {
         self.layout();
         if self.line_open {
-            self.emit_line();
+            if self.dirty {
+                self.emit_line();
+            } else {
+                // Opened but never written to: no output line.
+                self.line_open = false;
+                self.line.clear();
+            }
         }
     }
 
@@ -229,11 +284,23 @@ impl Term {
             self.line.push(Cell { ch: ' ', style: Style::None });
         }
         self.fresh = true;
+        self.dirty = true;
+    }
+
+    /// Starts a line at column `col` rather than the left margin; lines it wraps onto start at
+    /// the margin (a hanging indent when `col` is less than it).
+    pub fn begin_line_at(&mut self, col: usize) {
+        self.flush();
+        self.line_open = true;
+        self.fresh = true;
+        self.dirty = false;
+        self.line = vec![Cell { ch: ' ', style: Style::None }; col];
     }
 
     fn open_line(&mut self) {
         self.line_open = true;
         self.fresh = true;
+        self.dirty = false;
         self.line = vec![Cell { ch: ' ', style: Style::None }; self.offset];
     }
 
@@ -264,51 +331,70 @@ impl Term {
         let words = std::mem::take(&mut self.words);
         let mut i = 0;
         while i < words.len() {
-            // Words joined without a space break together.
+            // Words joined without a space are placed, and broken, as one.
             let mut j = i + 1;
-            while j < words.len() && words[j].space == 0 {
+            while j < words.len() && (words[j].space == 0 || words[j].glue) {
                 j += 1;
             }
-            if !self.line_open {
-                self.open_line();
-            }
-            let group_len: usize = words[i..j].iter().map(|w| visible_len(&w.cells)).sum();
-            let col = visible_len(&self.line);
-            let gap = if self.fresh { 0 } else { words[i].space };
-            if !self.nofill && col + gap + group_len > self.rmargin {
-                // A single word may break after a hyphen between letters, as mandoc does.
-                if j == i + 1
-                    && let Some(cut) = hyphen_break(&words[i].cells, self.rmargin.saturating_sub(col + gap))
-                {
-                    for _ in 0..gap {
-                        self.line.push(Cell { ch: ' ', style: Style::None });
+            let mut cells: Vec<Cell> = Vec::new();
+            for (k, w) in words[i..j].iter().enumerate() {
+                if k > 0 {
+                    for _ in 0..w.space {
+                        cells.push(Cell { ch: ' ', style: Style::None });
                     }
-                    self.push_cells(&words[i].cells[..cut]);
-                    self.emit_line();
-                    self.open_line();
-                    self.push_cells(&words[i].cells[cut..]);
-                    self.fresh = false;
-                    i = j;
-                    continue;
                 }
+                cells.extend(w.cells.iter().copied());
             }
-            if !self.nofill && !self.fresh && col + gap + group_len > self.rmargin {
-                self.emit_line();
-                self.open_line();
-            } else {
-                for _ in 0..gap {
-                    self.line.push(Cell { ch: ' ', style: Style::None });
-                }
-            }
-            for w in &words[i..j] {
-                self.push_cells(&w.cells);
-            }
-            self.fresh = false;
+            let hyph = j == i + 1 && words[i].hyph;
+            self.place(cells, words[i].space, hyph);
             i = j;
         }
     }
 
+    /// Places one unbreakable run of cells, wrapping first if it doesn't fit, and breaking it
+    /// after a hyphen when even a fresh line is too short.
+    fn place(&mut self, mut cells: Vec<Cell>, space: usize, hyph: bool) {
+        loop {
+            if !self.line_open {
+                self.open_line();
+            }
+            let len = visible_len(&cells);
+            let col = visible_len(&self.line);
+            let gap = if self.fresh { 0 } else { space };
+            if self.nofill || col + gap + len <= self.rmargin {
+                self.pad(gap);
+                self.push_cells(&cells);
+                self.fresh = false;
+                return;
+            }
+            if let Some(cut) = hyph.then(|| hyphen_break(&cells, self.rmargin.saturating_sub(col + gap))).flatten() {
+                self.pad(gap);
+                self.push_cells(&cells[..cut]);
+                cells.drain(..cut);
+                self.emit_line();
+                self.open_line();
+                continue;
+            }
+            if !self.fresh {
+                self.emit_line();
+                self.open_line();
+                continue;
+            }
+            // Too long for any line: it overflows.
+            self.push_cells(&cells);
+            self.fresh = false;
+            return;
+        }
+    }
+
+    fn pad(&mut self, n: usize) {
+        for _ in 0..n {
+            self.line.push(Cell { ch: ' ', style: Style::None });
+        }
+    }
+
     fn push_cells(&mut self, cells: &[Cell]) {
+        self.dirty = true;
         for c in cells {
             if c.ch == '\t' {
                 // Tab stops every 8 columns from the left margin.
@@ -389,19 +475,27 @@ impl Term {
         let (ll, cl, rl) = (left.chars().count(), center.chars().count(), right.chars().count());
         let mut s = String::from(left);
         let mut col = ll;
-        let cstart = ((w + 1).saturating_sub(cl) / 2).max(col + 1);
-        while col < cstart {
-            s.push(' ');
-            col += 1;
+        let pad = |s: &mut String, col: &mut usize, to: usize| {
+            while *col < to {
+                s.push(' ');
+                *col += 1;
+            }
+        };
+        if ll + cl + rl + 2 < w {
+            // All three fit: the center part centered, the right part flush right.
+            let cstart = ((w + 1).saturating_sub(cl) / 2).max(col + 1);
+            pad(&mut s, &mut col, cstart);
+            s.push_str(center);
+            col += cl;
+            let rstart = w.saturating_sub(rl).max(col + 1);
+            pad(&mut s, &mut col, rstart);
+            s.push_str(right);
+        } else if ll + cl + 1 <= w {
+            // No room for the right part: the center part goes flush right.
+            pad(&mut s, &mut col, w - cl);
+            s.push_str(center);
         }
-        s.push_str(center);
-        col += cl;
-        let rstart = w.saturating_sub(rl).max(col + 1);
-        while col < rstart {
-            s.push(' ');
-            col += 1;
-        }
-        s.push_str(right);
+        let s = s.trim_end().to_string();
         let s = if self.encoding == Encoding::Ascii { s.chars().map(|c| if c.is_ascii() { c.to_string() } else { ascii_for(c).to_string() }).collect() } else { s };
         self.out.push_str(&s);
         self.out.push('\n');
@@ -419,7 +513,8 @@ impl Term {
 fn hyphen_break(cells: &[Cell], room: usize) -> Option<usize> {
     let mut best = None;
     for k in 1..cells.len().saturating_sub(1) {
-        if cells[k].ch == '-' && cells[k - 1].ch.is_alphabetic() && cells[k + 1].ch.is_alphabetic() && visible_len(&cells[..=k]) <= room {
+        let plain = cells[k - 1].style == Style::None && cells[k].style == Style::None && cells[k + 1].style == Style::None;
+        if plain && cells[k].ch == '-' && cells[k - 1].ch.is_alphabetic() && cells[k + 1].ch.is_alphabetic() && visible_len(&cells[..=k]) <= room {
             best = Some(k + 1);
         }
     }

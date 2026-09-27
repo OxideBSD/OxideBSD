@@ -5,6 +5,7 @@
 
 pub mod chars;
 pub mod diag;
+pub mod libraries;
 pub mod mdoc;
 pub mod mdoc_term;
 pub mod roff;
@@ -92,11 +93,54 @@ pub fn default_os() -> String {
         .unwrap_or_else(|| "OxideBSD".to_string())
 }
 
-/// `.Dd`'s date as printed: `$Mdocdate: ... $` unwrapped, anything else as given.
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// `.Dd`'s date as printed, following mandoc: `Month D, YYYY` (the month in full or its first
+/// three letters) and `$Mdocdate: Month D YYYY $` are printed as `Month D, YYYY`; a bare
+/// `$Mdocdate$` is today; anything else is printed as given.
 pub fn format_date(date: &str) -> String {
     let d = date.trim();
-    if let Some(inner) = d.strip_prefix("$Mdocdate:").and_then(|r| r.strip_suffix('$')) {
-        return inner.trim().to_string();
+    if let Some(inner) = d.strip_prefix("$Mdocdate").map(|r| r.trim_start_matches(':').trim()) {
+        let inner = inner.trim_end_matches('$').trim();
+        if inner.is_empty() {
+            return today();
+        }
+        return parse_date(inner, false).unwrap_or_else(|| inner.to_string());
     }
-    d.to_string()
+    parse_date(d, true).unwrap_or_else(|| d.to_string())
+}
+
+/// `Month D, YYYY` (with the comma) or `Month D YYYY` (without) in canonical form.
+fn parse_date(s: &str, comma: bool) -> Option<String> {
+    let mut it = s.split_whitespace();
+    let month = it.next()?;
+    let day = it.next()?;
+    let year = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+    let day = if comma { day.strip_suffix(',')? } else { day };
+    let m = MONTHS.iter().find(|m| month == **m || (month.len() == 3 && m.starts_with(month)))?;
+    let day: u32 = day.parse().ok().filter(|d| (1..=31).contains(d))?;
+    if year.len() != 4 || !year.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{m} {day}, {year}"))
+}
+
+/// Today's date, `Month D, YYYY`, in UTC.
+fn today() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // Days since the epoch to a civil date (Howard Hinnant's algorithm).
+    let z = (secs / 86400) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{} {d}, {y}", MONTHS[(m - 1) as usize])
 }

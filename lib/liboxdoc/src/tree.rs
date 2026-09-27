@@ -99,6 +99,9 @@ pub struct Meta {
     pub volume: String,
     pub date: String,
     pub os: String,
+    /// Whether the page has an `.Os` line at all: an empty one means this system's name, a
+    /// missing one means none.
+    pub os_given: bool,
     /// `.Nm`'s first argument, the name later bare `.Nm` calls print.
     pub name: String,
 }
