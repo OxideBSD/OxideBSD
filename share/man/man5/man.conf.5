@@ -1,0 +1,52 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MAN.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm man.conf
+.Nd manual directories
+.Sh DESCRIPTION
+The file
+.Pa /etc/man.conf
+tells
+.Xr man 1
+where to look for manual pages.
+Each line is a directive and its argument; empty lines and lines starting
+with
+.Ql #
+are ignored.
+.Bl -tag -width Ds
+.It Ic manpath Ar directory
+Search
+.Ar directory ,
+which holds
+.Pa man1 ,
+.Pa man2
+and so on.
+Directories are searched in the order given.
+.It Ic output Ar option Op Ar value
+Accepted for compatibility with
+.Xr mandoc 1 ;
+ignored.
+.El
+.Pp
+Without a
+.Ic manpath
+line the directories are
+.Pa /usr/share/man
+and
+.Pa /usr/local/share/man .
+.Sh FILES
+.Bl -tag -width /etc/man.conf -compact
+.It Pa /etc/man.conf
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+manpath /usr/share/man
+manpath /usr/local/share/man
+.Ed
+.Sh SEE ALSO
+.Xr man 1
+.Sh HISTORY
+The file format is that of
+.Ox 5.8 .

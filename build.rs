@@ -357,6 +357,16 @@ fn main() {
     );
     let pwd_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
+
+    // The manual system (MAN.md in OxideBSD-doc): oxdoc(1), man(1) and more(1) over liboxdoc,
+    // replacing BusyBox's man, more and less.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/liboxdoc/src").display()
+    );
+    let oxdoc_elf_path = build_std_oxidebsd_userland_crate("usr.bin/oxdoc", "OXFS_OXDOC_ELF_PATH", &musl_sysroot);
+    let man_elf_path = build_std_oxidebsd_userland_crate("usr.bin/man", "OXFS_MAN_ELF_PATH", &musl_sysroot);
+    let more_elf_path = build_std_oxidebsd_userland_crate("usr.bin/more", "OXFS_MORE_ELF_PATH", &musl_sysroot);
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libttyent/src").display()
@@ -552,6 +562,9 @@ fn main() {
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
         ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),
         ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
+        ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
+        ("OXFS_MAN_ELF_PATH", man_elf_path.to_str().unwrap()),
+        ("OXFS_MORE_ELF_PATH", more_elf_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),

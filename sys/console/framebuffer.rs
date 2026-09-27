@@ -424,7 +424,7 @@ impl RedrawTarget {
 /// is a runtime value now, not a `const`, so this can't be sized to it directly; only the real
 /// active sub-region is ever actually touched, see `redraw()` below). `static mut`, not `static`,
 /// for the same reason `console::vga::SHADOW_BUFFER` is (see that static's own doc comment).
-static mut PREV_CELLS: [[Option<(u8, u8, u8)>; crate::console::vga::MAX_WIDTH];
+static mut PREV_CELLS: [[Option<(u8, u8, u8, bool)>; crate::console::vga::MAX_WIDTH];
     crate::console::vga::MAX_HEIGHT] =
     [[None; crate::console::vga::MAX_WIDTH]; crate::console::vga::MAX_HEIGHT];
 
@@ -488,7 +488,7 @@ pub fn redraw() {
     let prev_cursor = unsafe { (&raw const PREV_CURSOR).read() };
 
     crate::console::vga::for_each_cell(|row, col, cell| {
-        let key = (cell.ascii, cell.fg, cell.bg);
+        let key = (cell.ascii, cell.fg, cell.bg, cell.underline);
         // SAFETY: see above. `&raw mut` + deref, not a direct `&mut PREV_CELLS[...]`, is required
         // -- taking a `&mut` to (any part of) a mutable static directly is `deny`-by-default under
         // edition 2024 (`static_mut_refs`).
@@ -510,6 +510,14 @@ pub fn redraw() {
                 fg,
                 bg,
             );
+            if cell.underline {
+                // SGR 4: one scanline in the text color, just under the baseline.
+                let x0 = target.x_offset + col * GLYPH_WIDTH;
+                let y = target.y_offset + (row + 1) * GLYPH_HEIGHT - 3;
+                for gx in 0..GLYPH_WIDTH {
+                    target.put_pixel(x0 + gx, y, fg);
+                }
+            }
             if cursor_visible && (row, col) == (cursor_row, cursor_col) {
                 // A real two-scanline underline (the classic BIOS text-mode default shape -- see
                 // `vga::CURSOR_SHAPE_START`/`_END`'s own comment for the real hardware equivalent

@@ -1,0 +1,336 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MDOC 7
+.Os OxideBSD
+.Sh NAME
+.Nm mdoc
+.Nd semantic markup language for manual pages
+.Sh DESCRIPTION
+The
+.Nm
+language describes a manual page by what its parts mean \(em a flag, an
+argument, a file name, a cross-reference \(em rather than by how they look.
+It is written as
+.Xr roff 7
+input: text lines, and macro lines starting with a dot and a macro name.
+OxideBSD's own manual pages are written in it, and
+.Xr oxdoc 1
+formats it.
+.Pp
+A macro's arguments are separated by spaces; an argument containing spaces
+is quoted with double quotes, and a double quote inside one is written
+twice.
+.Bd -literal -offset indent
+\&.Sh DESCRIPTION
+The
+\&.Nm
+utility reads
+\&.Ar file
+and writes
+\&.Qq results .
+.Ed
+.Pp
+Text lines are filled and adjusted into paragraphs.
+A sentence should end at the end of an input line, so that it can be
+followed by two spaces; a new sentence starts on a new line.
+Blank lines should not be used; paragraphs are separated with
+.Ic \&Pp .
+.Sh MANUAL STRUCTURE
+A page starts with a prologue of three macros and continues with sections,
+in this order where present:
+.Bd -literal -offset indent
+\&.Dd Month day, year
+\&.Dt TITLE section [architecture]
+\&.Os [system [version]]
+\&.Sh NAME
+\&.Nm name , name ...
+\&.Nd one-line description
+\&.Sh LIBRARY            (sections 2, 3, 9)
+\&.Sh SYNOPSIS
+\&.Sh DESCRIPTION
+\&.Sh CONTEXT            (section 9)
+\&.Sh IMPLEMENTATION NOTES
+\&.Sh RETURN VALUES      (sections 2, 3, 9)
+\&.Sh ENVIRONMENT
+\&.Sh FILES
+\&.Sh EXIT STATUS        (sections 1, 6, 8)
+\&.Sh EXAMPLES
+\&.Sh DIAGNOSTICS
+\&.Sh ERRORS             (sections 2, 3, 4, 9)
+\&.Sh SEE ALSO
+\&.Sh STANDARDS
+\&.Sh HISTORY
+\&.Sh AUTHORS
+\&.Sh CAVEATS
+\&.Sh BUGS
+\&.Sh SECURITY CONSIDERATIONS
+.Ed
+.Pp
+The sections are:
+.Bl -tag -width Ds -compact
+.It 1
+General commands.
+.It 2
+System calls.
+.It 3
+Library functions.
+.It 4
+Device drivers.
+.It 5
+File formats.
+.It 6
+Games.
+.It 7
+Miscellaneous information.
+.It 8
+System administration.
+.It 9
+Kernel interfaces.
+.El
+.Sh MACRO OVERVIEW
+.Ss Document structure
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Dd Ta date: Ar month day , year
+.It Ic \&Dt Ta title: Ar TITLE section Op Ar arch
+.It Ic \&Os Ta operating system: Op Ar system Op Ar version
+.It Ic \&Sh Ta section heading
+.It Ic \&Ss Ta subsection heading
+.It Ic \&Sx Ta reference to a section or subsection
+.It Ic \&Pp Ta paragraph break
+.It Ic \&Nm Ta the name of the page's subject
+.It Ic \&Nd Ta one-line description, in NAME
+.El
+.Ss Displays and lists
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Bd , \&Ed Ta display block:
+.Fl literal ,
+.Fl filled ,
+.Fl ragged ,
+.Fl unfilled ,
+.Fl centered ;
+.Fl offset Ar width ;
+.Fl compact
+.It Ic \&D1 Ta indented display of one line
+.It Ic \&Dl Ta indented literal display of one line
+.It Ic \&Bl , \&El Ta list block:
+.Fl tag ,
+.Fl hang ,
+.Fl ohang ,
+.Fl inset ,
+.Fl diag ,
+.Fl bullet ,
+.Fl dash ,
+.Fl enum ,
+.Fl item ,
+.Fl column ;
+.Fl width Ar width ;
+.Fl offset Ar width ;
+.Fl compact
+.It Ic \&It Ta list item
+.It Ic \&Ta Ta column separator in a column list
+.It Ic \&Bk , \&Ek Ta keep the words of each line together
+.It Ic \&Bf , \&Ef Ta font block:
+.Fl emphasis ,
+.Fl literal ,
+.Fl symbolic
+.El
+.Ss Commands and options
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Fl Ta a command-line flag; each argument gets a dash
+.It Ic \&Ar Ta a command-line argument; default
+.Ar file ...
+.It Ic \&Cm Ta a command modifier or keyword
+.It Ic \&Ic Ta an internal or interactive command
+.It Ic \&Op Ta an optional part, in brackets
+.It Ic \&Oo , \&Oc Ta an optional part spanning lines
+.It Ic \&Ev Ta an environment variable
+.It Ic \&Pa Ta a file or directory name
+.It Ic \&Ex Ta the standard exit status text:
+.Fl std Op Ar utility ...
+.El
+.Ss Programming interfaces
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Lb Ta a function library
+.It Ic \&In Ta an include file
+.It Ic \&Fd Ta a preprocessor directive
+.It Ic \&Ft Ta a function's type
+.It Ic \&Fn Ta a function:
+.Ar name Op Ar argument ...
+.It Ic \&Fo , \&Fc Ta a function over several lines
+.It Ic \&Fa Ta a function argument
+.It Ic \&Vt Ta a variable type
+.It Ic \&Va Ta a variable name
+.It Ic \&Dv Ta a defined constant
+.It Ic \&Er Ta an error constant
+.It Ic \&Rv Ta the standard return value text:
+.Fl std Op Ar function ...
+.El
+.Ss Text and quotation
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Em Ta emphasis
+.It Ic \&Sy Ta strong emphasis
+.It Ic \&Li Ta literal text
+.It Ic \&No Ta normal text inside another macro
+.It Ic \&Ns Ta no space before the next word
+.It Ic \&Ap Ta an apostrophe with no space around it
+.It Ic \&Pf Ta a prefix with no space after it
+.It Ic \&Dq , \&Do , \&Dc Ta double quotes
+.It Ic \&Sq , \&So , \&Sc Ta single quotes
+.It Ic \&Qq , \&Qo , \&Qc Ta typewriter double quotes
+.It Ic \&Ql Ta quoted literal
+.It Ic \&Pq , \&Po , \&Pc Ta parentheses
+.It Ic \&Bq , \&Bo , \&Bc Ta brackets
+.It Ic "Brq, Bro, Brc" Ta braces
+.It Ic \&Aq , \&Ao , \&Ac Ta angle brackets
+.It Ic \&Eo , \&Ec Ta enclosure with any characters
+.It Ic \&Xo , \&Xc Ta extend a macro's arguments over lines
+.El
+.Ss References and authors
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Xr Ta a cross-reference:
+.Ar name section
+.It Ic \&Lk Ta a hyperlink:
+.Ar url Op Ar text
+.It Ic \&Mt Ta an e-mail address
+.It Ic \&An Ta an author's name;
+.Fl split ,
+.Fl nosplit
+.It Ic \&Rs , \&Re Ta a bibliographic reference, with the fields
+.Ic \&%A
+(author),
+.Ic \&%B
+(book),
+.Ic \&%C
+(city),
+.Ic \&%D
+(date),
+.Ic \&%I
+(issuer),
+.Ic \&%J
+(journal),
+.Ic \&%N
+(number),
+.Ic \&%O
+(other),
+.Ic \&%P
+(pages),
+.Ic \&%Q
+(institution),
+.Ic \&%R
+(report),
+.Ic \&%T
+(title),
+.Ic \&%U
+(URL) and
+.Ic \&%V
+(volume)
+.It Ic \&St Ta a standard, such as
+.Fl p1003.1-2008
+.It Ic \&At , \&Bx , \&Bsx , \&Dx , \&Fx , \&Nx , \&Ox , \&Ux Ta
+AT&T, BSD and other systems, with an optional version
+.El
+.Ss Controlling spacing
+.Bl -column "Brq, Bro, Brc" description -compact
+.It Ic \&Sm Ta spacing mode:
+.Cm on
+or
+.Cm off
+.El
+.Sh MACRO SYNTAX
+Macros belong to one of these classes:
+.Bl -tag -width Ds
+.It Block, full-explicit
+Enclose everything up to a closing macro:
+.Ic \&Bd ,
+.Ic \&Bf ,
+.Ic \&Bk ,
+.Ic \&Bl ,
+.Ic \&Rs .
+.It Block, full-implicit
+Enclose everything up to the next macro of the same or a higher level:
+.Ic \&Sh ,
+.Ic \&Ss ,
+.Ic \&It ,
+.Ic \&Nd ,
+and
+.Ic \&Nm
+at the start of a line in SYNOPSIS.
+.It Block, partial-explicit
+Enclose the rest of the line and later lines up to a closing macro, which
+may itself be on the middle of a line:
+.Ic \&Oo ,
+.Ic \&Do ,
+.Ic \&Xo
+and the other opening macros above.
+.It Block, partial-implicit
+Enclose the rest of their line:
+.Ic \&Op ,
+.Ic \&Dq ,
+.Ic \&Sq
+and the other quoting macros, and
+.Ic \&D1 ,
+.Ic \&Dl .
+.It In-line
+Format their own arguments:
+.Ic \&Fl ,
+.Ic \&Ar ,
+.Ic \&Pa
+and most others.
+.El
+.Pp
+Most macros are
+.Em parsed :
+an argument that is the name of a
+.Em callable
+macro starts that macro, so that
+.Ql .Op Fl a Ar file
+gives
+.Op Fl a Ar file .
+Prefix a word with
+.Ql \e&
+to use it literally.
+.Sh DELIMITERS
+The punctuation characters
+.Ql \&. ,
+.Ql \&, ,
+.Ql \&: ,
+.Ql \&; ,
+.Ql \&) ,
+.Ql \&] ,
+.Ql \&?
+and
+.Ql \&! ,
+given as separate arguments, close a macro: they are printed without a
+space before them and outside its font.
+.Ql \&(
+and
+.Ql \&[
+open: they are printed before the macro, without a space after them.
+.Ql \&|
+separates, with spaces on both sides.
+Written as
+.Ql \e&.
+they are ordinary words.
+.Pp
+A closing
+.Ql \&. ,
+.Ql \&?
+or
+.Ql \&!
+at the end of a macro line ends a sentence, like one at the end of a text
+line.
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr oxdoc 1 ,
+.Xr roff 7
+.Sh HISTORY
+The
+.Nm
+language first appeared in
+.Bx 4.4 .
+.Sh AUTHORS
+The
+.Nm
+language was written by
+.An Cynthia Livingston .
+This manual was written for OxideBSD.

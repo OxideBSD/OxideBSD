@@ -1,0 +1,278 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt ROFF 7
+.Os OxideBSD
+.Sh NAME
+.Nm roff
+.Nd roff language reference for manual pages
+.Sh DESCRIPTION
+The
+.Nm
+language is the input format underneath the
+.Xr mdoc 7
+and
+.Xr man 7
+macro languages.
+This page describes the part of it that
+.Xr oxdoc 1
+implements: the requests and escape sequences that manual pages use.
+Page layout, diversions, traps and environments are not implemented, as in
+the other BSDs' formatter.
+.Ss Input lines
+An input line is either a text line or a control line.
+A control line starts with the control character, normally
+.Ql \&. ,
+or the no-break control character
+.Ql \(aq ,
+followed by optional spaces and tabs, a request or macro name, and its
+arguments.
+Any other line is a text line.
+.Pp
+Arguments are separated by spaces.
+An argument that contains spaces is enclosed in double quotes; inside
+quotes, two double quotes stand for one.
+.Pp
+A line ending with an odd number of backslashes continues on the next input
+line.
+A control line consisting of the control character alone is ignored.
+.Ss Comments
+.Ql \e\(dq
+starts a comment that runs to the end of the line.
+A line consisting of the control character and a comment is ignored
+entirely.
+.Ql \e#
+is a comment that also removes the newline.
+.Sh REQUESTS
+.Bl -tag -width Ds
+.It Ic \&ds Ar name Op Ar string
+Define a string.
+A leading double quote in
+.Ar string
+is removed, so that it can start with spaces.
+.It Ic \&as Ar name Op Ar string
+Append to a string.
+.It Ic \&nr Ar name Oo \(pl|\- Oc Ns Ar number
+Set, increase or decrease a number register.
+.It Ic \&rr Ar name ...
+Remove number registers.
+.It Ic \&rm Ar name ...
+Remove strings or macros.
+.It Ic \&rn Ar old new
+Rename a string or macro.
+.It Ic \&als Ar new old
+Make
+.Ar new
+another name for the macro
+.Ar old .
+.It Ic \&de Ar name Op Ar end
+Define a macro, up to a line holding the control character and
+.Ar end ,
+by default
+.Ql \&.. .
+In the definition,
+.Ql \e\e
+stands for one backslash, so that
+.Ql \e\e$1
+becomes the first argument when the macro is called.
+.It Ic \&am Ar name Op Ar end
+Append to a macro.
+.It Ic \&ig Op Ar end
+Ignore input up to a line holding the control character and
+.Ar end .
+.It Ic \&if Ar condition body
+Process
+.Ar body
+if
+.Ar condition
+holds.
+.It Ic \&ie Ar condition body
+The same, remembering the result for the next
+.Ic \&el .
+.It Ic \&el Ar body
+Process
+.Ar body
+if the last
+.Ic \&ie
+condition did not hold.
+.It Ic \&so Ar file
+Include
+.Ar file ,
+relative to the root of the manual tree.
+.It Ic \&tr Ar pairs
+Translate each first character of a pair to the second.
+.It Ic \&cc Ar c
+Use
+.Ar c
+as the control character.
+.It Ic \&ec Op Ar c
+Use
+.Ar c
+as the escape character, by default a backslash.
+.It Ic \&eo
+Turn escape sequences off.
+.It Ic \&nop Ar text
+Treat
+.Ar text
+as a text line.
+.El
+.Pp
+A
+.Ar body
+is the rest of the line, or, starting with
+.Ql \e{ ,
+all lines up to the matching
+.Ql \e} .
+.Pp
+A
+.Ar condition
+is one of:
+.Bl -tag -width Ds -compact
+.It Cm n , o
+true (terminal output, odd page);
+.It Cm t , e , v
+false;
+.It Cm d Ar name
+a string or macro
+.Ar name
+is defined;
+.It Cm r Ar name
+a number register
+.Ar name
+is defined;
+.It Cm c Ar char
+true;
+.It Ar \(aqa\(aqb\(aq
+the strings
+.Ar a
+and
+.Ar b ,
+after interpolation, are equal;
+.It Ar expression
+a numeric expression is greater than zero.
+.El
+Any condition may be negated with
+.Ql \&! .
+Numeric expressions use
+.Ql \(pl ,
+.Ql \- ,
+.Ql * ,
+.Ql / ,
+.Ql % ,
+.Ql < ,
+.Ql > ,
+.Ql <= ,
+.Ql >= ,
+.Ql = ,
+.Ql == ,
+.Ql <> ,
+.Ql &
+and
+.Ql \&:
+evaluated from left to right, and parentheses.
+.Pp
+Requests that only affect typesetting \(em hyphenation, adjustment, page
+size, fonts and the like \(em are accepted and have no effect.
+.Sh ESCAPE SEQUENCES
+.Bl -tag -width Ds
+.It Ic \e\e , \ee
+A backslash.
+.It Ic \e\-
+A minus sign.
+.It Ic \e&
+A zero-width character.
+It stops a word from being taken as a macro name or a delimiter, and a
+period before it from ending a sentence.
+.It Ic \e\  , \e~ , \e0
+A space that does not break the line.
+.It Ic \e| , \e^ , \e% , \e:
+Nothing on a terminal.
+.It Ic \ec
+At the end of a text line, join the next line without a space.
+.It Ic \e(xx , \e[name] , \eC\(aqname\(aq
+The special character
+.Ar name ,
+such as
+.Ql \e(em
+for an em dash; see
+.Xr mandoc_char 7
+on other systems for the list.
+.Ic \e[u Ns Ar XXXX Ns Ic \&]
+is the Unicode character U+XXXX.
+.It Ic \eN\(aq Ns Ar number Ns Ic \(aq
+The character with code
+.Ar number .
+.It Ic \ef Ns Ar font
+Change the font:
+.Cm R
+(roman),
+.Cm B
+(bold),
+.Cm I
+(italic, shown underlined),
+.Cm BI ,
+.Cm CW ,
+or
+.Cm P ,
+the previous font.
+Names longer than one character are written
+.Ic \ef( Ns Ar xx
+or
+.Ic \ef[ Ns Ar name Ns Ic \&] .
+.It Ic \e* Ns Ar c , \e*( Ns Ar xx , \e*[ Ns Ar name Ns Ic \&]
+Interpolate a string.
+.It Ic \en Ns Ar c , \en( Ns Ar xx , \en[ Ns Ar name Ns Ic \&]
+Interpolate a number register;
+.Ic \en+ Ns Ar c
+and
+.Ic \en\- Ns Ar c
+increment or decrement it first.
+.It Ic \e$ Ns Ar n , \e$* , \e$@
+Inside a macro: its
+.Ar n Ns th
+argument, or all of them, the second form quoted.
+.It Ic \es Ns Ar size , \em Ns Ar color , \eh\(aq Ns Ar width Ns Ic \(aq
+Size, color and motion; on a terminal, horizontal motion prints spaces and
+the others nothing.
+.It Ic \ew\(aq Ns Ar text Ns Ic \(aq
+The width of
+.Ar text .
+.El
+.Pp
+An escape sequence not listed prints its character.
+.Sh PREDEFINED STRINGS
+.Bl -column "Name" "Value" -compact
+.It Sy Name Ta Sy Value
+.It Li Ai Ta ANSI
+.It Li Am Ta &
+.It Li Ba Ta |
+.It Li Ge Ta \(>=
+.It Li Gt Ta >
+.It Li If Ta infinity
+.It Li Le Ta \(<=
+.It Li Lq , lq Ta \(lq
+.It Li Lt Ta <
+.It Li Na Ta NaN
+.It Li Ne Ta \(!=
+.It Li Pi Ta pi
+.It Li Pm Ta \(+-
+.It Li Px Ta POSIX
+.It Li R Ta \(rg
+.It Li Rq , rq Ta \(rq
+.It Li Tm Ta (Tm)
+.It Li aa Ta \(aa
+.It Li ga Ta \(ga
+.It Li lp , rp Ta ( and )
+.It Li q Ta \(dq
+.It Li ua Ta \(ua
+.It Li va Ta \(va
+.El
+.Sh SEE ALSO
+.Xr oxdoc 1 ,
+.Xr mdoc 7
+.Sh HISTORY
+The
+.Nm
+typesetting language appeared in
+.At v1 ,
+descended from RUNOFF on CTSS.
+This manual was written for OxideBSD.

@@ -1,0 +1,130 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MAN 1
+.Os OxideBSD
+.Sh NAME
+.Nm man
+.Nd display manual pages
+.Sh SYNOPSIS
+.Nm
+.Op Fl acfhklw
+.Op Fl C Ar file
+.Op Fl M Ar path
+.Op Fl m Ar path
+.Op Fl S Ar subsection
+.Op Oo Fl s Oc Ar section
+.Ar name ...
+.Sh DESCRIPTION
+The
+.Nm
+utility finds the manual page for each
+.Ar name ,
+formats it with
+.Xr oxdoc 1
+and shows it through a pager.
+.Pp
+Without a
+.Ar section ,
+the sections are searched in the order 1, 8, 6, 2, 3, 5, 7, 4, 9, and the
+first page found is shown.
+A
+.Ar section
+may also be given as the first argument when a name follows it, as in
+.Ql man 8 init .
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl a
+Show every matching page, not only the first.
+.It Fl C Ar file
+Read
+.Ar file
+instead of
+.Pa /etc/man.conf .
+.It Fl c
+Do not use a pager.
+.It Fl f
+The same as
+.Xr whatis 1 .
+.It Fl h
+Show only the SYNOPSIS section.
+.It Fl k
+The same as
+.Xr apropos 1 .
+.It Fl l
+The arguments are file names, not page names.
+.It Fl M Ar path
+Search the colon-separated manual directories in
+.Ar path
+instead of the default.
+.It Fl m Ar path
+Search the directories in
+.Ar path
+before the others.
+.It Fl S Ar subsection
+Look in the architecture subdirectory
+.Ar subsection ,
+by default the machine's.
+.It Fl s Ar section
+Only search
+.Ar section .
+.It Fl w
+Print the file names of the pages instead of showing them.
+.El
+.Pp
+The
+.Fl T ,
+.Fl O
+and
+.Fl W
+options of
+.Xr oxdoc 1
+are also accepted and passed on.
+.Pp
+A page is found in a manual directory as
+.Pa man Ns Ar N Ns / Ns Ar name . Ns Ar section ,
+where
+.Ar N
+is the first character of the section, or in the architecture
+subdirectory of that directory.
+.Sh ENVIRONMENT
+.Bl -tag -width MANPAGER
+.It Ev MANPAGER
+The pager, run with
+.Pa /bin/sh
+.Fl c .
+.It Ev MANPATH
+The manual directories, separated by colons.
+A colon at the start or end, or two together, stand for the directories
+.Pa /etc/man.conf
+names.
+.It Ev PAGER
+The pager if
+.Ev MANPAGER
+is not set; the default is
+.Ql /usr/bin/more -s .
+.El
+.Sh FILES
+.Bl -tag -width /etc/man.conf -compact
+.It Pa /etc/man.conf
+the manual directories
+.It Pa /usr/share/man
+the system's manual pages
+.El
+.Sh EXIT STATUS
+The
+.Nm
+utility exits 0 on success, and 5 if a page was not found or the
+arguments were wrong.
+.Sh SEE ALSO
+.Xr apropos 1 ,
+.Xr more 1 ,
+.Xr oxdoc 1 ,
+.Xr man.conf 5 ,
+.Xr mdoc 7
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v2 .
+This implementation was written for OxideBSD.

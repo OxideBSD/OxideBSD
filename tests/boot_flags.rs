@@ -20,10 +20,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let single = BootFlags { single_user: true, ..none };
     assert_eq!(parse_cmdline(""), none);
     assert_eq!(parse_cmdline("-s"), single);
-    assert_eq!(parse_cmdline("  no-ata   -s "), BootFlags { no_ata: true, single_user: true });
+    assert_eq!(parse_cmdline("  no-ata   -s "), BootFlags { no_ata: true, single_user: true, ..none });
     assert_eq!(parse_cmdline("-vs"), single, "combined flags");
     assert_eq!(parse_cmdline("-v"), none, "unknown flag is ignored");
     assert_eq!(parse_cmdline("s single no-atax"), none, "non-flags aren't flags");
+    assert_eq!(parse_cmdline("console.underline=color"), BootFlags { underline_color: true, ..none });
+    assert_eq!(parse_cmdline("console.underline=line"), none);
 
     let argv = init_argv();
     if single_user() {

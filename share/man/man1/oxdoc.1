@@ -1,0 +1,123 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt OXDOC 1
+.Os OxideBSD
+.Sh NAME
+.Nm oxdoc
+.Nd format and check manual pages
+.Sh SYNOPSIS
+.Nm
+.Op Fl T Ar device
+.Op Fl O Ar option Ns Op , Ns Ar option ...
+.Op Fl W Ar level
+.Op Ar
+.Sh DESCRIPTION
+The
+.Nm
+utility formats manual pages written in the
+.Xr mdoc 7
+language, and in the
+.Xr roff 7
+requests and escapes that pages use.
+It reads each
+.Ar file ,
+or the standard input if none is given, and writes the formatted page to
+the standard output.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl O Ar option
+Set output options, separated by commas:
+.Bl -tag -width Ds
+.It Cm width Ns = Ns Ar columns
+The line length.
+The default is the terminal's width, at most 80, less two; or 78 when the
+output is not a terminal.
+.It Cm overstrike
+Show bold and underline as backspace overstrike
+.Pq Ql c\eb\&c , Ql _\eb\&c
+rather than as terminal escape sequences, for pagers and
+.Xr col 1 .
+.It Cm plain
+No bold or underline at all.
+.It Cm os Ns = Ns Ar name
+The operating system name for a page whose
+.Ic \&Os
+macro has no argument.
+.El
+.It Fl T Ar device
+The output device:
+.Bl -tag -width Ds
+.It Cm utf8
+Terminal text in UTF-8, the default when the locale names UTF-8.
+.It Cm ascii
+Terminal text in ASCII, the default otherwise.
+.It Cm lint
+No output; report every diagnostic, including style suggestions.
+.It Cm tree
+The parsed document tree, for debugging.
+.El
+.It Fl W Ar level
+Report diagnostics at
+.Ar level
+and above:
+.Cm style ,
+.Cm warning
+(the default),
+.Cm error
+or
+.Cm unsupp .
+.Cm all
+is
+.Cm style ;
+.Cm stop
+stops after the first file with a diagnostic at the chosen level.
+.El
+.Pp
+Bold and underline are shown when the output is a terminal, as SGR escape
+sequences, and not otherwise.
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev LC_ALL , LC_CTYPE , LANG
+The first of these that is set decides the default device:
+.Cm utf8
+if it names UTF-8,
+.Cm ascii
+otherwise.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+No diagnostic at
+.Cm warning
+level or above.
+.It 1
+At least one such diagnostic.
+.It 2
+A usage error, or a file could not be read.
+.El
+.Sh DIAGNOSTICS
+Diagnostics have the form
+.Dl oxdoc: Ar file : Ns Ar line : Ns Ar column : Ar LEVEL : Ar message : Ar detail
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr more 1 ,
+.Xr mdoc 7 ,
+.Xr roff 7
+.Sh STANDARDS
+The output follows the formatting of
+.Xr mandoc 1 ,
+which the other BSDs use.
+.Sh HISTORY
+The
+.Nm
+utility was written for OxideBSD.
+.Sh BUGS
+The
+.Xr man 7
+language and the
+.Xr tbl 7
+and
+.Xr eqn 7
+preprocessors are not implemented yet; neither are the HTML and Markdown
+devices.

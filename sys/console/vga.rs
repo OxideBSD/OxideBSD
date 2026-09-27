@@ -1,6 +1,5 @@
 use core::fmt;
 
-use alloc::boxed::Box;
 use spin::{Lazy, Mutex};
 use x86_64::instructions::interrupts;
 use x86_64::instructions::port::Port;
@@ -34,6 +33,7 @@ static mut SHADOW_BUFFER: Buffer = Buffer {
     chars: [[ScreenChar {
         ascii_character: b' ',
         color_code: ColorCode(0x07),
+        underline: false,
     }; MAX_BUFFER_WIDTH]; MAX_BUFFER_HEIGHT],
 };
 
@@ -140,11 +140,32 @@ impl ColorCode {
     }
 }
 
+/// How the console shows underlined text (SGR 4): a stroke under the glyph, or, as the Linux
+/// console does, a color. `console.underline=color` on the kernel command line selects color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderlineMode {
+    Line,
+    Color,
+}
+
+static UNDERLINE_COLOR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_underline_mode(mode: UnderlineMode) {
+    UNDERLINE_COLOR.store(mode == UnderlineMode::Color, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn underline_mode() -> UnderlineMode {
+    if UNDERLINE_COLOR.load(core::sync::atomic::Ordering::Relaxed) { UnderlineMode::Color } else { UnderlineMode::Line }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 struct ScreenChar {
     ascii_character: u8,
     color_code: ColorCode,
+    /// SGR 4, drawn as a stroke under the glyph (`UnderlineMode::Line`). In color mode the color
+    /// code carries underline instead and this stays false.
+    underline: bool,
 }
 
 #[repr(transparent)]
@@ -157,7 +178,15 @@ struct Buffer {
 /// `MAX_BUFFER_WIDTH`x`MAX_BUFFER_HEIGHT` backing extent, matching `Buffer` itself, regardless of
 /// this boot's real active `width`/`height` -- simplest correct option (a snapshot the size of
 /// whatever's actually active would need its own separate, dynamically-chosen type).
-type ScreenGrid = [[ScreenChar; MAX_BUFFER_WIDTH]; MAX_BUFFER_HEIGHT];
+/// The screen saved by `ESC[?1049h`: the active grid's cells, row by row, and the cursor. Kept
+/// on the heap and filled in place: as an array it is too big for a kernel stack (400 x 200 cells;
+/// building it on the stack overflowed one once `ScreenChar` grew an underline flag).
+struct AltScreen {
+    cells: alloc::vec::Vec<ScreenChar>,
+    width: usize,
+    row: usize,
+    col: usize,
+}
 
 /// Where a byte stream sits relative to an ANSI/VT100 escape sequence. Only `CSI` (`ESC [ ... `)
 /// is actually interpreted -- see `handle_escape_byte`/`handle_csi_byte`.
@@ -178,6 +207,7 @@ struct SavedCursorState {
     sgr_bg: Color,
     sgr_bold: bool,
     sgr_reverse: bool,
+    sgr_underline: bool,
 }
 
 struct Writer {
@@ -199,6 +229,7 @@ struct Writer {
     sgr_bg: Color,
     sgr_bold: bool,
     sgr_reverse: bool,
+    sgr_underline: bool,
     esc_state: EscState,
     csi_params: [u16; MAX_CSI_PARAMS],
     csi_param_count: usize,
@@ -215,10 +246,10 @@ struct Writer {
     scroll_bottom: usize,
     saved_cursor: Option<SavedCursorState>,
     /// Set only while an alternate-screen app (`vi`, `hexedit`, ...) is active -- holds the main
-    /// screen's real content plus its cursor, both restored verbatim on `ESC[?1049l`. A `Box`
-    /// because this writer otherwise holds no heap state at all; the buffer's home page is a
-    /// static VRAM pointer, not something that can just be swapped for a second static one.
-    alt_screen_saved: Option<Box<(ScreenGrid, usize, usize)>>,
+    /// screen's real content plus its cursor, both restored verbatim on `ESC[?1049l`. On the heap
+    /// (see `AltScreen`); the buffer's home page is a static, not something that can just be
+    /// swapped for a second static one.
+    alt_screen_saved: Option<AltScreen>,
     buffer: &'static mut Buffer,
 }
 
@@ -284,6 +315,7 @@ impl Writer {
                     ScreenChar {
                         ascii_character: b' ',
                         color_code,
+                        underline: false,
                     },
                 );
             }
@@ -512,11 +544,10 @@ impl Writer {
         }
     }
 
-    /// SGR: character attributes. Supports reset, bold, reverse-video, and the 8 base + 8 bright
-    /// foreground/background colors (30-37/40-47, 90-97/100-107, plus the 39/49 "default"
-    /// resets) -- enough for `vi`'s own bold-via-reverse highlighting (`ESC[7m`) and any other
-    /// ANSI-colored userland output, without modeling the rest of SGR (underline, blink, ...)
-    /// this kernel has no VGA attribute bits to represent anyway.
+    /// SGR: character attributes. Supports reset, bold, underline, reverse-video, and the 8 base +
+    /// 8 bright foreground/background colors (30-37/40-47, 90-97/100-107, plus the 39/49 "default"
+    /// resets). Underline is a stroke under the glyph or, in `UnderlineMode::Color`, a color, as
+    /// the Linux console shows it; blink and the rest aren't modeled.
     fn apply_sgr(&mut self) {
         if self.csi_param_count == 0 {
             self.sgr_reset();
@@ -527,6 +558,8 @@ impl Writer {
                 0 => self.sgr_reset(),
                 1 => self.sgr_bold = true,
                 22 => self.sgr_bold = false,
+                4 => self.sgr_underline = true,
+                24 => self.sgr_underline = false,
                 7 => self.sgr_reverse = true,
                 27 => self.sgr_reverse = false,
                 n @ 30..=37 => self.sgr_fg = Color::from_ansi_base(n - 30),
@@ -546,14 +579,21 @@ impl Writer {
         self.sgr_bg = Color::Black;
         self.sgr_bold = false;
         self.sgr_reverse = false;
+        self.sgr_underline = false;
         self.recompute_color_code();
     }
 
     fn recompute_color_code(&mut self) {
-        let (mut fg, bg) = if self.sgr_reverse {
-            (self.sgr_bg, self.sgr_fg)
+        // Color mode: underlined text is cyan unless it has a color of its own.
+        let sgr_fg = if self.sgr_underline && underline_mode() == UnderlineMode::Color && self.sgr_fg == Color::LightGray {
+            Color::Cyan
         } else {
-            (self.sgr_fg, self.sgr_bg)
+            self.sgr_fg
+        };
+        let (mut fg, bg) = if self.sgr_reverse {
+            (self.sgr_bg, sgr_fg)
+        } else {
+            (sgr_fg, self.sgr_bg)
         };
         if self.sgr_bold {
             fg = fg.intensify();
@@ -571,6 +611,7 @@ impl Writer {
             sgr_bg: self.sgr_bg,
             sgr_bold: self.sgr_bold,
             sgr_reverse: self.sgr_reverse,
+            sgr_underline: self.sgr_underline,
         });
     }
 
@@ -584,6 +625,7 @@ impl Writer {
             self.sgr_bg = saved.sgr_bg;
             self.sgr_bold = saved.sgr_bold;
             self.sgr_reverse = saved.sgr_reverse;
+            self.sgr_underline = saved.sgr_underline;
             self.recompute_color_code();
         }
     }
@@ -623,16 +665,13 @@ impl Writer {
         if self.alt_screen_saved.is_some() {
             return;
         }
-        let mut saved = [[ScreenChar {
-            ascii_character: b' ',
-            color_code: self.color_code,
-        }; MAX_BUFFER_WIDTH]; MAX_BUFFER_HEIGHT];
-        for (row, row_slice) in saved.iter_mut().enumerate() {
-            for (col, cell) in row_slice.iter_mut().enumerate() {
-                *cell = self.read_char_at(row, col);
+        let mut cells = alloc::vec::Vec::with_capacity(self.width * self.height);
+        for row in 0..self.height {
+            for col in 0..self.width {
+                cells.push(self.read_char_at(row, col));
             }
         }
-        self.alt_screen_saved = Some(Box::new((saved, self.cursor_row, self.cursor_col)));
+        self.alt_screen_saved = Some(AltScreen { cells, width: self.width, row: self.cursor_row, col: self.cursor_col });
         self.erase_in_display(2);
         self.cursor_row = 0;
         self.cursor_col = 0;
@@ -644,14 +683,14 @@ impl Writer {
         let Some(saved) = self.alt_screen_saved.take() else {
             return;
         };
-        let (content, row, col) = *saved;
-        for (r, row_slice) in content.iter().enumerate() {
-            for (c, &character) in row_slice.iter().enumerate() {
+        for (i, &character) in saved.cells.iter().enumerate() {
+            let (r, c) = (i / saved.width, i % saved.width);
+            if r < self.height && c < self.width {
                 self.write_char_at(r, c, character);
             }
         }
-        self.cursor_row = row;
-        self.cursor_col = col;
+        self.cursor_row = saved.row.min(self.height - 1);
+        self.cursor_col = saved.col.min(self.width - 1);
     }
 
     /// Push the software cursor position out to the real CRTC registers. Cheap (two port-index
@@ -725,6 +764,7 @@ impl Writer {
             ScreenChar {
                 ascii_character: byte,
                 color_code,
+                underline: self.sgr_underline && underline_mode() == UnderlineMode::Line,
             },
         );
         self.cursor_col += 1;
@@ -911,6 +951,7 @@ impl Writer {
         let blank = ScreenChar {
             ascii_character: b' ',
             color_code: self.color_code,
+            underline: false,
         };
         for col in start_col..end_col.min(self.width) {
             self.write_char_at(row, col, blank);
@@ -956,6 +997,7 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
         sgr_bg: Color::Black,
         sgr_bold: false,
         sgr_reverse: false,
+        sgr_underline: false,
         esc_state: EscState::Ground,
         csi_params: [0; MAX_CSI_PARAMS],
         csi_param_count: 0,
@@ -1028,6 +1070,8 @@ pub struct Cell {
     pub ascii: u8,
     pub fg: u8,
     pub bg: u8,
+    /// Drawn with a stroke under the glyph.
+    pub underline: bool,
 }
 
 /// Snapshots the current buffer content, cell by cell, bounded to this boot's real active
@@ -1050,6 +1094,7 @@ pub fn for_each_cell(mut f: impl FnMut(usize, usize, Cell)) {
                         ascii: sc.ascii_character,
                         fg: sc.color_code.0 & 0x0F,
                         bg: (sc.color_code.0 >> 4) & 0x0F,
+                        underline: sc.underline,
                     },
                 );
             }

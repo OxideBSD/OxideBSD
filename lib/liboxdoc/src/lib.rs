@@ -93,6 +93,17 @@ pub fn format(input: &str, file: &str, opts: &Options) -> (String, Diagnostics) 
     (out, diag)
 }
 
+/// Whether the locale (`LC_ALL`, else `LC_CTYPE`, else `LANG`) names UTF-8.
+pub fn locale_is_utf8() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+        .is_some_and(|l| {
+            let l = l.to_uppercase();
+            l.contains("UTF-8") || l.contains("UTF8")
+        })
+}
+
 /// The operating system name printed for an empty `.Os`: `uname`'s name and release.
 pub fn default_os() -> String {
     std::fs::read_to_string("/proc/sys/kernel/ostype")

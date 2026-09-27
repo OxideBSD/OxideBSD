@@ -7587,7 +7587,6 @@ fn format_fresh_filesystem() -> bool {
         b"killall5",
         include_bytes!(env!("OXFS_KILLALL5_ELF_PATH")),
     );
-    ok &= seed_file(usr_bin, b"less", include_bytes!(env!("OXFS_LESS_ELF_PATH")));
     ok &= seed_file(bin, b"link", include_bytes!(env!("OXFS_LINK_ELF_PATH")));
     ok &= seed_file(bin, b"ln", include_bytes!(env!("OXFS_LN_ELF_PATH")));
     ok &= seed_file(usr_bin, b"login", include_bytes!(env!("OXFS_LOGIN_ELF_PATH")));
@@ -7605,7 +7604,10 @@ fn format_fresh_filesystem() -> bool {
         b"makedevs",
         include_bytes!(env!("OXFS_MAKEDEVS_ELF_PATH")),
     );
+    // man(1), oxdoc(1) and more(1) are OxideBSD's own (MAN.md), not BusyBox's; less(1) is more.
     ok &= seed_file(usr_bin, b"man", include_bytes!(env!("OXFS_MAN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"oxdoc", include_bytes!(env!("OXFS_OXDOC_ELF_PATH")));
+    ok &= seed_symlink(usr_bin, b"less", b"more");
     ok &= seed_file(usr_bin, b"md5sum", include_bytes!(env!("OXFS_MD5SUM_ELF_PATH")));
     ok &= seed_file(usr_bin, b"minips", include_bytes!(env!("OXFS_MINIPS_ELF_PATH")));
     ok &= seed_file(sbin, b"mknod", include_bytes!(env!("OXFS_MKNOD_ELF_PATH")));
@@ -7878,6 +7880,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(etc, b"gettytab", include_bytes!("../../../../etc/gettytab"));
     ok &= seed_file(etc, b"login.conf", include_bytes!("../../../../etc/login.conf"));
     ok &= seed_file(etc, b"motd", include_bytes!("../../../../etc/motd"));
+    ok &= seed_file(etc, b"man.conf", include_bytes!("../../../../etc/man.conf"));
     let pam_d = ensure_dir(etc, b"pam.d");
     ok &= seed_file(pam_d, b"login", include_bytes!("../../../../etc/pam.d/login"));
     ok &= seed_file(pam_d, b"other", include_bytes!("../../../../etc/pam.d/other"));
@@ -8004,14 +8007,22 @@ fn format_fresh_filesystem() -> bool {
     let usr_share_man = ensure_dir(usr_share, b"man");
     let man_man1 = ensure_dir(usr_share_man, b"man1");
     ok &= seed_file(man_man1, b"login.1", include_bytes!("../../../../share/man/man1/login.1"));
+    ok &= seed_file(man_man1, b"less.1", include_bytes!("../../../../share/man/man1/more.1"));
+    ok &= seed_file(man_man1, b"man.1", include_bytes!("../../../../share/man/man1/man.1"));
+    ok &= seed_hardlink(man_man1, b"more.1", b"less.1");
+    ok &= seed_file(man_man1, b"oxdoc.1", include_bytes!("../../../../share/man/man1/oxdoc.1"));
     ok &= seed_file(man_man1, b"passwd.1", include_bytes!("../../../../share/man/man1/passwd.1"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
     ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
     ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
+    ok &= seed_file(man_man5, b"man.conf.5", include_bytes!("../../../../share/man/man5/man.conf.5"));
     ok &= seed_file(man_man5, b"passwd.5", include_bytes!("../../../../share/man/man5/passwd.5"));
     ok &= seed_hardlink(man_man5, b"master.passwd.5", b"passwd.5");
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
+    let man_man7 = ensure_dir(usr_share_man, b"man7");
+    ok &= seed_file(man_man7, b"mdoc.7", include_bytes!("../../../../share/man/man7/mdoc.7"));
+    ok &= seed_file(man_man7, b"roff.7", include_bytes!("../../../../share/man/man7/roff.7"));
     let man_man8 = ensure_dir(usr_share_man, b"man8");
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));

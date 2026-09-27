@@ -1,0 +1,118 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MORE 1
+.Os OxideBSD
+.Sh NAME
+.Nm more ,
+.Nm less
+.Nd page through text
+.Sh SYNOPSIS
+.Nm
+.Op Fl ceFisu
+.Op Fl n Ar number
+.Op Fl p Ar command
+.Op Fl t Ar pattern
+.Op + Ns Ar command
+.Op Ar
+.Sh DESCRIPTION
+The
+.Nm
+utility shows text one screen at a time.
+It reads each
+.Ar file ,
+or the standard input.
+Invoked as
+.Nm less ,
+it behaves the same.
+When the standard output is not a terminal, the input is copied to it
+unchanged.
+.Pp
+Bold and underline, as escape sequences or as backspace overstrike, are
+shown as such; tabs expand to every eighth column, and long lines fold.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl c , Fl R
+Accepted for compatibility.
+.It Fl e
+Exit on reaching the end of the last file.
+.It Fl F
+Exit at once, after printing it, if the text fits on one screen.
+.It Fl i
+Ignore case in searches.
+.It Fl n Ar number
+Show
+.Ar number
+lines per screen.
+.It Fl p Ar command , No + Ns Ar command
+Run
+.Ar command
+first:
+.Ql / Ns Ar pattern ,
+.Ql G ,
+or a line number.
+.It Fl s
+Show runs of blank lines as one.
+.It Fl t Ar pattern
+Start at the first line matching
+.Ar pattern .
+.It Fl u
+Show backspaces as they are, with no bold or underline.
+.El
+.Pp
+The commands are single keys, some preceded by a count
+.Ar N :
+.Bl -tag -width "SPACE f ^F"
+.It SPACE f ^F
+Forward one screen, or
+.Ar N .
+At the end of a file, go to the next.
+.It b ^B
+Back one screen.
+.It RETURN j e ^N
+Forward one line, or
+.Ar N .
+.It k y ^Y ^P
+Back one line.
+.It d ^D , u ^U
+Forward or back half a screen.
+.It g <
+The first line, or line
+.Ar N .
+.It G >
+The last line, or line
+.Ar N .
+.It / Ns Ar pattern
+Search forward for
+.Ar pattern ,
+a literal string; matches are highlighted.
+.It \&? Ns Ar pattern
+Search backward.
+.It n , N
+Repeat the last search, or repeat it the other way.
+.It :n , :p
+The next or previous file.
+.It = ^G
+Show the position.
+.It r ^L
+Redraw the screen.
+.It h
+Summarize the commands.
+.It q Q ZZ
+Quit.
+.El
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr oxdoc 1
+.Sh STANDARDS
+The
+.Nm
+utility follows
+.St -p1003.1-2008 ,
+except that patterns are literal strings, not regular expressions.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Bx 3.0 .
+This implementation was written for OxideBSD.
