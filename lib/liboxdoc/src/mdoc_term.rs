@@ -43,16 +43,19 @@ pub fn scaled(s: &str) -> usize {
     if !digits.is_empty() {
         let unit = &s[digits.len()..];
         let v: f64 = digits.parse().unwrap_or(0.0);
-        let cols = match unit {
-            "" | "n" | "m" | "M" | "u" => v,
-            "i" => v * 10.0,
-            "c" => v * 10.0 / 2.54,
-            "p" => v / 7.2,
-            "P" => v * 10.0 / 6.0,
-            "v" => v,
+        // Basic units, 24 to a column; an exact half rounds down, as mandoc's does.
+        let units = match unit {
+            "" | "n" | "m" => v * 24.0,
+            "u" => v,
+            "M" => v * 0.24,
+            "i" => v * 240.0,
+            "c" => v * 240.0 / 2.54,
+            "p" => v * 240.0 / 72.0,
+            "P" => v * 40.0,
+            "v" => v * 40.0,
             _ => return s.chars().count(),
         };
-        return cols.round() as usize;
+        return (units / 24.0 + 0.4995).floor() as usize;
     }
     s.chars().filter(|c| !('\u{E000}'..='\u{E01F}').contains(c)).count()
 }

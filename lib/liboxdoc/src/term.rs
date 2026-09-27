@@ -236,9 +236,28 @@ impl Term {
     pub fn word_ext(&mut self, text: &str, style: Style, eos: bool) {
         let mut cells = Vec::new();
         let mut cur = self.esc_font.unwrap_or(style);
+        // The drawing character of a `\l` rule, while it is being read.
+        let mut rule: Option<Vec<Cell>> = None;
         for c in text.chars() {
             if let Some(f) = self.font_change(c, style) {
                 cur = f;
+                continue;
+            }
+            if c == mark::RULE {
+                match rule.take() {
+                    None => rule = Some(Vec::new()),
+                    Some(draw) => {
+                        // From where the line starts to the right margin.
+                        let start = if self.line_open { self.line.iter().take_while(|c| c.ch == ' ').count() } else { self.offset };
+                        for _ in 0..self.rmargin.saturating_sub(start) {
+                            cells.extend(draw.iter().copied());
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(draw) = rule.as_mut() {
+                self.push_char(draw, c, cur);
                 continue;
             }
             match c {

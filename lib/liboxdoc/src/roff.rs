@@ -26,6 +26,9 @@ pub mod mark {
     pub const BACKSLASH: char = '\u{E004}';
     /// One column of leftward motion (`\h` with a negative distance).
     pub const BACK: char = '\u{E005}';
+    /// Brackets the character a `\l` of zero or negative length draws: it runs from where the
+    /// output line starts to the right margin, which only the formatter knows.
+    pub const RULE: char = '\u{E006}';
     /// Font changes: `\fR`, `\fB`, `\fI`, `\f(BI`, `\fC`..., and `\fP` (previous).
     pub const FONT_R: char = '\u{E010}';
     pub const FONT_B: char = '\u{E011}';
@@ -340,14 +343,14 @@ impl<'a> Roff<'a> {
             "nr" => {
                 let mut it = argstr.split_whitespace();
                 if let Some(key) = it.next() {
-                    let expr = it.next().unwrap_or("0");
+                    let expr = self.expand(it.next().unwrap_or("0"), 0);
                     let cur = *self.registers.get(key).unwrap_or(&0);
                     let v = if let Some(e) = expr.strip_prefix('+') {
-                        cur + self.number(e)
+                        cur + self.number(e, b'u')
                     } else if let Some(e) = expr.strip_prefix('-') {
-                        cur - self.number(e)
+                        cur - self.number(e, b'u')
                     } else {
-                        self.number(expr)
+                        self.number(&expr, b'u')
                     };
                     self.registers.insert(key.to_string(), v);
                 }
@@ -518,19 +521,32 @@ impl<'a> Roff<'a> {
                 // A numeric expression, up to the first space.
                 let end = s.find([' ', '\t']).unwrap_or(s.len());
                 let expr = self.expand(&s[..end], 0);
-                (self.number(&expr) > 0, &s[end..])
+                (self.number(&expr, b'u') > 0, &s[end..])
             }
         };
         (value != neg, rest)
     }
 
-    /// A numeric expression: integers, `+ - * / %`, comparisons and parentheses, left to right as
-    /// roff evaluates them; scaling units are ignored.
-    fn number(&self, s: &str) -> i64 {
-        fn term(b: &[u8], i: &mut usize) -> i64 {
+    /// A numeric expression in basic units: numbers with an optional scaling unit (`unit` when
+    /// there is none), `+ - * / %`, comparisons and parentheses, left to right as roff
+    /// evaluates them. On a terminal an en and an em are both 24 units, an inch 240.
+    fn number(&self, s: &str, unit: u8) -> i64 {
+        fn scale(u: u8) -> f64 {
+            match u {
+                b'i' => 240.0,
+                b'c' => 240.0 / 2.54,
+                b'p' => 240.0 / 72.0,
+                b'P' => 40.0,
+                b'm' | b'n' => 24.0,
+                b'v' => 40.0,
+                b'M' => 0.24,
+                _ => 1.0,
+            }
+        }
+        fn term(b: &[u8], i: &mut usize, unit: u8) -> i64 {
             if *i < b.len() && b[*i] == b'(' {
                 *i += 1;
-                let v = expr(b, i);
+                let v = expr(b, i, unit);
                 if *i < b.len() && b[*i] == b')' {
                     *i += 1;
                 }
@@ -543,18 +559,21 @@ impl<'a> Roff<'a> {
                 false
             };
             let start = *i;
-            while *i < b.len() && b[*i].is_ascii_digit() {
+            while *i < b.len() && (b[*i].is_ascii_digit() || b[*i] == b'.') {
                 *i += 1;
             }
-            let v: i64 = std::str::from_utf8(&b[start..*i]).unwrap().parse().unwrap_or(0);
-            // A scaling unit.
-            while *i < b.len() && (b[*i] == b'.' || b[*i].is_ascii_digit() || b"icpPmMnuvsf".contains(&b[*i])) {
+            let n: f64 = std::str::from_utf8(&b[start..*i]).unwrap().parse().unwrap_or(0.0);
+            let u = if *i < b.len() && b"icpPmMnuvsfz".contains(&b[*i]) {
                 *i += 1;
-            }
+                b[*i - 1]
+            } else {
+                unit
+            };
+            let v = (n * scale(u)) as i64;
             if neg { -v } else { v }
         }
-        fn expr(b: &[u8], i: &mut usize) -> i64 {
-            let mut v = term(b, i);
+        fn expr(b: &[u8], i: &mut usize, unit: u8) -> i64 {
+            let mut v = term(b, i, unit);
             while *i < b.len() {
                 let op = b[*i];
                 let two = if *i + 1 < b.len() { &b[*i..*i + 2] } else { &b[*i..*i + 1] };
@@ -576,14 +595,14 @@ impl<'a> Roff<'a> {
                     _ => break,
                 };
                 *i += len;
-                let r = term(b, i);
+                let r = term(b, i, unit);
                 v = f(v, r);
             }
             v
         }
-        let b = s.trim().as_bytes();
+        let s: String = s.trim().chars().filter(|c| !is_marker(*c)).collect();
         let mut i = 0;
-        expr(b, &mut i)
+        expr(s.as_bytes(), &mut i, unit)
     }
 
     /// Expands escapes in the name position of a control line (`.\*[name]` is rare but legal).
@@ -738,19 +757,31 @@ impl<'a> Roff<'a> {
                         'l' => {
                             // A horizontal line: its length, then optionally the character to
                             // draw it with (an underscore by default).
-                            let digits: String = arg.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-                            let rest = &arg[digits.len()..];
-                            let unit_len = rest.chars().take_while(|c| c.is_ascii_alphabetic()).count();
-                            let n = scale_cols(&arg[..digits.len() + unit_len.min(1)]);
+                            // A length that rounds to nothing, or is negative, draws the rule.
+                            let arg = self.expand_depth(&arg, lineno, depth + 1);
+                            let sign = arg.chars().take_while(|c| *c == '-' || *c == '+').count();
+                            let negative = arg.starts_with('-');
+                            let body = &arg[sign..];
+                            let digits: String = body.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                            let rest = &body[digits.len()..];
+                            let unit_len = rest.chars().take(1).filter(|c| "icpPumnvMfsz".contains(*c)).count();
+                            let n = if negative { 0 } else { scale_cols(&body[..digits.len() + unit_len.min(1)]) as i64 };
                             let draw = &rest[unit_len.min(1)..];
-                            let ch = if draw.is_empty() { "_".to_string() } else { self.expand_depth(draw, lineno, depth + 1) };
-                            for _ in 0..n.min(200) {
+                            let ch = if draw.is_empty() { "_".to_string() } else { draw.to_string() };
+                            if n <= 0 {
+                                out.push(mark::RULE);
+                                out.push_str(&ch);
+                                out.push(mark::RULE);
+                            }
+                            for _ in 0..n.clamp(0, 200) {
                                 out.push_str(&ch);
                             }
                         }
                         'h' => {
                             // Horizontal motion: whole ens become spaces, as mandoc does.
-                            let n = self.number(&arg);
+                            // In ems by default; whole columns on a terminal, as mandoc rounds.
+                            let arg = self.expand_depth(&arg, lineno, depth + 1);
+                            let n = (self.number(&arg, b'm') as f64 / 24.0).round() as i64;
                             let c = if n < 0 { mark::BACK } else { mark::NBSP };
                             for _ in 0..n.unsigned_abs().min(80) {
                                 out.push(c);
@@ -763,7 +794,7 @@ impl<'a> Roff<'a> {
                         'o' => out.push_str(&arg),
                         'Z' => out.push_str(&self.expand_depth(&arg, lineno, depth + 1)),
                         'A' => out.push('1'),
-                        'B' => out.push(if self.number(&arg) != 0 || arg.chars().any(|c| c.is_ascii_digit()) { '1' } else { '0' }),
+                        'B' => out.push(if self.number(&arg, b'u') != 0 || arg.chars().any(|c| c.is_ascii_digit()) { '1' } else { '0' }),
                         _ => {}
                     }
                 }
