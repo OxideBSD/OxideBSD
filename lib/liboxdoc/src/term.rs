@@ -678,7 +678,7 @@ impl Term {
                 col = 0;
             }
         }
-        for line in s.split('\n') {
+        for line in s.replace('\u{A0}', " ").split('\n') {
             let line = line.trim_end();
             let line: String = if self.encoding == Encoding::Ascii { line.chars().map(|c| if c.is_ascii() { c.to_string() } else { ascii_for(c) }).collect() } else { line.to_string() };
             self.out.push_str(&line);

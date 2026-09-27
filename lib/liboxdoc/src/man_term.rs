@@ -57,11 +57,13 @@ pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     r.t.finish()
 }
 
+/// Header and footer text with roff's markers resolved; `\ ` stays a no-break space, which
+/// [`Term::columns`] doesn't break at.
 fn plain(s: &str) -> String {
     s.chars()
         .filter_map(|c| match c {
             mark::MINUS => Some('-'),
-            mark::NBSP => Some(' '),
+            mark::NBSP => Some('\u{A0}'),
             mark::BACKSLASH => Some('\\'),
             c if ('\u{E000}'..='\u{E01F}').contains(&c) => None,
             c => Some(c),
