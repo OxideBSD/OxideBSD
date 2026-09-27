@@ -444,6 +444,9 @@ impl R<'_> {
                 let url = n.args.first().cloned().unwrap_or_default();
                 let body = n.part(Kind::Body);
                 let has_text = body.is_some_and(|b| !b.children.is_empty());
+                if n.flags.nospace {
+                    self.t.nospace();
+                }
                 if let Some(b) = body {
                     self.children(b, style);
                 }

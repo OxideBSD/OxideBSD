@@ -233,7 +233,11 @@ impl Parser<'_> {
             }
             "UR" | "MT" => {
                 self.open(Kind::Block, name);
-                self.stack.last_mut().unwrap().args = args.to_vec();
+                // After `\c`, the link attaches to the text before it.
+                let nospace = std::mem::take(&mut self.nospace);
+                let top = self.stack.last_mut().unwrap();
+                top.args = args.to_vec();
+                top.flags.nospace = nospace;
                 self.open(Kind::Body, name);
             }
             "UE" | "ME" => {

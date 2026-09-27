@@ -785,6 +785,8 @@ impl R<'_> {
             self.children(cell, Style::None);
             col += w + 4;
         }
+        // A row is a line even when all its cells are empty.
+        self.t.keep_line();
         self.t.flush();
     }
 

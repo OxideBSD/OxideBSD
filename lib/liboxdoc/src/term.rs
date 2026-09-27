@@ -336,6 +336,12 @@ impl Term {
         visible_len(&self.line)
     }
 
+    /// Makes the open line (opened if need be) one that is output, even if it stays empty.
+    pub fn keep_line(&mut self) {
+        self.flush_open();
+        self.dirty = true;
+    }
+
     /// Pads the open line with spaces up to `col`; the next word starts there.
     pub fn pad_to(&mut self, col: usize) {
         if !self.line_open {
@@ -344,8 +350,8 @@ impl Term {
         while visible_len(&self.line) < col {
             self.line.push(Cell { ch: ' ', style: Style::None });
         }
+        // Padding alone doesn't make a line worth outputting (an empty tag before a break).
         self.fresh = true;
-        self.dirty = true;
     }
 
     /// Starts a line at column `col` rather than the left margin; lines it wraps onto start at
@@ -463,7 +469,8 @@ impl Term {
             let len = visible_len(&cells);
             let col = visible_len(&self.line);
             let gap = if self.fresh { 0 } else { space };
-            if self.nofill || col + gap + len <= self.rmargin {
+            // A word with no width (a font change alone) never breaks the line.
+            if self.nofill || col + gap + len <= self.rmargin || len == 0 {
                 self.pad(gap);
                 self.push_cells(&cells);
                 self.fresh = false;
