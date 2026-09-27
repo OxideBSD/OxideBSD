@@ -128,10 +128,23 @@ impl Parser<'_> {
     }
 
     fn text_line(&mut self, text: &str) {
+        use crate::roff::mark::{CONT, NBSP};
         let text = text.trim_end_matches([' ', '\t']);
-        // `\c`: the next line continues this one without a space.
-        let cont = text.ends_with(crate::roff::mark::CONT);
-        let text = text.trim_end_matches(crate::roff::mark::CONT);
+        // `\c`: the next line continues this one without a space. Spaces before it are kept.
+        let cont = text.ends_with(CONT);
+        let mut text = text.trim_end_matches(CONT).to_string();
+        if cont {
+            let body = text.trim_end_matches(' ').len();
+            let trail = text.len() - body;
+            text.truncate(body);
+            text.extend(std::iter::repeat_n(NBSP, trail));
+        }
+        // A line continuing one that ended in `\c` doesn't break at its leading spaces.
+        if self.nospace && text.starts_with(' ') {
+            let lead = text.len() - text.trim_start_matches(' ').len();
+            text = std::iter::repeat_n(NBSP, lead).chain(text[lead..].chars()).collect();
+        }
+        let text = text.as_str();
         self.text_line_inner(text);
         if cont {
             self.nospace = true;

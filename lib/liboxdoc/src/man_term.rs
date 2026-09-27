@@ -303,8 +303,13 @@ impl R<'_> {
                 self.base = INDENT;
                 self.width = WIDTH;
                 self.t.nofill = false;
-                let head = if n.tok == "SH" { 0 } else { SS_INDENT };
-                self.t.set_offset(self.at(head));
+                // A long subsection heading wraps to the body's indent.
+                if n.tok == "SH" {
+                    self.t.set_offset(self.at(0));
+                } else {
+                    self.t.set_offset(self.at(INDENT));
+                    self.t.begin_line_at(self.at(SS_INDENT));
+                }
                 if let Some(h) = n.part(Kind::Head) {
                     self.children(h, Style::Bold);
                 }
@@ -332,7 +337,8 @@ impl R<'_> {
                 }
                 let base = self.base;
                 let body_at = base + self.width;
-                self.t.set_offset(body_at);
+                // A tag too long for one line wraps at the paragraph's own indent.
+                self.t.set_offset(base);
                 self.t.begin_line_at(base);
                 if let Some(tag) = tag_arg {
                     self.arg_words(tag, style, false);
@@ -340,6 +346,7 @@ impl R<'_> {
                     self.children(h, style);
                 }
                 let col = self.t.flush_open();
+                self.t.set_offset(body_at);
                 if col < body_at {
                     self.t.pad_to(body_at);
                 } else if col > base {
