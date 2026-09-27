@@ -105,7 +105,9 @@ xorriso -as mkisofs -R -r -J \
 if [ "$IS_TEST" = 1 ]; then
     QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
 else
-    QEMU_DISK_IMAGE="target/oxfs_disk.img"
+    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (an existing file of
+    # oxfs_disk.img's size), leaving the persistent dev disk alone.
+    QEMU_DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/oxfs_disk.img}"
 fi
 QEMU_ISO_PATH="$ISO_PATH"
 QEMU_HEADLESS_TEST="$IS_TEST"
