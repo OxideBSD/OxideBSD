@@ -216,6 +216,25 @@ impl R<'_> {
                 self.width = WIDTH;
                 self.t.set_offset(self.base);
             }
+            "ta" => {
+                // Tab stops: absolute, `+n` from the one before, and `T n` repeating n.
+                let mut stops: Vec<usize> = Vec::new();
+                let mut repeat = None;
+                let mut args = n.args.iter();
+                while let Some(a) = args.next() {
+                    if a == "T" {
+                        repeat = args.next().map(|r| scaled(r.trim_start_matches('+')));
+                        break;
+                    }
+                    let prev = stops.last().copied().unwrap_or(0);
+                    stops.push(match a.strip_prefix('+') {
+                        Some(r) => prev + scaled(r),
+                        None => scaled(a),
+                    });
+                }
+                self.t.tab_stops = Some((stops, repeat));
+            }
+            "DT" => self.t.tab_stops = None,
             "PD" => {
                 self.pd = n.args.first().filter(|a| !a.is_empty()).map(|a| vertical_lines(a)).unwrap_or(1);
             }

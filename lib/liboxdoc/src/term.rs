@@ -78,6 +78,9 @@ pub struct Term {
     pub nofill: bool,
     /// Columns between tab stops: 8 for mdoc, 5 for man(7).
     pub tab_width: usize,
+    /// Explicit tab stops (`.ta`), in columns from the left margin, replacing the regular
+    /// ones; past the last, the interval `.ta T` gives repeats, else a tab moves nowhere.
+    pub tab_stops: Option<(Vec<usize>, Option<usize>)>,
     out: String,
     words: Vec<Word>,
     /// Cells already placed on the current, unfinished output line.
@@ -133,6 +136,7 @@ impl Term {
             rmargin: width,
             nofill: false,
             tab_width: 8,
+            tab_stops: None,
             out: String::new(),
             words: Vec::new(),
             line: Vec::new(),
@@ -554,10 +558,22 @@ impl Term {
                     self.line.pop();
                 }
             } else if c.ch == '\t' {
-                // Tab stops every 8 columns from the left margin.
+                // Tab stops every `tab_width` columns from the left margin, or the `.ta` ones.
                 let col = visible_len(&self.line);
-                let tw = self.tab_width.max(1);
-                let stop = self.offset + ((col.saturating_sub(self.offset)) / tw + 1) * tw;
+                let rel = col.saturating_sub(self.offset);
+                let stop = match &self.tab_stops {
+                    None => {
+                        let tw = self.tab_width.max(1);
+                        self.offset + (rel / tw + 1) * tw
+                    }
+                    Some((stops, repeat)) => match stops.iter().find(|s| **s > rel) {
+                        Some(s) => self.offset + s,
+                        None => match (stops.last(), repeat) {
+                            (Some(&last), Some(r)) if *r > 0 => self.offset + last + ((rel - last) / r + 1) * r,
+                            _ => col,
+                        },
+                    },
+                };
                 while visible_len(&self.line) < stop {
                     self.line.push(Cell { ch: ' ', style: Style::None });
                 }
