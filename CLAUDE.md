@@ -808,6 +808,9 @@ layer.
 - DMA goes through physically contiguous bounce buffers (`dma::DmaBuffer`; below 4 GiB for IDE's
   32-bit PRDs). One request in flight at a time. Writes end with `CACHE FLUSH`/`VIRTIO_BLK_T_FLUSH`.
 - Real hardware would need `SET FEATURES` (UDMA mode) before IDE DMA; QEMU doesn't.
+- **Format commits via the superblock**: `flush_all_to_disk` blanks block 0 first and writes the
+  superblock last, so an interrupted format reformats on the next boot instead of mounting a
+  gutted filesystem (found live: a disk with ~3% of its blocks, `ls` missing, doom faulting).
 - **QEMU topology** (`scripts/qemu_common.sh`): the IDE data disk is the secondary master
   (`ide.1`, unit 0); the boot ISO is on virtio-scsi (`OXIDEBSD_QEMU_CDROM=ide` puts it back on
   `ide.0`) — firmware reads an IDE CD by PIO, which made Limine's load of the ~257 MiB kernel take

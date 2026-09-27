@@ -7025,13 +7025,23 @@ fn mount_from_disk() -> bool {
     true
 }
 
-/// Performs the one-time bulk write a freshly formatted filesystem needs: superblock, the full
-/// bitmap, the full inode table, and every block the bitmap marks used. Called once, right after
-/// `format_fresh_filesystem` completes, while `PERSISTENCE_READY` is still `false` (see that flag's
-/// own doc comment for why the format pass itself doesn't write through block-by-block) -- so every
-/// subsequent boot mounts this disk instead of reformatting it.
+/// Performs the one-time bulk write a freshly formatted filesystem needs: the full bitmap, the
+/// full inode table, every block the bitmap marks used, and last the superblock. Called once,
+/// right after `format_fresh_filesystem` completes, while `PERSISTENCE_READY` is still `false`
+/// (see that flag's own doc comment for why the format pass itself doesn't write through
+/// block-by-block) -- so every subsequent boot mounts this disk instead of reformatting it.
+///
+/// **The superblock is the commit record: cleared first, written last.** It used to be written
+/// first, so a format interrupted partway (QEMU closed during the old 17-minute PIO format) left a
+/// valid superblock over mostly-unwritten data, which every later boot mounted as a gutted
+/// filesystem -- found live: a disk with 1,719 of ~66,470 blocks, `/bin/ls` and most of `/etc`
+/// missing, and doom faulting on its unwritten WAD. Now an interrupted format leaves no valid
+/// superblock, and the next boot formats again. Clearing it first matters when a format follows a
+/// failed mount of a disk whose superblock was valid.
 fn flush_all_to_disk() {
-    write_superblock();
+    let blank = [0u8; BLOCK_SIZE];
+    // SAFETY: FFI call to a kernel-exported function, with a live 4096-byte buffer.
+    unsafe { oxidebsd_block_write(0, blank.as_ptr() as u64) };
 
     // Real, multi-block bitmap write -- see `mount_from_disk`'s own matching read loop and
     // `BITMAP_BLOCKS`'s own doc comment.
@@ -7099,6 +7109,10 @@ fn flush_all_to_disk() {
         flushed += run_len;
         i = run_start + run_len;
     }
+
+    // Everything above is on disk (every block write flushes before returning), so the
+    // superblock that makes it mountable can go now.
+    write_superblock();
 
     let mut msg_buf = [0u8; 96];
     let mut msg = ByteBuf {
