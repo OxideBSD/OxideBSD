@@ -41,18 +41,19 @@ pub fn scaled(s: &str) -> usize {
     }
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
     if !digits.is_empty() {
-        let unit = &s[digits.len()..];
+        // A scaled number, in basic units, 24 to a column; an exact half rounds down, as
+        // mandoc's does. Anything after it (`264u+1n`) is ignored, as mandoc ignores it.
         let v: f64 = digits.parse().unwrap_or(0.0);
-        // Basic units, 24 to a column; an exact half rounds down, as mandoc's does.
-        let units = match unit {
-            "" | "n" | "m" => v * 24.0,
-            "u" => v,
-            "M" => v * 0.24,
-            "i" => v * 240.0,
-            "c" => v * 240.0 / 2.54,
-            "p" => v * 240.0 / 72.0,
-            "P" => v * 40.0,
-            "v" => v * 40.0,
+        let rest = &s[digits.len()..];
+        let units = match rest.chars().next() {
+            None | Some('n') | Some('m') => v * 24.0,
+            Some('u') => v,
+            Some('M') => v * 0.24,
+            Some('i') => v * 240.0,
+            Some('c') => v * 240.0 / 2.54,
+            Some('p') => v * 240.0 / 72.0,
+            Some('P') | Some('v') => v * 40.0,
+            Some('+') | Some('-') => v * 24.0,
             _ => return s.chars().count(),
         };
         return (units / 24.0 + 0.4995).floor() as usize;

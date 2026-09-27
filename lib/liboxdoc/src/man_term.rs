@@ -223,13 +223,13 @@ impl R<'_> {
                 let mut args = n.args.iter();
                 while let Some(a) = args.next() {
                     if a == "T" {
-                        repeat = args.next().map(|r| scaled(r.trim_start_matches('+')));
+                        repeat = args.next().map(|r| width(r.trim_start_matches('+')));
                         break;
                     }
                     let prev = stops.last().copied().unwrap_or(0);
                     stops.push(match a.strip_prefix('+') {
-                        Some(r) => prev + scaled(r),
-                        None => scaled(a),
+                        Some(r) => prev + width(r),
+                        None => width(a),
                     });
                 }
                 self.t.tab_stops = Some((stops, repeat));
@@ -279,13 +279,13 @@ impl R<'_> {
                 // paragraph's own margin. The next paragraph macro resets it.
                 let arg = n.args.first().map(String::as_str).unwrap_or("");
                 let off = if let Some(v) = arg.strip_prefix('+') {
-                    self.t.offset + scaled(v)
+                    self.t.offset + width(v)
                 } else if let Some(v) = arg.strip_prefix('-') {
-                    self.t.offset.saturating_sub(scaled(v))
+                    self.t.offset.saturating_sub(width(v))
                 } else if arg.is_empty() {
                     self.base
                 } else {
-                    scaled(arg)
+                    width(arg)
                 };
                 self.t.set_offset(off);
                 self.t.no_vspace = false;
@@ -294,11 +294,11 @@ impl R<'_> {
             "ti" => {
                 let arg = n.args.first().map(String::as_str).unwrap_or("0");
                 let at = if let Some(v) = arg.strip_prefix('+') {
-                    self.t.offset + scaled(v)
+                    self.t.offset + width(v)
                 } else if let Some(v) = arg.strip_prefix('-') {
-                    self.t.offset.saturating_sub(scaled(v))
+                    self.t.offset.saturating_sub(width(v))
                 } else {
-                    scaled(arg)
+                    width(arg)
                 };
                 self.t.begin_line_at(at);
             }
@@ -423,7 +423,7 @@ impl R<'_> {
                 }
                 let (tag_arg, width_arg) = if n.tok == "IP" { (n.args.first(), n.args.get(1)) } else { (None, n.args.first()) };
                 if let Some(w) = width_arg.filter(|w| !w.is_empty()) {
-                    self.width = scaled(w);
+                    self.width = width(w);
                 }
                 let base = self.base;
                 let body_at = base + self.width;
@@ -453,7 +453,7 @@ impl R<'_> {
                 self.t.reset_font();
                 self.para_space();
                 if let Some(w) = n.args.first().filter(|w| !w.is_empty()) {
-                    self.width = scaled(w);
+                    self.width = width(w);
                 }
                 let base = self.base;
                 self.t.set_offset(base + self.width);
@@ -475,8 +475,8 @@ impl R<'_> {
                 self.levels.push((self.base, self.width));
                 // A negative width moves the margin left.
                 match n.args.first().filter(|a| !a.is_empty()) {
-                    Some(a) if a.starts_with('-') => self.base = self.base.saturating_sub(scaled(&a[1..])),
-                    Some(a) => self.base += scaled(a.trim_start_matches('+')),
+                    Some(a) if a.starts_with('-') => self.base = self.base.saturating_sub(width(&a[1..])),
+                    Some(a) => self.base += width(a.trim_start_matches('+')),
                     None => self.base += self.width,
                 }
                 self.width = WIDTH;
@@ -534,6 +534,17 @@ impl R<'_> {
 }
 
 /// A paragraph macro with nothing in it, which mandoc drops (`.TP` right before `.SH`).
+/// A horizontal distance in columns, as man(7) reads one: a number and a scaling unit, with
+/// anything after them ignored (and an unknown unit taken as the default, ens).
+fn width(s: &str) -> usize {
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    if digits.is_empty() {
+        return scaled(s);
+    }
+    let unit = s[digits.len()..].chars().next().filter(|c| "unmMicpPv".contains(*c));
+    scaled(&format!("{digits}{}", unit.map(String::from).unwrap_or_default()))
+}
+
 /// A vertical distance in lines: `v` (a line) by default; an exact half rounds down, as
 /// mandoc's does.
 fn vertical_lines(a: &str) -> usize {
