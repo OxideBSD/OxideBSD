@@ -608,8 +608,13 @@ tests read as before. fds 0-2 of the first process are one RW description of it 
 - **An interrupt handler must only call `schedule()` when it interrupted ring 3** — a nested
   `schedule()` from the idle loop (`wait_for_ready`) hung the system (found live after ^D).
 - `vga`'s `ESC[6n` reply is queued and fed to input after its lock drops (echo would deadlock).
-- Not done yet (TTY.md §10.2): /dev/{ttyv0,tty,console} nodes, `ttyname`//proc/self, COM2 `tty01`,
-  `TIOCCONS` + msgbuf//dev/klog. Test console input headlessly with the monitor's `sendkey`.
+- Device nodes: oxfs's `Device` arm hands majors 4-6 to `tty::oxidebsd_tty_open` (`/dev/tty` =
+  the caller's controlling terminal, `/dev/console` = `ttyv0` for now). Kernel-owned descriptions
+  carry an `fs::fd::FdKind` (pipe/socket/FIFO/mqueue) so oxfs can `fstat` them and build the
+  `/proc/<pid>/fd/<n>` symlinks musl's `ttyname(3)` reads; `/proc/self` exists.
+  `tests/tty_syscall_smoke.rs`.
+- Not done yet (TTY.md §10.3): COM2 `tty01`, `TIOCCONS` + msgbuf//dev/klog. Test console input
+  headlessly with the monitor's `sendkey`.
 
 ## Process abstraction, scheduler, and fork/exec/wait (`sys/process/`)
 

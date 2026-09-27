@@ -156,6 +156,65 @@ struct FdOps {
     fb_geometry: FdFbGeometry,
     pread: FdReadWriteAt,
     pwrite: FdReadWriteAt,
+    kind: FdKind,
+}
+
+/// What a kernel-owned description is, for `readlink("/proc/<pid>/fd/<n>")` (TTY.md §6.3) and
+/// `fstat`. Descriptions a module owns (`sys/modules/oxfs`'s files) are `Module`: the module knows
+/// what they are. Terminals aren't tagged here: `tty::of_real_fd` already knows them.
+#[derive(Clone, Copy)]
+pub(crate) enum FdKind {
+    Module,
+    /// Both ends of one pipe carry its buffer id.
+    Pipe(u64),
+    Socket(u64),
+    /// A FIFO, by the oxfs inode that names it.
+    Fifo(u64),
+    Mqueue,
+}
+
+/// Tags `real_fd`'s kind, after it's registered.
+pub(crate) fn set_kind(real_fd: u64, kind: FdKind) {
+    with_description(real_fd, |ops| ops.kind = kind);
+}
+
+/// `oxidebsd_real_fd_kind`'s codes; `sys/modules/oxfs` mirrors them.
+const KIND_MODULE: i64 = 0;
+const KIND_TTY: i64 = 1;
+const KIND_PIPE: i64 = 2;
+const KIND_SOCKET: i64 = 3;
+const KIND_FIFO: i64 = 4;
+const KIND_MQUEUE: i64 = 5;
+
+/// What description `real_fd` is: one of the `KIND_*` codes, with its argument (a terminal's
+/// packed `major << 8 | minor`, a pipe or socket's id, a FIFO's inode) stored through `arg`.
+/// `-1` if no such description exists.
+pub(crate) extern "C" fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64 {
+    let (code, value) = if let Some(id) = crate::tty::of_real_fd(real_fd) {
+        let (major, minor) = crate::tty::device(id);
+        (KIND_TTY, (major as u64) << 8 | minor as u64)
+    } else {
+        let Some(kind) = DESCRIPTIONS.lock().get(&real_fd).map(|d| d.ops.kind) else {
+            return -1;
+        };
+        match kind {
+            FdKind::Module => (KIND_MODULE, 0),
+            FdKind::Pipe(id) => (KIND_PIPE, id),
+            FdKind::Socket(id) => (KIND_SOCKET, id),
+            FdKind::Fifo(inode) => (KIND_FIFO, inode),
+            FdKind::Mqueue => (KIND_MQUEUE, 0),
+        }
+    };
+    // SAFETY: a module-owned out-pointer into its own stack.
+    unsafe { *arg = value };
+    code
+}
+
+/// `pid`'s (any process's, unlike `oxidebsd_real_fd_of`) `real_fd` for its fd `fd`, or `-1`.
+pub(crate) extern "C" fn oxidebsd_real_fd_of_pid(pid: u64, fd: u64) -> i64 {
+    let tgid = crate::process::table().lock().get(&pid).map(|p| p.tgid);
+    let Some(tgid) = tgid else { return -1 };
+    TABLE.lock().get(&(tgid, fd)).map_or(-1, |&real_fd| real_fd as i64)
 }
 
 /// One open file description: its callbacks, plus how many `TABLE` entries (across every process)
@@ -358,6 +417,7 @@ fn register(
         fb_geometry: no_fb_geometry,
         pread: no_pread_pwrite,
         pwrite: no_pread_pwrite,
+        kind: FdKind::Module,
     };
     DESCRIPTIONS
         .lock()
@@ -776,6 +836,7 @@ pub fn init() {
         fb_geometry: no_fb_geometry,
         pread: no_pread_pwrite,
         pwrite: no_pread_pwrite,
+        kind: FdKind::Module,
     };
     crate::tty::console::init();
     DESCRIPTIONS.lock().insert(0, Description { ops, refs: 0 });

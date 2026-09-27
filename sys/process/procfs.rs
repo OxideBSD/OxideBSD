@@ -85,34 +85,58 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     };
     let ppid = proc.parent.unwrap_or(0);
     let pgid = proc.pgid;
+    let sid = proc.sid;
     let brk = proc.shared.lock().brk.as_u64();
     let blocked = proc.blocked_signals;
+    let state = state_char(proc.state);
+    let comm = proc.comm.clone();
+    // The terminal layer is asked without the process table held.
+    drop(table);
+
+    // TTY.md §6.4: the session's controlling terminal (`major << 8 | minor`, 0 for none) and
+    // its foreground process group (-1 for none), as proc(5) encodes them.
+    let (tty_nr, tpgid) = match crate::tty::controlling(sid) {
+        Some(id) => {
+            let (major, minor) = crate::tty::device(id);
+            let tpgid = crate::tty::with(id, |t| t.pgrp);
+            ((major as u64) << 8 | minor as u64, tpgid)
+        }
+        None => (0, None),
+    };
 
     let mut out = Vec::new();
     push_decimal(&mut out, pid);
     out.push(b' ');
     out.push(b'(');
-    out.extend_from_slice(&proc.comm);
+    out.extend_from_slice(&comm);
     out.push(b')');
     out.push(b' ');
-    out.push(state_char(proc.state));
+    out.push(state);
 
-    // Fields 4 (ppid) through 52 (exit_code) -- see proc(5). Non-zero entries: pgrp/session
-    // (idx 1/2), priority (idx 14), num_threads (idx 16), blocked (idx 28), exit_signal (idx 34,
-    // SIGCHLD), start_brk (idx 43).
+    // Fields 4 (ppid) through 52 (exit_code) -- see proc(5). Non-zero entries: pgrp/session/
+    // tty_nr (idx 1/2/3), tpgid (idx 4, written separately: it can be -1), priority (idx 14),
+    // num_threads (idx 16), blocked (idx 28), exit_signal (idx 34, SIGCHLD), start_brk (idx 43).
     let fields: [u64; 49] = [
-        ppid, pgid, pgid, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 4-13
+        ppid, pgid, sid, tty_nr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 4-13
         20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 14-27 (priority, nice, num_threads, ...)
         blocked, 0, 0, 0, 0, 0, // 28-33
         17, 0, 0, 0, 0, 0, 0, // 34-40 (exit_signal, processor, rt_priority, ...)
         0, 0, brk, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)
     ];
-    for f in fields {
+    for (i, f) in fields.into_iter().enumerate() {
         out.push(b' ');
-        push_decimal(&mut out, f);
+        match (i, tpgid) {
+            (4, None) => out.extend_from_slice(b"-1"),
+            (4, Some(pgrp)) => push_decimal(&mut out, pgrp),
+            _ => push_decimal(&mut out, f),
+        }
     }
-    drop(table);
     copy_into(&out, buf_ptr, buf_cap)
+}
+
+/// The calling process's pid as `/proc/self` names it: its thread group's.
+pub(crate) extern "C" fn oxidebsd_current_tgid() -> u64 {
+    scheduler::current_tgid()
 }
 
 /// Raw copy of `Process::cmdline` (already real `/proc/[pid]/cmdline` wire format) into

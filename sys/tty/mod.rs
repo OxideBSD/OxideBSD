@@ -1069,11 +1069,18 @@ pub fn signal_character(id: TtyId, b: u8) -> bool {
 
 // --- descriptors (TTY.md §6) -------------------------------------------------------------------
 
-/// Which terminal each terminal description (`real_fd`) is.
-static FDS: Mutex<alloc::collections::BTreeMap<u64, TtyId>> = Mutex::new(alloc::collections::BTreeMap::new());
+/// One terminal description (`real_fd`): which terminal, and the access it was opened with.
+#[derive(Clone, Copy)]
+struct TtyFd {
+    id: TtyId,
+    readable: bool,
+    writable: bool,
+}
+
+static FDS: Mutex<alloc::collections::BTreeMap<u64, TtyFd>> = Mutex::new(alloc::collections::BTreeMap::new());
 
 pub fn of_real_fd(real_fd: u64) -> Option<TtyId> {
-    FDS.lock().get(&real_fd).copied()
+    FDS.lock().get(&real_fd).map(|f| f.id)
 }
 
 fn to_ffi(r: Result<usize, u64>) -> i64 {
@@ -1084,35 +1091,88 @@ fn to_ffi(r: Result<usize, u64>) -> i64 {
 }
 
 pub(crate) extern "C" fn fd_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
-    let Some(id) = of_real_fd(real_fd) else { return -(crate::syscall::EBADF as i64) };
+    let Some(f) = FDS.lock().get(&real_fd).copied() else { return -(crate::syscall::EBADF as i64) };
+    if !f.readable {
+        return -(crate::syscall::EBADF as i64);
+    }
     // SAFETY: the unvalidated-user-pointer gap every read path has.
     let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-    to_ffi(read(id, buf, &caller(crate::fs::fd::is_nonblocking(real_fd))))
+    to_ffi(read(f.id, buf, &caller(crate::fs::fd::is_nonblocking(real_fd))))
 }
 
 pub(crate) extern "C" fn fd_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
-    let Some(id) = of_real_fd(real_fd) else { return -(crate::syscall::EBADF as i64) };
+    let Some(f) = FDS.lock().get(&real_fd).copied() else { return -(crate::syscall::EBADF as i64) };
+    if !f.writable {
+        return -(crate::syscall::EBADF as i64);
+    }
     // SAFETY: as fd_read.
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    to_ffi(write(id, bytes, &caller(crate::fs::fd::is_nonblocking(real_fd))))
+    to_ffi(write(f.id, bytes, &caller(crate::fs::fd::is_nonblocking(real_fd))))
 }
 
 pub(crate) extern "C" fn fd_close(real_fd: u64) -> i64 {
-    if let Some(id) = FDS.lock().remove(&real_fd) {
-        closed(id);
+    if let Some(f) = FDS.lock().remove(&real_fd) {
+        closed(f.id);
     }
     0
 }
 
-/// Makes `real_fd` a description of `id`.
+/// `F_GETFL`'s access mode (`fs::fd::FdAccessMode`: bit 0 readable, bit 1 writable).
+extern "C" fn fd_access_mode(real_fd: u64) -> i64 {
+    FDS.lock().get(&real_fd).map_or(0, |f| f.readable as i64 | (f.writable as i64) << 1)
+}
+
+/// Makes `real_fd` a read-write description of `id`.
 pub fn bind(real_fd: u64, id: TtyId) {
-    FDS.lock().insert(real_fd, id);
+    bind_with(real_fd, id, true, true);
+}
+
+fn bind_with(real_fd: u64, id: TtyId, readable: bool, writable: bool) {
+    FDS.lock().insert(real_fd, TtyFd { id, readable, writable });
     opened(id);
 }
 
-/// Opens a new description of `id` in the calling process; returns its fd.
-pub fn open_fd(id: TtyId) -> u64 {
+/// `/dev/tty` (TTY.md §2.4, §2.6).
+pub const CTTY_DEVICE: (u32, u32) = (5, 0);
+/// `/dev/console` (§2.3); `ttyv0` until the console becomes a device of its own (§10.2, slice 5).
+pub const CONSOLE_DEVICE: (u32, u32) = (5, 1);
+
+/// `open(2)` of a terminal device node (`sys/modules/oxfs`'s `InodeKind::Device` dispatch, the
+/// way FIFOs go through `oxidebsd_fifo_open`): a new description of the terminal numbered
+/// `major:minor`, in the calling process. Returns its fd, or `-ENXIO` if no such terminal exists
+/// -- for `/dev/tty`, if the caller has no controlling terminal. `O_NOCTTY` has nothing to
+/// suppress: opening never makes a terminal controlling (§5.1).
+pub(crate) extern "C" fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -> i64 {
+    const O_ACCMODE: u64 = 3;
+    const O_WRONLY: u64 = 1;
+    const O_RDWR: u64 = 2;
+    const O_NONBLOCK: u64 = 0o4000;
+    let enxio = -(crate::syscall::ENXIO as i64);
+    let dev = (major as u32, minor as u32);
+    let id = if dev == CTTY_DEVICE {
+        match controlling(caller(false).sid) {
+            Some(id) => id,
+            None => return enxio,
+        }
+    } else if dev == CONSOLE_DEVICE {
+        TTYV0
+    } else {
+        match find(dev.0, dev.1) {
+            Some(id) => id,
+            None => return enxio,
+        }
+    };
+    let (readable, writable) = match flags & O_ACCMODE {
+        O_WRONLY => (false, true),
+        O_RDWR => (true, true),
+        _ => (true, false),
+    };
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
-    bind(real_fd, id);
-    crate::fs::fd::oxidebsd_register_fd_ops(real_fd, fd_read, fd_write, fd_close)
+    bind_with(real_fd, id, readable, writable);
+    if flags & O_NONBLOCK != 0 {
+        crate::fs::fd::set_nonblocking(real_fd, true);
+    }
+    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, fd_read, fd_write, fd_close);
+    crate::fs::fd::oxidebsd_set_fd_access_mode(real_fd, fd_access_mode);
+    fd as i64
 }

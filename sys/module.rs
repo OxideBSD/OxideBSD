@@ -929,6 +929,10 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_real_fd_of" => Some(crate::fs::fd::oxidebsd_real_fd_of as *const () as u64),
         "oxidebsd_fifo_open" => Some(crate::fs::pipe::oxidebsd_fifo_open as *const () as u64),
+        "oxidebsd_tty_open" => Some(crate::tty::oxidebsd_tty_open as *const () as u64),
+        "oxidebsd_real_fd_kind" => Some(crate::fs::fd::oxidebsd_real_fd_kind as *const () as u64),
+        "oxidebsd_real_fd_of_pid" => Some(crate::fs::fd::oxidebsd_real_fd_of_pid as *const () as u64),
+        "oxidebsd_current_tgid" => Some(crate::process::procfs::oxidebsd_current_tgid as *const () as u64),
         "oxidebsd_proc_exists" => Some(crate::process::oxidebsd_proc_exists as *const () as u64),
         "oxidebsd_proc_pid_at" => Some(crate::process::oxidebsd_proc_pid_at as *const () as u64),
         "oxidebsd_proc_stat_line" => {

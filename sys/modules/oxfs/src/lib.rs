@@ -133,6 +133,16 @@ unsafe extern "C" {
     /// Opens the FIFO whose inode is `key` with `open(2)`'s `flags`; returns the new fd or
     /// `-errno`. The kernel owns the pipe buffer and the reader/writer rendezvous (`fs::pipe`).
     fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64;
+    /// Opens terminal `major:minor` (TTY.md §2.6) with `open(2)`'s `flags`; returns the new fd or
+    /// `-errno` (`-ENXIO` for no such terminal, or `/dev/tty` without a controlling terminal).
+    fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -> i64;
+    /// What description `real_fd` is: an `FD_KIND_*` code, its argument stored through `arg`;
+    /// `-1` if there's no such description.
+    fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64;
+    /// Process `pid`'s `real_fd` for its descriptor `fd`, or `-1`.
+    fn oxidebsd_real_fd_of_pid(pid: u64, fd: u64) -> i64;
+    /// The pid `/proc/self` names: the caller's thread group's.
+    fn oxidebsd_current_tgid() -> u64;
     fn oxidebsd_proc_exists(pid: u64) -> i32;
     fn oxidebsd_proc_pid_at(index: u64) -> i64;
     fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
@@ -390,6 +400,9 @@ const S_IFLNK: u32 = 0o120000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 const S_IFIFO: u32 = 0o010000;
+const S_IFSOCK: u32 = 0o140000;
+/// The `tty` group, which owns terminals (4 in all three BSDs).
+const TTY_GID: u32 = 4;
 /// Real POSIX mask isolating the type bits above out of a raw `mode_t` -- used by `oxfs_mknod` to
 /// read the caller's requested node type back out of its own `mode` argument.
 const S_IFMT: u32 = 0o170000;
@@ -2296,7 +2309,7 @@ fn proc_dir_kind_for(suffix: &[u8]) -> Option<ProcDirKind> {
     let Some(pid_str) = comps.next() else {
         return Some(ProcDirKind::Root);
     };
-    let pid = parse_pid(pid_str)?;
+    let pid = parse_proc_pid(pid_str)?;
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
     if unsafe { oxidebsd_proc_exists(pid as u64) } == 0 {
         return None;
@@ -2393,7 +2406,7 @@ fn proc_relative_chdir(kind: ProcDirKind, path: &[u8]) -> i64 {
 /// `oxfs_stat`/`oxfs_lstat`'s own cwd-relative delegate -- `/proc` has no real symlinks (see
 /// `resolve_path_impl`'s own doc comment), so there's no `stat`-vs-`lstat` divergence to make here
 /// the way there is in real inode space; both call this the same way.
-fn proc_relative_stat(kind: ProcDirKind, path: &[u8], buf_ptr: u64) -> i64 {
+fn proc_relative_stat(kind: ProcDirKind, path: &[u8], buf_ptr: u64, follow: bool) -> i64 {
     if path.is_empty() || path == b"." {
         return write_proc_stat(true, buf_ptr);
     }
@@ -2407,10 +2420,7 @@ fn proc_relative_stat(kind: ProcDirKind, path: &[u8], buf_ptr: u64) -> i64 {
     let Some(len) = proc_join_suffix(kind, path, &mut suffix) else {
         return -ENOENT;
     };
-    match proc_kind(&suffix[..len]) {
-        Some(is_dir) => write_proc_stat(is_dir, buf_ptr),
-        None => -ENOENT,
-    }
+    proc_stat(&suffix[..len], buf_ptr, follow)
 }
 
 /// `oxfs_access`'s own cwd-relative delegate -- `/proc` has no real permission bits (see
@@ -2436,7 +2446,7 @@ fn proc_relative_access(kind: ProcDirKind, path: &[u8]) -> i64 {
 /// `oxfs_readlink`'s own cwd-relative delegate -- nothing under `/proc` is ever a real symlink in
 /// this design (see `ProcDirKind::FdList`'s own doc comment), so a path that resolves to *anything*
 /// existing is `-EINVAL` ("exists, but isn't a symlink"), matching real `readlink(2)`.
-fn proc_relative_readlink(kind: ProcDirKind, path: &[u8]) -> i64 {
+fn proc_relative_readlink(kind: ProcDirKind, path: &[u8], buf_ptr: u64, buf_cap: u64) -> i64 {
     if path.is_empty() || path == b"." || path == b".." {
         return -EINVAL;
     }
@@ -2444,8 +2454,37 @@ fn proc_relative_readlink(kind: ProcDirKind, path: &[u8]) -> i64 {
     let Some(len) = proc_join_suffix(kind, path, &mut suffix) else {
         return -ENOENT;
     };
-    match proc_kind(&suffix[..len]) {
-        Some(_) => -EINVAL,
+    proc_readlink(&suffix[..len], buf_ptr, buf_cap)
+}
+
+/// `readlink(2)` of a `/proc` path (`suffix` follows `/proc`): the links' targets (`proc_link`);
+/// anything else that exists isn't a link.
+fn proc_readlink(suffix: &[u8], buf_ptr: u64, buf_cap: u64) -> i64 {
+    let Some(link) = proc_link(suffix) else {
+        return match proc_kind(suffix) {
+            Some(_) => -EINVAL,
+            None => -ENOENT,
+        };
+    };
+    let mut target = [0u8; MAX_CWD_PATH];
+    let len = match proc_link_target(link, &mut target) {
+        Ok(len) => len.min(buf_cap as usize),
+        Err(e) => return e,
+    };
+    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
+    unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf_ptr as *mut u8, len) };
+    len as i64
+}
+
+/// `stat(2)` (`follow`) or `lstat(2)` of a `/proc` path.
+fn proc_stat(suffix: &[u8], buf_ptr: u64, follow: bool) -> i64 {
+    match proc_link(suffix) {
+        Some(ProcLink::Fd(real_fd)) if follow => return stat_real_fd(real_fd, buf_ptr),
+        Some(_) if !follow => return write_synthetic_stat(S_IFLNK | 0o777, 0, PROC_INODE_BASE, buf_ptr),
+        _ => {}
+    }
+    match proc_kind(suffix) {
+        Some(is_dir) => write_proc_stat(is_dir, buf_ptr),
         None => -ENOENT,
     }
 }
@@ -2553,7 +2592,15 @@ enum OpenFile {
     /// `read()` call via `read_inode_at` rather than caching the whole file at `open` time (unlike
     /// `modules/fat32`'s own `OpenFile::Read`), so file size is bounded only by the block pool,
     /// not by a fixed per-fd buffer.
-    FileRead { inode: u32, position: usize },
+    FileRead {
+        inode: u32,
+        position: usize,
+        /// The directory and name this was opened through, for `/proc/<pid>/fd/<n>`'s link
+        /// (`open_file_path`).
+        parent: u32,
+        name: [u8; NAME_MAX],
+        name_len: u8,
+    },
     /// A directory listing, formatted into a fixed buffer at `open` time -- listings stay small,
     /// so caching one is simpler than streaming it record-by-record, and this mirrors
     /// `modules/fat32`'s existing "open a directory, read back a formatted listing" trick for
@@ -2745,13 +2792,8 @@ enum ProcDirKind {
     /// for this tier) unconditionally `opendir()`s this path and silently skips a pid entirely if
     /// it's missing, rather than falling back to treating the pid as single-threaded itself.
     TaskList(u32),
-    /// `/proc/<pid>/fd`: one entry per fd this process currently has open (`oxidebsd_fd_at`).
-    /// Closes the *enumeration* gap for `lsof`/`fuser` -- each entry is a plain `DT_REG`
-    /// placeholder (no real fd-target content, since there's no `readlink`-able target to back it
-    /// with: oxfs doesn't know what a pipe/socket fd actually is, only `src/pipe.rs`/`sys/net/*`
-    /// do). A real per-fd target (making these genuine symlinks to the fd's actual resource) needs
-    /// a separate, cross-module "describe this fd" mechanism -- a known, deliberate limitation of
-    /// this pass, not solved by guessing.
+    /// `/proc/<pid>/fd`: one symlink per fd this process has open (`oxidebsd_fd_at`), naming
+    /// what it's open on (`proc_link_target`, TTY.md §6.3).
     FdList(u32),
 }
 
@@ -3248,7 +3290,7 @@ fn proc_open(suffix: &[u8]) -> i64 {
     let Some(pid_str) = comps.next() else {
         return open_proc_root_dir();
     };
-    let Some(pid) = parse_pid(pid_str) else {
+    let Some(pid) = parse_proc_pid(pid_str) else {
         return -ENOENT;
     };
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
@@ -3305,7 +3347,7 @@ fn proc_kind(suffix: &[u8]) -> Option<bool> {
     let Some(pid_str) = comps.next() else {
         return Some(true); // /proc itself
     };
-    let pid = parse_pid(pid_str)?;
+    let pid = parse_proc_pid(pid_str)?;
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
     if unsafe { oxidebsd_proc_exists(pid as u64) } == 0 {
         return None;
@@ -3313,7 +3355,13 @@ fn proc_kind(suffix: &[u8]) -> Option<bool> {
     match comps.next() {
         None => Some(true), // /proc/<pid>
         Some(b"stat" | b"cmdline" | b"status") if comps.next().is_none() => Some(false),
-        Some(b"fd") if comps.next().is_none() => Some(true),
+        Some(b"fd") => match (comps.next(), comps.next()) {
+            (None, _) => Some(true),
+            // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+            (Some(n), None) => (unsafe { oxidebsd_real_fd_of_pid(pid as u64, parse_pid(n)? as u64) } >= 0)
+                .then_some(false),
+            _ => None,
+        },
         Some(b"task") => match comps.next() {
             None => Some(true), // /proc/<pid>/task
             Some(tid_str) => {
@@ -3330,6 +3378,236 @@ fn proc_kind(suffix: &[u8]) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+// --- terminals and /proc symlinks (TTY.md §6) ------------------------------------------------
+
+/// `oxidebsd_real_fd_kind`'s codes (`sys/fs/fd.rs`, kernel tree).
+const FD_KIND_MODULE: i64 = 0;
+const FD_KIND_TTY: i64 = 1;
+const FD_KIND_PIPE: i64 = 2;
+const FD_KIND_SOCKET: i64 = 3;
+const FD_KIND_FIFO: i64 = 4;
+const FD_KIND_MQUEUE: i64 = 5;
+
+/// Terminal majors (TTY.md §2.6): `ttyv<n>` (4), `/dev/tty` and `/dev/console` (5), serial
+/// `tty0<n>` (6). Opening one opens the kernel's terminal, not an oxfs file.
+fn is_tty_major(major: u32) -> bool {
+    matches!(major, 4..=6)
+}
+
+/// A `/proc` path's first component: a pid, or `self`, the caller's own.
+fn parse_proc_pid(bytes: &[u8]) -> Option<u32> {
+    if bytes == b"self" {
+        // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+        return Some(unsafe { oxidebsd_current_tgid() } as u32);
+    }
+    parse_pid(bytes)
+}
+
+/// `/dev`'s node for character device `rdev`: its inode and name.
+fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
+    let dev = dir_lookup(ROOT_INODE, b"dev")?;
+    let inode = read_inode(dev);
+    let mut i = 0;
+    while let Some(blk) = inode_block_at(&inode, i) {
+        let block = read_block(blk);
+        for r in 0..RECORDS_PER_BLOCK {
+            if !dir_record_used(&block, r) {
+                continue;
+            }
+            let child = read_inode(dir_record_inode(&block, r));
+            if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
+                let name = dir_record_name(&block, r);
+                let mut buf = [0u8; NAME_MAX];
+                buf[..name.len()].copy_from_slice(name);
+                return Some((dir_record_inode(&block, r), buf, name.len() as u8));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `stat` of a descriptor (`fstat`, and `stat` through a `/proc/<pid>/fd/<n>` link). A terminal
+/// reports its device node (TTY.md §6.2), so that `ttyname(3)`'s comparison of the two matches;
+/// pipes and sockets get the types they are.
+fn stat_real_fd(real_fd: u64, buf_ptr: u64) -> i64 {
+    let mut arg = 0u64;
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+    match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
+        FD_KIND_TTY => match dev_node_for(arg as u32) {
+            Some((inode, _, _)) => write_stat(inode, buf_ptr),
+            None => write_synthetic_stat(S_IFCHR | 0o600, arg, 0, buf_ptr),
+        },
+        FD_KIND_PIPE => write_synthetic_stat(S_IFIFO | 0o600, 0, arg, buf_ptr),
+        FD_KIND_SOCKET => write_synthetic_stat(S_IFSOCK | 0o777, 0, arg, buf_ptr),
+        FD_KIND_FIFO => write_stat(arg as u32, buf_ptr),
+        _ => match resolve_write_fd_inode(real_fd) {
+            Some(inode_num) => write_stat(inode_num, buf_ptr),
+            None => -EBADF,
+        },
+    }
+}
+
+/// A `struct stat` for something no oxfs inode backs (pipes, sockets, a terminal whose node was
+/// removed).
+fn write_synthetic_stat(mode: u32, rdev: u64, ino: u64, buf_ptr: u64) -> i64 {
+    let stat = MuslStat {
+        st_dev: 0,
+        st_ino: ino,
+        st_nlink: 1,
+        st_mode: mode,
+        st_uid: 0,
+        st_gid: 0,
+        __pad0: 0,
+        st_rdev: rdev,
+        st_size: 0,
+        st_blksize: BLOCK_SIZE as i64,
+        st_blocks: 0,
+        st_atime_sec: 0,
+        st_atime_nsec: 0,
+        st_mtime_sec: 0,
+        st_mtime_nsec: 0,
+        st_ctime_sec: 0,
+        st_ctime_nsec: 0,
+        __unused: [0; 3],
+    };
+    // SAFETY: same trust boundary as `write_stat` -- caller-owned pointer, sized by the caller's
+    // own `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly).
+    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
+    0
+}
+
+/// The `/proc` symlinks (TTY.md §6.3).
+enum ProcLink {
+    /// `/proc/self`, naming the caller's pid.
+    SelfPid(u32),
+    /// `/proc/<pid>/fd/<n>`, naming what the descriptor is open on.
+    Fd(u64),
+}
+
+/// Whether `suffix` (a path after `/proc`) names a link itself, rather than going through one.
+fn proc_link(suffix: &[u8]) -> Option<ProcLink> {
+    let mut comps = suffix.split(|&b| b == b'/').filter(|c| !c.is_empty());
+    let first = comps.next()?;
+    let pid = parse_proc_pid(first)?;
+    match (comps.next(), comps.next(), comps.next()) {
+        // `/proc/self/` goes through the link, as any trailing slash does.
+        (None, _, _) if first == b"self" && suffix.last() != Some(&b'/') => Some(ProcLink::SelfPid(pid)),
+        (Some(b"fd"), Some(n), None) if suffix.last() != Some(&b'/') => {
+            // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+            let real_fd = unsafe { oxidebsd_real_fd_of_pid(pid as u64, parse_pid(n)? as u64) };
+            (real_fd >= 0).then_some(ProcLink::Fd(real_fd as u64))
+        }
+        _ => None,
+    }
+}
+
+/// A link's target into `out`: its length, or `-errno`.
+fn proc_link_target(link: ProcLink, out: &mut [u8; MAX_CWD_PATH]) -> Result<usize, i64> {
+    let real_fd = match link {
+        ProcLink::SelfPid(pid) => return Ok(decimal_into(out, pid as u64)),
+        ProcLink::Fd(real_fd) => real_fd,
+    };
+    let tagged = |out: &mut [u8; MAX_CWD_PATH], tag: &[u8], n: u64| {
+        let mut b = ByteBuf { buf: &mut out[..], len: 0 };
+        b.push_bytes(tag);
+        b.push_bytes(b":[");
+        b.push_decimal_u64(n);
+        b.push_bytes(b"]");
+        b.len
+    };
+    let mut arg = 0u64;
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+    match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
+        FD_KIND_TTY => {
+            let (_, name, name_len) = dev_node_for(arg as u32).ok_or(-ENOENT)?;
+            let mut b = ByteBuf { buf: &mut out[..], len: 0 };
+            b.push_bytes(b"/dev/");
+            b.push_bytes(&name[..name_len as usize]);
+            Ok(b.len)
+        }
+        // Linux's names for descriptors without a path.
+        FD_KIND_PIPE => Ok(tagged(out, b"pipe", arg)),
+        FD_KIND_SOCKET => Ok(tagged(out, b"socket", arg)),
+        FD_KIND_MQUEUE => {
+            let mut b = ByteBuf { buf: &mut out[..], len: 0 };
+            b.push_bytes(b"anon_inode:[mqueue]");
+            Ok(b.len)
+        }
+        FD_KIND_FIFO => any_path_of(arg as u32, out).ok_or(-ENOENT),
+        FD_KIND_MODULE => open_file_path(real_fd, out),
+        _ => Err(-ENOENT),
+    }
+}
+
+/// The path of one of this module's open files (`OPEN_FILES`, keyed by `real_fd`).
+fn open_file_path(real_fd: u64, out: &mut [u8; MAX_CWD_PATH]) -> Result<usize, i64> {
+    let fixed = |out: &mut [u8; MAX_CWD_PATH], path: &[u8]| {
+        out[..path.len()].copy_from_slice(path);
+        Ok(path.len())
+    };
+    match find_open_file(real_fd).ok_or(-ENOENT)? {
+        &mut OpenFile::FileRead { inode, parent, name, name_len, .. } => {
+            Ok(file_path(inode, parent, &name[..name_len as usize], false, out))
+        }
+        &mut OpenFile::Write { parent_inode, name, name_len, existing_inode, unlinked, .. } => {
+            let name = &name[..name_len as usize];
+            Ok(match existing_inode {
+                Some(inode) => file_path(inode, parent_inode, name, unlinked, out),
+                // Not committed yet: it has no inode for a rename to have moved.
+                None => join_path(parent_inode, name, unlinked, out),
+            })
+        }
+        &mut OpenFile::DirListing { inode, .. } => Ok(build_cwd_path(inode, out)),
+        &mut OpenFile::ProcDir { kind, .. } => Ok(proc_dir_suffix(kind, out)),
+        OpenFile::DevNull => fixed(out, b"/dev/null"),
+        OpenFile::DevZero => fixed(out, b"/dev/zero"),
+        OpenFile::DevRandom => fixed(out, b"/dev/urandom"),
+        OpenFile::Framebuffer { .. } => fixed(out, b"/dev/fb0"),
+        // Which /proc file it was isn't kept.
+        OpenFile::ProcRead { .. } => Err(-ENOENT),
+    }
+}
+
+/// The path of file `inode`, opened as `name` in `parent`: that name while it still names the
+/// file, else another name the file has (renamed, or linked elsewhere), else the old one marked
+/// ` (deleted)`, as Linux does.
+fn file_path(inode: u32, parent: u32, name: &[u8], unlinked: bool, out: &mut [u8; MAX_CWD_PATH]) -> usize {
+    if !unlinked && dir_lookup(parent, name) == Some(inode) {
+        return join_path(parent, name, false, out);
+    }
+    if read_inode(inode).nlink > 0 {
+        if let Some(len) = any_path_of(inode, out) {
+            return len;
+        }
+    }
+    join_path(parent, name, true, out)
+}
+
+/// `<dir's path>/<name>`, plus ` (deleted)`.
+fn join_path(dir: u32, name: &[u8], deleted: bool, out: &mut [u8; MAX_CWD_PATH]) -> usize {
+    let mut len = build_cwd_path(dir, out);
+    if len == 1 {
+        len = 0; // the root: no "//name"
+    }
+    let mut b = ByteBuf { buf: &mut out[..], len };
+    b.push_bytes(b"/");
+    b.push_bytes(name);
+    if deleted {
+        b.push_bytes(b" (deleted)");
+    }
+    b.len
+}
+
+/// Some path of `inode`, by searching every directory for an entry naming it. `None` if nothing
+/// does (it was unlinked).
+fn any_path_of(inode: u32, out: &mut [u8; MAX_CWD_PATH]) -> Option<usize> {
+    (0..TOTAL_INODES as u32)
+        .filter(|&d| read_inode(d).kind == InodeKind::Dir)
+        .find_map(|d| find_name_of_inode_in_dir(d, inode).map(|name| (d, name)))
+        .map(|(dir, (name, name_len))| join_path(dir, &name[..name_len as usize], false, out))
 }
 
 /// `/dev/{random,urandom,null,zero}` -- a second special-cased path prefix alongside `/proc`
@@ -3620,7 +3898,16 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                 InodeKind::Dir => open_dir_listing(resolved),
                 InodeKind::Device => match known_device(inode.rdev, inode.device_char) {
                     Some(open_file) => register_open_file(open_file),
-                    None => -ENXIO,
+                    None => {
+                        let (major, minor) = dev_major_minor(inode.rdev);
+                        if inode.device_char && is_tty_major(major) {
+                            // SAFETY: FFI call to a kernel-exported function, matching its
+                            // declared signature.
+                            unsafe { oxidebsd_tty_open(major as u64, minor as u64, flags) }
+                        } else {
+                            -ENXIO
+                        }
+                    }
                 },
                 InodeKind::Fifo => {
                     // The open can block until the other end shows up, and other processes'
@@ -3689,10 +3976,17 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                         append: flags & O_APPEND != 0,
                     })
                 }
-                _ => register_open_file(OpenFile::FileRead {
-                    inode: resolved,
-                    position: 0,
-                }),
+                _ => {
+                    let mut name = [0u8; NAME_MAX];
+                    name[..leaf.len()].copy_from_slice(leaf);
+                    register_open_file(OpenFile::FileRead {
+                        inode: resolved,
+                        position: 0,
+                        parent,
+                        name,
+                        name_len: leaf.len() as u8,
+                    })
+                }
             }
         }
         None if create => {
@@ -3774,7 +4068,7 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
         return -EBADF;
     };
     match file {
-        OpenFile::FileRead { inode, position } => {
+        OpenFile::FileRead { inode, position, .. } => {
             // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
             let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
             let n = read_inode_at(*inode, *position, out);
@@ -4937,6 +5231,7 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
         let _ = dir_insert(old_parent, old_leaf, target);
         return errno_for(e);
     }
+    rename_open_files(old_parent, old_leaf, new_parent, new_leaf);
     if reparent {
         // Removing then re-adding `..` reuses the slot just freed, so this can't run out of space.
         let _ = dir_remove(target, b"..");
@@ -4945,6 +5240,24 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
         }
     }
     0
+}
+
+/// Files open through `old_parent`/`old_leaf` now go by the new name, for their
+/// `/proc/<pid>/fd` links (`open_file_path`).
+fn rename_open_files(old_parent: u32, old_leaf: &[u8], new_parent: u32, new_leaf: &[u8]) {
+    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
+    for (_, file) in slots.iter_mut().flatten() {
+        let (parent, name, name_len) = match file {
+            OpenFile::FileRead { parent, name, name_len, .. } => (parent, name, name_len),
+            OpenFile::Write { parent_inode, name, name_len, .. } => (parent_inode, name, name_len),
+            _ => continue,
+        };
+        if *parent == old_parent && &name[..*name_len as usize] == old_leaf {
+            *parent = new_parent;
+            name[..new_leaf.len()].copy_from_slice(new_leaf);
+            *name_len = new_leaf.len() as u8;
+        }
+    }
 }
 
 /// Is `dir` the directory `ancestor` itself, or somewhere beneath it? Walks `..` up to the root.
@@ -5024,10 +5337,7 @@ extern "C" fn oxfs_stat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
-        return match proc_kind(&path[5..]) {
-            Some(is_dir) => write_proc_stat(is_dir, buf_ptr),
-            None => -ENOENT,
-        };
+        return proc_stat(&path[5..], buf_ptr, true);
     }
 
     let cwd = match current_cwd() {
@@ -5036,7 +5346,7 @@ extern "C" fn oxfs_stat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -
             if path.first() == Some(&b'/') {
                 ROOT_INODE
             } else {
-                return proc_relative_stat(kind, path, buf_ptr);
+                return proc_relative_stat(kind, path, buf_ptr, true);
             }
         }
     };
@@ -5055,10 +5365,7 @@ extern "C" fn oxfs_lstat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) 
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
-        return match proc_kind(&path[5..]) {
-            Some(is_dir) => write_proc_stat(is_dir, buf_ptr),
-            None => -ENOENT,
-        };
+        return proc_stat(&path[5..], buf_ptr, false);
     }
 
     let cwd = match current_cwd() {
@@ -5067,7 +5374,7 @@ extern "C" fn oxfs_lstat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) 
             if path.first() == Some(&b'/') {
                 ROOT_INODE
             } else {
-                return proc_relative_stat(kind, path, buf_ptr);
+                return proc_relative_stat(kind, path, buf_ptr, false);
             }
         }
     };
@@ -5086,12 +5393,7 @@ extern "C" fn oxfs_readlink(path_ptr: u64, path_len: u64, buf_ptr: u64, buf_cap:
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
-        // Nothing under /proc is a real symlink in this design (see ProcDirKind::FdList's own
-        // doc comment) -- an existing path is "exists, but isn't a symlink", not "no such file".
-        return match proc_kind(&path[5..]) {
-            Some(_) => -EINVAL,
-            None => -ENOENT,
-        };
+        return proc_readlink(&path[5..], buf_ptr, buf_cap);
     }
 
     let cwd = match current_cwd() {
@@ -5100,7 +5402,7 @@ extern "C" fn oxfs_readlink(path_ptr: u64, path_len: u64, buf_ptr: u64, buf_cap:
             if path.first() == Some(&b'/') {
                 ROOT_INODE
             } else {
-                return proc_relative_readlink(kind, path);
+                return proc_relative_readlink(kind, path, buf_ptr, buf_cap);
             }
         }
     };
@@ -5960,56 +6262,11 @@ extern "C" fn oxfs_fstat(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
     if real_fd < 0 {
         return -EBADF;
     }
-    // `real_fd` `0`/`1`/`2` is the fixed sentinel `crate::fs::fd::init` assigns the real console's
-    // stdin/stdout/stderr (never reassigned by `dup2`/`fork_inherit`, which copy the ops struct --
-    // and thus `real_fd` -- verbatim; every other fd's own `real_fd` comes from
-    // `oxidebsd_alloc_fd`, bump-allocated starting at `3`). Not backed by any real oxfs inode, so
-    // `resolve_write_fd_inode` below can never find one -- found live via the real Clang/LLVM port:
-    // `llvm::sys::Process::FixupStandardFileDescriptors()` genuinely `fstat()`s its own fd 0/1/2
-    // at startup, and a flat `EBADF` here made it conclude all three were invalid and `dup2` every
-    // one of them onto a freshly opened `/dev/null` -- silently discarding every one of `clang`'s
-    // own later diagnostic/output writes with no error anywhere. Synthesizes a real character-device
-    // stat directly instead, matching how a real Unix kernel reports `fstat()` on a tty (major:minor
-    // `5:1`, matching real Linux's own `/dev/console` -- cosmetic here, nothing decodes it back).
-    if real_fd <= 2 {
-        return write_console_stat(buf_ptr);
-    }
-    match resolve_write_fd_inode(real_fd as u64) {
-        Some(inode_num) => write_stat(inode_num, buf_ptr),
-        None => -EBADF,
-    }
-}
-
-/// Synthesizes a real `struct stat` for the console's stdin/stdout/stderr -- see `oxfs_fstat`'s own
-/// doc comment for why this exists (no backing oxfs inode to `write_stat` from). `st_ino`/`st_dev`
-/// are fixed placeholders (`0`); nothing in this codebase or any ported software keys behavior off
-/// their exact values for a tty, only off `S_IFCHR` itself (`isatty()`-style checks use `ioctl`
-/// `TCGETS`, not `fstat`, for that -- see `console::stdin`'s own module doc comment).
-fn write_console_stat(buf_ptr: u64) -> i64 {
-    let stat = MuslStat {
-        st_dev: 0,
-        st_ino: 0,
-        st_nlink: 1,
-        st_mode: S_IFCHR | 0o620,
-        st_uid: 0,
-        st_gid: 0,
-        __pad0: 0,
-        st_rdev: (5u64 << 8) | 1,
-        st_size: 0,
-        st_blksize: BLOCK_SIZE as i64,
-        st_blocks: 0,
-        st_atime_sec: 0,
-        st_atime_nsec: 0,
-        st_mtime_sec: 0,
-        st_mtime_nsec: 0,
-        st_ctime_sec: 0,
-        st_ctime_nsec: 0,
-        __unused: [0; 3],
-    };
-    // SAFETY: same trust boundary as `write_stat` -- caller-owned pointer, sized by the caller's
-    // own `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly).
-    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
-    0
+    // A terminal reports its device node, a pipe or socket its type (`stat_real_fd`). Found
+    // live via the Clang/LLVM port that this matters for the console: `llvm::sys::Process::
+    // FixupStandardFileDescriptors()` `fstat()`s fd 0/1/2 at startup, and an `EBADF` made it
+    // `dup2` all three onto `/dev/null`, silently discarding every diagnostic.
+    stat_real_fd(real_fd as u64, buf_ptr)
 }
 
 /// Registered for `SYS_LSEEK` -- see that constant's own doc comment for why this exists at all
@@ -6066,7 +6323,7 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
     };
     let offset = offset as i64;
     let (position, size): (&mut usize, i64) = match open_file {
-        OpenFile::FileRead { inode, position } => {
+        OpenFile::FileRead { inode, position, .. } => {
             (position, read_inode(*inode).size as i64)
         }
         OpenFile::DirListing { content: _, len, position, .. } => (position, *len as i64),
@@ -6196,8 +6453,14 @@ fn proc_dir_nth_entry(kind: ProcDirKind, n: usize) -> Option<(u64, [u8; NAME_MAX
                     DT_REG,
                 ));
             }
+            // Then the `self` link, then the pids.
+            if n == SYS_NAMES.len() {
+                let mut name = [0u8; NAME_MAX];
+                name[..4].copy_from_slice(b"self");
+                return Some((PROC_INODE_BASE - 1 - n as u64, name, 4, DT_LNK));
+            }
             // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-            let pid = unsafe { oxidebsd_proc_pid_at((n - SYS_NAMES.len()) as u64) };
+            let pid = unsafe { oxidebsd_proc_pid_at((n - SYS_NAMES.len() - 1) as u64) };
             if pid < 0 {
                 return None;
             }
@@ -6238,7 +6501,7 @@ fn proc_dir_nth_entry(kind: ProcDirKind, n: usize) -> Option<(u64, [u8; NAME_MAX
                 PROC_INODE_BASE + (pid as u64) * 1024 + fd as u64 + 1,
                 name,
                 name_len as u8,
-                DT_REG,
+                DT_LNK,
             ))
         }
     }
@@ -7606,7 +7869,7 @@ fn format_fresh_filesystem() -> bool {
         b"passwd",
         b"root:x:0:0:root:/:/bin/sh\nuser:x:1000:1000:User:/home/user:/bin/sh\n",
     );
-    ok &= seed_file(etc, b"group", b"root:x:0:\nuser:x:1000:\n");
+    ok &= seed_file(etc, b"group", b"root:x:0:\ntty:x:4:\nuser:x:1000:\n");
 
     // /etc/shadow: real crypt(3) password hashes (SHA-512, `$6$`) -- musl's own getspnam
     // (external/mit/musl/src/passwd/getspnam*.c) parses this the same way it parses /etc/passwd.
@@ -7699,6 +7962,24 @@ fn format_fresh_filesystem() -> bool {
         inode.device_char = true;
         write_inode(fb0, inode);
         dir_insert(dev, b"fb0", fb0).expect("oxfs: failed to insert /dev/fb0 into /dev");
+    }
+
+    // The terminals (TTY.md §2.6), owned and moded as the BSDs' devfs creates them: the console
+    // terminal root's until login(1) takes it for a user, /dev/tty open to all (it only ever
+    // reaches the opener's own controlling terminal), /dev/console root's.
+    for (name, major, minor, gid, mode) in [
+        (&b"ttyv0"[..], 4u32, 0u32, TTY_GID, 0o600u16),
+        (b"tty", 5, 0, 0, 0o666),
+        (b"console", 5, 1, 0, 0o600),
+    ] {
+        let node = alloc_inode().expect("oxfs: failed to allocate a terminal node");
+        let mut inode = Inode::new(InodeKind::Device);
+        inode.mode = mode;
+        inode.gid = gid;
+        inode.rdev = (major << 8) | minor;
+        inode.device_char = true;
+        write_inode(node, inode);
+        dir_insert(dev, name, node).expect("oxfs: failed to insert a terminal node into /dev");
     }
 
     // The real, on-target musl runtime tree -- `/usr/include`/`/usr/lib` -- what Clang/LLVM's own
@@ -7865,6 +8146,9 @@ fn format_fresh_filesystem() -> bool {
         b"fd-smoke.elf",
         include_bytes!(env!("OXFS_FD_SMOKE_ELF_PATH")),
     );
+    // Terminal nodes and descriptors, run by `tests/tty_syscall_smoke.rs` -- see
+    // `regress/tty-smoke/main.c`.
+    ok &= seed_file(root, b"tty-smoke.elf", include_bytes!(env!("OXFS_TTY_SMOKE_ELF_PATH")));
 
     // Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) via the real
     // `/dev/shm`-backed `MAP_SHARED` mmap two independent processes each map at their own,

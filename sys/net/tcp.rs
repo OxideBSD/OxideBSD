@@ -710,7 +710,9 @@ pub fn create_socket() -> u64 {
         .lock()
         .sockets
         .insert(fd, TcpSocket::Unbound { local_port: None });
-    crate::fs::fd::oxidebsd_register_fd_ops(fd, tcp_read, tcp_write, tcp_close)
+    let user_fd = crate::fs::fd::oxidebsd_register_fd_ops(fd, tcp_read, tcp_write, tcp_close);
+    crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Socket(fd));
+    user_fd
 }
 
 /// `None` if `real_fd` isn't a TCP socket at all (the caller, `udp::oxidebsd_sys_bind`, should
@@ -930,6 +932,7 @@ pub extern "C" fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u
 
     let user_fd =
         crate::fs::fd::oxidebsd_register_fd_ops(conn_fd, tcp_read, tcp_write, tcp_close);
+    crate::fs::fd::set_kind(conn_fd, crate::fs::fd::FdKind::Socket(conn_fd));
     super::udp::write_sockaddr(addr_out_ptr, remote_ip, remote_port);
     if addrlen_ptr != 0 {
         unsafe {

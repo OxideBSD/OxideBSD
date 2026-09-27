@@ -226,6 +226,7 @@ fn main() {
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
@@ -342,6 +343,7 @@ fn main() {
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
     let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
     let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
+    let tty_smoke_elf_path = build_tty_smoke(&musl_sysroot);
 
     // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
@@ -528,6 +530,7 @@ fn main() {
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_TTY_SMOKE_ELF_PATH", tty_smoke_elf_path.to_str().unwrap()),
         (
             "OXFS_SEM_OPEN_SMOKE_ELF_PATH",
             sem_open_smoke_elf_path.to_str().unwrap(),
@@ -1506,6 +1509,29 @@ fn build_fd_smoke(sysroot: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for fd-smoke: {e}"));
     if !status.success() {
         panic!("building fd-smoke failed: {status}");
+    }
+    out
+}
+
+/// Terminal device nodes and descriptors (TTY.md §6) -- see `regress/tty-smoke/main.c`. Same recipe
+/// as `build_fd_smoke`, next slot (`0x8300000`).
+fn build_tty_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/tty-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/tty-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/tty-smoke");
+    let out = target_dir.join("tty-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8300000", "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for tty-smoke: {e}"));
+    if !status.success() {
+        panic!("building tty-smoke failed: {status}");
     }
     out
 }

@@ -122,7 +122,9 @@ pub fn create_socket() -> u64 {
             recv_queue: VecDeque::new(),
         },
     );
-    crate::fs::fd::oxidebsd_register_fd_ops(fd, raw_read, raw_write, raw_close)
+    let user_fd = crate::fs::fd::oxidebsd_register_fd_ops(fd, raw_read, raw_write, raw_close);
+    crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Socket(fd));
+    user_fd
 }
 
 /// `None` if `real_fd` isn't a raw ICMP socket (caller keeps looking in its own table); `Some`

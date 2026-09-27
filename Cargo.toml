@@ -57,6 +57,7 @@ members = [
   "regress/at-syscall-smoke",
   "regress/ppoll-syscall-smoke",
   "regress/fd-syscall-smoke",
+  "regress/tty-syscall-smoke",
   "regress/ninja-syscall-smoke",
   "regress/sh-syscall-smoke",
   "regress/rc-syscall-smoke",
@@ -325,6 +326,10 @@ harness = false
 
 [[test]]
 name = "fd_syscall_smoke"
+harness = false
+
+[[test]]
+name = "tty_syscall_smoke"
 harness = false
 
 [[test]]

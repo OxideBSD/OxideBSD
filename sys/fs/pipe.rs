@@ -264,6 +264,8 @@ pub(crate) fn do_pipe(fds_ptr: u64) -> Result<u64, u64> {
         crate::fs::fd::oxidebsd_register_fd_ops(read_fd, pipe_read, write_denied, pipe_close);
     let write_user_fd =
         crate::fs::fd::oxidebsd_register_fd_ops(write_fd, read_denied, pipe_write, pipe_close);
+    crate::fs::fd::set_kind(read_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
+    crate::fs::fd::set_kind(write_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
 
     // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
     // already has -- fds_ptr isn't checked against the caller's actual mappings first.
@@ -345,6 +347,8 @@ pub(crate) fn do_socketpair(fds_ptr: u64) -> Result<u64, u64> {
     );
     let user_fd0 = crate::fs::fd::oxidebsd_register_fd_ops(fd0, sock_read, sock_write, sock_close);
     let user_fd1 = crate::fs::fd::oxidebsd_register_fd_ops(fd1, sock_read, sock_write, sock_close);
+    crate::fs::fd::set_kind(fd0, crate::fs::fd::FdKind::Socket(fd0));
+    crate::fs::fd::set_kind(fd1, crate::fs::fd::FdKind::Socket(fd1));
 
     // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
     // already has -- fds_ptr isn't checked against the caller's actual mappings first.
@@ -605,7 +609,9 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
     }
     let read_op = if read { fifo_read as FdOp } else { read_denied };
     let write_op = if write { fifo_write as FdOp } else { write_denied };
-    crate::fs::fd::oxidebsd_register_fd_ops(real_fd, read_op, write_op, fifo_close) as i64
+    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, read_op, write_op, fifo_close);
+    crate::fs::fd::set_kind(real_fd, crate::fs::fd::FdKind::Fifo(key));
+    fd as i64
 }
 
 type FdOp = extern "C" fn(u64, u64, u64) -> i64;

@@ -323,6 +323,7 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
     );
     let user_fd =
         crate::fs::fd::oxidebsd_register_fd_ops(fd, mq_read_denied, mq_write_denied, mq_close);
+    crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Mqueue);
     if flags & (O_NONBLOCK as u64) != 0 {
         crate::fs::fd::set_nonblocking(fd, true);
     }

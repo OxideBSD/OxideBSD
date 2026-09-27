@@ -5,4 +5,6 @@
 # password. Change it to `secure` only for a console nobody else can reach.
 #
 # name		getty				type	status		flags
-console		"/usr/libexec/getty"		linux	on		insecure
+# `console' is never run; its `secure' flag decides whether single-user mode asks for a password.
+console		none				unknown	off		insecure
+ttyv0		"/usr/libexec/getty Pc"	linux	on		insecure
