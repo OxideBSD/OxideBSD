@@ -273,10 +273,9 @@ impl Writer {
             EscState::Escape => self.handle_escape_byte(byte),
             EscState::Csi => self.handle_csi_byte(byte),
         }
-        // Every byte can potentially move the cursor (a plain glyph, a control character, or a
-        // CSI/escape final byte) -- rather than call this from each of those individually, just
-        // resync once per byte. Two `outb` pairs is trivial next to VRAM writes at this scale.
-        self.sync_hw_cursor();
+        // The hardware cursor is synced once per write (`write_bytes`, `write_str`), not per
+        // byte: its four `outb`s are each a trip to the hypervisor, which made every byte of a
+        // full-screen redraw cost six port-I/O exits with the serial mirror's two.
     }
 
     fn write_byte_ground(&mut self, byte: u8) {
@@ -786,6 +785,7 @@ impl Writer {
                 _ => self.write_byte(0xfe),
             }
         }
+        self.sync_hw_cursor();
     }
 
     /// Advance to column 0 of the next row, scrolling the active DECSTBM region up if already at

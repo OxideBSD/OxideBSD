@@ -18,7 +18,12 @@ struct SerialPort {
     line_control: Port<u8>,
     modem_control: Port<u8>,
     line_status: Port<u8>,
+    /// Bytes that can still go into the transmit FIFO before the line status is read again.
+    fifo_room: usize,
 }
+
+/// The 16550's transmit FIFO: when THRE says it's empty, this many bytes fit.
+const FIFO_DEPTH: usize = 16;
 
 impl SerialPort {
     /// # Safety
@@ -32,6 +37,7 @@ impl SerialPort {
             line_control: Port::new(base + 3),
             modem_control: Port::new(base + 4),
             line_status: Port::new(base + 5),
+            fifo_room: 0,
         }
     }
 
@@ -61,10 +67,16 @@ impl SerialPort {
     }
 
     fn send_raw(&mut self, byte: u8) {
+        // Poll once per FIFO's worth rather than once per byte: each port access is an exit to
+        // the hypervisor, and the console copies every byte it shows here.
         unsafe {
-            while self.line_status.read() & LSR_TRANSMIT_EMPTY == 0 {}
+            if self.fifo_room == 0 {
+                while self.line_status.read() & LSR_TRANSMIT_EMPTY == 0 {}
+                self.fifo_room = FIFO_DEPTH;
+            }
             self.data.write(byte);
         }
+        self.fifo_room -= 1;
     }
 }
 

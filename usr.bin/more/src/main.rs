@@ -213,6 +213,16 @@ struct Pager {
     pattern: Option<(String, bool)>,
     message: Option<String>,
     out: std::io::StdoutLock<'static>,
+    /// What the screen shows, to redraw only what changed; `None` forces a full redraw.
+    shown: Option<Shown>,
+    shown_status_same: bool,
+}
+
+struct Shown {
+    file: usize,
+    top: usize,
+    rows: Vec<String>,
+    status: String,
 }
 
 fn load(name: &str, text: &str, cols: usize, opts: &Opts) -> File {
@@ -276,19 +286,20 @@ impl Pager {
         hits
     }
 
-    fn draw(&mut self) {
-        let page = self.page();
+    /// One screen row as terminal output: its text with SGR sequences, search matches in
+    /// reverse video, `~` past the end.
+    fn render_row(&self, r: usize) -> String {
         let cols = self.tty.cols;
         let f = &self.files[self.cur];
-        let mut s = String::from("\x1b[H");
-        for r in 0..page {
-            let row = f.rows.get(f.top + r);
-            let hits = match (&self.pattern, row) {
-                (Some((p, _)), Some(row)) => self.row_matches(row, p),
-                _ => Vec::new(),
-            };
-            let mut cur = Attr::default();
-            if let Some(row) = row {
+        let row = f.rows.get(f.top + r);
+        let hits = match (&self.pattern, row) {
+            (Some((p, _)), Some(row)) => self.row_matches(row, p),
+            _ => Vec::new(),
+        };
+        let mut s = String::new();
+        let mut cur = Attr::default();
+        match row {
+            Some(row) => {
                 for (k, (ch, a)) in row.iter().take(cols).enumerate() {
                     let mut a = *a;
                     if hits.iter().any(|(s, e)| (*s..*e).contains(&k)) {
@@ -300,15 +311,19 @@ impl Pager {
                     }
                     s.push(*ch);
                 }
-            } else {
-                s.push('~');
             }
-            if cur != Attr::default() {
-                s.push_str("\x1b[0m");
-            }
-            s.push_str("\x1b[K\r\n");
+            None => s.push('~'),
         }
-        let status = if let Some(m) = self.message.take() {
+        if cur != Attr::default() {
+            s.push_str("\x1b[0m");
+        }
+        s
+    }
+
+    fn status(&mut self) -> String {
+        let page = self.page();
+        let f = &self.files[self.cur];
+        if let Some(m) = self.message.take() {
             m
         } else if self.at_end() {
             if self.files.len() > 1 && self.cur + 1 < self.files.len() {
@@ -319,16 +334,82 @@ impl Pager {
         } else {
             let pct = ((f.top + page) * 100 / f.rows.len().max(1)).min(100);
             if f.name.is_empty() { format!("--More--({pct}%)") } else { format!("{} ({pct}%)", f.name) }
-        };
-        s.push_str("\x1b[7m");
-        s.push_str(&status.chars().take(cols.saturating_sub(1)).collect::<String>());
-        s.push_str("\x1b[0m\x1b[K");
-        let _ = self.out.write_all(s.as_bytes());
+        }
+    }
+
+    /// Brings the screen up to date. Only rows that changed are rewritten, and a move of less
+    /// than a screen scrolls the terminal (a scroll region and `ESC[S`/`ESC[T`) so that only the
+    /// rows scrolled in are drawn. The whole update goes out in one write.
+    fn draw(&mut self) {
+        let page = self.page();
+        let cols = self.tty.cols;
+        let rows: Vec<String> = (0..page).map(|r| self.render_row(r)).collect();
+        let status: String = self.status().chars().take(cols.saturating_sub(1)).collect();
+        let (file, top) = (self.cur, self.files[self.cur].top);
+        let mut out = String::new();
+        let mut old: Vec<Option<String>> = vec![None; page];
+        if let Some(sh) = self.shown.take()
+            && sh.file == file
+            && sh.rows.len() == page
+        {
+            let d = top as isize - sh.top as isize;
+            if d == 0 {
+                old = sh.rows.into_iter().map(Some).collect();
+            } else if d.unsigned_abs() < page {
+                out.push_str(&format!("\x1b[1;{page}r"));
+                if d > 0 {
+                    out.push_str(&format!("\x1b[{d}S"));
+                } else {
+                    out.push_str(&format!("\x1b[{}T", -d));
+                }
+                out.push_str("\x1b[r");
+                for (i, slot) in old.iter_mut().enumerate() {
+                    let from = i as isize + d;
+                    // A row scrolled in is blank on the screen.
+                    *slot = if (0..page as isize).contains(&from) { Some(sh.rows[from as usize].clone()) } else { Some(String::new()) };
+                }
+            }
+            if sh.status == status && d == 0 {
+                self.shown_status_same = true;
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            if old[i].as_ref() != Some(row) {
+                out.push_str(&format!("\x1b[{};1H", i + 1));
+                out.push_str(row);
+                out.push_str("\x1b[K");
+            }
+        }
+        if !std::mem::take(&mut self.shown_status_same) || !out.is_empty() {
+            out.push_str(&format!("\x1b[{};1H\x1b[7m{status}\x1b[0m\x1b[K", page + 1));
+        }
+        self.emit(&out);
+        self.shown = Some(Shown { file, top, rows, status });
+    }
+
+    /// Writes `s` to the terminal in one system call where it can.
+    fn emit(&mut self, s: &str) {
         let _ = self.out.flush();
+        let mut b = s.as_bytes();
+        while !b.is_empty() {
+            // SAFETY: write(2) from a live buffer.
+            let n = unsafe { libc::write(1, b.as_ptr().cast(), b.len()) };
+            if n <= 0 {
+                if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            b = &b[n as usize..];
+        }
     }
 
     /// Reads a line on the status line (a search pattern or a `:` command).
     fn prompt(&mut self, lead: char) -> Option<String> {
+        // The prompt writes over the status line; the next draw puts it back.
+        if let Some(sh) = &mut self.shown {
+            sh.status.clear();
+        }
         let rows = self.page() + 1;
         let _ = write!(self.out, "\x1b[{rows};1H\x1b[K{lead}");
         let _ = self.out.flush();
@@ -419,6 +500,7 @@ impl Pager {
         let _ = write!(self.out, "\x1b[H\x1b[2J{}", text.replace('\n', "\r\n"));
         let _ = self.out.flush();
         self.tty.key();
+        self.shown = None;
     }
 
     fn run(&mut self) {
@@ -483,6 +565,7 @@ impl Pager {
                 b'h' | b'H' => self.help(),
                 b'r' | 0x0c => {
                     let _ = write!(self.out, "\x1b[2J");
+                    self.shown = None;
                 }
                 b'q' | b'Q' => break,
                 b'Z' => {
@@ -628,7 +711,7 @@ fn main() {
     };
     let cols = tty.cols;
     let files = inputs.iter().map(|(n, t)| load(n, t, cols, &opts)).collect();
-    let mut p = Pager { tty, files, cur: 0, opts, pattern: None, message: None, out: stdout.lock() };
+    let mut p = Pager { tty, files, cur: 0, opts, pattern: None, message: None, out: stdout.lock(), shown: None, shown_status_same: false };
     if p.files.is_empty() {
         std::process::exit(1);
     }
