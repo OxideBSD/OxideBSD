@@ -268,11 +268,20 @@ impl Parser<'_> {
                     self.pending_font = Some(name.to_string());
                     return;
                 }
+                // `\c` ending the last argument joins the next line without a space.
+                let mut args = args.to_vec();
+                let cont = args.last().is_some_and(|a| a.ends_with(crate::roff::mark::CONT));
+                if let Some(last) = args.last_mut() {
+                    *last = last.trim_end_matches(crate::roff::mark::CONT).to_string();
+                }
                 let mut e = Node::new(Kind::Elem, name, self.line);
-                e.args = args.to_vec();
                 e.flags.line_start = true;
                 e.flags.eos = args.last().is_some_and(|a| ends_sentence(a));
+                e.args = args;
                 self.push(e);
+                if cont {
+                    self.nospace = true;
+                }
             }
             "UC" | "AT" => {
                 // The system the page belongs to, printed at the bottom left.

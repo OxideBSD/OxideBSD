@@ -672,6 +672,9 @@ pub fn ascii_for(c: char) -> String {
         '\u{00B4}' => return "'".into(),
         _ => {}
     }
+    if let Some(a) = crate::unicode::lookup(c) {
+        return a.to_string();
+    }
     let s = c.to_string();
     for (_, u, a) in chars::CHARS {
         if *u == s {

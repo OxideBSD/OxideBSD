@@ -835,8 +835,9 @@ impl<'a> Roff<'a> {
                     out.push_str(&match name.as_str() {
                         // Built-in registers: the output line length and indentation, in basic
                         // units, and the troff/nroff mode.
-                        ".T" | ".A" => "1".to_string(),
-                        ".g" => "0".to_string(),
+                        // `.g` is 1: pages test it to use groff's features, which mandoc and
+                        // this formatter provide.
+                        ".T" | ".A" | ".g" => "1".to_string(),
                         ".$" => self.frames.last().map(|f| f.len()).unwrap_or(0).to_string(),
                         _ => v.to_string(),
                     });

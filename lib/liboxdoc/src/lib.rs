@@ -14,6 +14,7 @@ pub mod roff;
 pub mod standards;
 pub mod term;
 pub mod tree;
+pub mod unicode;
 
 use diag::Diagnostics;
 use term::{Encoding, Styling, Term};

@@ -253,6 +253,8 @@ impl R<'_> {
                     let st = if i % 2 == 0 { a } else { b };
                     if alternating {
                         // Alternating fonts join their arguments; spaces inside one are kept.
+                        // Each argument starts in its own font, whatever escapes came before.
+                        self.t.reset_font();
                         if i > 0 {
                             self.t.nospace();
                         }
