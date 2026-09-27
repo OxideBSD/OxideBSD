@@ -42,6 +42,8 @@ pub enum Styling {
 
 /// A `-` that is not a break point (`\-`, `\(hy`), printed as `-`.
 const HARD_HYPHEN: char = '\u{E0FE}';
+/// A space the line may not break at (`\ `), printed as a space.
+const HARD_SPACE: char = '\u{E0FD}';
 
 #[derive(Clone, Copy, Debug)]
 struct Cell {
@@ -262,7 +264,7 @@ impl Term {
             }
             match c {
                 mark::ZERO | mark::CONT => {}
-                mark::NBSP => cells.push(Cell { ch: ' ', style: Style::None }),
+                mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: Style::None }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
                 mark::BACK => cells.push(Cell { ch: mark::BACK, style: Style::None }),
@@ -539,8 +541,12 @@ impl Term {
     fn emit_line(&mut self) {
         let mut line = std::mem::take(&mut self.line);
         self.line_open = false;
-        for c in line.iter_mut().filter(|c| c.ch == HARD_HYPHEN) {
-            c.ch = '-';
+        for c in line.iter_mut() {
+            match c.ch {
+                HARD_HYPHEN => c.ch = '-',
+                HARD_SPACE => c.ch = ' ',
+                _ => {}
+            }
         }
         // Trailing spaces are dropped.
         let end = line.iter().rposition(|c| c.ch != ' ').map(|i| i + 1).unwrap_or(0);

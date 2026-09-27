@@ -298,8 +298,7 @@ impl R<'_> {
                         if i > 0 {
                             self.t.nospace();
                         }
-                        let w = arg.replace(' ', &mark::NBSP.to_string());
-                        self.t.word_ext(&w, st, n.flags.eos && i == last);
+                        self.arg_words(arg, st, n.flags.eos && i == last);
                     } else if self.t.nofill {
                         // In no-fill mode an argument's spaces, leading ones included, are kept.
                         if i > 0 {
