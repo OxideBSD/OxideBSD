@@ -1188,7 +1188,7 @@ impl<'a> Roff<'a> {
     }
 }
 
-fn is_marker(c: char) -> bool {
+pub(crate) fn is_marker(c: char) -> bool {
     ('\u{E000}'..='\u{E01F}').contains(&c)
 }
 

@@ -550,7 +550,9 @@ impl R<'_> {
                 let base = self.base;
                 self.t.word(&cmd, Style::Bold);
                 self.t.flush_open();
-                self.t.set_offset(base + cmd.chars().count() + 1);
+                // Hung by the name's printed width: markers such as `\%` take no column.
+                let printed = cmd.chars().filter(|c| !crate::roff::is_marker(*c) || matches!(*c, mark::NBSP | mark::MINUS | mark::BACKSLASH)).count();
+                self.t.set_offset(base + printed + 1);
                 if let Some(b) = n.part(Kind::Body) {
                     self.children(b, style);
                 }
