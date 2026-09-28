@@ -234,6 +234,7 @@ impl Parser<'_> {
     fn macro_line(&mut self, name: &str, args: &[String]) {
         match name {
             "TH" => {
+                crate::lint::man_th(self.diag, self.line, self.col, &self.raw);
                 self.meta.title = args.first().cloned().unwrap_or_default();
                 self.meta.section = args.get(1).cloned().unwrap_or_default();
                 self.meta.date = args.get(2).cloned().unwrap_or_default();

@@ -115,6 +115,20 @@ pub const MDOC_MACROS: &[&str] = &[
     "Dd", "Dt", "Os", "Sh", "Ss", "Pp", "D1", "Dl", "Bd", "Ed", "Bl", "El", "It", "Ad", "An", "Ap", "Ar", "Cd", "Cm", "Dv", "Er", "Ev", "Ex", "Fa", "Fd", "Fl", "Fn", "Ft", "Ic", "In", "Li", "Nd", "Nm", "Op", "Ot", "Pa", "Rv", "St", "Va", "Vt", "Xr", "%A", "%B", "%D", "%I", "%J", "%N", "%O", "%P", "%R", "%T", "%V", "Ac", "Ao", "Aq", "At", "Bc", "Bf", "Bo", "Bq", "Bsx", "Bx", "Db", "Dc", "Do", "Dq", "Ec", "Ef", "Em", "Eo", "Fx", "Ms", "No", "Ns", "Nx", "Ox", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Re", "Rs", "Sc", "So", "Sq", "Sm", "Sx", "Sy", "Tn", "Ux", "Xc", "Xo", "Fo", "Fc", "Oo", "Oc", "Bk", "Ek", "Bt", "Hf", "Fr", "Ud", "Lb", "Lp", "Lk", "Mt", "Brq", "Bro", "Brc", "%C", "Es", "En", "Dx", "%Q", "%U", "Ta",
 ];
 
+/// Decoded text with its markers resolved to the characters they print (`\-` as `-`, `\ ` as a
+/// space), for diagnostics.
+pub fn plain_text(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            mark::MINUS => Some('-'),
+            mark::NBSP => Some(' '),
+            mark::BACKSLASH => Some('\\'),
+            c if is_marker(c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Macro expansion depth limit, so a recursive `.de` can't hang.
 const MAX_DEPTH: usize = 64;
 
@@ -237,7 +251,9 @@ impl<'a> Roff<'a> {
                 self.close_conds(raw);
                 return;
             }
+            let prefix = text.len() - rest.len();
             let rest = strip_comment(rest, self.ec);
+            let lead = rest.len() - rest.trim_start_matches([' ', '\t']).len();
             let rest = rest.trim_start_matches([' ', '\t']);
             if rest.is_empty() {
                 // A lone control character is ignored.
@@ -295,7 +311,7 @@ impl<'a> Roff<'a> {
             if self.language.is_none() && (name == "Dd" || name == "TH") {
                 self.language = Some(name == "Dd");
             }
-            let col = text.len() - rest.len() + 1;
+            let col = prefix + lead + 1;
             let raw_rest = rest.to_string();
             // Trailing whitespace on a macro line is the language parser's to report, one column
             // past the end, if it knows the macro.
