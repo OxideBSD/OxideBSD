@@ -96,6 +96,8 @@ struct Parser<'a> {
     col: usize,
     /// The current macro line as typed, from its name on.
     raw: String,
+    /// The checks that need what came before.
+    lint: crate::lint::MdocState,
     /// A description ending in punctuation, reported unless a text line continues it.
     pending_nd: Option<(usize, usize, String)>,
     /// Unknown macros already reported.
@@ -108,7 +110,7 @@ struct Parser<'a> {
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, pending_nd: None };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, pending_nd: None, lint: Default::default() };
     let mut first = true;
     for l in lines {
         match l {
@@ -136,6 +138,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                     p.diag.report(Level::Style, l, c, "trailing delimiter", &d);
                 }
                 p.pending_nd = crate::lint::mdoc_args(p.diag, line, p.col, &name, &p.raw);
+                p.lint.macro_line(p.diag, line, p.col, &name, &p.raw);
                 p.macro_line(&name, &args, first);
                 if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MDOC_MACROS.contains(&name.as_str())) {
                     p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
@@ -147,6 +150,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             Line::Text { text, raw, line, last } => {
                 // A description continued on a text line doesn't end where its macro line does.
                 p.pending_nd = None;
+                p.lint.text();
                 p.line = line;
                 p.col = 1;
                 let literal = p.in_literal() || p.in_preproc;
@@ -174,6 +178,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
     if let Some((l, c, d)) = p.pending_nd.take() {
         p.diag.report(Level::Style, l, c, "trailing delimiter", &d);
     }
+    p.lint.end(p.diag);
     while p.stack.len() > 1 {
         let top = p.stack.last().unwrap();
         if top.kind == Kind::Block && FULL_EXPLICIT.iter().any(|(o, _)| *o == top.tok) {

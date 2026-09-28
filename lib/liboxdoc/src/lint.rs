@@ -418,13 +418,22 @@ pub fn mdoc_args(diag: &mut Diagnostics, line: usize, col: usize, name: &str, ra
         }
         return None;
     }
-    // Each macro on the line with its arguments, in order.
+    // Each macro on the line, at its column, with its arguments, in order.
     let mut groups: Vec<(&str, Vec<(usize, &str)>)> = vec![(name, Vec::new())];
+    let mut macro_cols = vec![col];
     for (c, a) in &args {
         if crate::mdoc::CALLABLE.contains(&a.as_str()) {
             groups.push((a.as_str(), Vec::new()));
+            macro_cols.push(*c);
         } else {
             groups.last_mut().unwrap().1.push((*c, a.as_str()));
+        }
+    }
+    for ((m, _), c) in groups.iter().zip(&macro_cols) {
+        match *m {
+            "Tn" | "Bt" | "Ud" => diag.report(Level::Style, line, *c, "useless macro", m),
+            "Fr" | "Hf" | "Ot" | "Es" | "En" | "Db" => diag.report(Level::Warning, line, *c, "obsolete macro", m),
+            _ => {}
         }
     }
     let n = groups.len();
@@ -467,4 +476,105 @@ pub fn mdoc_args(diag: &mut Diagnostics, line: usize, col: usize, name: &str, ra
         }
     }
     None
+}
+
+/// A cross-reference seen in SEE ALSO, for the order and punctuation checks: name, section,
+/// column, and the punctuation after it with its column.
+#[derive(Clone, Debug)]
+struct Xref {
+    line: usize,
+    name: String,
+    sec: String,
+    punct: Option<(String, usize)>,
+}
+
+/// mdoc checks that need what came before: the page's own name and section, and the order and
+/// punctuation of the cross-references in SEE ALSO.
+#[derive(Default)]
+pub struct MdocState {
+    /// The current section's heading.
+    section: String,
+    /// The page's name (the first `.Nm`) and section (`.Dt`).
+    name: Option<String>,
+    dt_section: String,
+    /// The last cross-reference in an unbroken run of them in SEE ALSO.
+    last_xr: Option<Xref>,
+}
+
+impl MdocState {
+    /// A macro line, with the macros it calls; `raw` is the line as typed from `name` on.
+    pub fn macro_line(&mut self, diag: &mut Diagnostics, line: usize, col: usize, name: &str, raw: &str) {
+        let args = typed_args(raw, col);
+        match name {
+            "Sh" => {
+                self.end_run(diag);
+                self.section = args.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>().join(" ");
+                return;
+            }
+            "Dt" => self.dt_section = args.get(1).map(|(_, a)| a.clone()).unwrap_or_default(),
+            "Nm" if self.name.is_none() => self.name = args.first().map(|(_, a)| a.clone()),
+            _ => {}
+        }
+        // Each macro on the line with its column and arguments.
+        let mut groups: Vec<(&str, usize, Vec<(usize, &str)>)> = vec![(name, col, Vec::new())];
+        for (c, a) in &args {
+            if crate::mdoc::CALLABLE.contains(&a.as_str()) {
+                groups.push((a.as_str(), *c, Vec::new()));
+            } else {
+                groups.last_mut().unwrap().2.push((*c, a.as_str()));
+            }
+        }
+        for (m, mcol, margs) in groups {
+            if m != "Xr" {
+                // A block interrupting a run of cross-references ends it, as the section's end
+                // does; a paragraph break or text just breaks it.
+                if matches!(m, "Rs" | "Bl" | "Bd" | "Ss") {
+                    self.end_run(diag);
+                } else {
+                    self.last_xr = None;
+                }
+                continue;
+            }
+            let (Some(&(nc, xname)), Some(&(_, sec))) = (margs.first(), margs.get(1)) else { continue };
+            if self.name.as_deref() == Some(xname) && sec == self.dt_section {
+                diag.report(Level::Warning, line, nc, "cross reference to self", &format!("Xr {xname} {sec}"));
+            }
+            if self.section != "SEE ALSO" {
+                continue;
+            }
+            let punct = margs.get(2).map(|&(c, p)| (p.to_string(), c));
+            if let Some(prev) = self.last_xr.take() {
+                match &prev.punct {
+                    None => diag.report(Level::Warning, line, mcol, "unusual Xr punctuation", &format!("none before {xname}({sec})")),
+                    Some((p, _)) if p != "," => diag.report(Level::Warning, line, mcol, "unusual Xr punctuation", &format!("{p} before {xname}({sec})")),
+                    _ => {}
+                }
+                if prev.sec == sec {
+                    if xname.to_lowercase() < prev.name.to_lowercase() {
+                        diag.report(Level::Warning, line, mcol, "unusual Xr order", &format!("{xname} after {}", prev.name));
+                    }
+                } else if sec < prev.sec.as_str() {
+                    diag.report(Level::Warning, line, mcol, "unusual Xr order", &format!("{xname}({sec}) after {}({})", prev.name, prev.sec));
+                }
+            }
+            self.last_xr = Some(Xref { line, name: xname.to_string(), sec: sec.to_string(), punct });
+        }
+    }
+
+    /// A text line: it breaks a run of cross-references.
+    pub fn text(&mut self) {
+        self.last_xr = None;
+    }
+
+    /// The end of the input.
+    pub fn end(&mut self, diag: &mut Diagnostics) {
+        self.end_run(diag);
+    }
+
+    /// The end of a run of cross-references: the last one takes no punctuation.
+    fn end_run(&mut self, diag: &mut Diagnostics) {
+        if let Some(Xref { line, name, sec, punct: Some((p, c)) }) = self.last_xr.take() {
+            diag.report(Level::Warning, line, c, "unusual Xr punctuation", &format!("{p} after {name}({sec})"));
+        }
+    }
 }
