@@ -353,7 +353,11 @@ impl Parser<'_> {
                 let used = self.inline_elem(name, args);
                 self.words(&args[used..], None);
             }
-            "br" | "sp" => self.push(Node::new(Kind::Elem, name, self.line)),
+            "br" | "sp" => {
+                let mut e = Node::new(Kind::Elem, name, self.line);
+                e.args = args.iter().take(1).map(|a| a.to_string()).collect();
+                self.push(e);
+            }
             _ if name.starts_with('%') && !self.stack.iter().any(|n| n.kind == Kind::Block && n.tok == "Rs") => {
                 // A reference field outside `.Rs`: an in-line macro like any other.
                 let used = self.inline_elem(name, args);

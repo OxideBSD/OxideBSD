@@ -580,7 +580,7 @@ fn width(s: &str) -> usize {
 
 /// A vertical distance in lines: `v` (a line) by default; an exact half rounds down, as
 /// mandoc's does.
-fn vertical_lines(a: &str) -> usize {
+pub(crate) fn vertical_lines(a: &str) -> usize {
     let digits: String = a.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
     let v: f64 = digits.parse().unwrap_or(0.0);
     let units = match &a[digits.len()..] {

@@ -197,7 +197,14 @@ impl R<'_> {
         let under = Style::Under;
         match n.tok.as_str() {
             "Pp" => self.t.vspace(),
-            "sp" => self.t.blank_line(),
+            "sp" => {
+                // As many blank lines as the argument says, one by default.
+                let count = n.args.first().filter(|a| !a.is_empty()).map_or(1, |a| crate::man_term::vertical_lines(a));
+                self.t.flush();
+                for _ in 0..count {
+                    self.t.blank_line();
+                }
+            }
             "br" => self.t.flush(),
             "Fl" => {
                 let mut first = true;

@@ -382,13 +382,17 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     let pad = " ".repeat(indent);
 
     // A horizontal line across the table, with `+` where vertical lines cross it.
+    // Where the first of `bars` vertical lines goes in the gap before column `j`: in its
+    // middle.
+    let bar_at = |j: usize, bars: usize| start[j] - spacing[j - 1] + (spacing[j - 1].saturating_sub(bars) + 1) / 2;
     // Lines cross it where the rows above and below it have them (`vl`).
     let rule = |double: bool, vl: &[u8]| -> String {
         let fill = if double { '=' } else { '-' };
         let mut line: Vec<char> = vec![fill; content];
         for j in 0..n.saturating_sub(1) {
-            let at = start[j] + widths[j] + 1;
-            for v in 0..vl.get(j + 1).copied().unwrap_or(0) as usize {
+            let bars = vl.get(j + 1).copied().unwrap_or(0) as usize;
+            let at = bar_at(j + 1, bars);
+            for v in 0..bars {
                 if at + v < content {
                     line[at + v] = '+';
                 }
@@ -439,12 +443,24 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                     let mut col = 0;
                     for j in 0..n {
                         let Some((f, kind, span, line)) = &laid.cells[j] else { continue };
+                        // A line across the cell (not `\_`) reaches the vertical lines on either
+                        // side, crossing those on its left and the first on its right.
+                        let full = matches!(line, Some(1 | 2)) && li == 0;
+                        let fill = if *line == Some(2) { '=' } else { '-' };
                         // Get to the column's start, drawing vertical lines on the way.
-                        while col < start[j] {
-                            let sep_start = start[j] - spacing[j - 1];
-                            let bar = col >= sep_start + 1 && col < sep_start + 1 + laid.vl[j] as usize;
-                            s.push(if bar { '|' } else { ' ' });
-                            col += 1;
+                        if j > 0 {
+                            let bars = laid.vl[j] as usize;
+                            let b0 = bar_at(j, bars);
+                            while col < start[j] {
+                                let bar = col >= b0 && col < b0 + bars;
+                                s.push(match (bar, full) {
+                                    (true, true) => '+',
+                                    (true, false) => '|',
+                                    (false, true) if bars > 0 && col == b0 + bars => fill,
+                                    _ => ' ',
+                                });
+                                col += 1;
+                            }
                         }
                         let w = (j..j + span).map(|c| widths[c]).sum::<usize>() + (j..j + span - 1).map(|c| spacing[c]).sum::<usize>();
                         let text = match line {
@@ -472,6 +488,16 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                         s.push_str(&" ".repeat(lead));
                         s.push_str(&text.0);
                         col = start[j] + lead + text.1;
+                        let next = j + span;
+                        if full && next < n && laid.vl[next] > 0 {
+                            let b0 = bar_at(next, laid.vl[next] as usize);
+                            while col < b0 {
+                                s.push(fill);
+                                col += 1;
+                            }
+                            s.push('+');
+                            col += 1;
+                        }
                     }
                     if right {
                         while col < content {
@@ -495,6 +521,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
         for i in 0..o.frame {
             t.raw_line(&rule(false, if i == 0 { &last } else { &[] }));
         }
+        // The bottom line stands in for the next blank line.
         t.skip_vspace = true;
     }
 }
