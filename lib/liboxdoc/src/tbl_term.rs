@@ -209,7 +209,9 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             vl[j + 1] = spec.vline;
         }
         if o.allbox {
-            vl.fill(1);
+            for v in vl.iter_mut() {
+                *v = (*v).max(1);
+            }
         }
         let mut laid = Laid { cells: (0..n).map(|_| None).collect(), nums: vec![None; n], vl };
         for (j, spec) in layout.specs.iter().enumerate().take(n) {
@@ -309,7 +311,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     let num_lead: Vec<usize> = (0..n).map(|j| (widths[j] - (ints[j] + fracs[j]).min(widths[j])) / 2).collect();
     if o.allbox {
         for v in vlines.iter_mut() {
-            *v = 1;
+            *v = (*v).max(1);
         }
     }
     // Equal columns: all as wide as the widest.
@@ -466,7 +468,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                         let text = match line {
                             Some(d) if li == 0 => {
                                 let c = if *d == 2 { '=' } else { '-' };
-                                let len = if *d == 0 { f.width().max(1).min(w) } else { w };
+                                let len = w;
                                 (c.to_string().repeat(len), len)
                             }
                             _ => f.lines.get(li).cloned().unwrap_or_default(),
