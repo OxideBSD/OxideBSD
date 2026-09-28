@@ -110,14 +110,17 @@ fn is_bullet(n: &Node) -> bool {
     n.kind == Kind::Block && n.tok == "IP" && n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*")
 }
 
-/// The bullet items that have another right before or after them.
+/// The bullet items that have another right before or after them. (An `.RS` block in an item
+/// ends it, as mandoc sees it, so the item after isn't next to it.)
 fn bullet_runs(root: &Node) -> HashSet<usize> {
+    let ends_in_rs = |n: &Node| n.part(Kind::Body).is_some_and(|b| b.children.iter().any(|c| c.kind == Kind::Block && c.tok == "RS"));
     let mut out = HashSet::new();
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         for (i, c) in n.children.iter().enumerate() {
-            let near = |j: Option<usize>| j.and_then(|j| n.children.get(j)).is_some_and(is_bullet);
-            if is_bullet(c) && (near(i.checked_sub(1)) || near(Some(i + 1))) {
+            let before = i.checked_sub(1).and_then(|j| n.children.get(j)).is_some_and(|p| is_bullet(p) && !ends_in_rs(p));
+            let after = n.children.get(i + 1).is_some_and(is_bullet) && !ends_in_rs(c);
+            if is_bullet(c) && (before || after) {
                 out.insert(c as *const Node as usize);
             }
             stack.push(c);
