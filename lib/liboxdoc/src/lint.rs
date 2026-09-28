@@ -594,7 +594,8 @@ impl MdocState {
             if m == "An" {
                 self.authors = None;
             }
-            if EMPTY_SKIPPED.contains(&m) && margs.is_empty() {
+            // Delimiters alone don't count as content.
+            if EMPTY_SKIPPED.contains(&m) && margs.iter().all(|(_, a)| crate::mdoc::is_delim(a)) {
                 diag.report(Level::Warning, line, mcol, "skipping empty macro", m);
             }
             match m {

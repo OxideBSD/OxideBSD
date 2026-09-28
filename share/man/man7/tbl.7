@@ -1,0 +1,294 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt TBL 7
+.Os OxideBSD
+.Sh NAME
+.Nm tbl
+.Nd tables in manual pages
+.Sh DESCRIPTION
+The
+.Nm
+language describes a table inside a manual page written in
+.Xr mdoc 7
+or
+.Xr man 7 .
+It began as a preprocessor that turned tables into
+.Xr roff 7
+requests;
+.Xr oxdoc 1
+reads it directly, as part of the page.
+.Pp
+A table starts with a
+.Ic \&TS
+line and ends with a
+.Ic \&TE
+line.
+Between them are, in order:
+.Bl -enum -offset indent -compact
+.It
+an optional line of options, ending in a semicolon;
+.It
+the layout: one or more rows of column descriptions, the last ending in a
+period;
+.It
+the data: one line per row, its cells separated by tabs.
+.El
+.Bd -literal -offset indent
+\&.TS
+box tab(:);
+lb lb
+l n.
+Name:Size
+kernel:31
+modules:7
+\&.TE
+.Ed
+.Pp
+The layout's rows describe the data's rows in turn, and its last row
+describes all the rest.
+A line
+.Ic \&T&
+among the data starts a new layout for the rows after it, up to the next
+period.
+.Pp
+In
+.Xr man 7 ,
+a table is set off from the text before it by a blank line; in
+.Xr mdoc 7 ,
+it is not.
+A table's lines are not formatted as text: a macro line inside a table is
+reported and ignored, as described under
+.Sx DATA .
+.Sh OPTIONS
+Options are words, separated by spaces or commas, some with an argument in
+parentheses.
+Case does not matter.
+.Bl -tag -width "decimalpoint(c)"
+.It Cm allbox
+Draw a box around the table and lines between all its cells.
+.It Cm box , Cm frame
+Draw a box around the table.
+.It Cm center , Cm centre
+Centre the table between the current indentation and the right margin.
+A table too wide for that space moves left of the indentation.
+.It Cm decimalpoint Ns Pq Ar c
+Align numbers at
+.Ar c
+instead of a period.
+.It Cm doublebox , Cm doubleframe
+Draw a double box around the table.
+.It Cm tab Ns Pq Ar c
+Separate cells with
+.Ar c
+instead of a tab.
+.El
+.Pp
+The options
+.Cm delim ,
+.Cm expand ,
+.Cm linesize ,
+.Cm nokeep ,
+.Cm nospaces
+and
+.Cm nowarn
+are accepted and have no effect.
+.Sh LAYOUT
+Each layout row is a list of column keys, each followed by its modifiers;
+spaces between them are optional.
+Rows are separated by commas or line ends, and the layout ends with a
+period.
+.Ss Keys
+.Bl -tag -width 4n
+.It Cm l
+Left-aligned text.
+.It Cm r
+Right-aligned text.
+.It Cm c
+Centred text.
+.It Cm n
+A number: the numbers in the column are aligned at their decimal point, or
+at
+.Ql \e&
+where a cell contains one, or else after their last digit.
+A cell without a digit is centred.
+If the column is wider than its numbers need, they are centred in it
+together.
+.It Cm a
+Left-aligned text, indented by one column.
+.It Cm s
+The cell to the left spans this column too.
+.It Cm ^
+The cell above spans this row too; this row's own data for the column is
+ignored.
+.It Cm _ , Cm \-
+A horizontal line across the cell.
+.It Cm =
+A double horizontal line across the cell.
+.It Cm \&|
+A vertical line between the columns on either side, or at the table's
+edge; two for a double line.
+.El
+.Ss Modifiers
+.Bl -tag -width 4n
+.It Cm b
+Bold.
+.It Cm i
+Italic.
+.It Cm f Ns Ar name
+The font
+.Ar name ,
+one or two characters:
+.Cm B , I , BI , R ,
+or a number from 1 to 4.
+Fonts replace each other: the last one given counts.
+.It Cm e
+All columns marked
+.Cm e
+are as wide as the widest of them.
+.It Cm x
+The column takes a share of the width the other columns leave on the
+line.
+.It Cm w Ns Pq Ar width
+The column is at least
+.Ar width
+wide, in the scaling units of
+.Xr man 7 ,
+columns by default.
+A width that is not a number is ignored.
+.It Ar number
+The space after the column, in columns; three by default.
+.El
+.Pp
+The modifiers
+.Cm d , p , t , u , v
+and
+.Cm z
+are accepted and have no effect on a terminal.
+.Sh DATA
+Each data line is a row, its cells separated by the tab character.
+A cell's text is formatted as in a text line: escape sequences work, and
+spaces at its edges are kept.
+Cells beyond the layout row's columns are reported and ignored.
+.Pp
+A line consisting of
+.Ql _
+or
+.Ql =
+alone draws a single or double line across the table.
+A cell consisting of one of them draws a line across the cell, reaching the
+vertical lines beside it;
+.Ql \e_
+draws one as wide as the column, and
+.Ql \e^
+leaves the cell for the one above to span.
+.Pp
+A cell holding
+.Ql T{
+at the end of a line starts a text block: the lines after it, up to one
+starting with
+.Ql T} ,
+are filled into a paragraph as wide as the column.
+More cells may follow
+.Ql T}
+on its line.
+A text block's column is at most a fraction of the line wide: the line
+divided by one more than the number of columns.
+.Pp
+A macro line in a table is not formatted.
+.Ic \&br ,
+.Ic \&sp ,
+.Ic \&ce
+and
+.Ic \&rj
+leave nothing; any other macro leaves its arguments as text, as a row of
+their own or, inside a text block, as part of the block.
+Definitions of strings, registers and macros take effect, and macros the
+page defines are expanded first.
+.Sh EXAMPLES
+A table of numbers under a spanning heading:
+.Bd -literal -offset indent
+\&.TS
+center tab(:);
+cb s
+l n.
+Daily intake (MJ)
+_
+Carbohydrates:4.5
+Fats:2.25
+Protein:3
+\&.TE
+.Ed
+.Pp
+is shown as
+.TS
+center tab(:);
+cb s
+l n.
+Daily intake (MJ)
+_
+Carbohydrates:4.5
+Fats:2.25
+Protein:3
+.TE
+.Pp
+A boxed table with a text block:
+.Bd -literal -offset indent
+\&.TS
+allbox tab(:);
+lb lb
+l lw(30).
+Option:Meaning
+\-s:T{
+Start in single-user mode, with a shell on the console.
+T}
+\-h:Use the serial console.
+\&.TE
+.Ed
+.Pp
+is shown as
+.TS
+allbox tab(:);
+lb lb
+l lw(30).
+Option:Meaning
+\-s:T{
+Start in single-user mode, with a shell on the console.
+T}
+\-h:Use the serial console.
+.TE
+.Sh DIAGNOSTICS
+In lint mode,
+.Xr oxdoc 1
+reports problems in tables at the levels
+.Xr mandoc 1
+uses: unknown options and missing or wrong option arguments, invalid
+characters and unmatched parentheses in the layout, an empty layout, a
+layout row starting with a span, extra cells, data in a cell spanned from
+above, a text block still open at
+.Ic \&TE ,
+a table without data, and ignored macros.
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr oxdoc 1 ,
+.Xr man 7 ,
+.Xr mdoc 7 ,
+.Xr roff 7
+.Rs
+.%A M. E. Lesk
+.%T Tbl \(em A Program to Format Tables
+.%I Bell Laboratories
+.%D 1976
+.Re
+.Sh HISTORY
+The
+.Nm
+preprocessor was written by
+.An M. E. Lesk
+at Bell Laboratories and first appeared in
+.At v7 .
+This manual was written for OxideBSD.
+.Sh BUGS
+Equations inside tables are not supported.
+The
+.Cm expand
+option has no effect.

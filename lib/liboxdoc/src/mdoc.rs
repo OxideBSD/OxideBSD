@@ -479,10 +479,16 @@ impl Parser<'_> {
 
     /// A word outside any in-line macro; `last` if it ends the input line.
     fn plain_word(&mut self, a: &str, last: bool) {
+        self.plain_word_ext(a, last, false);
+    }
+
+    /// A word outside any in-line macro; a closing delimiter attaches to the word before it
+    /// unless `spaced`.
+    fn plain_word_ext(&mut self, a: &str, last: bool, spaced: bool) {
         let mut n = Node::text(a, self.line);
         if is_delim(a) {
             n.flags.delim = true;
-            if is_delim_close(a) {
+            if is_delim_close(a) && !spaced {
                 n.flags.nospace = true;
             }
         }
@@ -629,16 +635,19 @@ impl Parser<'_> {
             if is_delim(a) && !a.contains(mark::ZERO) {
                 // A delimiter: close the element; a middle delimiter reopens it after, unless the
                 // element printed its default (`.Nm , text`), when the rest is plain text.
-                if !produced && !open {
-                    self.default_content(name);
-                    produced = true;
-                    defaulted = true;
+                // A closing one before any content prints the macro's default first (any one,
+                // for `.Fl`'s dash).
+                if !produced && !open && (is_delim_close(a) || name == "Fl") {
+                    produced = self.default_content(name);
+                    // (`.Fl`'s later words are flags again; the others' are plain text.)
+                    defaulted = produced && name != "Fl";
                 }
                 if open {
                     self.close_top();
                     open = false;
                 }
-                self.plain_word(a, i + 1 == rest.len());
+                // A closing delimiter first among the macro's arguments keeps its space.
+                self.plain_word_ext(a, i + 1 == rest.len(), i == 0 && !produced);
                 i += 1;
                 // Only delimiters left (or a macro): they all stay outside.
                 continue;
@@ -669,19 +678,20 @@ impl Parser<'_> {
         i
     }
 
-    /// An element with no arguments: some macros print a default.
-    fn default_content(&mut self, name: &str) {
+    /// An element with no arguments: some macros print a default. Whether one did.
+    fn default_content(&mut self, name: &str) -> bool {
         let text = match name {
             "Ar" => "file ...".to_string(),
             "Nm" => self.meta.name.clone(),
             "Pa" => "~".to_string(),
             "Fl" => String::new(),
             // (Reported by the lint checks, in mandoc's words.)
-            _ => return,
+            _ => return false,
         };
         self.open(Kind::Elem, name);
         self.push(Node::text(&text, self.line));
         self.close_top();
+        true
     }
 
     /// Macros whose arguments form one formatted unit.
