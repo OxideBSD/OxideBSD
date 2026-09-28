@@ -1,7 +1,7 @@
 //! Renders a man(7) document tree as HTML (MAN.md §5, `-T html`), in the markup mandoc
 //! produces: fonts as `b`/`i`, paragraphs as `p`, tagged paragraphs as a tag list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::html::{self, Html, HtmlOptions};
 use crate::mdoc_term::volume;
@@ -30,13 +30,16 @@ struct R {
     /// and whether a blank line came since (ending the block, it ends the last line).
     pre_sp: usize,
     pre_blank: bool,
+    /// Bullet-tagged indented paragraphs in runs of two or more, by node address: those make
+    /// bullet lists.
+    bullets: HashSet<usize>,
     /// The tag list open, and the macro and indent its items were made with.
     list: Option<(String, Option<String>)>,
 }
 
 pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String {
     let meta = &doc.meta;
-    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, pre_sp: 0, pre_blank: false, list: None };
+    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, pre_sp: 0, pre_blank: false, bullets: bullet_runs(&doc.root), list: None };
     let title = format!("{}({})", plain(&meta.title), plain(&meta.section));
     html::begin_document(&mut r.h, opts, &title, comments);
     let vol = if meta.volume_given {
@@ -99,6 +102,26 @@ fn tags(doc: &Document) -> HashMap<usize, String> {
         *n += 1;
         let id = html::make_id(&text);
         out.insert(node, if *n == 1 { id } else { format!("{id}~{n}") });
+    }
+    out
+}
+
+fn is_bullet(n: &Node) -> bool {
+    n.kind == Kind::Block && n.tok == "IP" && n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*")
+}
+
+/// The bullet items that have another right before or after them.
+fn bullet_runs(root: &Node) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        for (i, c) in n.children.iter().enumerate() {
+            let near = |j: Option<usize>| j.and_then(|j| n.children.get(j)).is_some_and(is_bullet);
+            if is_bullet(c) && (near(i.checked_sub(1)) || near(Some(i + 1))) {
+                out.insert(c as *const Node as usize);
+            }
+            stack.push(c);
+        }
     }
     out
 }
@@ -577,8 +600,8 @@ impl R {
         self.fonts.reset();
         match tok {
             "SH" | "SS" => self.section(n),
-            "IP" if n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*") => {
-                // An indented paragraph tagged with a bullet is an item of a bullet list.
+            "IP" if self.bullets.contains(&(n as *const Node as usize)) => {
+                // Indented paragraphs tagged with bullets, two or more, are a bullet list.
                 self.close_p();
                 let same = self.list.as_ref().is_some_and(|(k, _)| k == "bullet");
                 if !same {
@@ -596,10 +619,11 @@ impl R {
             "TP" | "TQ" | "IP" => {
                 self.close_p();
                 let width = if tok == "IP" { n.args.get(1).cloned() } else { n.args.first().cloned() };
-                let kind = if tok == "IP" { "IP" } else { "TP" };
+                // (A bullet item on its own is a tag list of its own.)
+                let kind = if is_bullet(n) { "bullet-item" } else if tok == "IP" { "IP" } else { "TP" };
                 // (A list goes on through items of its kind; an indented paragraph with a new
                 // indent starts another.)
-                let same = self.list.as_ref().is_some_and(|(k, w)| k == kind && (kind == "TP" || width.is_none() || *w == width));
+                let same = kind != "bullet-item" && self.list.as_ref().is_some_and(|(k, w)| k == kind && (kind == "TP" || width.is_none() || *w == width));
                 if !same {
                     self.end_list();
                     self.h.open("dl", "class=\"Bl-tag\"");
