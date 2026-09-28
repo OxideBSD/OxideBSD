@@ -634,10 +634,12 @@ impl R {
             "UR" | "MT" => {
                 self.ensure_p();
                 let url = n.args.first().cloned().unwrap_or_default();
-                let (class, href) = if tok == "UR" { ("Lk", url) } else { ("Mt", format!("mailto:{url}")) };
+                let (class, href) = if tok == "UR" { ("Lk", url.clone()) } else { ("Mt", format!("mailto:{url}")) };
                 self.h.open("a", &format!("class=\"{class}\" href=\"{}\"", html::escape(&href)));
-                if let Some(b) = n.part(Kind::Body) {
-                    self.children(b);
+                // (With no text, the address is the text.)
+                match n.part(Kind::Body).filter(|b| !b.children.is_empty()) {
+                    Some(b) => self.children(b),
+                    None => self.words(&url, false),
                 }
                 self.close_font();
                 self.h.close("a");
