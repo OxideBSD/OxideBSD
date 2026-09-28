@@ -106,8 +106,21 @@ fn tags(doc: &Document) -> HashMap<usize, String> {
     out
 }
 
+/// The list an indented paragraph's tag, as typed, makes items of: `\(bu` and `*` bullet lists,
+/// `\-` dash lists.
+fn list_mark(n: &Node) -> Option<&'static str> {
+    if n.kind != Kind::Block || n.tok != "IP" {
+        return None;
+    }
+    match n.text.as_str() {
+        "\\(bu" | "*" => Some("bullet"),
+        "\\-" => Some("dash"),
+        _ => None,
+    }
+}
+
 fn is_bullet(n: &Node) -> bool {
-    n.kind == Kind::Block && n.tok == "IP" && n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*")
+    list_mark(n).is_some()
 }
 
 /// The bullet items that have another right before or after them. (An `.RS` block in an item
@@ -118,8 +131,9 @@ fn bullet_runs(root: &Node) -> HashSet<usize> {
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         for (i, c) in n.children.iter().enumerate() {
-            let before = i.checked_sub(1).and_then(|j| n.children.get(j)).is_some_and(|p| is_bullet(p) && !ends_in_rs(p));
-            let after = n.children.get(i + 1).is_some_and(is_bullet) && !ends_in_rs(c);
+            let kind = list_mark(c);
+            let before = i.checked_sub(1).and_then(|j| n.children.get(j)).is_some_and(|p| list_mark(p) == kind && !ends_in_rs(p));
+            let after = n.children.get(i + 1).is_some_and(|x| list_mark(x) == kind) && !ends_in_rs(c);
             if is_bullet(c) && (before || after) {
                 out.insert(c as *const Node as usize);
             }
@@ -225,7 +239,7 @@ impl R {
     fn end_list(&mut self) {
         if let Some((k, _)) = self.list.take() {
             self.close_font();
-            self.h.close(if k == "bullet" { "ul" } else { "dl" });
+            self.h.close(if k == "bullet" || k == "dash" { "ul" } else { "dl" });
         }
     }
 
@@ -614,14 +628,16 @@ impl R {
         match tok {
             "SH" | "SS" => self.section(n),
             "IP" if self.bullets.contains(&(n as *const Node as usize)) => {
-                // Indented paragraphs tagged with bullets, two or more, are a bullet list.
+                // Indented paragraphs tagged with bullets (or dashes), two or more, are a
+                // bullet (or dash) list.
                 self.close_p();
-                let same = self.list.as_ref().is_some_and(|(k, _)| k == "bullet");
+                let kind = list_mark(n).unwrap_or("bullet");
+                let same = self.list.as_ref().is_some_and(|(k, _)| k == kind);
                 if !same {
                     self.end_list();
-                    self.h.open("ul", "class=\"Bl-bullet\"");
+                    self.h.open("ul", &format!("class=\"Bl-{kind}\""));
                 }
-                self.list = Some(("bullet".into(), None));
+                self.list = Some((kind.into(), None));
                 self.h.open("li", "");
                 if let Some(b) = n.part(Kind::Body) {
                     self.children(b);

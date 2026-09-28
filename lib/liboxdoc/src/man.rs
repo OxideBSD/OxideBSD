@@ -318,6 +318,10 @@ impl Parser<'_> {
                 self.close_paragraph();
                 self.open(Kind::Block, name);
                 self.stack.last_mut().unwrap().args = args.to_vec();
+                // (Its tag as typed: `\(bu` or `*` makes bullet lists, `\-` dash lists.)
+                if name == "IP" {
+                    self.stack.last_mut().unwrap().text = raw_first_arg(self.raw.get(name.len()..).unwrap_or(""));
+                }
                 self.open(Kind::Body, name);
             }
             "RS" => {
@@ -489,6 +493,28 @@ fn text_id_source(raw: &str) -> String {
             if hyph { '_' } else { c[i] }
         })
         .collect()
+}
+
+/// The first of macro arguments as typed (after the name), unquoted.
+fn raw_first_arg(raw: &str) -> String {
+    let s = raw.trim_start_matches([' ', '\t']);
+    match s.strip_prefix('"') {
+        Some(q) => {
+            let mut out = String::new();
+            let mut it = q.chars().peekable();
+            while let Some(c) = it.next() {
+                if c == '"' {
+                    if it.peek() != Some(&'"') {
+                        break;
+                    }
+                    it.next();
+                }
+                out.push(c);
+            }
+            out
+        }
+        None => s.split([' ', '\t']).next().unwrap_or("").to_string(),
+    }
 }
 
 /// From macro arguments as typed (after the name): the arguments joined by a space.
