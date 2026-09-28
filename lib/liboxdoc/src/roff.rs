@@ -224,6 +224,8 @@ impl<'a> Roff<'a> {
             if is_end_marker(raw, self.cc, end) {
                 let (name, _, body) = self.defining.take().unwrap();
                 self.macros.insert(name, body);
+            } else if raw.starts_with(['.', '\'']) && raw[1..].trim_start_matches([' ', '\t']).starts_with("\\\"") {
+                // A comment line is gone from the definition.
             } else {
                 // Copy mode: `\\` becomes `\`, so `\\$1` in a definition is `\$1` when called.
                 body.push(match self.ec {
@@ -235,7 +237,7 @@ impl<'a> Roff<'a> {
         }
 
         // Inside a table: its lines as typed, up to `.TE`.
-        if let Some((start, lines)) = &mut self.table {
+        if self.table.is_some() {
             if raw.trim_end().strip_prefix(self.cc).is_some_and(|r| r.trim() == "TE") {
                 let (start, lines) = self.table.take().unwrap();
                 let mut d = Diagnostics::new("");
@@ -245,20 +247,27 @@ impl<'a> Roff<'a> {
                 self.emit(Line::Table(Box::new(t)));
                 return;
             }
-            let _ = start;
-            // Control lines: definitions still take effect, formatting requests are dropped,
-            // and the rest go to the table, which ignores them with a message.
+            // Control lines: definitions and the page's own macros still take effect,
+            // formatting requests are dropped, and the rest go to the table, which ignores them
+            // with a message.
             let mut define = false;
-            if raw.starts_with(self.cc) || raw.starts_with('\'') {
+            let control = raw.starts_with(self.cc) || raw.starts_with('\'');
+            if control {
                 let (name, _) = split_name(raw[1..].trim_start_matches([' ', '\t']));
                 match name {
                     "ds" | "ds1" | "as" | "as1" | "nr" | "de" | "de1" | "am" | "am1" | "rm" | "rn" | "tr" | "so" => define = true,
+                    // A macro defined in the page is expanded; its lines come back here.
+                    _ if self.macros.contains_key(name) => define = true,
                     "if" | "ie" | "el" | "ft" | "na" | "ad" | "nf" | "fi" | "nh" | "hy" | "ll" | "ta" | "ti" | "ne" | "hw" | "ps" | "vs" | "ss" | "lg" | "cu" | "ul" | "it" | "itc" | "nop" => return,
                     _ => {}
                 }
             }
             if !define {
-                lines.push((lineno, raw.to_string()));
+                // A control line's strings and registers are interpolated, as for any request.
+                let line = if control { self.interpolate(raw, lineno, 0) } else { raw.to_string() };
+                if let Some((_, lines)) = &mut self.table {
+                    lines.push((lineno, line));
+                }
                 return;
             }
         }

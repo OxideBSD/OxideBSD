@@ -178,7 +178,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                             continue;
                         }
                         // A macro inside a block: ignored, but its arguments stay as text.
-                        if let Some(args) = ignore_macro(l, lines[i - 1].0, diag).filter(|a| !a.is_empty()) {
+                        if let Some(args) = ignore_macro(l, lines[i - 1].0, diag) {
                             text.push(decode(args, lines[i - 1].0));
                         }
                         continue;

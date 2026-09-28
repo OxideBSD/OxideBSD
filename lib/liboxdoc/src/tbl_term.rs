@@ -69,6 +69,9 @@ fn format_filled(t: &Term, text: &[String], style: Style, width: usize) -> Forma
         if body.is_empty() {
             if lead > 0 {
                 s.word(&nbsp(lead), style);
+            } else if li > 0 {
+                // An empty line is joined like any other: one more space between the words.
+                s.add_space(1);
             }
             continue;
         }
@@ -140,7 +143,13 @@ fn number_point(s: &str, point: char) -> Option<usize> {
 fn measure_block(t: &Term, text: &[String], style: Style, limit: usize) -> usize {
     let (mut longest, mut line) = (0, 0);
     for w in text.iter().flat_map(|l| l.split(' ')).filter(|w| !w.is_empty()) {
-        let ww = format(t, &[w.to_string()], style, 10_000).width();
+        // mandoc measures a character drawn as an overstrike (`+\bo`) as three columns.
+        let struck = if t.encoding == crate::term::Encoding::Ascii {
+            w.chars().filter(|c| !c.is_ascii() && crate::term::ascii_for(*c).contains('\u{8}')).count()
+        } else {
+            0
+        };
+        let ww = format(t, &[w.to_string()], style, 10_000).width() + 2 * struck;
         line = if line > 0 && line + 1 + ww <= limit { line + 1 + ww } else { ww };
         longest = longest.max(line);
     }
@@ -352,9 +361,18 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     // even for `||`).
     let left = frame || vlines[0] > 0;
     let right = frame || vlines[n] > 0;
-    let total = content + usize::from(left) + usize::from(right);
-    let avail = t.rmargin.saturating_sub(t.offset);
-    let indent = t.offset + if o.center { (avail.saturating_sub(total) + 1) / 2 } else { 0 };
+    // Centred in the space from the page's left edge plus the indent to the right margin, so
+    // a table too wide for its indent moves left of it, as in mandoc (which counts one column
+    // less for such a table).
+    let indent = if o.center {
+        let mut size = content - 1 + usize::from(left) + usize::from(right);
+        if t.offset + size > t.rmargin {
+            size -= 1;
+        }
+        (t.offset + t.rmargin).saturating_sub(size) / 2
+    } else {
+        t.offset
+    };
     let pad = " ".repeat(indent);
 
     // A horizontal line across the table, with `+` where vertical lines cross it.
