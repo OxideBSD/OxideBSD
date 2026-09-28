@@ -39,8 +39,8 @@ fn visible(s: &str) -> usize {
 }
 
 /// Formats text lines, filled, in a scratch terminal `width` columns wide (a text block's
-/// width, or wide enough for any cell). Spaces between words are kept as typed, and a sentence
-/// ending a line gets two after it, as in running text.
+/// width, or wide enough for any cell). Spaces between words are kept as typed; a sentence
+/// ending a line gets no extra one, unlike running text.
 fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
     let mut s = Term::new(width, t.encoding, t.styling);
     s.tab_width = t.tab_width;
@@ -57,12 +57,11 @@ fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
             words.push((w, spaces + 1));
             spaces = 0;
         }
-        let last = words.len().saturating_sub(1);
         for (i, (w, sp)) in words.iter().enumerate() {
             if i > 0 {
                 s.set_space(*sp);
             }
-            s.word_ext(w, style, i == last && crate::mdoc::ends_sentence(line));
+            s.word(w, style);
         }
     }
     s.flush();
@@ -110,6 +109,8 @@ fn measure_block(t: &Term, text: &[String], style: Style, limit: usize) -> usize
 /// kind, and the number of columns it spans.
 struct Laid {
     cells: Vec<Option<(Formatted, char, usize, Option<u8>)>>,
+    /// The row's own vertical lines: before the first column, then after each.
+    vl: Vec<u8>,
 }
 
 /// Lays out a table; man(7) puts a blank line before it, mdoc doesn't.
@@ -147,7 +148,15 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             continue;
         };
         vlines[0] = vlines[0].max(layout.lead);
-        let mut laid = Laid { cells: (0..n).map(|_| None).collect() };
+        let mut vl = vec![0u8; n + 1];
+        vl[0] = layout.lead;
+        for (j, spec) in layout.specs.iter().enumerate().take(n) {
+            vl[j + 1] = spec.vline;
+        }
+        if o.allbox {
+            vl.fill(1);
+        }
+        let mut laid = Laid { cells: (0..n).map(|_| None).collect(), vl };
         for (j, spec) in layout.specs.iter().enumerate().take(n) {
             vlines[j + 1] = vlines[j + 1].max(spec.vline);
             if let Some(s) = spec.spacing {
@@ -215,11 +224,15 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             widths[j] = eq;
         }
     }
-    // A spanning cell wider than its columns widens the last of them.
+    // A spanning cell wider than its columns widens them evenly, the leftmost first by the
+    // odd columns.
     for &(j, span, w) in &spans {
         let have: usize = (j..j + span).map(|c| widths[c]).sum::<usize>() + (j..j + span - 1).map(|c| spacing[c]).sum::<usize>();
         if w > have {
-            widths[j + span - 1] += w - have;
+            let extra = w - have;
+            for (i, c) in (j..j + span).enumerate() {
+                widths[c] += extra / span + usize::from(i < extra % span);
+            }
         }
     }
     // `x` columns share the width the others leave, less 3 columns between each two and the
@@ -276,15 +289,13 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     let pad = " ".repeat(indent);
 
     // A horizontal line across the table, with `+` where vertical lines cross it.
-    let rule = |double: bool, cross: bool| -> String {
+    // Lines cross it where the rows above and below it have them (`vl`).
+    let rule = |double: bool, vl: &[u8]| -> String {
         let fill = if double { '=' } else { '-' };
         let mut line: Vec<char> = vec![fill; content];
         for j in 0..n.saturating_sub(1) {
-            if !cross {
-                break;
-            }
             let at = start[j] + widths[j] + 1;
-            for v in 0..vlines[j + 1] as usize {
+            for v in 0..vl.get(j + 1).copied().unwrap_or(0) as usize {
                 if at + v < content {
                     line[at + v] = '+';
                 }
@@ -299,16 +310,31 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     } else {
         t.flush();
     }
+    // The vertical lines crossing a horizontal one after row `i`: those of the data rows on
+    // either side.
+    let data_vl = |i: usize| laid_rows.get(i).and_then(|l| l.as_ref()).map(|l| l.vl.clone());
+    let crossing = |after: usize| -> Vec<u8> {
+        let prev = (0..=after).rev().find_map(data_vl);
+        let next = (after + 1..laid_rows.len()).find_map(data_vl);
+        let mut v = vec![0u8; n + 1];
+        for src in [prev, next].into_iter().flatten() {
+            for (a, b) in v.iter_mut().zip(src) {
+                *a = (*a).max(b);
+            }
+        }
+        v
+    };
     // A double frame's outer line doesn't show where the columns' lines cross it.
     if frame {
+        let next_only = (0..laid_rows.len()).find_map(data_vl).unwrap_or_default();
         for i in 0..o.frame {
-            t.raw_line(&rule(false, i + 1 == o.frame));
+            t.raw_line(&rule(false, if i + 1 == o.frame { &next_only } else { &[] }));
         }
     }
     let nrows = laid_rows.len();
     for (ri, (row, laid)) in tbl.rows.iter().zip(&laid_rows).enumerate() {
         match (row, laid) {
-            (Row::Line(d), _) => t.raw_line(&rule(*d == 2, true)),
+            (Row::Line(d), _) => t.raw_line(&rule(*d == 2, &crossing(ri))),
             (_, Some(laid)) => {
                 let height = laid.cells.iter().flatten().map(|(f, ..)| f.lines.len()).max().unwrap_or(1);
                 for li in 0..height {
@@ -323,7 +349,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                         // Get to the column's start, drawing vertical lines on the way.
                         while col < start[j] {
                             let sep_start = start[j] - spacing[j - 1];
-                            let bar = col >= sep_start + 1 && col < sep_start + 1 + vlines[j] as usize;
+                            let bar = col >= sep_start + 1 && col < sep_start + 1 + laid.vl[j] as usize;
                             s.push(if bar { '|' } else { ' ' });
                             col += 1;
                         }
@@ -338,7 +364,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                         };
                         let lead = match kind {
                             'r' => w.saturating_sub(text.1),
-                            'c' => (w.saturating_sub(text.1) + 1) / 2,
+                            'c' => w.saturating_sub(text.1) / 2,
                             'n' if line.is_none() && *span == 1 => ints[j].saturating_sub(numeric_split(&text.0, tbl.opts.decimal).0),
                             _ => 0,
                         };
@@ -357,15 +383,16 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                 }
                 // allbox: a line after every row but the last.
                 if o.allbox && ri + 1 < nrows {
-                    t.raw_line(&rule(false, true));
+                    t.raw_line(&rule(false, &crossing(ri)));
                 }
             }
             _ => {}
         }
     }
     if frame {
+        let last = (0..laid_rows.len()).rev().find_map(data_vl).unwrap_or_default();
         for i in 0..o.frame {
-            t.raw_line(&rule(false, i == 0));
+            t.raw_line(&rule(false, if i == 0 { &last } else { &[] }));
         }
         t.skip_vspace = true;
     }

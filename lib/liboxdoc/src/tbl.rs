@@ -227,9 +227,14 @@ fn parse_opts(line: &str) -> Opts {
             i += 1;
         }
         let word: String = b[start..i].iter().collect::<String>().to_lowercase();
-        // An argument in parentheses.
+        // An argument in parentheses, maybe after spaces.
         let mut arg = String::new();
-        if b.get(i) == Some(&'(') {
+        let mut k = i;
+        while b.get(k).is_some_and(|c| *c == ' ' || *c == '\t') {
+            k += 1;
+        }
+        if b.get(k) == Some(&'(') {
+            i = k;
             i += 1;
             while i < b.len() && b[i] != ')' {
                 arg.push(b[i]);
@@ -278,6 +283,15 @@ fn parse_layout(lines: &[(usize, String)], mut i: usize, out: &mut Vec<Layout>) 
     i
 }
 
+fn set_font(sp: &mut Spec, name: &str) {
+    (sp.bold, sp.italic) = match name {
+        "B" | "3" | "CB" => (true, false),
+        "I" | "2" | "CI" => (false, true),
+        "BI" | "4" => (true, true),
+        _ => (false, false),
+    };
+}
+
 fn parse_layout_row(s: &str) -> Layout {
     let mut l = Layout::default();
     let b: Vec<char> = s.chars().collect();
@@ -298,34 +312,27 @@ fn parse_layout_row(s: &str) -> Layout {
                 l.specs.push(Spec::new(kind));
             }
             _ if l.specs.is_empty() => {}
-            'b' | 'B' => l.specs.last_mut().unwrap().bold = true,
-            'i' | 'I' => l.specs.last_mut().unwrap().italic = true,
+            // A font replaces the one before: `b`, `i`, or `f` and a name. mandoc takes a
+            // one- or two-character name as typed; `f(xx` isn't a font it knows, so roman.
+            'b' | 'B' => set_font(l.specs.last_mut().unwrap(), "B"),
+            'i' | 'I' => set_font(l.specs.last_mut().unwrap(), "I"),
             'e' | 'E' => l.specs.last_mut().unwrap().equal = true,
             'x' | 'X' => l.specs.last_mut().unwrap().max = true,
             'f' | 'F' => {
-                // A font: `(xx`, one letter, or two starting with C (`CW`).
                 let mut name = String::new();
                 if b.get(i) == Some(&'(') {
-                    name = b[(i + 1).min(b.len())..(i + 3).min(b.len())].iter().collect();
-                    i += 3;
-                } else if let Some(&f) = b.get(i) {
-                    name.push(f);
                     i += 1;
-                    if f == 'C' && b.get(i).is_some_and(|c| c.is_ascii_uppercase()) {
+                    while i < b.len() && b[i] != ')' {
+                        i += 1;
+                    }
+                    i += 1;
+                } else {
+                    while i < b.len() && name.len() < 2 && (b[i].is_ascii_uppercase() || b[i].is_ascii_digit()) {
                         name.push(b[i]);
                         i += 1;
                     }
                 }
-                let sp = l.specs.last_mut().unwrap();
-                match name.as_str() {
-                    "B" | "3" => sp.bold = true,
-                    "I" | "2" => sp.italic = true,
-                    "BI" | "4" => {
-                        sp.bold = true;
-                        sp.italic = true;
-                    }
-                    _ => {}
-                }
+                set_font(l.specs.last_mut().unwrap(), &name);
             }
             'w' | 'W' => {
                 let mut arg = String::new();
