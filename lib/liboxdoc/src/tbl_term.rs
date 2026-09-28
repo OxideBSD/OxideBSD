@@ -36,18 +36,34 @@ fn visible(s: &str) -> usize {
     n
 }
 
-/// Formats `text` in a scratch terminal `width` columns wide (a text block's width, or wide
-/// enough for any cell).
-fn format(t: &Term, text: &str, style: Style, width: usize) -> Formatted {
+/// Formats text lines, filled, in a scratch terminal `width` columns wide (a text block's
+/// width, or wide enough for any cell). Spaces between words are kept as typed, and a sentence
+/// ending a line gets two after it, as in running text.
+fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
     let mut s = Term::new(width, t.encoding, t.styling);
     s.tab_width = t.tab_width;
     let mut lines = Vec::new();
-    for para in text.split('\n') {
-        for w in para.split(' ').filter(|w| !w.is_empty()) {
-            s.word(w, style);
+    for line in text {
+        let line = line.trim_end_matches(' ');
+        let mut words: Vec<(&str, usize)> = Vec::new();
+        let mut spaces = 0;
+        for w in line.split(' ') {
+            if w.is_empty() {
+                spaces += 1;
+                continue;
+            }
+            words.push((w, spaces + 1));
+            spaces = 0;
         }
-        s.flush();
+        let last = words.len().saturating_sub(1);
+        for (i, (w, sp)) in words.iter().enumerate() {
+            if i > 0 {
+                s.set_space(*sp);
+            }
+            s.word_ext(w, style, i == last && crate::mdoc::ends_sentence(line));
+        }
     }
+    s.flush();
     let out = s.finish();
     for l in out.lines() {
         lines.push((l.to_string(), visible(l)));
@@ -88,6 +104,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
     // A text block's width, unless the layout gives one: the line over the columns plus one.
     let block_width = (t.width / (n + 1)).max(1);
     let big = 10_000;
+    let none: [String; 0] = [];
 
     // Format the cells and find the natural widths.
     let mut widths = vec![0usize; n];
@@ -97,8 +114,19 @@ pub fn render(t: &mut Term, tbl: &Table) {
     let mut spacing = vec![3usize; n];
     let mut vlines = vec![0u8; n + 1];
     let mut equal = vec![false; n];
-    let mut laid_rows: Vec<Option<Laid>> = Vec::new();
+    // `x` belongs to the column, whichever layout row gives it.
+    let mut max = vec![false; n];
     for row in &tbl.rows {
+        if let Row::Data { layout, .. } = row {
+            for (j, spec) in layout.specs.iter().enumerate().take(n) {
+                max[j] |= spec.max;
+            }
+        }
+    }
+    let mut laid_rows: Vec<Option<Laid>> = Vec::new();
+    // Text blocks in `x` columns, formatted once the widths are known: row, column, text.
+    let mut later: Vec<(usize, usize, &[String], Style)> = Vec::new();
+    for (ri, row) in tbl.rows.iter().enumerate() {
         let Row::Data { cells, layout, .. } = row else {
             laid_rows.push(None);
             continue;
@@ -118,7 +146,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
         // Map the cells to the layout's columns; a spanned (`s`) column takes none.
         let mut k = 0;
         for j in 0..n {
-            let spec = layout.specs.get(j).cloned().unwrap_or_else(|| Spec { kind: 'l', bold: false, italic: false, width: None, equal: false, spacing: None, vline: 0 });
+            let spec = layout.specs.get(j).cloned().unwrap_or_else(|| Spec::new('l'));
             if spec.kind == 's' {
                 continue;
             }
@@ -127,13 +155,17 @@ pub fn render(t: &mut Term, tbl: &Table) {
             k += 1;
             let style = style_of(&spec);
             let (f, line) = match (cell, spec.kind) {
-                (_, '_') => (format(t, "", style, big), Some(1)),
-                (_, '=') => (format(t, "", style, big), Some(2)),
-                (Some(Cell::Line(d)), _) => (format(t, "", style, big), Some(*d)),
+                (_, '_') => (format(t, &none, style, big), Some(1)),
+                (_, '=') => (format(t, &none, style, big), Some(2)),
+                (Some(Cell::Line(d)), _) => (format(t, &none, style, big), Some(*d)),
+                (Some(Cell::Block(text)), _) if max[j] && spec.width.is_none() => {
+                    later.push((ri, j, text, style));
+                    (format(t, &none, style, big), None)
+                }
                 (Some(Cell::Block(text)), _) => (format(t, text, style, spec.width.unwrap_or(block_width)), None),
-                (Some(Cell::Text(text)), _) => (format(t, text, style, big), None),
-                (Some(Cell::ShortLine), _) => (format(t, "", style, big), Some(0)),
-                _ => (format(t, "", style, big), None),
+                (Some(Cell::Text(text)), _) => (format(t, std::slice::from_ref(text), style, big), None),
+                (Some(Cell::ShortLine), _) => (format(t, &none, style, big), Some(0)),
+                _ => (format(t, &none, style, big), None),
             };
             let w = f.width();
             if span > 1 {
@@ -172,6 +204,42 @@ pub fn render(t: &mut Term, tbl: &Table) {
             widths[j + span - 1] += w - have;
         }
     }
+    // `x` columns share the width the others leave, less 3 columns between each two and the
+    // outer lines, as evenly as whole columns allow. Like mandoc, this copies a GNU tbl quirk
+    // with five of them.
+    let nx = max.iter().filter(|m| **m).count();
+    if nx > 0 {
+        let outer = if o.frame > 0 { 2 } else { usize::from(vlines[0] > 0) + usize::from(vlines[n] > 0) };
+        let fixed: usize = (0..n).filter(|j| !max[*j]).map(|j| widths[j]).sum::<usize>() + 3 * (n - 1) + outer;
+        let avail = t.rmargin.saturating_sub(t.offset);
+        if avail > fixed {
+            let xw = avail - fixed;
+            let quirk = if nx == 5 && matches!(xw % 5 + 2, 3 | 4) { xw % 5 + 2 } else { 0 };
+            let (mut k, mut given) = (0, 0);
+            for j in 0..n {
+                if !max[j] {
+                    continue;
+                }
+                k += 1;
+                let mut w = ((xw * k) as f64 / nx as f64 - given as f64 + 0.4995) as usize;
+                if k == quirk {
+                    w -= 1;
+                }
+                given += w;
+                widths[j] = w;
+            }
+        }
+    }
+    // Blocks in `x` columns, at their column's width.
+    for (ri, j, text, style) in later {
+        if let Some(Some(laid)) = laid_rows.get_mut(ri)
+            && let Some(cell) = laid.cells[j].as_mut()
+        {
+            let span = cell.2;
+            let w = (j..j + span).map(|c| widths[c]).sum::<usize>() + (j..j + span - 1).map(|c| spacing[c]).sum::<usize>();
+            cell.0 = format(t, text, style, w.max(1));
+        }
+    }
 
     // Column positions, from the left edge of the table's content (after a frame's line).
     let mut start = vec![0usize; n];
@@ -201,8 +269,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
         if frame { format!("{pad}+{body}+") } else { format!("{pad}{body}") }
     };
 
-    t.flush();
-    t.vspace();
+    t.table_space();
     if frame {
         for _ in 0..o.frame {
             t.raw_line(&rule(false));
@@ -270,5 +337,6 @@ pub fn render(t: &mut Term, tbl: &Table) {
         for _ in 0..o.frame {
             t.raw_line(&rule(false));
         }
+        t.skip_vspace = true;
     }
 }

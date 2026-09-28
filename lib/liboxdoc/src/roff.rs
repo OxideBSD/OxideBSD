@@ -243,11 +243,24 @@ impl<'a> Roff<'a> {
                 let t = crate::tbl::parse(&lines, start, &mut decode, &mut d);
                 self.diag.list.extend(d.list);
                 self.emit(Line::Table(Box::new(t)));
-            } else {
-                let _ = start;
-                lines.push((lineno, raw.to_string()));
+                return;
             }
-            return;
+            let _ = start;
+            // Control lines: definitions still take effect, formatting requests are dropped,
+            // and the rest go to the table, which ignores them with a message.
+            let mut define = false;
+            if raw.starts_with(self.cc) || raw.starts_with('\'') {
+                let (name, _) = split_name(raw[1..].trim_start_matches([' ', '\t']));
+                match name {
+                    "ds" | "ds1" | "as" | "as1" | "nr" | "de" | "de1" | "am" | "am1" | "rm" | "rn" | "tr" | "so" => define = true,
+                    "if" | "ie" | "el" | "ft" | "na" | "ad" | "nf" | "fi" | "nh" | "hy" | "ll" | "ta" | "ti" | "ne" | "hw" | "ps" | "vs" | "ss" | "lg" | "cu" | "ul" | "it" | "itc" | "nop" => return,
+                    _ => {}
+                }
+            }
+            if !define {
+                lines.push((lineno, raw.to_string()));
+                return;
+            }
         }
         // Inside a false `\{` body: only track nesting.
         if self.conds.last().is_some_and(|c| !c.active) {

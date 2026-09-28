@@ -40,11 +40,13 @@ pub struct Spec {
     pub spacing: Option<usize>,
     /// Vertical lines after this column: 0, 1 (`|`) or 2 (`||`).
     pub vline: u8,
+    /// `x`: the column takes a share of the width left over.
+    pub max: bool,
 }
 
 impl Spec {
-    fn new(kind: char) -> Spec {
-        Spec { kind, bold: false, italic: false, width: None, equal: false, spacing: None, vline: 0 }
+    pub fn new(kind: char) -> Spec {
+        Spec { kind, bold: false, italic: false, width: None, equal: false, spacing: None, vline: 0, max: false }
     }
 }
 
@@ -60,8 +62,8 @@ pub struct Layout {
 pub enum Cell {
     /// Text, escapes decoded.
     Text(String),
-    /// A `T{` ... `T}` text block, filled.
-    Block(String),
+    /// A `T{` ... `T}` text block, filled: its lines, decoded.
+    Block(Vec<String>),
     /// `_` or `=`: a line across the cell (1 or 2 for double).
     Line(u8),
     /// `\_`: a line as long as the cell's contents would be.
@@ -115,11 +117,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
             continue;
         }
         if line.starts_with('.') || line.starts_with('\'') {
-            // Macros aren't formatted inside a table.
-            let name: String = line[1..].trim_start().chars().take_while(|c| !c.is_whitespace()).collect();
-            if !name.starts_with('\\') {
-                diag.report(Level::Unsupported, *lineno, 2, "ignoring macro in table", line[1..].trim_start());
-            }
+            ignore_macro(line, *lineno, diag);
             i += 1;
             continue;
         }
@@ -159,17 +157,16 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                         after = Some(t.to_string());
                         break;
                     }
-                    if l.starts_with('.') && l.len() > 1 {
-                        // A request inside a block: a break or space starts a new line.
-                        let name: String = l[1..].trim_start().chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-                        if matches!(name.as_str(), "br" | "sp") {
-                            text.push("\n".into());
+                    if l.starts_with('.') || l.starts_with('\'') {
+                        // A macro inside a block: ignored, but its arguments stay as text.
+                        if let Some(args) = ignore_macro(l, lines[i - 1].0, diag) {
+                            text.push(decode(args, lines[i - 1].0));
                         }
                         continue;
                     }
                     text.push(decode(l, lines[i - 1].0));
                 }
-                cells.push(Cell::Block(text.join(" ")));
+                cells.push(Cell::Block(text));
                 match after {
                     // `T}` then the next cell, after a tab.
                     Some(a) if a.starts_with(opts.tab) => {
@@ -194,6 +191,25 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
         rows.push(Row::Data { cells, layout, line: row_line });
     }
     Table { opts, rows, ncols, line: start }
+}
+
+/// Reports a macro line in a table, which isn't formatted. The requests that break or place
+/// text (`br`, `sp`, `ce`, `rj`) are reported at their arguments and leave nothing; any other
+/// macro is reported at its name, and its arguments (returned) stay as text.
+fn ignore_macro<'a>(line: &'a str, lineno: usize, diag: &mut Diagnostics) -> Option<&'a str> {
+    let body = line[1..].trim_start_matches([' ', '\t']);
+    if body.is_empty() || body.starts_with('\\') {
+        return None;
+    }
+    let name_col = line.len() - body.len() + 1;
+    let name_len = body.find([' ', '\t']).unwrap_or(body.len());
+    let args = body[name_len..].trim_start_matches([' ', '\t']);
+    if matches!(&body[..name_len], "br" | "sp" | "ce" | "rj") {
+        diag.report(Level::Unsupported, lineno, line.len() - args.len() + 1, "ignoring macro in table", body);
+        return None;
+    }
+    diag.report(Level::Unsupported, lineno, name_col, "ignoring macro in table", body);
+    (!args.is_empty()).then_some(args)
 }
 
 fn parse_opts(line: &str) -> Opts {
@@ -285,6 +301,7 @@ fn parse_layout_row(s: &str) -> Layout {
             'b' | 'B' => l.specs.last_mut().unwrap().bold = true,
             'i' | 'I' => l.specs.last_mut().unwrap().italic = true,
             'e' | 'E' => l.specs.last_mut().unwrap().equal = true,
+            'x' | 'X' => l.specs.last_mut().unwrap().max = true,
             'f' | 'F' => {
                 // A font: `(xx`, one letter, or two starting with C (`CW`).
                 let mut name = String::new();

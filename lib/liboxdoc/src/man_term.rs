@@ -84,6 +84,16 @@ impl R<'_> {
         }
     }
 
+    /// A paragraph's space, except when its body starts with a table, whose own blank line
+    /// stands in for it.
+    fn para_space_unless_table(&mut self, n: &Node) {
+        if n.part(Kind::Body).and_then(|b| b.children.first()).is_some_and(|c| c.kind == Kind::Table) {
+            self.t.flush();
+            return;
+        }
+        self.para_space();
+    }
+
     fn title(&self) -> String {
         format!("{}({})", plain(&self.meta.title), plain(&self.meta.section))
     }
@@ -217,7 +227,7 @@ impl R<'_> {
         match n.tok.as_str() {
             "PP" => {
                 self.t.reset_font();
-                self.para_space();
+                self.para_space_unless_table(n);
                 self.width = WIDTH;
                 self.t.set_offset(self.base);
             }
@@ -422,7 +432,7 @@ impl R<'_> {
                 // Each paragraph, and its body after the tag, starts in the regular font.
                 self.t.reset_font();
                 if n.tok != "TQ" {
-                    self.para_space();
+                    self.para_space_unless_table(n);
                 } else {
                     self.t.flush();
                 }
@@ -456,7 +466,7 @@ impl R<'_> {
             }
             "HP" => {
                 self.t.reset_font();
-                self.para_space();
+                self.para_space_unless_table(n);
                 if let Some(w) = n.args.first().filter(|w| !w.is_empty()) {
                     self.width = width(w);
                 }

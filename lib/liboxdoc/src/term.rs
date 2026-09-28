@@ -118,6 +118,8 @@ pub struct Term {
     blank_header: bool,
     /// Vertical space is suppressed until the next text (right after a section heading).
     pub no_vspace: bool,
+    /// The next vertical space is skipped: a boxed table's bottom line stands in for it.
+    pub skip_vspace: bool,
     /// The words of the macro being rendered break at hyphens, as a text line's do.
     pub hyph_args: bool,
     /// In no-fill mode, a line of zero-width characters is output (empty), as man(7) does.
@@ -147,6 +149,7 @@ impl Term {
             eos: false,
             space: None,
             extra_space: 0,
+            skip_vspace: false,
             esc_font: None,
             esc_prev: None,
             keep: 0,
@@ -259,6 +262,7 @@ impl Term {
 
     /// Adds a word that ends a sentence when `eos` is set.
     pub fn word_ext(&mut self, text: &str, style: Style, eos: bool) {
+        self.skip_vspace = false;
         // The word's parts, split at `\:` break points.
         let mut parts: Vec<Vec<Cell>> = Vec::new();
         let mut cells = Vec::new();
@@ -415,6 +419,9 @@ impl Term {
     /// vertical space is suppressed.
     pub fn vspace(&mut self) {
         self.flush();
+        if std::mem::take(&mut self.skip_vspace) {
+            return;
+        }
         if self.no_vspace || self.at_blank {
             return;
         }
@@ -427,6 +434,9 @@ impl Term {
     /// A blank line even at the start of a section.
     pub fn blank_line(&mut self) {
         self.flush();
+        if std::mem::take(&mut self.skip_vspace) {
+            return;
+        }
         self.out.push('\n');
         self.at_blank = true;
         self.blank_explicit = true;
@@ -436,6 +446,9 @@ impl Term {
     /// A man(7) `.sp`: a blank line, unless paragraph space was just output, which absorbs it.
     pub fn sp_line(&mut self) {
         self.flush();
+        if std::mem::take(&mut self.skip_vspace) {
+            return;
+        }
         if self.at_blank && !self.blank_explicit && !self.blank_header {
             // Absorbed by the paragraph space before it, which stays what the output ends with.
             return;
@@ -456,6 +469,9 @@ impl Term {
     /// explicit blank line before it.
     pub fn section_vspace(&mut self) {
         self.flush();
+        if std::mem::take(&mut self.skip_vspace) {
+            return;
+        }
         if self.no_vspace || (self.at_blank && !self.blank_explicit) {
             return;
         }
@@ -652,6 +668,19 @@ impl Term {
     }
 
     /// A line laid out by the caller (a table row), already styled; output as it is.
+    /// The blank line before a table: always there, even after other space or at the start of
+    /// a section.
+    pub fn table_space(&mut self) {
+        self.flush();
+        if std::mem::take(&mut self.skip_vspace) {
+            return;
+        }
+        self.out.push('\n');
+        self.at_blank = true;
+        self.blank_explicit = true;
+        self.blank_header = false;
+    }
+
     pub fn raw_line(&mut self, s: &str) {
         self.flush();
         self.out.push_str(s.trim_end_matches(' '));
