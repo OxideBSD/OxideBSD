@@ -530,7 +530,13 @@ impl<'a> Roff<'a> {
             "ds" | "as" => {
                 let (key, value) = split_name(argstr);
                 let value = value.strip_prefix('"').unwrap_or(value);
-                // String values are stored unexpanded and expanded at interpolation.
+                // String values are stored unexpanded and expanded at interpolation; but the
+                // value is read in copy mode, where `\\` is `\` (`.ds V \\%v1` holds `\%v1`).
+                let value = match self.ec {
+                    Some(ec) => value.replace(&format!("{ec}{ec}"), &ec.to_string()),
+                    None => value.to_string(),
+                };
+                let value = value.as_str();
                 let key = key.to_string();
                 if name == "as" {
                     self.strings.entry(key).or_default().push_str(value);

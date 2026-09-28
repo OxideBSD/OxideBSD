@@ -554,7 +554,7 @@ const EMPTY_SKIPPED: &[&str] = &[
 ];
 
 /// The standard mdoc sections, in their conventional order.
-const SECTIONS: &[&str] = &[
+pub(crate) const SECTIONS: &[&str] = &[
     "NAME", "LIBRARY", "SYNOPSIS", "DESCRIPTION", "CONTEXT", "IMPLEMENTATION NOTES", "RETURN VALUES", "ENVIRONMENT", "FILES", "EXIT STATUS", "EXAMPLES", "DIAGNOSTICS", "COMPATIBILITY", "ERRORS", "SEE ALSO", "STANDARDS", "HISTORY", "AUTHORS", "CAVEATS", "BUGS", "SECURITY CONSIDERATIONS",
 ];
 

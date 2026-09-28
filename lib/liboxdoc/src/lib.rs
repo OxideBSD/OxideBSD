@@ -18,6 +18,12 @@ pub mod unicode;
 pub mod lint;
 pub mod tbl;
 pub mod tbl_term;
+pub mod regex;
+pub mod keys;
+pub mod db;
+pub mod manpath;
+pub mod makewhatis;
+pub mod apropos;
 
 use diag::Diagnostics;
 use term::{Encoding, Styling, Term};

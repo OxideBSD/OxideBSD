@@ -14,3 +14,13 @@ publish = false
 # own oxdoc(1) is usr.bin/oxdoc.
 name = "oxdoc-host"
 path = "src/bin/oxdoc-host.rs"
+
+[[bin]]
+# Host-side makewhatis and apropos, for building the image's index and for the differential
+# tests against mandoc's; OxideBSD's own are usr.sbin/makewhatis and usr.bin/apropos.
+name = "makewhatis-host"
+path = "src/bin/makewhatis-host.rs"
+
+[[bin]]
+name = "apropos-host"
+path = "src/bin/apropos-host.rs"

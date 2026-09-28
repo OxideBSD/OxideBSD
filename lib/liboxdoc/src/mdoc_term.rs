@@ -823,7 +823,7 @@ impl R<'_> {
 }
 
 /// The text of `.Ox`, `.Bx`, `.At`, `.St` and friends.
-fn os_name(tok: &str, args: &[String]) -> String {
+pub(crate) fn os_name(tok: &str, args: &[String]) -> String {
     let v = args.join(" ");
     match tok {
         "Ox" => if v.is_empty() { "OpenBSD".into() } else { format!("OpenBSD {v}") },

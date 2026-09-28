@@ -13,7 +13,7 @@ use crate::tree::{Document, Kind, Language, Meta, Node};
 
 /// Macros that may be called from another macro's arguments.
 pub const CALLABLE: &[&str] = &[
-    "Ac", "Ad", "An", "Ao", "Ap", "Aq", "Ar", "At", "Bc", "Bo", "Bq", "Brc", "Bro", "Brq", "Bsx", "Bx", "Cd", "Cm", "Dc", "Do", "Dq", "Dv", "Dx", "Ec", "Em", "En", "Eo", "Er", "Es", "Ev", "Fa", "Fc", "Fl", "Fn", "Fr", "Ft", "Fx", "Ic", "Li", "Lk", "Ms", "Mt", "Nm", "No", "Ns", "Nx", "Oc", "Oo", "Op", "Ox", "Pa", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Sc", "So", "Sq", "St", "Sx", "Sy", "Ta", "Tn", "Ux", "Va", "Vt", "Xc", "Xo", "Xr",
+    "Ac", "Ad", "An", "Ao", "Ap", "Aq", "Ar", "At", "Bc", "Bo", "Bq", "Brc", "Bro", "Brq", "Bsx", "Bx", "Cd", "Cm", "Dc", "Do", "Dq", "Dv", "Dx", "Ec", "Em", "En", "Eo", "Er", "Es", "Ev", "Fa", "Fc", "Fl", "Fn", "Fr", "Ft", "Fx", "Ic", "In", "Li", "Lk", "Ms", "Mt", "Nm", "No", "Ns", "Nx", "Oc", "Oo", "Op", "Ot", "Ox", "Pa", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Sc", "So", "Sq", "St", "Sx", "Sy", "Ta", "Tn", "Ux", "Va", "Vt", "Xc", "Xo", "Xr",
 ];
 
 /// Partial blocks enclosing the rest of their line, with their opening and closing text (UTF-8;
