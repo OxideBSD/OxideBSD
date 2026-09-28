@@ -502,7 +502,17 @@ pub struct MdocState {
     /// The prologue macros seen so far.
     seen_dt: bool,
     seen_os: bool,
+    /// Section headings so far, and the conventional place of the last standard one.
+    sections: Vec<String>,
+    last_std: Option<usize>,
+    /// An AUTHORS section not yet known to hold an `.An`: where its heading is.
+    authors: Option<(usize, usize)>,
 }
+
+/// The standard mdoc sections, in their conventional order.
+const SECTIONS: &[&str] = &[
+    "NAME", "LIBRARY", "SYNOPSIS", "DESCRIPTION", "CONTEXT", "IMPLEMENTATION NOTES", "RETURN VALUES", "ENVIRONMENT", "FILES", "EXIT STATUS", "EXAMPLES", "DIAGNOSTICS", "COMPATIBILITY", "ERRORS", "SEE ALSO", "STANDARDS", "HISTORY", "AUTHORS", "CAVEATS", "BUGS", "SECURITY CONSIDERATIONS",
+];
 
 impl MdocState {
     /// A macro line, with the macros it calls; `raw` is the line as typed from `name` on.
@@ -517,7 +527,9 @@ impl MdocState {
         match name {
             "Sh" => {
                 self.end_run(diag);
+                self.end_section(diag);
                 self.section = args.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>().join(" ");
+                self.sh(diag, line, col, args.first().map(|(c, _)| *c).unwrap_or(col));
                 return;
             }
             "Dt" => self.dt_section = args.get(1).map(|(_, a)| a.clone()).unwrap_or_default(),
@@ -534,6 +546,9 @@ impl MdocState {
             }
         }
         for (m, mcol, margs) in groups {
+            if m == "An" {
+                self.authors = None;
+            }
             if m != "Xr" {
                 // A block interrupting a run of cross-references ends it, as the section's end
                 // does; a paragraph break or text just breaks it.
@@ -578,8 +593,51 @@ impl MdocState {
     /// The end of the input.
     pub fn end(&mut self, diag: &mut Diagnostics) {
         self.end_run(diag);
+        self.end_section(diag);
         if !self.seen_os {
             diag.report(Level::Warning, 0, 0, "missing Os macro, using \"\"", "");
+        }
+    }
+
+    /// A section heading: its conventional order, duplicates, sections for certain manual
+    /// sections only, and near-misses of the standard names.
+    fn sh(&mut self, diag: &mut Diagnostics, line: usize, col: usize, arg_col: usize) {
+        let name = self.section.clone();
+        if self.sections.contains(&name) {
+            diag.report(Level::Warning, line, col, "duplicate section title", &format!("Sh {name}"));
+        }
+        self.sections.push(name.clone());
+        if let Some(i) = SECTIONS.iter().position(|s| *s == name) {
+            if self.last_std.is_some_and(|l| i < l) {
+                diag.report(Level::Warning, line, col, "sections out of conventional order", &format!("Sh {name}"));
+            }
+            self.last_std = Some(i);
+            let only: &[&str] = match name.as_str() {
+                "LIBRARY" | "RETURN VALUES" => &["2", "3", "9"],
+                "ERRORS" => &["2", "3", "4", "9"],
+                "CONTEXT" => &["9"],
+                _ => &[],
+            };
+            let sec = self.dt_section.chars().next().map(String::from).unwrap_or_default();
+            if !only.is_empty() && !only.contains(&sec.as_str()) {
+                diag.report(Level::Warning, line, col, "unexpected section", &format!("Sh {name} for {} only", only.join(", ")));
+            }
+            if name == "AUTHORS" {
+                self.authors = Some((line, col));
+            }
+        } else {
+            // A standard name misspelled: spaces or a final S missing or extra.
+            let squash = |s: &str| s.replace(' ', "").trim_end_matches('S').to_string();
+            if let Some(std) = SECTIONS.iter().find(|s| squash(s) == squash(&name)) {
+                diag.report(Level::Style, line, arg_col, "possible typo in section name", &format!("Sh {name} instead of {std}"));
+            }
+        }
+    }
+
+    /// The end of a section: an AUTHORS section should name its authors with `.An`.
+    fn end_section(&mut self, diag: &mut Diagnostics) {
+        if let Some((line, col)) = self.authors.take() {
+            diag.report(Level::Warning, line, col, "AUTHORS section without An macro", "");
         }
     }
 
