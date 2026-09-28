@@ -20,6 +20,11 @@ pub mod tbl;
 pub mod tbl_term;
 pub mod eqn;
 pub mod eqn_term;
+pub mod html;
+pub mod mdoc_html;
+pub mod man_html;
+pub mod tbl_html;
+pub mod eqn_html;
 pub mod regex;
 pub mod keys;
 pub mod db;
@@ -35,6 +40,7 @@ use tree::{Document, Language};
 pub enum Device {
     Ascii,
     Utf8,
+    Html,
     Lint,
     Tree,
 }
@@ -52,11 +58,13 @@ pub struct Options {
     /// Today's date in the local time zone, `Month D, YYYY`, for a `$Mdocdate$` with no date;
     /// without it, today in UTC. (This library doesn't read the time zone itself.)
     pub today: Option<String>,
+    /// The HTML device's options.
+    pub html: html::HtmlOptions,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None, synopsis_only: false, today: None }
+        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None, synopsis_only: false, today: None, html: Default::default() }
     }
 }
 
@@ -103,6 +111,13 @@ pub fn format(input: &str, file: &str, opts: &Options) -> (String, Diagnostics) 
             match doc.language {
                 Language::Mdoc => mdoc_term::render(&doc, t, opts.synopsis_only),
                 Language::Man => man_term::render(&doc, t, opts.synopsis_only),
+            }
+        }
+        Device::Html => {
+            let comments = html::leading_comments(input);
+            match doc.language {
+                Language::Mdoc => mdoc_html::render(&doc, &opts.html, &comments),
+                Language::Man => man_html::render(&doc, &opts.html, &comments),
             }
         }
         Device::Lint => String::new(),

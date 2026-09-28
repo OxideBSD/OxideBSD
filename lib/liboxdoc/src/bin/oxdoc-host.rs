@@ -19,6 +19,7 @@ fn main() {
                 opts.device = match args[i].as_str() {
                     "ascii" => Device::Ascii,
                     "utf8" => Device::Utf8,
+                    "html" => Device::Html,
                     "lint" => Device::Lint,
                     "tree" => Device::Tree,
                     d => panic!("unknown device {d}"),
@@ -31,6 +32,12 @@ fn main() {
                         opts.width = w.parse().unwrap();
                     } else if o == "sgr" {
                         opts.styling = Styling::Sgr;
+                    } else if let Some(s) = o.strip_prefix("style=") {
+                        opts.html.style = Some(s.to_string());
+                    } else if let Some(s) = o.strip_prefix("man=") {
+                        opts.html.man = Some(s.to_string());
+                    } else if o == "fragment" {
+                        opts.html.fragment = true;
                     }
                 }
             }

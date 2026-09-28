@@ -90,6 +90,7 @@ fn main() -> ExitCode {
                 opts.device = match value.as_str() {
                     "utf8" | "locale" => Device::Utf8,
                     "ascii" => Device::Ascii,
+                    "html" => Device::Html,
                     "lint" => Device::Lint,
                     "tree" => Device::Tree,
                     d => {
@@ -109,6 +110,9 @@ fn main() -> ExitCode {
                             Err(_) => eprintln!("oxdoc: -O width={w}: not a number"),
                         },
                         Some(("os", os)) => opts.os = Some(os.to_string()),
+                        Some(("style", s)) => opts.html.style = Some(s.to_string()),
+                        Some(("man", s)) => opts.html.man = Some(s.to_string()),
+                        None if o == "fragment" => opts.html.fragment = true,
                         None if o == "overstrike" => opts.styling = Styling::Overstrike,
                         None if o == "plain" => opts.styling = Styling::Plain,
                         _ => eprintln!("oxdoc: -O {o}: unknown option"),

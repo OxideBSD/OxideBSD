@@ -44,6 +44,9 @@ pub enum Styling {
 const HARD_HYPHEN: char = '\u{E0FE}';
 /// A space the line may not break at (`\ `), printed as a space.
 const HARD_SPACE: char = '\u{E0FD}';
+/// A space mdoc itself puts between words that stay together (`.Fx 10`, a SYNOPSIS function
+/// argument): a plain, unstyled space in UTF-8 too, unlike `\ `.
+pub const PLAIN_NBSP: char = '\u{E0FC}';
 
 #[derive(Clone, Copy, Debug)]
 struct Cell {
@@ -124,6 +127,8 @@ pub struct Term {
     pub hyph_args: bool,
     /// In no-fill mode, a line of zero-width characters is output (empty), as man(7) does.
     pub nofill_zero_lines: bool,
+    /// Lines are centred between the left and right margins (`.Bd -centered`).
+    pub center: bool,
     /// Lines output so far, so a renderer can tell whether anything came after a point.
     pub lines_out: usize,
 }
@@ -161,6 +166,7 @@ impl Term {
             no_vspace: false,
             hyph_args: false,
             nofill_zero_lines: false,
+            center: false,
             lines_out: 0,
         }
     }
@@ -309,6 +315,7 @@ impl Term {
                 // (In UTF-8 it is a character of its own, and takes the font.)
                 mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: if self.encoding == Encoding::Utf8 { cur } else { Style::None } }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
+                PLAIN_NBSP => cells.push(Cell { ch: PLAIN_NBSP, style: Style::None }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
                 mark::BACK => cells.push(Cell { ch: mark::BACK, style: Style::None }),
                 '\t' => cells.push(Cell { ch: '\t', style: Style::None }),
@@ -616,13 +623,22 @@ impl Term {
         for c in line.iter_mut() {
             match c.ch {
                 HARD_HYPHEN => c.ch = '-',
+                PLAIN_NBSP => c.ch = ' ',
                 // (An unpaddable space is a no-break space in UTF-8, as mandoc prints it.)
                 HARD_SPACE => c.ch = if self.encoding == Encoding::Utf8 { '\u{a0}' } else { ' ' },
                 _ => {}
             }
         }
         // Trailing spaces are dropped.
-        let end = line.iter().rposition(|c| c.ch != ' ').map(|i| i + 1).unwrap_or(0);
+        let mut end = line.iter().rposition(|c| c.ch != ' ').map(|i| i + 1).unwrap_or(0);
+        if self.center && end > 0 {
+            let lead = line.iter().take_while(|c| c.ch == ' ').count().min(self.offset);
+            let len = end - lead;
+            let pad = self.offset + self.rmargin.saturating_sub(self.offset + len) / 2;
+            let blank = Cell { ch: ' ', style: Style::None };
+            line.splice(0..lead, std::iter::repeat_n(blank, pad));
+            end = end - lead + pad;
+        }
         let mut s = String::new();
         let mut cur = Style::None;
         for c in &line[..end] {

@@ -212,6 +212,8 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
         p.close_top();
     }
     let root = p.stack.pop().unwrap();
+    let mut root = root;
+    skip_paragraphs(&mut root, None, true, false, false, p.diag);
     Document { language: Language::Mdoc, meta: p.meta, root }
 }
 
@@ -409,6 +411,8 @@ impl Parser<'_> {
                 }
                 self.close_top();
             }
+            // At the start of a line, `.Ns` has nothing to join: it has no effect.
+            "Ns" => self.words(args, None),
             _ if is_callable(name) || PARTIAL_EXPLICIT.iter().any(|(o, ..)| *o == name) || matches!(name, "Fn" | "Fo" | "Fc" | "St" | "Lk") => {
                 self.words(&prepend(name, args), None);
             }
@@ -488,7 +492,10 @@ impl Parser<'_> {
                 self.end_item_head();
             }
         }
-        self.nospace = false;
+        // (A head still open, extended with `.Xo`, keeps a trailing `.Ns` for its next line.)
+        if !self.stack.iter().any(|t| t.kind == Kind::Head && t.tok == "It") {
+            self.nospace = false;
+        }
     }
 
     /// Closes an `.It` head and opens its body, unless an `.Xo` in the head is still open.
@@ -499,7 +506,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Parses a line's arguments as words and callable macros into the current node. `in_elem`
+        /// Parses a line's arguments as words and callable macros into the current node. `in_elem`
     /// is the in-line macro whose arguments these are, if any.
     fn words(&mut self, args: &[String], in_elem: Option<&str>) {
         let _ = in_elem;
@@ -574,6 +581,9 @@ impl Parser<'_> {
                 if name == "Fo" || name == "Eo" {
                     // `.Fo name`: the function name; `.Eo x`: the opening text.
                     let first = rest.first().cloned().unwrap_or_default();
+                    if name == "Eo" {
+                        b.args[0] = first.clone();
+                    }
                     b.text = first;
                     self.open(Kind::Body, name);
                     return rest.len().min(1) + self.words_count(&rest[rest.len().min(1)..]);
@@ -774,3 +784,69 @@ pub fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 pub fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
+
+/// An enclosure's opening and closing text: its own, except that angle brackets around an
+/// e-mail address (`.Aq Mt`) are `<` and `>`, as mandoc prints them.
+pub fn enclosure(n: &Node) -> (String, String) {
+    let (open, close) = (n.args[0].clone(), n.args[1].clone());
+    if matches!(n.tok.as_str(), "Aq" | "Ao") && n.part(Kind::Body).and_then(|b| b.children.first()).is_some_and(|c| c.kind == Kind::Elem && c.tok == "Mt") {
+        return ("<".into(), ">".into());
+    }
+    (open, close)
+}
+
+fn is_pp(n: &Node) -> bool {
+    n.kind == Kind::Elem && matches!(n.tok.as_str(), "Pp" | "Lp")
+}
+
+/// Removes paragraph breaks that do nothing, reporting each as mandoc does: first in a section,
+/// before another break, a section, a list item or a spaced list or display, and at the end of a
+/// section (through the list items that end it). `section` is the enclosing section's macro when
+/// `n` is its body; `at_end` says nothing follows `n` up to the end of its section.
+fn skip_paragraphs(n: &mut Node, section: Option<&str>, at_end: bool, item_follows: bool, compact: bool, diag: &mut Diagnostics) {
+    let body_of = if n.kind == Kind::Body { Some(n.tok.clone()) } else { None };
+    let mut i = 0;
+    while i < n.children.len() {
+        if is_pp(&n.children[i]) {
+            let next = n.children.get(i + 1);
+            let reason = if i == 0 && matches!(body_of.as_deref(), Some("Sh" | "Ss")) {
+                Some(format!("Pp after {}", body_of.as_deref().unwrap()))
+            } else if let Some(x) = next {
+                if is_pp(x) {
+                    Some("Pp before Pp".to_string())
+                } else if x.kind == Kind::Block && matches!(x.tok.as_str(), "Bl" | "Bd" | "Ss") && !has_flag(&x.args, "-compact") {
+                    Some(format!("Pp before {}", x.tok))
+                } else {
+                    None
+                }
+            } else if body_of.as_deref() == Some("It") && item_follows {
+                Some("Pp before It".to_string())
+            } else if at_end {
+                Some(format!("Pp at the end of {}", section.unwrap_or("Sh")))
+            } else {
+                None
+            };
+            if let Some(r) = reason {
+                let line = n.children[i].line;
+                diag.report(Level::Warning, line, 2, "skipping paragraph macro", &r);
+                n.children.remove(i);
+                continue;
+            }
+        }
+        let last = i + 1 == n.children.len();
+        let next_item = n.children.get(i + 1).is_some_and(|x| x.kind == Kind::Block && x.tok == "It");
+        let c = &mut n.children[i];
+        let (sec, end) = match (c.kind, c.tok.as_str()) {
+            (Kind::Block, "Sh" | "Ss") => (Some(c.tok.clone()), true),
+            // Nothing after a list's last item, or a display's end, reaches past it.
+            (Kind::Block, "Bd") => (section.map(String::from), false),
+            _ => (section.map(String::from), at_end && last),
+        };
+        // (In a compact list, a break before the next item is kept, and spaces the items.)
+        let follows = if c.kind == Kind::Block && c.tok == "It" { next_item && !compact } else { item_follows && last };
+        let compact = if c.kind == Kind::Block && c.tok == "Bl" { has_flag(&c.args, "-compact") } else { compact };
+        skip_paragraphs(c, sec.as_deref(), end, follows, compact, diag);
+        i += 1;
+    }
+}
+

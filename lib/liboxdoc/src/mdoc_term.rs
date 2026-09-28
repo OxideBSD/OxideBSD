@@ -253,7 +253,7 @@ impl R<'_> {
             }
             "Ox" | "Nx" | "Fx" | "Dx" | "Bsx" | "Bx" | "Ux" => {
                 // A system and its version (`OpenBSD 3.0`) never break apart.
-                let text = os_name(&n.tok, &n.args).replace(' ', &mark::NBSP.to_string());
+                let text = os_name(&n.tok, &n.args).replace(' ', &crate::term::PLAIN_NBSP.to_string());
                 self.t.word(&text, style);
             }
             "At" | "St" => {
@@ -261,7 +261,11 @@ impl R<'_> {
                     self.t.word(w, style);
                 }
             }
-            "Ex" | "Rv" => self.std_text(n, style),
+            "Ex" | "Rv" => {
+                // In the middle of a paragraph, the sentence starts a line.
+                self.t.flush();
+                self.std_text(n, style)
+            }
             "In" => {
                 let file = n.args.first().cloned().unwrap_or_default();
                 if self.synopsis {
@@ -369,7 +373,7 @@ impl R<'_> {
             // In SYNOPSIS an argument doesn't break across lines where it can be helped, and
             // keeps its spacing; elsewhere its words fill like any others.
             if r.synopsis {
-                let joined = words.join(" ").replace(' ', &mark::NBSP.to_string());
+                let joined = words.join(" ").replace(' ', &crate::term::PLAIN_NBSP.to_string());
                 r.t.word(&joined, Style::Under);
             } else {
                 for w in words.join(" ").split(' ').filter(|w| !w.is_empty()) {
@@ -450,8 +454,8 @@ impl R<'_> {
             }
         }
         let rest = match (fns, count > 1) {
-            (false, false) => "utility exits 0 on success, and >0 if an error occurs.",
-            (false, true) => "utilities exit 0 on success, and >0 if an error occurs.",
+            (false, false) => "utility exits\u{E002}0 on success, and\u{E002}>0 if an error occurs.",
+            (false, true) => "utilities exit\u{E002}0 on success, and\u{E002}>0 if an error occurs.",
             (true, false) => "function returns the value\u{E002}0 if successful; otherwise the value\u{E002}-1 is returned and the global variable errno is set to indicate the error.",
             (true, true) => "functions return the value\u{E002}0 if successful; otherwise the value\u{E002}-1 is returned and the global variable errno is set to indicate the error.",
         };
@@ -516,7 +520,7 @@ impl R<'_> {
             }
             _ if n.args.len() == 2 && n.part(Kind::Body).is_some() => {
                 // Enclosures: `.Op`, `.Dq`, `.Oo`...
-                let (open, close) = (n.args[0].clone(), n.args[1].clone());
+                let (open, close) = crate::mdoc::enclosure(n);
                 // The enclosing text takes the surrounding style (bold in a SYNOPSIS head).
                 if !open.is_empty() {
                     self.t.word(&open, style);
@@ -746,16 +750,21 @@ impl R<'_> {
                     self.t.flush();
                 }
                 "-inset" => {
+                    // The head runs into the body, joined by a no-break space.
                     if let Some(h) = head {
                         self.children(h, Style::None);
+                        self.t.nospace();
+                        self.t.word(&mark::NBSP.to_string(), Style::None);
+                        self.t.nospace();
                     }
                 }
                 "-diag" => {
                     if let Some(h) = head {
                         self.children(h, Style::Bold);
                     }
-                    let col = self.t.flush_open();
-                    self.t.pad_to(col + 2);
+                    self.t.nospace();
+                    self.t.word(&mark::NBSP.to_string().repeat(2), Style::None);
+                    self.t.nospace();
                 }
                 "-column" => {
                     self.column_row(n, it, base);
@@ -817,11 +826,14 @@ impl R<'_> {
         self.t.offset += option(&n.args, "-offset").map(offset_of).unwrap_or(0);
         let nofill = self.t.nofill;
         self.t.nofill = has_flag(&n.args, "-literal") || has_flag(&n.args, "-unfilled");
+        let center = self.t.center;
+        self.t.center = has_flag(&n.args, "-centered");
         if let Some(b) = n.part(Kind::Body) {
             self.children(b, Style::None);
         }
         self.t.flush();
         self.t.nofill = nofill;
+        self.t.center = center;
         self.t.set_offset(saved);
     }
 }
@@ -905,10 +917,10 @@ pub fn text_node(t: &mut Term, n: &Node, style: Style) {
         for (i, w) in words.iter().enumerate() {
             let mut word = w.to_string();
             if i == 0 {
-                word = format!("{}{word}", mark::NBSP.to_string().repeat(lead));
+                word = format!("{}{word}", crate::term::PLAIN_NBSP.to_string().repeat(lead));
             }
             if i == last {
-                word.push_str(&mark::NBSP.to_string().repeat(trail));
+                word.push_str(&crate::term::PLAIN_NBSP.to_string().repeat(trail));
             }
             t.word_ext(&word, style, i == last && n.flags.eos);
         }

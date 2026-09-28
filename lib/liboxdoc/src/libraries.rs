@@ -10,7 +10,7 @@ pub static LIBRARIES: &[(&str, &str)] = &[
     ("libbluetooth", "Bluetooth Library (libbluetooth, -lbluetooth)"),
     ("libbsdxml", "eXpat XML parser library (libbsdxml, -lbsdxml)"),
     ("libbsm", "Basic Security Module Library (libbsm, -lbsm)"),
-    ("libc", "Standard C Library (libc, -lc)"),
+    ("libc", "Standard C\u{E002}Library (libc, -lc)"),
     ("libc_r", "Reentrant C Library (libc_r, -lc_r)"),
     ("libcalendar", "Calendar Arithmetic Library (libcalendar, -lcalendar)"),
     ("libcam", "Common Access Method User Library (libcam, -lcam)"),

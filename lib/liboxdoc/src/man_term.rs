@@ -194,7 +194,7 @@ impl R<'_> {
         if body.is_empty() {
             // Only spaces: still that many spaces, printed even at the start of a line.
             if self.t.at_line_start() && !text.is_empty() {
-                self.t.word(&mark::NBSP.to_string().repeat(text.len()), style);
+                self.t.word(&crate::term::PLAIN_NBSP.to_string().repeat(text.len()), style);
             } else {
                 self.t.add_space(text.len());
             }
@@ -202,7 +202,7 @@ impl R<'_> {
         }
         let lead = text.len() - text.trim_start_matches(' ').len();
         let trail = text.len() - text.trim_end_matches(' ').len();
-        let nbsp = |n: usize| mark::NBSP.to_string().repeat(n);
+        let nbsp = |n: usize| crate::term::PLAIN_NBSP.to_string().repeat(n);
         let mut words: Vec<(String, usize)> = Vec::new();
         let mut spaces = 0;
         for w in body.split(' ') {
@@ -391,7 +391,7 @@ impl R<'_> {
                         if i > 0 {
                             self.t.set_space(1);
                         }
-                        let w = arg.replace(' ', &mark::NBSP.to_string());
+                        let w = arg.replace(' ', &crate::term::PLAIN_NBSP.to_string());
                         self.t.word_ext(&w, st, false);
                     } else {
                         self.arg_words(arg, st, n.flags.eos && i == last);
