@@ -90,6 +90,11 @@ struct Parser<'a> {
     nospace: bool,
     /// `.Sm off`: no spaces between macro arguments.
     spacing_off: bool,
+    /// On a macro line (not a text line), where `.Sm off` takes the spaces out.
+    in_macro_line: bool,
+    /// The last line was a text line: the first output of a macro line after it keeps its
+    /// space even with `.Sm off`.
+    after_text: bool,
     in_synopsis: bool,
     line: usize,
     /// The column of the current macro's name, for diagnostics.
@@ -110,7 +115,7 @@ struct Parser<'a> {
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, pending_nd: None, lint: Default::default() };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_macro_line: false, after_text: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, pending_nd: None, lint: Default::default() };
     let mut first = true;
     for l in lines {
         match l {
@@ -140,7 +145,9 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.pending_nd = crate::lint::mdoc_args(p.diag, line, p.col, &name, &p.raw);
                 p.lint.macro_line(p.diag, line, p.col, &name, &p.raw);
                 crate::lint::macro_line_tabs(p.diag, line, &p.raw, p.col, p.in_literal() || p.in_preproc);
+                p.in_macro_line = true;
                 p.macro_line(&name, &args, first);
+                p.in_macro_line = false;
                 if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MDOC_MACROS.contains(&name.as_str())) {
                     p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
                 }
@@ -158,6 +165,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 let literal = p.in_literal() || p.in_preproc;
                 crate::lint::text_line(p.diag, line, &raw, last, literal, true);
                 p.text_line(&text);
+                p.after_text = true;
             }
             Line::Table(table) => {
                 let mut n = Node::new(Kind::Table, "TS", table.line);
@@ -204,6 +212,11 @@ impl Parser<'_> {
             n.flags.nospace = true;
             self.nospace = false;
         }
+        // (An element's first word is spaced as the element is.)
+        let first_in_elem = self.stack.last().is_some_and(|t| t.kind == Kind::Elem && t.children.is_empty());
+        if !first_in_elem {
+            self.sm_off_space(&mut n);
+        }
         self.stack.last_mut().unwrap().children.push(n);
     }
 
@@ -213,7 +226,23 @@ impl Parser<'_> {
             n.flags.nospace = true;
             self.nospace = false;
         }
+        if matches!(kind, Kind::Block | Kind::Elem) {
+            self.sm_off_space(&mut n);
+        }
         self.stack.push(n);
+    }
+
+    /// With `.Sm off`, output from macros gets no space before it, except the first after a
+    /// text line.
+    fn sm_off_space(&mut self, n: &mut Node) {
+        if !self.spacing_off || !self.in_macro_line {
+            return;
+        }
+        if self.after_text {
+            self.after_text = false;
+        } else {
+            n.flags.nospace = true;
+        }
     }
 
     fn close_top(&mut self) {
@@ -494,9 +523,6 @@ impl Parser<'_> {
         }
         // On a macro line, only a final closing delimiter (`.Ev PATH .`) ends a sentence.
         n.flags.eos = last && is_delim_close(a) && ends_sentence(a);
-        if self.spacing_off {
-            n.flags.nospace = true;
-        }
         let open = is_delim_open(a);
         self.push(n);
         if open {
@@ -658,10 +684,7 @@ impl Parser<'_> {
                 continue;
             }
             start_elem(self, &mut open);
-            let mut n = Node::text(a, self.line);
-            if self.spacing_off {
-                n.flags.nospace = true;
-            }
+            let n = Node::text(a, self.line);
             self.push(n);
             produced = true;
             i += 1;
