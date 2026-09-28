@@ -1,0 +1,209 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt APROPOS 1
+.Os OxideBSD
+.Sh NAME
+.Nm apropos ,
+.Nm whatis
+.Nd search the manual page index
+.Sh SYNOPSIS
+.Nm apropos
+.Op Fl afkt
+.Op Fl C Ar file
+.Op Fl M Ar path
+.Op Fl m Ar path
+.Op Fl O Ar outkey
+.Op Fl S Ar arch
+.Op Fl s Ar section
+.Ar expression ...
+.Nm whatis
+.Op Fl a
+.Op Fl C Ar file
+.Op Fl M Ar path
+.Op Fl m Ar path
+.Op Fl S Ar arch
+.Op Fl s Ar section
+.Ar name ...
+.Sh DESCRIPTION
+The
+.Nm
+utility searches the index of each manual directory, the file
+.Pa oxdoc.db
+that
+.Xr makewhatis 8
+builds, and lists the pages matching
+.Ar expression :
+their names, section and one-line description.
+The
+.Nm whatis
+utility lists the pages with a
+.Ar name
+among their names.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl a
+Show the matching pages in full, through
+.Xr man 1 ,
+instead of listing them.
+.It Fl C Ar file
+Read the manual directories from
+.Ar file
+instead of
+.Pa /etc/man.conf .
+.It Fl f
+Search as
+.Nm whatis
+does: each argument is a whole word to find in the pages' names, ignoring
+case.
+.It Fl k
+Search as
+.Nm apropos
+does, the default.
+.It Fl M Ar path
+Search the indexes of the colon-separated manual directories in
+.Ar path
+instead of the default ones.
+.It Fl m Ar path
+Search the directories in
+.Ar path
+before the others.
+.It Fl O Ar outkey
+Show the values of the key
+.Ar outkey
+for each page instead of its description, sorted and separated by
+.Ql # .
+.It Fl S Ar arch
+Only list pages for the architecture
+.Ar arch ,
+or for any.
+.It Fl s Ar section
+Only list pages of
+.Ar section .
+.It Fl t
+Search the full text: each word in
+.Ar expression
+is the term
+.Cm Tx= Ns Ar word .
+.El
+.Ss Expressions
+An expression is made of terms, joined by
+.Fl a
+.Pq and
+and
+.Fl o
+.Pq or .
+Two terms without an operator between them are joined by
+.Fl o ,
+and
+.Fl a
+binds more tightly.
+Parentheses, as separate arguments, group terms.
+.Pp
+A term has the form
+.Oo Ar key Ns Oo , Ns Ar key ... Oc Ns Po Cm = | Cm ~ Pc Oc Ns Ar value .
+With
+.Cm = ,
+it is true of a page with a value of one of the
+.Ar key Ns s
+containing
+.Ar value ,
+ignoring case; with
+.Cm ~ ,
+of a page with a value matching the extended regular expression
+.Ar value
+.Pq see Xr re_format 7 ,
+with case, unless
+.Fl i
+comes before the term.
+Without a
+.Ar key ,
+a term searches the names and the description.
+A term without
+.Cm =
+or
+.Cm ~
+searches the names and the description with
+.Ar value
+as a regular expression, ignoring case.
+.Ss Keys
+The keys are the
+.Xr mdoc 7
+macros whose values
+.Xr makewhatis 8
+records, and a few others:
+.Bl -column "St, At, Bx, Fx" "description" -offset indent
+.It Cm \&Nm Ta the page's names
+.It Cm \&Nd Ta its one-line description
+.It Cm sec Ta its section
+.It Cm arch Ta its architecture
+.It Cm \&Sh , \&Ss Ta its section and subsection titles, except the standard ones
+.It Cm \&Xr Ta its cross references, as Ar name Ns Pq Ar section
+.It Cm \&Fl , \&Cm , \&Ar , \&Ic Ta flags, modifiers, arguments and commands
+.It Cm \&Ev , \&Pa , \&Er Ta environment variables, paths and error numbers
+.It Cm \&In , \&Lb Ta header files and libraries
+.It Cm \&Fn , \&Fa , \&Ft Ta function names, arguments and types
+.It Cm \&Va , \&Vt , \&Dv Ta variables, types and constants
+.It Cm \&An , \&Lk , \&Mt Ta authors, links and mail addresses
+.It Cm \&Cd , \&Ms , \&Tn Ta configuration, symbols and trade names
+.It Cm \&Em , \&Sy , \&Li Ta emphasized, bold and literal text
+.It Cm \&St , \&At , \&Bx , \&Fx , \&Nx , \&Ox , \&Dx , \&Bsx Ta standards and systems
+.It Cm \&Tx Ta every word of the page's text, in lower case
+.It Cm any Ta all of the above but Cm \&Tx
+.El
+.Pp
+Pages written in
+.Xr man 7
+only have names, a description and full text.
+.Sh ENVIRONMENT
+.Bl -tag -width MANPATH
+.It Ev MANPATH
+The manual directories, as for
+.Xr man 1 .
+.El
+.Sh FILES
+.Bl -tag -width /etc/man.conf -compact
+.It Pa oxdoc.db
+the index in each manual directory
+.It Pa /etc/man.conf
+the manual directories
+.El
+.Sh EXIT STATUS
+The
+.Nm
+utility exits 0 if it found a page, and 1 if it found none or the
+arguments were wrong.
+.Sh EXAMPLES
+Pages mentioning file systems in their names or descriptions:
+.Dl $ apropos 'file ?system'
+.Pp
+Pages in section 3 using both
+.Va optind
+and
+.Va optarg :
+.Dl $ apropos -s 3 Va=optind -a Va=optarg
+.Pp
+Pages referring to
+.Xr getty 8 ,
+with those references:
+.Dl $ apropos -O \&Xr \&Xr=getty
+.Pp
+Pages whose text mentions a password:
+.Dl $ apropos -t password
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr man.conf 5 ,
+.Xr makewhatis 8
+.Sh HISTORY
+The
+.Nm
+and
+.Nm whatis
+utilities first appeared in
+.Bx 2 .
+This implementation was written for OxideBSD; its expressions and keys follow
+.Xr mandoc 1 Ns 's
+.Nm .
+.Sh BUGS
+The names of a page are listed in the order its NAME section gives them,
+which is not always the order of other systems.

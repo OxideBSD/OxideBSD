@@ -80,6 +80,53 @@ include!("build_busybox.rs");
 /// a plain host-native C program with a trivial `.POSIX` Makefile that already does its own real
 /// incremental-rebuild tracking, unlike BusyBox's own more elaborate out-of-tree build -- no
 /// separate staleness bookkeeping needed here, `make` is cheap to just always invoke).
+/// The index of the system's manual pages (MAN.md §7 in OxideBSD-doc): liboxdoc's makewhatis,
+/// built for the host, over a copy of `share/man`. oxfs seeds it as `/usr/share/man/oxdoc.db`,
+/// so apropos(1) and man(1)'s lookup by any page name work from the first boot, as the BSDs
+/// ship theirs prebuilt. Returns the index's path.
+fn build_man_index() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pages = root.join("share/man");
+    println!("cargo:rerun-if-changed={}", pages.display());
+    let target_dir = root.join("target/liboxdoc-host");
+    // From the library's own directory, so its .cargo/config.toml (a host build) applies.
+    let status = Command::new(cargo_bin())
+        .current_dir(root.join("lib/liboxdoc"))
+        .args(["build", "--release", "--bin", "makewhatis-host", "--target-dir"])
+        .arg(&target_dir)
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_PKG_NAME")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTC_WRAPPER")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run cargo for makewhatis-host: {e}"));
+    if !status.success() {
+        panic!("building makewhatis-host failed: {status}");
+    }
+    let tool = target_dir.join("x86_64-unknown-linux-gnu/release/makewhatis-host");
+    // A copy of the pages as they are laid out on the system: `manN/page.N`.
+    let stage = root.join("target/man-index");
+    let _ = std::fs::remove_dir_all(&stage);
+    for dir in std::fs::read_dir(&pages).unwrap_or_else(|e| panic!("{}: {e}", pages.display())).flatten() {
+        if !dir.path().is_dir() {
+            continue;
+        }
+        let into = stage.join(dir.file_name());
+        std::fs::create_dir_all(&into).unwrap_or_else(|e| panic!("{}: {e}", into.display()));
+        for f in std::fs::read_dir(dir.path()).unwrap().flatten() {
+            if f.path().is_file() {
+                std::fs::copy(f.path(), into.join(f.file_name())).unwrap_or_else(|e| panic!("{}: {e}", f.path().display()));
+            }
+        }
+    }
+    let status = Command::new(&tool).arg(&stage).status().unwrap_or_else(|e| panic!("failed to run {}: {e}", tool.display()));
+    if !status.success() {
+        panic!("makewhatis-host {} failed: {status}", stage.display());
+    }
+    stage.join("oxdoc.db")
+}
+
 fn build_limine_deploy_tool() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let limine_dir = Path::new(manifest_dir).join("external/bsd/limine");
@@ -367,6 +414,10 @@ fn main() {
     let oxdoc_elf_path = build_std_oxidebsd_userland_crate("usr.bin/oxdoc", "OXFS_OXDOC_ELF_PATH", &musl_sysroot);
     let man_elf_path = build_std_oxidebsd_userland_crate("usr.bin/man", "OXFS_MAN_ELF_PATH", &musl_sysroot);
     let more_elf_path = build_std_oxidebsd_userland_crate("usr.bin/more", "OXFS_MORE_ELF_PATH", &musl_sysroot);
+    let apropos_elf_path = build_std_oxidebsd_userland_crate("usr.bin/apropos", "OXFS_APROPOS_ELF_PATH", &musl_sysroot);
+    let makewhatis_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/makewhatis", "OXFS_MAKEWHATIS_ELF_PATH", &musl_sysroot);
+    let man_db_path = build_man_index();
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libttyent/src").display()
@@ -565,6 +616,9 @@ fn main() {
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
         ("OXFS_MAN_ELF_PATH", man_elf_path.to_str().unwrap()),
         ("OXFS_MORE_ELF_PATH", more_elf_path.to_str().unwrap()),
+        ("OXFS_APROPOS_ELF_PATH", apropos_elf_path.to_str().unwrap()),
+        ("OXFS_MAKEWHATIS_ELF_PATH", makewhatis_elf_path.to_str().unwrap()),
+        ("OXFS_MAN_DB_PATH", man_db_path.to_str().unwrap()),
         (
             "OXFS_FLOAT_SMOKE_ELF_PATH",
             float_smoke_elf_path.to_str().unwrap(),

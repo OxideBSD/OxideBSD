@@ -7607,6 +7607,9 @@ fn format_fresh_filesystem() -> bool {
     // man(1), oxdoc(1) and more(1) are OxideBSD's own (MAN.md), not BusyBox's; less(1) is more.
     ok &= seed_file(usr_bin, b"man", include_bytes!(env!("OXFS_MAN_ELF_PATH")));
     ok &= seed_file(usr_bin, b"oxdoc", include_bytes!(env!("OXFS_OXDOC_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"apropos", include_bytes!(env!("OXFS_APROPOS_ELF_PATH")));
+    ok &= seed_symlink(usr_bin, b"whatis", b"apropos");
+    ok &= seed_file(usr_sbin, b"makewhatis", include_bytes!(env!("OXFS_MAKEWHATIS_ELF_PATH")));
     ok &= seed_symlink(usr_bin, b"less", b"more");
     ok &= seed_file(usr_bin, b"md5sum", include_bytes!(env!("OXFS_MD5SUM_ELF_PATH")));
     ok &= seed_file(usr_bin, b"minips", include_bytes!(env!("OXFS_MINIPS_ELF_PATH")));
@@ -8006,6 +8009,10 @@ fn format_fresh_filesystem() -> bool {
     // mdoc(7) manual pages, from the source tree's share/man.
     let usr_share_man = ensure_dir(usr_share, b"man");
     let man_man1 = ensure_dir(usr_share_man, b"man1");
+    // Their index, built with the image (makewhatis(8)).
+    ok &= seed_file(usr_share_man, b"oxdoc.db", include_bytes!(env!("OXFS_MAN_DB_PATH")));
+    ok &= seed_file(man_man1, b"apropos.1", include_bytes!("../../../../share/man/man1/apropos.1"));
+    ok &= seed_hardlink(man_man1, b"whatis.1", b"apropos.1");
     ok &= seed_file(man_man1, b"login.1", include_bytes!("../../../../share/man/man1/login.1"));
     ok &= seed_file(man_man1, b"less.1", include_bytes!("../../../../share/man/man1/more.1"));
     ok &= seed_file(man_man1, b"man.1", include_bytes!("../../../../share/man/man1/man.1"));
@@ -8028,6 +8035,7 @@ fn format_fresh_filesystem() -> bool {
     let man_man8 = ensure_dir(usr_share_man, b"man8");
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
+    ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
     ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));

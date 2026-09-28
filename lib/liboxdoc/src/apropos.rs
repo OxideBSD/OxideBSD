@@ -273,6 +273,26 @@ fn search(db: &Db, tree: &str, terms: &[Term], expr: &Expr, sec: Option<&str>, a
     found
 }
 
+/// The pages of the tree `tree` with the name `name` (ignoring case), from its index: each
+/// file, relative to the tree, with its sections and architecture. Nothing without an index.
+pub fn lookup(tree: &str, name: &str) -> Vec<(String, String, String)> {
+    let Ok(bytes) = std::fs::read(std::path::Path::new(tree).join(DB_NAME)) else { return Vec::new() };
+    let Ok(db) = Db::read(bytes) else { return Vec::new() };
+    let mut found = Vec::new();
+    for k in db.class_range(0) {
+        let key = db.key(k);
+        if key.value.eq_ignore_ascii_case(name) {
+            for p in key.pages {
+                let page = db.page(p as usize);
+                found.push((page.file.to_string(), page.section.to_string(), page.arch.to_string()));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// Sorting: section by number, then name, ignoring case.
 fn order(a: &Hit, b: &Hit) -> std::cmp::Ordering {
     let num = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>().unwrap_or(u32::MAX);

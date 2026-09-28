@@ -13,8 +13,6 @@ use liboxdoc::term::Styling;
 use liboxdoc::{Device, Options};
 
 const USAGE: &str = "usage: man [-acfhklw] [-C file] [-M path] [-m path] [-S subsection]\n\t   [[-s] section] name ...";
-const DEFAULT_MANPATH: &str = "/usr/share/man:/usr/local/share/man";
-const MAN_CONF: &str = "/etc/man.conf";
 /// The order sections are searched in when none is given (MAN.md §8.2).
 const SECTIONS: &[&str] = &["1", "8", "6", "2", "3", "5", "7", "4", "9"];
 /// Exit status for a usage error or a page not found, as mandoc's man.
@@ -106,37 +104,15 @@ fn is_section(s: &str) -> bool {
     c.next().is_some_and(|d| d.is_ascii_digit() || d == 'n') && s.len() <= 4 || s == "n"
 }
 
-/// The manual path (MAN.md §8.2): `-M`, else `MANPATH` (a leading, trailing or doubled `:`
-/// stands for the default), else man.conf's `manpath` lines, else the built-in default; then
-/// `-m` directories first.
+/// The manual path (MAN.md §8.2): `-M`, else `MANPATH`, else man.conf's `manpath` lines, else
+/// the built-in default; then `-m` directories first.
 fn manpath(a: &Args) -> Vec<String> {
-    let conf = a.conf.clone().unwrap_or_else(|| MAN_CONF.to_string());
-    let from_conf: Vec<String> = std::fs::read_to_string(&conf)
-        .map(|t| t.lines().filter_map(|l| l.trim().strip_prefix("manpath").map(|p| p.trim().to_string())).filter(|p| !p.is_empty()).collect())
-        .unwrap_or_default();
-    let default = if from_conf.is_empty() { DEFAULT_MANPATH.to_string() } else { from_conf.join(":") };
-    let base = match &a.manpath {
-        Some(m) => m.clone(),
-        None => match std::env::var("MANPATH") {
-            Ok(m) if !m.is_empty() => {
-                if m.starts_with(':') {
-                    format!("{default}{m}")
-                } else if m.ends_with(':') {
-                    format!("{m}{default}")
-                } else {
-                    m.replace("::", &format!(":{default}:"))
-                }
-            }
-            _ => default,
-        },
-    };
-    let mut dirs: Vec<String> = a.extra.iter().flat_map(|m| m.split(':').map(String::from).collect::<Vec<_>>()).collect();
-    dirs.extend(base.split(':').filter(|d| !d.is_empty()).map(String::from));
-    dirs
+    liboxdoc::manpath::resolve(a.conf.as_deref(), a.manpath.as_deref(), &a.extra)
 }
 
-/// The files for `name`: in each manual directory, each section in turn, `manN/name.N*` and the
-/// architecture's `manN/arch/name.N*`.
+/// The files for `name`: in each manual directory, each section in turn, the pages its index
+/// (makewhatis(8)) lists under that name, then `manN/name.N*` and the architecture's
+/// `manN/arch/name.N*`.
 fn find(name: &str, dirs: &[String], a: &Args) -> Vec<PathBuf> {
     let sections: Vec<String> = match &a.section {
         Some(s) => vec![s.clone()],
@@ -146,6 +122,18 @@ fn find(name: &str, dirs: &[String], a: &Args) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for sec in &sections {
         for dir in dirs {
+            // Any name of a page finds it through the index: `man getc` finds `fgetc.3`.
+            for (file, secs, page_arch) in liboxdoc::apropos::lookup(dir, name) {
+                let in_section = secs.split(", ").any(|s| s.starts_with(sec.as_str()));
+                let for_arch = page_arch.is_empty() || page_arch.eq_ignore_ascii_case(&arch);
+                let path = Path::new(dir).join(&file);
+                if in_section && for_arch && path.is_file() && !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+            if !a.all && !found.is_empty() {
+                return found;
+            }
             // The section's own directory is its first character: `3p` lives in `man3`.
             let first = sec.chars().next().unwrap_or('1');
             let mandir = Path::new(dir).join(format!("man{first}"));
@@ -194,10 +182,23 @@ fn local_today() -> Option<String> {
 fn main() -> ExitCode {
     let Ok(a) = parse_args() else { return usage() };
     if let Some(prog) = a.apropos {
-        // `man -k` and `man -f` are apropos(1) and whatis(1).
-        let err = std::os::unix::process::CommandExt::exec(Command::new(format!("/usr/bin/{prog}")).args(&a.names));
-        eprintln!("man: /usr/bin/{prog}: {err}");
-        return ExitCode::from(NOT_FOUND);
+        // `man -k` and `man -f` are apropos(1) and whatis(1), over the same trees.
+        let mut args = Vec::new();
+        for (flag, v) in [("-C", &a.conf), ("-M", &a.manpath), ("-S", &a.arch), ("-s", &a.section)] {
+            if let Some(v) = v {
+                args.push(flag.to_string());
+                args.push(v.clone());
+            }
+        }
+        for m in &a.extra {
+            args.push("-m".to_string());
+            args.push(m.clone());
+        }
+        args.extend(a.names.iter().cloned());
+        return match liboxdoc::apropos::main(prog, &args) {
+            0 => ExitCode::SUCCESS,
+            _ => ExitCode::from(NOT_FOUND),
+        };
     }
     if a.names.is_empty() {
         return usage();

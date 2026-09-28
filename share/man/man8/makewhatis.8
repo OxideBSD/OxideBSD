@@ -1,0 +1,107 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MAKEWHATIS 8
+.Os OxideBSD
+.Sh NAME
+.Nm makewhatis
+.Nd index the manual pages
+.Sh SYNOPSIS
+.Nm
+.Op Fl an
+.Op Fl C Ar file
+.Nm
+.Op Fl an
+.Ar dir ...
+.Nm
+.Op Fl n
+.Fl d Ar dir
+.Op Ar file ...
+.Nm
+.Op Fl n
+.Fl u Ar dir
+.Op Ar file ...
+.Nm
+.Fl t Ar file ...
+.Sh DESCRIPTION
+The
+.Nm
+utility writes the index that
+.Xr apropos 1
+searches and
+.Xr man 1
+finds pages by: the file
+.Pa oxdoc.db
+in each manual directory.
+For every page in the directory's
+.Pa man Ns Ar N
+subdirectories and their architecture subdirectories, it records the
+page's names, sections, architecture and one-line description, the values
+of the
+.Xr mdoc 7
+macros listed in
+.Xr apropos 1 ,
+and every word of its text.
+A file consisting of a
+.Ic \&.so
+request alone, or a hard link to another page, adds its name to that page.
+.Pp
+Without arguments,
+.Nm
+indexes every manual directory named in
+.Pa /etc/man.conf ;
+with
+.Ar dir
+arguments, those directories.
+A new index replaces the old one only once it is complete.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl a
+Accepted for compatibility: all architectures are always indexed.
+.It Fl C Ar file
+Read the manual directories from
+.Ar file
+instead of
+.Pa /etc/man.conf .
+.It Fl d Ar dir Op Ar file ...
+Index each
+.Ar file
+again in the existing index of
+.Ar dir ,
+adding it if it is new.
+.It Fl n
+Do everything but write the index.
+.It Fl t Ar file ...
+Check that each
+.Ar file
+can be indexed usefully: that it has a one-line description.
+.It Fl u Ar dir Op Ar file ...
+Remove each
+.Ar file
+from the index of
+.Ar dir .
+.El
+.Pp
+The index format is described in
+.Pa MAN.md
+of the OxideBSD documentation; a program finding an index of another
+version ignores it and says so.
+.Sh FILES
+.Bl -tag -width /etc/man.conf -compact
+.It Pa oxdoc.db
+the index in each manual directory
+.It Pa /etc/man.conf
+the manual directories
+.It Pa /usr/share/man/oxdoc.db
+the index of the system's pages, built with the system
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr apropos 1 ,
+.Xr man 1 ,
+.Xr man.conf 5
+.Sh HISTORY
+This implementation was written for OxideBSD; its keys follow
+.Xr mandoc 1 Ns 's
+.Nm .

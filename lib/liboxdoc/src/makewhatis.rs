@@ -107,7 +107,8 @@ fn is_page(name: &str) -> bool {
 }
 
 /// Every page of the tree at `root`, in file order. A file holding nothing but `.so other`
-/// is a link: its name becomes one more name of the page it points to.
+/// is a link: its name becomes one more name of the page it points to, and `apropos` lists it on
+/// a line of its own. A hard link to a file before it only adds its name.
 pub fn index_tree(root: &Path) -> Vec<Page> {
     let mut files: Vec<(String, String, String)> = Vec::new();
     let Ok(dirs) = std::fs::read_dir(root) else { return Vec::new() };
@@ -137,13 +138,21 @@ pub fn index_tree(root: &Path) -> Vec<Page> {
             }
         }
     }
-    let mut pages = Vec::new();
+    let mut pages: Vec<Page> = Vec::new();
     let mut links = Vec::new();
+    let mut seen: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
     for (rel, sec, arch) in files {
         let Ok(bytes) = std::fs::read(root.join(&rel)) else { continue };
+        if let Some(id) = file_id(&root.join(&rel)) {
+            if let Some(first) = seen.get(&id) {
+                links.push((rel, first.clone(), false));
+                continue;
+            }
+            seen.insert(id, rel.clone());
+        }
         let text = String::from_utf8_lossy(&bytes);
         if let Some(target) = so_target(&text) {
-            links.push((rel, target));
+            links.push((rel, target, true));
             continue;
         }
         let mut p = index_page(&text, &rel, &sec);
@@ -152,7 +161,7 @@ pub fn index_tree(root: &Path) -> Vec<Page> {
         }
         pages.push(p);
     }
-    for (rel, target) in links {
+    for (rel, target, so) in links {
         let stem = stem(&rel);
         if let Some(p) = pages.iter_mut().find(|p| p.file == target) {
             if !p.names.iter().any(|n| n == stem) {
@@ -160,12 +169,18 @@ pub fn index_tree(root: &Path) -> Vec<Page> {
                 p.keys.push((0, stem.to_string()));
                 p.keys.sort();
             }
-            if !p.links.iter().any(|n| n == stem) {
+            if so && !p.links.iter().any(|n| n == stem) {
                 p.links.push(stem.to_string());
             }
         }
     }
     pages
+}
+
+/// A file's device and inode, which its hard links share.
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
 /// A file's name without its directory and its last suffix.
