@@ -11,12 +11,13 @@ pub fn text_line(diag: &mut Diagnostics, line: usize, raw: &str, last: bool, lit
     }
     // A line that could have been broken earlier: longer than 80 bytes, with a space in it
     // (and not starting with one, or with an escape).
-    if raw.len() > 80 && raw.contains(' ') && !raw.starts_with([' ', '\\']) {
+    // (mandoc counts the input's last line one byte longer.)
+    let len = raw.len() + last as usize;
+    if len > 80 && raw.contains(' ') && !raw.starts_with([' ', '\\']) {
         let start: String = raw.chars().take(20).collect();
-        // (mandoc reports the input's last line one column further.)
-        diag.report(Level::Style, line, raw.len() + last as usize, "input text line longer than 80 bytes", &format!("{start}..."));
+        diag.report(Level::Style, line, len, "input text line longer than 80 bytes", &format!("{start}..."));
     }
-    if let Some(p) = raw.find('\t') {
+    for (p, _) in raw.match_indices('\t') {
         diag.report(Level::Warning, line, p + 1, "tab in filled text", "");
     }
     if mdoc {
@@ -100,13 +101,19 @@ impl ManFlow {
     /// A macro line: `name` at `line`:`col`, with or without arguments.
     pub fn macro_line(&mut self, diag: &mut Diagnostics, name: &str, line: usize, col: usize, has_args: bool) {
         match name {
-            "SH" | "SS" => {
-                while self.stack.len() > 1 {
+            "SH" => {
+                while !self.stack.is_empty() {
                     self.close(diag);
                 }
-                self.close(diag);
-                let s = if name == "SH" { "SH" } else { "SS" };
-                self.stack.push(Container { kind: Kind::Section(s), children: Vec::new() });
+                self.stack.push(Container { kind: Kind::Section("SH"), children: Vec::new() });
+            }
+            // A subsection is part of its section: it ends what is open inside the section.
+            "SS" => {
+                while self.stack.len() > 1 && self.stack.last().is_some_and(|c| c.kind != Kind::Section("SH")) {
+                    self.close(diag);
+                }
+                self.top().children.push(Child::Content);
+                self.stack.push(Container { kind: Kind::Section("SS"), children: Vec::new() });
             }
             "PP" | "LP" | "P" | "IP" | "TP" | "TQ" | "HP" => {
                 self.close_para(diag);

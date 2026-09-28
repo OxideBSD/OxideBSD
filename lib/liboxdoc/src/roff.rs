@@ -186,7 +186,8 @@ impl<'a> Roff<'a> {
             }
             pending.push_str(line);
             let l = std::mem::take(&mut pending);
-            self.check_line = l.ends_with([' ', '\t']).then_some((i + 1, l.len()));
+            // (A line of nothing but spaces isn't reported.)
+            self.check_line = (l.ends_with([' ', '\t']) && !l.trim().is_empty()).then_some((i + 1, l.len()));
             self.line(&l, start, 0);
         }
         if !pending.is_empty() {
