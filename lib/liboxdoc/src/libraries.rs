@@ -11,7 +11,7 @@ pub static LIBRARIES: &[(&str, &str)] = &[
     ("libbsdxml", "eXpat XML parser library (libbsdxml, -lbsdxml)"),
     ("libbsm", "Basic Security Module Library (libbsm, -lbsm)"),
     ("libc", "Standard C\u{E002}Library (libc, -lc)"),
-    ("libc_r", "Reentrant C Library (libc_r, -lc_r)"),
+    ("libc_r", "Reentrant C\u{E002}Library (libc_r, -lc_r)"),
     ("libcalendar", "Calendar Arithmetic Library (libcalendar, -lcalendar)"),
     ("libcam", "Common Access Method User Library (libcam, -lcam)"),
     ("libcasper", "Casper Library (libcasper, -lcasper)"),

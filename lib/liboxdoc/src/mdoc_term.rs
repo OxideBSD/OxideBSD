@@ -410,8 +410,8 @@ impl R<'_> {
     /// else a line break.
     fn synopsis_pre(&mut self, tok: &str) {
         let prev = self.prev.as_str();
-        let decl = matches!(prev, "In" | "Fd" | "Fn" | "Fo" | "Ft" | "Vt" | "Cd");
-        let same = prev == tok && tok != "Fn";
+        let decl = matches!(prev, "In" | "Fd" | "Fn" | "Fo" | "Ft" | "Vt");
+        let same = prev == tok && matches!(tok, "In" | "Fd" | "Vt");
         let ft_fn = prev == "Ft" && tok == "Fn";
         if decl && !same && !ft_fn {
             self.t.vspace();

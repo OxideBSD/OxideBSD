@@ -82,6 +82,10 @@ pub struct Html {
     pub literal: bool,
     /// Nothing has been output since the last block element's start tag.
     fresh: bool,
+    /// Words are kept together (`.Bk -words`): no-break spaces between them.
+    pub keep: bool,
+    /// While words are kept together, the next space may break all the same.
+    pub keep_break: bool,
 }
 
 impl Default for Html {
@@ -92,7 +96,7 @@ impl Default for Html {
 
 impl Html {
     pub fn new() -> Html {
-        Html { out: String::new(), col: 0, indent: 0, stack: Vec::new(), unit: String::new(), unit_space: false, started: false, nospace: false, literal: false, fresh: false }
+        Html { out: String::new(), col: 0, indent: 0, stack: Vec::new(), unit: String::new(), unit_space: false, started: false, nospace: false, literal: false, fresh: false, keep: false, keep_break: false }
     }
 
     pub fn finish(mut self) -> String {
@@ -172,6 +176,12 @@ impl Html {
         if std::mem::take(&mut self.nospace) {
             return;
         }
+        // (Words kept together are joined by no-break spaces, but for the one space allowed to
+        // break.)
+        if self.keep && !std::mem::take(&mut self.keep_break) && (!self.unit.is_empty() || self.started) {
+            self.append("&#x00A0;");
+            return;
+        }
         if !self.unit.is_empty() || self.started {
             self.flush_unit();
             self.unit_space = true;
@@ -191,20 +201,43 @@ impl Html {
     pub fn open(&mut self, tag: &str, attrs: &str) {
         let (class, indents) = layout(tag);
         let text = if attrs.is_empty() { format!("<{tag}>") } else { format!("<{tag} {attrs}>") };
+        // The spaces between an element's classes are places the line may break, as between
+        // words.
+        let mut pieces = text.splitn(2, "class=\"");
+        let head = pieces.next().unwrap();
+        let (first, more) = match pieces.next() {
+            Some(rest) => {
+                let end = rest.find('"').unwrap_or(rest.len());
+                let words: Vec<&str> = rest[..end].split(' ').collect();
+                let tail = &rest[end..];
+                let mut more: Vec<String> = words[1..].iter().map(|w| w.to_string()).collect();
+                if let Some(l) = more.last_mut() {
+                    l.push_str(tail);
+                }
+                let first = format!("{head}class=\"{}{}", words[0], if more.is_empty() { tail } else { "" });
+                (first, more)
+            }
+            None => (text.clone(), Vec::new()),
+        };
         match class {
             Class::Block => {
                 self.end_line();
                 self.nospace = false;
                 self.write_indent(self.indent);
-                self.out.push_str(&text);
-                self.col += text.chars().count();
+                self.out.push_str(&first);
+                self.col += first.chars().count();
                 self.started = true;
                 self.fresh = true;
             }
             Class::Phrase => {
                 self.begin_run();
-                self.append(&text);
+                self.append(&first);
             }
+        }
+        for w in &more {
+            self.flush_unit();
+            self.unit_space = true;
+            self.append(w);
         }
         if indents {
             self.indent += 1;
@@ -376,9 +409,13 @@ pub fn begin_document(h: &mut Html, opts: &HtmlOptions, title: &str, comments: &
     h.push_raw("<!DOCTYPE html>\n<html>\n");
     // (Blank comment lines before the first with text are left out; a blank last one runs into
     // the end of the comment.)
+    let any = !comments.is_empty();
     let mut comments: Vec<&String> = comments.iter().skip_while(|l| l.trim().is_empty()).collect();
     // (Blank lines in a row are one.)
     comments.dedup_by(|a, b| a.trim().is_empty() && b.trim().is_empty());
+    if any && comments.is_empty() {
+        h.push_raw("<!-- This is an automatically generated file.  Do not edit. -->\n");
+    }
     if !comments.is_empty() {
         let mut c = String::from("<!-- This is an automatically generated file.  Do not edit.");
         for l in &comments {

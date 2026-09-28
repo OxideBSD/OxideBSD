@@ -601,6 +601,8 @@ impl Parser<'_> {
                 while self.stack.len() > at {
                     self.close_top();
                 }
+                // (A `.Ns` before the closing macro joined its delimiter, and is spent.)
+                self.nospace = false;
             } else {
                 self.diag.report(Level::Error, self.line, 0, "skipping end of block that is not open", close_tok);
             }

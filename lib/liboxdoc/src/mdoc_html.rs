@@ -78,6 +78,19 @@ fn phrase(tok: &str) -> Option<(&'static str, &'static str)> {
         "Fa" => ("var", "Fa"),
         "Fd" => ("code", "Fd"),
         "Fr" => ("i", "Em"),
+        "%A" => ("span", "RsA"),
+        "%T" => ("span", "RsT"),
+        "%B" => ("i", "RsB"),
+        "%I" => ("i", "RsI"),
+        "%J" => ("i", "RsJ"),
+        "%D" => ("span", "RsD"),
+        "%N" => ("span", "RsN"),
+        "%V" => ("span", "RsV"),
+        "%P" => ("span", "RsP"),
+        "%Q" => ("span", "RsQ"),
+        "%C" => ("span", "RsC"),
+        "%O" => ("span", "RsO"),
+        "%R" => ("span", "RsR"),
         "Ft" => ("var", "Ft"),
         "Ic" => ("code", "Ic"),
         "Li" => ("code", "Li"),
@@ -157,7 +170,7 @@ impl R<'_> {
             if c.kind == Kind::Elem
                 && !c.children.iter().any(|t| !t.text.is_empty() || t.kind != Kind::Text)
                 && c.args.is_empty()
-                && next.is_some_and(|x| x.kind == Kind::Elem && x.tok == c.tok && x.flags.nospace && x.children.iter().any(|t| !t.text.is_empty()))
+                && next.is_some_and(|x| x.kind == Kind::Elem && x.tok == c.tok && (x.flags.nospace || x.children.first().is_some_and(|t| t.flags.nospace)) && x.children.iter().any(|t| !t.text.is_empty()))
             {
                 if c.tok == "Fl" {
                     self.fl_prefix += 1;
@@ -506,8 +519,8 @@ impl R<'_> {
     /// line break after the same kind (or a function after its type), as on the terminal.
     fn synopsis_pre(&mut self, tok: &str) {
         let prev = self.prev.as_str();
-        let decl = matches!(prev, "In" | "Fd" | "Fn" | "Fo" | "Ft" | "Vt" | "Cd");
-        let same = prev == tok && tok != "Fn";
+        let decl = matches!(prev, "In" | "Fd" | "Fn" | "Fo" | "Ft" | "Vt");
+        let same = prev == tok && matches!(tok, "In" | "Fd" | "Vt");
         let ft_fn = prev == "Ft" && tok == "Fn";
         if decl && !same && !ft_fn {
             self.close_p();
@@ -614,8 +627,22 @@ impl R<'_> {
                 self.function(&name, &[], n.part(Kind::Body), id, link);
             }
             "Bk" => {
+                // With -words, the words of each input line stay together.
                 if let Some(b) = n.part(Kind::Body) {
-                    self.children(b);
+                    if has_flag(&n.args, "-words") {
+                        // Only the space before each input line's words may break.
+                        let saved = (self.h.keep, self.h.keep_break);
+                        self.h.keep = true;
+                        let mut line = None;
+                        for c in &b.children {
+                            self.h.keep_break = line != Some(c.line);
+                            self.node(c);
+                            line = Some(c.line);
+                        }
+                        (self.h.keep, self.h.keep_break) = saved;
+                    } else {
+                        self.children(b);
+                    }
                 }
             }
             "Ql" => {
@@ -741,8 +768,8 @@ impl R<'_> {
             "-inset" => ("dl", "Bl-inset"),
             _ => ("dl", "Bl-tag"),
         };
-        // An indented list: a class of its own for bullets and numbers, otherwise a division.
-        let offset = crate::mdoc::option(&n.args, "-offset").is_some() && !matches!(tag, "ul" | "ol");
+        // An indented list: a division around a tag list, a class of its own for the others.
+        let offset = crate::mdoc::option(&n.args, "-offset").is_some() && class == "Bl-tag";
         let indent = if !offset && crate::mdoc::option(&n.args, "-offset").is_some() { " Bd-indent" } else { "" };
         if offset {
             self.h.open("div", "class=\"Bd-indent\"");
@@ -927,6 +954,8 @@ enum ClaimKind {
     Item,
     /// `.Fn`, `.Em` or `.Sy` in running text.
     Text,
+    /// An alternative in a list item's head, after `|`.
+    Alt,
 }
 
 /// A claim on an identifier: the node that would carry it, the one its permalink goes
@@ -1046,7 +1075,7 @@ fn tag_text(n: &Node) -> Option<String> {
         "Fn" | "Fo" => if n.tok == "Fo" { n.text.clone() } else { n.args.first().cloned().unwrap_or_default() },
         _ => n.plain_text(),
     };
-    let text = text.trim_start_matches(['-', mark::MINUS]).to_string();
+    let text = text.trim_start_matches(['-', mark::MINUS, mark::BACKSLASH]).to_string();
     // (An escape sequence ends it.)
     let text: String = text.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c)).collect();
     let word = text.split(' ').find(|w| !w.is_empty())?.to_string();
@@ -1100,6 +1129,8 @@ fn collect(n: &Node, section: &str, list: &str, para: &mut usize, anchor: usize,
                     } else {
                         Some(first)
                     };
+                    // (A macro inside an enclosure gets no permalink, only the item an identifier.)
+                    let linked = func.is_some() || !enclosed || first.tok == "Bq";
                     if let Some(t) = target
                         && (t.kind == Kind::Elem || t.tok == "Fo")
                         && (ITEM_TAGS.contains(&t.tok.as_str()) || (t.tok == "Er" && section == "ERRORS"))
@@ -1113,12 +1144,32 @@ fn collect(n: &Node, section: &str, list: &str, para: &mut usize, anchor: usize,
                             }
                             continue;
                         }
-                        out.push(Claim { kind: ClaimKind::Item, tok, node: addr(c), link: addr(t), text, para: *para, anchor: 0 });
+                        out.push(Claim { kind: ClaimKind::Item, tok, node: addr(c), link: if linked { addr(t) } else { addr(c) }, text, para: *para, anchor: 0 });
                     }
                 }
-                // (What the head holds is the item's claim, not claims of its own.)
-                for part in c.children.iter().filter(|p| p.kind != Kind::Head) {
+                // Alternatives after `|` in the head claim their own.
+                for w in items.windows(2) {
+                    if w[0].kind == Kind::Text && w[0].text == "|" && w[1].kind == Kind::Elem && ITEM_TAGS.contains(&w[1].tok.as_str())
+                        && let Some(text) = tag_text(w[1])
+                    {
+                        out.push(Claim { kind: ClaimKind::Alt, tok: w[1].tok.clone(), node: addr(w[1]), link: addr(w[1]), text, para: *para, anchor: 0 });
+                    }
+                }
+                // (The head's own macro is the item's claim, not a claim of its own.)
+                let target = out.iter().rev().find(|x| x.kind == ClaimKind::Item && x.node == addr(c)).map(|x| x.link);
+                let start = out.len();
+                for part in &c.children {
                     collect(part, section, "", para, addr(c), out);
+                }
+                if let Some(t) = target {
+                    let mut k = start;
+                    while k < out.len() {
+                        if out[k].node == t && out[k].kind == ClaimKind::Text {
+                            out.remove(k);
+                        } else {
+                            k += 1;
+                        }
+                    }
                 }
             }
             (Kind::Block, "Fo") if section == "DESCRIPTION" || !STANDARD_SECTIONS.contains(&section) => {
