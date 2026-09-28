@@ -64,7 +64,8 @@ pub fn parse(input: &str, diag: &mut Diagnostics) -> Document {
 fn detect(lines: &[roff::Line]) -> Language {
     for l in lines {
         if let roff::Line::Macro { name, .. } = l {
-            return if name == "Dd" { Language::Mdoc } else { Language::Man };
+            // (A page starting with `.Dt`, prologue out of order, is still mdoc.)
+            return if name == "Dd" || name == "Dt" { Language::Mdoc } else { Language::Man };
         }
     }
     Language::Mdoc

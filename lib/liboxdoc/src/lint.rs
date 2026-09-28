@@ -499,12 +499,21 @@ pub struct MdocState {
     dt_section: String,
     /// The last cross-reference in an unbroken run of them in SEE ALSO.
     last_xr: Option<Xref>,
+    /// The prologue macros seen so far.
+    seen_dt: bool,
+    seen_os: bool,
 }
 
 impl MdocState {
     /// A macro line, with the macros it calls; `raw` is the line as typed from `name` on.
     pub fn macro_line(&mut self, diag: &mut Diagnostics, line: usize, col: usize, name: &str, raw: &str) {
         let args = typed_args(raw, col);
+        match name {
+            "Dd" => self.dd(diag, line, col, &args),
+            "Dt" => self.dt(diag, line, col, &args),
+            "Os" => self.seen_os = true,
+            _ => {}
+        }
         match name {
             "Sh" => {
                 self.end_run(diag);
@@ -569,6 +578,61 @@ impl MdocState {
     /// The end of the input.
     pub fn end(&mut self, diag: &mut Diagnostics) {
         self.end_run(diag);
+        if !self.seen_os {
+            diag.report(Level::Warning, 0, 0, "missing Os macro, using \"\"", "");
+        }
+    }
+
+    /// `.Dd date`: the date as `Month D, YYYY` or `$Mdocdate: Month D YYYY $`.
+    fn dd(&mut self, diag: &mut Diagnostics, line: usize, col: usize, args: &[(usize, String)]) {
+        if self.seen_dt || self.seen_os {
+            let after = if self.seen_os { "Os" } else { "Dt" };
+            diag.report(Level::Warning, line, col, "prologue macros out of order", &format!("Dd after {after}"));
+        }
+        let Some(&(c, _)) = args.first() else {
+            diag.report(Level::Warning, line, col, "missing date, using \"\"", "Dd");
+            return;
+        };
+        let date = args.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>().join(" ");
+        if date.starts_with("$Mdocdate") {
+            return;
+        }
+        if iso_date(&date).is_some() {
+            diag.report(Level::Style, line, c, "legacy man(7) date format", &format!("Dd {date}"));
+            return;
+        }
+        match man_date(&date) {
+            Some(n) if n != date => diag.report(Level::Style, line, c, "normalizing date format to", &format!("Dd {n}")),
+            Some(_) => {}
+            None => diag.report(Level::Warning, line, c, "cannot parse date, using it verbatim", &format!("Dd {date}")),
+        }
+    }
+
+    /// `.Dt TITLE section [arch]`.
+    fn dt(&mut self, diag: &mut Diagnostics, line: usize, col: usize, args: &[(usize, String)]) {
+        if self.seen_os {
+            diag.report(Level::Warning, line, col, "prologue macros out of order", "Dt after Os");
+        }
+        self.seen_dt = true;
+        let title = match args.first() {
+            None => {
+                diag.report(Level::Warning, line, col, "missing manual title, using UNTITLED", "Dt");
+                "UNTITLED".to_string()
+            }
+            Some((c, t)) => {
+                if let Some(p) = t.find(|c: char| c.is_ascii_lowercase()) {
+                    diag.report(Level::Style, line, c + p, "lower case character in document title", &format!("Dt {t}"));
+                }
+                t.clone()
+            }
+        };
+        match args.get(1) {
+            None => diag.report(Level::Warning, line, col, "missing manual section, using \"\"", &format!("Dt {title}")),
+            Some((c, sec)) if !matches!(sec.as_str(), "1" | "2" | "3" | "3p" | "4" | "5" | "6" | "7" | "8" | "9") => {
+                diag.report(Level::Warning, line, *c, "unknown manual section", &format!("Dt ... {sec}"));
+            }
+            _ => {}
+        }
     }
 
     /// The end of a run of cross-references: the last one takes no punctuation.

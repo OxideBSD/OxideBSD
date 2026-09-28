@@ -67,7 +67,12 @@ impl Diagnostics {
     pub fn format(&self, min: Level) -> String {
         let mut out = String::new();
         for d in self.list.iter().filter(|d| d.level >= min) {
-            out.push_str(&format!("oxdoc: {}:{}:{}: {}: {}", self.file, d.line, d.column, d.level, d.message));
+            // A diagnostic about the whole page (line 0) has no position, as in mandoc.
+            if d.line == 0 {
+                out.push_str(&format!("oxdoc: {}: {}: {}", self.file, d.level, d.message));
+            } else {
+                out.push_str(&format!("oxdoc: {}:{}:{}: {}: {}", self.file, d.line, d.column, d.level, d.message));
+            }
             if !d.detail.is_empty() {
                 out.push_str(": ");
                 out.push_str(&d.detail);

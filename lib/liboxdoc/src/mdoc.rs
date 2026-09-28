@@ -251,13 +251,11 @@ impl Parser<'_> {
         self.push(n);
     }
 
-    fn macro_line(&mut self, name: &str, args: &[String], first: bool) {
+    fn macro_line(&mut self, name: &str, args: &[String], _first: bool) {
         match name {
             "Dd" => {
                 self.meta.date = args.join(" ");
-                if !first {
-                    self.diag.report(Level::Warning, self.line, 0, "prologue macros out of order", "Dd");
-                }
+
             }
             "Dt" => {
                 self.meta.title = args.first().cloned().unwrap_or_default();

@@ -309,8 +309,8 @@ impl<'a> Roff<'a> {
             let args = self.macro_args(argstr, lineno);
             self.close_conds(raw);
             self.track_rs(&name, &args);
-            if self.language.is_none() && (name == "Dd" || name == "TH") {
-                self.language = Some(name == "Dd");
+            if self.language.is_none() && matches!(name.as_str(), "Dd" | "Dt" | "TH") {
+                self.language = Some(name != "TH");
             }
             let col = prefix + lead + 1;
             let raw_rest = rest.to_string();
