@@ -651,6 +651,18 @@ impl Term {
         self.no_vspace = false;
     }
 
+    /// A line laid out by the caller (a table row), already styled; output as it is.
+    pub fn raw_line(&mut self, s: &str) {
+        self.flush();
+        self.out.push_str(s.trim_end_matches(' '));
+        self.out.push('\n');
+        self.lines_out += 1;
+        self.at_blank = false;
+        self.blank_explicit = false;
+        self.blank_header = false;
+        self.no_vspace = false;
+    }
+
     /// A whole line laid out by the caller: `left`, `center` and `right` parts of a header or
     /// footer, spread across the width.
     pub fn three_part(&mut self, left: &str, center: &str, right: &str) {

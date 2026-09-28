@@ -60,6 +60,8 @@ pub enum Line {
     Text { text: String, raw: String, line: usize, last: bool },
     /// An empty line: a paragraph break in both languages.
     Blank { line: usize },
+    /// A table (`.TS` ... `.TE`).
+    Table(Box<crate::tbl::Table>),
 }
 
 /// A condition being skipped or taken, for `.if`/`.ie`/`.el` with a `\{` ... `\}` body.
@@ -95,6 +97,8 @@ pub struct Roff<'a> {
     check_line: Option<(usize, usize)>,
     /// The number of input lines.
     total_lines: usize,
+    /// An open table: where it started, and its lines so far.
+    table: Option<(usize, Vec<(usize, String)>)>,
     /// An input trap (`.it`): text lines to go, and the macro to call then (empty for a break).
     trap: Option<(usize, String)>,
     /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
@@ -158,6 +162,7 @@ impl<'a> Roff<'a> {
             language: None,
             check_line: None,
             total_lines: 0,
+            table: None,
             trap: None,
             out: Vec::new(),
         }
@@ -229,6 +234,21 @@ impl<'a> Roff<'a> {
             return;
         }
 
+        // Inside a table: its lines as typed, up to `.TE`.
+        if let Some((start, lines)) = &mut self.table {
+            if raw.trim_end().strip_prefix(self.cc).is_some_and(|r| r.trim() == "TE") {
+                let (start, lines) = self.table.take().unwrap();
+                let mut d = Diagnostics::new("");
+                let mut decode = |s: &str, l: usize| self.expand(s, l);
+                let t = crate::tbl::parse(&lines, start, &mut decode, &mut d);
+                self.diag.list.extend(d.list);
+                self.emit(Line::Table(Box::new(t)));
+            } else {
+                let _ = start;
+                lines.push((lineno, raw.to_string()));
+            }
+            return;
+        }
         // Inside a false `\{` body: only track nesting.
         if self.conds.last().is_some_and(|c| !c.active) {
             self.skip_conds(raw);
@@ -270,6 +290,10 @@ impl<'a> Roff<'a> {
             if name.is_empty() {
                 // Nothing but a closing `\}`.
                 self.close_conds(raw);
+                return;
+            }
+            if name == "TS" {
+                self.table = Some((lineno, Vec::new()));
                 return;
             }
             if self.request(&name, argstr, lineno, depth) {

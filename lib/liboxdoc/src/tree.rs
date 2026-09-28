@@ -13,6 +13,8 @@ pub enum Kind {
     Tail,
     Elem,
     Text,
+    /// A tbl table (`node.table`).
+    Table,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,11 +45,13 @@ pub struct Node {
     pub children: Vec<Node>,
     pub line: usize,
     pub flags: Flags,
+    /// A table's contents, for a `Kind::Table` node.
+    pub table: Option<Box<crate::tbl::Table>>,
 }
 
 impl Node {
     pub fn new(kind: Kind, tok: &str, line: usize) -> Node {
-        Node { kind, tok: tok.to_string(), text: String::new(), args: Vec::new(), children: Vec::new(), line, flags: Flags::default() }
+        Node { kind, tok: tok.to_string(), text: String::new(), args: Vec::new(), children: Vec::new(), line, flags: Flags::default(), table: None }
     }
 
     pub fn text(text: &str, line: usize) -> Node {

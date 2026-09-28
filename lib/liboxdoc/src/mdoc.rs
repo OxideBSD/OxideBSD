@@ -119,11 +119,11 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.trailing = trailing;
                 // tbl and eqn blocks: not formatted yet, and not checked.
                 match name.as_str() {
-                    "TS" | "EQ" => {
+                    "EQ" => {
                         p.in_preproc = true;
                         continue;
                     }
-                    "TE" | "EN" => {
+                    "EN" => {
                         p.in_preproc = false;
                         continue;
                     }
@@ -157,6 +157,11 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 let literal = p.in_literal() || p.in_preproc;
                 crate::lint::text_line(p.diag, line, &raw, last, literal, true);
                 p.text_line(&text);
+            }
+            Line::Table(table) => {
+                let mut n = Node::new(Kind::Table, "TS", table.line);
+                n.table = Some(table);
+                p.stack.last_mut().unwrap().children.push(n);
             }
             Line::Blank { line } => {
                 p.line = line;

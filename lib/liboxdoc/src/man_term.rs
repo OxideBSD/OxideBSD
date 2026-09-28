@@ -146,6 +146,11 @@ impl R<'_> {
         }
         match n.kind {
             Kind::Text => text_node(&mut self.t, n, style),
+            Kind::Table => {
+                if let Some(t) = &n.table {
+                    crate::tbl_term::render(&mut self.t, t);
+                }
+            }
             Kind::Elem => self.elem(n, style),
             Kind::Block => self.block(n, style),
             _ => self.children(n, style),

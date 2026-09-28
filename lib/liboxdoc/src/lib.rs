@@ -16,6 +16,8 @@ pub mod term;
 pub mod tree;
 pub mod unicode;
 pub mod lint;
+pub mod tbl;
+pub mod tbl_term;
 
 use diag::Diagnostics;
 use term::{Encoding, Styling, Term};

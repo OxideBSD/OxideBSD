@@ -162,6 +162,12 @@ impl R<'_> {
         if n.kind == Kind::Text {
             return self.text(n, style);
         }
+        if n.kind == Kind::Table {
+            if let Some(t) = &n.table {
+                crate::tbl_term::render(&mut self.t, t);
+            }
+            return;
+        }
         // The arguments of these macros break at hyphens like text; nested macros' don't.
         let saved = self.t.hyph_args;
         if matches!(n.kind, Kind::Elem | Kind::Block) {
