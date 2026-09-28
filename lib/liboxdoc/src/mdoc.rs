@@ -12,7 +12,7 @@ use crate::roff::{Line, mark};
 use crate::tree::{Document, Kind, Language, Meta, Node};
 
 /// Macros that may be called from another macro's arguments.
-const CALLABLE: &[&str] = &[
+pub const CALLABLE: &[&str] = &[
     "Ac", "Ad", "An", "Ao", "Ap", "Aq", "Ar", "At", "Bc", "Bo", "Bq", "Brc", "Bro", "Brq", "Bsx", "Bx", "Cd", "Cm", "Dc", "Do", "Dq", "Dv", "Dx", "Ec", "Em", "En", "Eo", "Er", "Es", "Ev", "Fa", "Fc", "Fl", "Fn", "Fr", "Ft", "Fx", "Ic", "Li", "Lk", "Ms", "Mt", "Nm", "No", "Ns", "Nx", "Oc", "Oo", "Op", "Ox", "Pa", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Sc", "So", "Sq", "St", "Sx", "Sy", "Ta", "Tn", "Ux", "Va", "Vt", "Xc", "Xo", "Xr",
 ];
 
@@ -96,6 +96,8 @@ struct Parser<'a> {
     col: usize,
     /// The current macro line as typed, from its name on.
     raw: String,
+    /// A description ending in punctuation, reported unless a text line continues it.
+    pending_nd: Option<(usize, usize, String)>,
     /// Unknown macros already reported.
     unknown: Vec<String>,
     /// Inside a tbl or eqn block (`.TS`/`.TE`, `.EQ`/`.EN`), whose lines aren't text.
@@ -106,7 +108,7 @@ struct Parser<'a> {
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, pending_nd: None };
     let mut first = true;
     for l in lines {
         match l {
@@ -127,6 +129,13 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
                 p.col = col;
                 p.raw = raw;
+                // A description runs to the next section; anything else before then continues it.
+                if let Some((l, c, d)) = p.pending_nd.take()
+                    && matches!(name.as_str(), "Sh" | "Ss")
+                {
+                    p.diag.report(Level::Style, l, c, "trailing delimiter", &d);
+                }
+                p.pending_nd = crate::lint::mdoc_args(p.diag, line, p.col, &name, &p.raw);
                 p.macro_line(&name, &args, first);
                 if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MDOC_MACROS.contains(&name.as_str())) {
                     p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
@@ -136,6 +145,8 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 first = false;
             }
             Line::Text { text, raw, line, last } => {
+                // A description continued on a text line doesn't end where its macro line does.
+                p.pending_nd = None;
                 p.line = line;
                 p.col = 1;
                 let literal = p.in_literal() || p.in_preproc;
@@ -159,6 +170,9 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
             }
         }
+    }
+    if let Some((l, c, d)) = p.pending_nd.take() {
+        p.diag.report(Level::Style, l, c, "trailing delimiter", &d);
     }
     while p.stack.len() > 1 {
         let top = p.stack.last().unwrap();

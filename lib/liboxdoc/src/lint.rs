@@ -377,3 +377,94 @@ mod tests {
         assert_eq!(super::arg_columns("TH \"Esys_ClearControl\" 3 \"Version 4.2.0\" \"tpm2-tss\"", 2), vec![5, 25, 27, 43]);
     }
 }
+
+/// mdoc macros whose last argument may not end with a closing delimiter joined to it
+/// (`.Ar file.` instead of `.Ar file .`).
+const DELIM_CHECKED: &[&str] = &[
+    "Ad", "An", "Ar", "Cm", "Dv", "Er", "Ev", "Fa", "Fl", "Fn", "Ft", "Ic", "In", "Li", "Lk", "Mt", "Nm", "Pa", "Sy", "Va", "Vt", "Xr", "Ql", "Ms", "Em", "No", "Bx", "Dx", "Nx", "Ox", "Fx", "Lb", "Sq", "Pq", "Aq", "Qq", "Op", "Ot", "Bsx", "Brq",
+];
+
+/// mdoc macros whose arguments the delimiter message shows joined; the others show `...` and
+/// the last one.
+const JOINED: &[&str] = &["An", "Ic", "Li", "Sy", "Ql", "Em", "No", "Sq", "Pq", "Aq", "Qq", "Brq"];
+
+/// Enclosures, whose argument is checked only at the end of the line.
+const ENCLOSURES: &[&str] = &["Sq", "Pq", "Aq", "Qq", "Op", "Brq"];
+
+/// mdoc macros taking a single argument; what follows is outside them.
+const ONE_ARG: &[&str] = &["In", "Dx", "Nx", "Ox", "Fx", "Bsx"];
+
+/// mandoc's checks of an mdoc macro line's arguments as typed: a closing delimiter joined to a
+/// macro's last argument, and text ending in punctuation where it shouldn't. A description
+/// (`.Nd`) ending so is returned rather than reported, since it may go on on the next line.
+pub fn mdoc_args(diag: &mut Diagnostics, line: usize, col: usize, name: &str, raw: &str) -> Option<(usize, usize, String)> {
+    let args = typed_args(raw, col);
+    // Macros whose text shouldn't end with punctuation at all (unless it is a separate
+    // argument).
+    if matches!(name, "Nd" | "Sh" | "Ss" | "Sx" | "Rv" | "Ex" | "Fo") {
+        // (A description may end in a closing bracket.)
+        let delims: &[char] = if name == "Nd" { &['.', ',', ':', ';', '?', '!'] } else { &['.', ',', ':', ';', ')', ']', '?', '!'] };
+        if let Some((c, last)) = args.last()
+            && last.chars().count() > 1
+            && last.ends_with(delims)
+            && !(last.ends_with(')') && args.iter().any(|(_, a)| a.contains('(')))
+        {
+            let all: Vec<&str> = args.iter().map(|(_, a)| a.as_str()).collect();
+            let found = (line, c + last.len() - 1, format!("{name} {}", all.join(" ")));
+            if name == "Nd" {
+                return Some(found);
+            }
+            diag.report(Level::Style, found.0, found.1, "trailing delimiter", &found.2);
+        }
+        return None;
+    }
+    // Each macro on the line with its arguments, in order.
+    let mut groups: Vec<(&str, Vec<(usize, &str)>)> = vec![(name, Vec::new())];
+    for (c, a) in &args {
+        if crate::mdoc::CALLABLE.contains(&a.as_str()) {
+            groups.push((a.as_str(), Vec::new()));
+        } else {
+            groups.last_mut().unwrap().1.push((*c, a.as_str()));
+        }
+    }
+    let n = groups.len();
+    for (g, (m, margs)) in groups.iter().enumerate() {
+        if !DELIM_CHECKED.contains(m) || (ENCLOSURES.contains(m) && g + 1 < n) {
+            continue;
+        }
+        let shown = if *m == "Ot" { "Ft" } else { *m };
+        // `.Fl` checks each argument, a one-argument macro its argument, the rest their last.
+        let checked: Vec<(usize, (usize, &str))> = if *m == "Fl" {
+            margs.iter().map(|a| (0, *a)).collect()
+        } else if ONE_ARG.contains(m) {
+            margs.first().map(|a| vec![(0, *a)]).unwrap_or_default()
+        } else {
+            margs.last().map(|a| vec![(margs.len() - 1, *a)]).unwrap_or_default()
+        };
+        for (i, (c, a)) in checked {
+            let Some(d) = a.chars().last() else { continue };
+            // (Not after `\&`, not an ellipsis `a..`, not a bracket closing one opened in the
+            // same word.)
+            let escaped = a.ends_with(&format!("\\&{d}"));
+            let paired = (d == ')' && a.contains('(')) || (d == ']' && a.contains('['));
+            // (And not after a character that is neither part of a word nor punctuation, as in
+            // `*.`, or one escaped, as in `\e)`.)
+            let before: Vec<char> = a.chars().rev().skip(1).take(2).collect();
+            let odd = before.first().is_some_and(|c| !c.is_alphanumeric() && !".,:;)]?!|\\(".contains(*c));
+            let after_escape = before.get(1) == Some(&'\\');
+            if a.chars().count() < 2 || !".,:;)]?!|".contains(d) || escaped || a.ends_with("..") || paired || odd || after_escape {
+                continue;
+            }
+            let what = if i == 0 {
+                format!("{shown} {a}")
+            } else if JOINED.contains(m) {
+                let all: Vec<&str> = margs.iter().map(|(_, a)| *a).collect();
+                format!("{shown} {}", all.join(" "))
+            } else {
+                format!("{shown} ... {a}")
+            };
+            diag.report(Level::Style, line, c + a.len() - 1, "no blank before trailing delimiter", &what);
+        }
+    }
+    None
+}
