@@ -442,37 +442,35 @@ pub fn mdoc_args(diag: &mut Diagnostics, line: usize, col: usize, name: &str, ra
             continue;
         }
         let shown = if *m == "Ot" { "Ft" } else { *m };
-        // `.Fl` checks each argument, a one-argument macro its argument, the rest their last.
-        let checked: Vec<(usize, (usize, &str))> = if *m == "Fl" {
-            margs.iter().map(|a| (0, *a)).collect()
+        // The macro's own arguments: not the delimiters after them, and for `.Xr` only its
+        // name and section.
+        let mut own: Vec<(usize, &str)> = margs.clone();
+        while own.last().is_some_and(|(_, a)| a.len() == 1 && ".,:;)]?!|(".contains(*a)) {
+            own.pop();
+        }
+        if *m == "Xr" {
+            own.truncate(2);
+        }
+        // What is checked: each argument of `.Fl`, the one of a one-argument macro, the text
+        // of a macro that joins its arguments, or the last argument of the others.
+        let checked: Vec<(usize, String, String)> = if *m == "Fl" {
+            own.iter().map(|(c, a)| (*c, a.to_string(), format!("Fl {a}"))).collect()
         } else if ONE_ARG.contains(m) {
-            margs.first().map(|a| vec![(0, *a)]).unwrap_or_default()
+            own.first().map(|(c, a)| vec![(*c, a.to_string(), format!("{shown} {a}"))]).unwrap_or_default()
+        } else if JOINED.contains(m) {
+            let all: Vec<&str> = own.iter().map(|(_, a)| *a).collect();
+            let joined = all.join(" ");
+            own.first().map(|(c, _)| vec![(*c, joined.clone(), format!("{shown} {joined}"))]).unwrap_or_default()
         } else {
-            margs.last().map(|a| vec![(margs.len() - 1, *a)]).unwrap_or_default()
+            let n = own.len();
+            own.last()
+                .map(|(c, a)| vec![(*c, a.to_string(), if n == 1 { format!("{shown} {a}") } else { format!("{shown} ... {a}") })])
+                .unwrap_or_default()
         };
-        for (i, (c, a)) in checked {
-            let Some(d) = a.chars().last() else { continue };
-            // (Not after `\&`, not an ellipsis `a..`, not a bracket closing one opened in the
-            // same word.)
-            let escaped = a.ends_with(&format!("\\&{d}"));
-            let paired = (d == ')' && a.contains('(')) || (d == ']' && a.contains('['));
-            // (And not after a character that is neither part of a word nor punctuation, as in
-            // `*.`, or one escaped, as in `\e)`.)
-            let before: Vec<char> = a.chars().rev().skip(1).take(2).collect();
-            let odd = before.first().is_some_and(|c| !c.is_alphanumeric() && !".,:;)]?!|\\(".contains(*c));
-            let after_escape = before.get(1) == Some(&'\\');
-            if a.chars().count() < 2 || !".,:;)]?!|".contains(d) || escaped || a.ends_with("..") || paired || odd || after_escape {
-                continue;
+        for (c, text, what) in checked {
+            if delim_joined(m, &text) {
+                diag.report(Level::Style, line, c + text.len() - 1, "no blank before trailing delimiter", &what);
             }
-            let what = if i == 0 {
-                format!("{shown} {a}")
-            } else if JOINED.contains(m) {
-                let all: Vec<&str> = margs.iter().map(|(_, a)| *a).collect();
-                format!("{shown} {}", all.join(" "))
-            } else {
-                format!("{shown} ... {a}")
-            };
-            diag.report(Level::Style, line, c + a.len() - 1, "no blank before trailing delimiter", &what);
         }
     }
     None
@@ -699,4 +697,58 @@ impl MdocState {
             diag.report(Level::Warning, line, c, "unusual Xr punctuation", &format!("{p} after {name}({sec})"));
         }
     }
+}
+
+/// Whether a macro argument's text ends with a delimiter that should have been an argument of
+/// its own (mandoc's rules, which allow for common idioms).
+fn delim_joined(m: &str, s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = b.len();
+    if n < 2 {
+        return false;
+    }
+    let lc = b[n - 1];
+    if !b",;:.?!)]|".contains(&lc) {
+        return false;
+    }
+    // After an escape: `\&.`, `\e)`.
+    if n > 2 && b[n - 3] == b'\\' && (b[n - 2] == b'&' || b[n - 2] == b'e') {
+        return false;
+    }
+    match lc {
+        b')' if b.contains(&b'(') => return false,
+        b']' if b.contains(&b'[') => return false,
+        b'.' if b[n - 2] == b'.' => return false,
+        b';' if m == "Vt" => return false,
+        b'?' if b[n - 2] == b'?' => return false,
+        b'|' if n == 2 && b[0] == b'|' => return false,
+        _ => {}
+    }
+    // Two bytes, neither a letter nor a digit before the delimiter: `*.`.
+    if n == 2 && !b[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    // A sentence of three words or more in running text.
+    if b"!.:?".contains(&lc) && matches!(m, "Em" | "Li" | "Pq" | "Sy") {
+        let mut words = 0;
+        let mut i = n - 1;
+        while i > 0 {
+            i -= 1;
+            match b[i] {
+                b' ' => {
+                    words += 1;
+                    if i > 0 && b[i - 1] == b',' {
+                        i -= 1;
+                    }
+                }
+                c if c.is_ascii_alphabetic() => {
+                    if words > 1 {
+                        return false;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+    true
 }
