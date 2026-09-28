@@ -26,13 +26,15 @@ struct R {
     /// before the next line.
     pre_start: bool,
     pre_break: bool,
+    /// In no-fill mode: the `.sp` requests since the last line, each a newline before the next.
+    pre_sp: usize,
     /// The tag list open, and the macro and indent its items were made with.
     list: Option<(String, Option<String>)>,
 }
 
 pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String {
     let meta = &doc.meta;
-    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, list: None };
+    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, pre_sp: 0, list: None };
     let title = format!("{}({})", plain(&meta.title), plain(&meta.section));
     html::begin_document(&mut r.h, opts, &title, comments);
     let vol = if meta.volume_given {
@@ -288,12 +290,15 @@ impl R {
         let text = n.text.trim_end_matches([' ', '\t']);
         let text = text.trim_start_matches([' ', '\t']);
         self.h.text(text, &mut self.fonts, false);
+        self.fonts.line_end();
     }
 
     /// The start of a line in no-fill mode: after a newline, or a break where the line starts
     /// with spaces (or `.br` came before it).
     fn pre_line(&mut self, spaces: bool) {
         let brk = spaces || std::mem::take(&mut self.pre_break);
+        let sp = std::mem::take(&mut self.pre_sp);
+        self.h.literal_raw(&"\n".repeat(sp));
         if brk {
             self.h.literal_raw("\n<br/>\n");
         } else if !self.pre_start {
@@ -334,8 +339,8 @@ impl R {
 
     fn elem(&mut self, n: &Node) {
         let tok = n.tok.as_str();
-        // Font macros and paragraphs end the escape font.
-        if matches!(tok, "PP" | "LP" | "P" | "sp" | "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" | "SM" | "SB") {
+        // Macros end the escape font, but for those mandoc ignores, or doesn't know.
+        if !matches!(tok, "ft" | "ad" | "na" | "ne" | "hy" | "nh" | "MR" | "UE" | "ME" | "YS") {
             self.fonts.reset();
         }
         match tok {
@@ -360,11 +365,12 @@ impl R {
                 }
             }
             "sp" => {
-                // A paragraph within whatever holds it; in no-fill mode, a blank line, which
-                // vanishes.
+                // A paragraph within whatever holds it; in no-fill mode, a newline (a blank line
+                // vanishes).
                 if self.nofill {
                     if n.text != "blank" {
-                        self.pre_break = true;
+                        self.ensure_pre();
+                        self.pre_sp += 1;
                     }
                 } else {
                     self.close_p();
@@ -385,16 +391,18 @@ impl R {
                     self.example = tok == "EX";
                     self.pre_start = true;
                     self.pre_break = false;
+                    self.pre_sp = 0;
                 }
             }
             "fi" | "EE" => {
                 if self.nofill {
                     // (Ending no-fill mode between blocks leaves an empty one.)
                     self.ensure_pre();
-                    // (An example ends with its last line's newline.)
-                    if self.example {
-                        self.h.literal_raw("\n");
-                    }
+                    // Newlines for the `.sp` requests last, and the last line's own, if there was
+                    // one: an example ends with it, other blocks only before such a `.sp`.
+                    let sp = std::mem::take(&mut self.pre_sp);
+                    let end = !self.pre_start && (self.example || sp > 0);
+                    self.h.literal_raw(&"\n".repeat(sp + end as usize));
                     while let Some(t) = self.font.pop() {
                         self.h.literal_raw(&format!("</{t}>"));
                     }
@@ -522,12 +530,13 @@ impl R {
             }
             "RE" => {}
             "ft" => {
-                self.fonts.esc = match n.args.first().map(String::as_str) {
-                    Some("B") | Some("3") => Some(mark::FONT_B),
-                    Some("I") | Some("2") => Some(mark::FONT_I),
-                    Some("BI") | Some("4") => Some(mark::FONT_BI),
-                    _ => None,
-                };
+                self.fonts.select(match n.args.first().map(String::as_str) {
+                    None | Some("P") => None,
+                    Some("B") | Some("3") => Some(Some(mark::FONT_B)),
+                    Some("I") | Some("2") => Some(Some(mark::FONT_I)),
+                    Some("BI") | Some("4") => Some(Some(mark::FONT_BI)),
+                    _ => Some(None),
+                });
             }
             "MR" => {
                 self.ensure_p();
@@ -548,9 +557,7 @@ impl R {
 
     fn block(&mut self, n: &Node) {
         let tok = n.tok.as_str();
-        if matches!(tok, "SH" | "SS" | "TP" | "TQ" | "IP" | "HP") {
-            self.fonts.reset();
-        }
+        self.fonts.reset();
         match tok {
             "SH" | "SS" => self.section(n),
             "IP" if n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*") => {

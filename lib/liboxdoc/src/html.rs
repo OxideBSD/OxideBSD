@@ -531,22 +531,46 @@ mod tests {
     }
 }
 
-/// The font roman escapes (`\fB`, `\fI`...) have selected: it lasts across text lines, each
-/// line reopening it, until a font macro or paragraph resets it.
+/// The font roman escapes (`\fB`, `\fI`...) and `.ft` have selected: it lasts across text
+/// lines, each line reopening it, until a macro resets it.
 #[derive(Clone, Debug, Default)]
 pub struct Fonts {
     /// The escape font's marker, `None` for roman.
     pub esc: Option<char>,
+    /// The font before the last escape, for `\fP`.
     prev: Option<char>,
+    /// The font a bare `.ft` goes back to: the last one not roman at a line's end or a macro.
+    saved: Option<char>,
     /// Its elements, open now.
     open: Vec<&'static str>,
 }
 
 impl Fonts {
-    /// Back to roman (a font macro or a paragraph).
+    /// Back to roman, at a macro: the font selected, if not roman, becomes the previous one.
     pub fn reset(&mut self) {
-        self.esc = None;
-        self.prev = None;
+        if let Some(f) = self.esc.take() {
+            self.prev = Some(f);
+            self.saved = Some(f);
+        }
+    }
+
+    /// The end of a filled text line: the font selected, if not roman, is saved for `.ft`.
+    pub fn line_end(&mut self) {
+        if self.esc.is_some() {
+            self.saved = self.esc;
+        }
+    }
+
+    /// `.ft`: a font named (with nothing previous), or the one saved.
+    pub fn select(&mut self, f: Option<Option<char>>) {
+        match f {
+            Some(f) => {
+                self.esc = f;
+                self.prev = None;
+                self.saved = None;
+            }
+            None => self.esc = self.saved,
+        }
     }
 }
 
