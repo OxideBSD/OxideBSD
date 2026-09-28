@@ -81,10 +81,10 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                     p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
                 }
             }
-            Line::Text { text, raw, line } => {
+            Line::Text { text, raw, line, last } => {
                 p.line = line;
                 p.col = 1;
-                crate::lint::text_line(p.diag, line, &raw, p.nofill || p.in_preproc, false);
+                crate::lint::text_line(p.diag, line, &raw, last, p.nofill || p.in_preproc, false);
                 p.text_line(&text);
             }
             Line::Blank { line } => {

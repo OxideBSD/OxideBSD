@@ -55,9 +55,9 @@ pub enum Line {
     /// `col` is the 1-based column of the name, and `raw` the rest of the line as typed (for
     /// diagnostics).
     Macro { name: String, args: Vec<String>, line: usize, col: usize, raw: String, no_break: bool, trailing: Option<(usize, usize)> },
-    /// A text line, escapes decoded; `raw` is the line with strings interpolated and escapes
-    /// still as typed, which diagnostics look at.
-    Text { text: String, raw: String, line: usize },
+    /// A text line, escapes decoded; `raw` is the line as typed, which diagnostics look at.
+    /// `last` marks the input's last line, whose too-long column mandoc reports one further.
+    Text { text: String, raw: String, line: usize, last: bool },
     /// An empty line: a paragraph break in both languages.
     Blank { line: usize },
 }
@@ -93,6 +93,8 @@ pub struct Roff<'a> {
     /// The next line is a new input line, whose own checks (trailing whitespace) are due; a
     /// conditional's body, processed as a line of its own, is not.
     check_line: Option<(usize, usize)>,
+    /// The number of input lines.
+    total_lines: usize,
     /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
     language: Option<bool>,
     /// `an-margin` values saved by man(7)'s `.RS`, for `.RE` to restore.
@@ -139,6 +141,7 @@ impl<'a> Roff<'a> {
             rs_saved: Vec::new(),
             language: None,
             check_line: None,
+            total_lines: 0,
             out: Vec::new(),
         }
     }
@@ -152,6 +155,7 @@ impl<'a> Roff<'a> {
         let input = input.strip_suffix('\n').unwrap_or(input);
         let mut pending = String::new();
         let mut start = 0;
+        self.total_lines = input.split('\n').count();
         for (i, line) in input.split('\n').enumerate() {
             // A line ending in an unescaped backslash continues on the next one.
             let line = line.strip_suffix('\r').unwrap_or(line);
@@ -292,7 +296,8 @@ impl<'a> Roff<'a> {
             let raw_rest = rest.to_string();
             // Trailing whitespace on a macro line is the language parser's to report, one column
             // past the end, if it knows the macro.
-            let trailing = self.check_line.take().map(|(l, len)| (l, len + 1));
+            let has_args = !argstr.trim().is_empty();
+            let trailing = self.check_line.take().map(|(l, len)| (l, len + has_args as usize));
             self.emit(Line::Macro { name, args, line: lineno, col, raw: raw_rest, no_break, trailing });
             return;
         }
@@ -301,7 +306,7 @@ impl<'a> Roff<'a> {
             self.emit(Line::Blank { line: lineno });
             return;
         }
-        let raw_text = self.interpolate(text, lineno, 0);
+        let raw_text = text.to_string();
         let mut expanded = self.expand(text, lineno);
         // A line holding only a comment or a `\}` produces nothing.
         if expanded.is_empty() {
@@ -313,7 +318,8 @@ impl<'a> Roff<'a> {
         }
         self.close_conds(raw);
         self.trailing_space_at(0);
-        self.emit(Line::Text { text: expanded, raw: raw_text, line: lineno });
+        let last = lineno == self.total_lines && depth == 0;
+        self.emit(Line::Text { text: expanded, raw: raw_text, line: lineno, last });
     }
 
     /// Reports whitespace at the end of the current input line, if it has some, at its last
@@ -537,7 +543,7 @@ impl<'a> Roff<'a> {
                 if name == "nop" {
                     // `.nop text`: the text as a text line.
                     let t = self.expand(argstr, lineno);
-                    self.emit(Line::Text { raw: t.clone(), text: t, line: lineno });
+                    self.emit(Line::Text { raw: t.clone(), text: t, line: lineno, last: false });
                 }
                 true
             }
@@ -1246,7 +1252,7 @@ mod tests {
     #[test]
     fn strings_and_escapes() {
         let l = run(".ds Xx hello\n\\*(Xx \\(em \\fBb\\fR\n");
-        assert_eq!(l, vec![Line::Text { text: format!("hello \u{2014} {}b{}", mark::FONT_B, mark::FONT_R), raw: "hello \\(em \\fBb\\fR".into(), line: 2 }]);
+        assert_eq!(l, vec![Line::Text { text: format!("hello \u{2014} {}b{}", mark::FONT_B, mark::FONT_R), raw: "\\*(Xx \\(em \\fBb\\fR".into(), line: 2, last: true }]);
     }
 
     #[test]

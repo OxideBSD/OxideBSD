@@ -135,11 +135,11 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.end_item_head();
                 first = false;
             }
-            Line::Text { text, raw, line } => {
+            Line::Text { text, raw, line, last } => {
                 p.line = line;
                 p.col = 1;
                 let literal = p.in_literal() || p.in_preproc;
-                crate::lint::text_line(p.diag, line, &raw, literal, true);
+                crate::lint::text_line(p.diag, line, &raw, last, literal, true);
                 p.text_line(&text);
             }
             Line::Blank { line } => {

@@ -5,14 +5,16 @@ use crate::diag::{Diagnostics, Level};
 
 /// The checks on a text line, before its escapes are decoded. `literal` is no-fill mode;
 /// `mdoc` enables the checks only mdoc(7) makes.
-pub fn text_line(diag: &mut Diagnostics, line: usize, raw: &str, literal: bool, mdoc: bool) {
+pub fn text_line(diag: &mut Diagnostics, line: usize, raw: &str, last: bool, literal: bool, mdoc: bool) {
     if literal {
         return;
     }
-    // A line that could have been broken earlier: longer than 80 bytes, with a space in it.
-    if raw.len() > 80 && raw.contains(' ') {
+    // A line that could have been broken earlier: longer than 80 bytes, with a space in it
+    // (and not starting with one, or with an escape).
+    if raw.len() > 80 && raw.contains(' ') && !raw.starts_with([' ', '\\']) {
         let start: String = raw.chars().take(20).collect();
-        diag.report(Level::Style, line, raw.len(), "input text line longer than 80 bytes", &format!("{start}..."));
+        // (mandoc reports the input's last line one column further.)
+        diag.report(Level::Style, line, raw.len() + last as usize, "input text line longer than 80 bytes", &format!("{start}..."));
     }
     if let Some(p) = raw.find('\t') {
         diag.report(Level::Warning, line, p + 1, "tab in filled text", "");
