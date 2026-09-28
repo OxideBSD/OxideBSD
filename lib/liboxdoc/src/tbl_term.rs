@@ -84,13 +84,20 @@ fn style_of(spec: &Spec) -> Style {
     }
 }
 
-/// The integer and fraction widths of a number, split at the decimal point (or after the
-/// last digit, or at the end).
-fn numeric_split(s: &str, point: char) -> (usize, usize) {
-    let w = visible(s);
-    let p = s.rfind(point).or_else(|| s.rfind(|c: char| c.is_ascii_digit()).map(|p| p + 1)).unwrap_or(s.len());
-    let int = visible(&s[..p]);
-    (int, w - int)
+/// Where a number aligns, as a byte offset into its decoded text: the last `\&`, or else the
+/// last decimal point next to a digit, or else just after the last digit. `None` when the text
+/// has no digit: it isn't a number.
+fn number_point(s: &str, point: char) -> Option<usize> {
+    if let Some(p) = s.rfind(crate::roff::mark::ZERO) {
+        return Some(p);
+    }
+    let last_digit = s.char_indices().filter(|(_, c)| c.is_ascii_digit()).last()?;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let dot = (0..chars.len()).rev().find(|&k| {
+        chars[k].1 == point
+            && (k > 0 && chars[k - 1].1.is_ascii_digit() || chars.get(k + 1).is_some_and(|(_, c)| c.is_ascii_digit()))
+    });
+    Some(dot.map_or(last_digit.0 + last_digit.1.len_utf8(), |k| chars[k].0))
 }
 
 /// A text block's width: its words, filled with single spaces between them (whatever was
@@ -109,6 +116,8 @@ fn measure_block(t: &Term, text: &[String], style: Style, limit: usize) -> usize
 /// kind, and the number of columns it spans.
 struct Laid {
     cells: Vec<Option<(Formatted, char, usize, Option<u8>)>>,
+    /// For a number in an `n` column, the width of its part before the alignment point.
+    nums: Vec<Option<usize>>,
     /// The row's own vertical lines: before the first column, then after each.
     vl: Vec<u8>,
 }
@@ -156,7 +165,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
         if o.allbox {
             vl.fill(1);
         }
-        let mut laid = Laid { cells: (0..n).map(|_| None).collect(), vl };
+        let mut laid = Laid { cells: (0..n).map(|_| None).collect(), nums: vec![None; n], vl };
         for (j, spec) in layout.specs.iter().enumerate().take(n) {
             vlines[j + 1] = vlines[j + 1].max(spec.vline);
             if let Some(s) = spec.spacing {
@@ -197,11 +206,13 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             let w = f.width();
             if span > 1 {
                 spans.push((j, span, w));
-            } else if spec.kind == 'n' && line.is_none() {
-                let text = &f.lines[0].0;
-                let (i, fr) = numeric_split(text, o.decimal);
-                ints[j] = ints[j].max(i);
-                fracs[j] = fracs[j].max(fr);
+            } else if let (Some(Cell::Text(raw)), 'n', None) = (cell, spec.kind, line)
+                && let Some(p) = number_point(raw, o.decimal)
+            {
+                let int = format(t, &[raw[..p].to_string()], style, big).width();
+                ints[j] = ints[j].max(int);
+                fracs[j] = fracs[j].max(w.saturating_sub(int));
+                laid.nums[j] = Some(int);
             } else {
                 widths[j] = widths[j].max(w);
             }
@@ -211,18 +222,6 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     }
     for j in 0..n {
         widths[j] = widths[j].max(ints[j] + fracs[j]);
-    }
-    if o.allbox {
-        for v in vlines.iter_mut() {
-            *v = 1;
-        }
-    }
-    // Equal columns: all as wide as the widest.
-    let eq = (0..n).filter(|j| equal[*j]).map(|j| widths[j]).max().unwrap_or(0);
-    for j in 0..n {
-        if equal[j] {
-            widths[j] = eq;
-        }
     }
     // A spanning cell wider than its columns widens them.
     for &(j, span, w) in &spans {
@@ -254,6 +253,20 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                     }
                 }
             }
+        }
+    }
+    // Numbers in a column wider than they need are centred as a block.
+    let num_lead: Vec<usize> = (0..n).map(|j| (widths[j] - (ints[j] + fracs[j]).min(widths[j])) / 2).collect();
+    if o.allbox {
+        for v in vlines.iter_mut() {
+            *v = 1;
+        }
+    }
+    // Equal columns: all as wide as the widest.
+    let eq = (0..n).filter(|j| equal[*j]).map(|j| widths[j]).max().unwrap_or(0);
+    for j in 0..n {
+        if equal[j] {
+            widths[j] = eq;
         }
     }
     // `x` columns share the width the others leave, less 3 columns between each two and the
@@ -386,7 +399,13 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                         let lead = match kind {
                             'r' => w.saturating_sub(text.1),
                             'c' => w.saturating_sub(text.1) / 2,
-                            'n' if line.is_none() && *span == 1 => ints[j].saturating_sub(numeric_split(&text.0, tbl.opts.decimal).0),
+                            // Alphabetic: one column in, without widening the column.
+                            'a' if line.is_none() => 1,
+                            'n' if line.is_none() && *span == 1 => match laid.nums[j] {
+                                Some(int) => num_lead[j] + ints[j] - int,
+                                // Not a number: centred.
+                                None => w.saturating_sub(text.1) / 2,
+                            },
                             _ => 0,
                         };
                         s.push_str(&" ".repeat(lead));
