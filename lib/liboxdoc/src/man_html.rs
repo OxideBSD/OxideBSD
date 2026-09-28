@@ -390,6 +390,11 @@ impl R {
                     self.para = false;
                 }
             }
+            // In no-fill mode, the next line starts on a line of its own, even first.
+            "ti" if self.nofill => {
+                self.ensure_pre();
+                self.pre_start = false;
+            }
             "in" => {
                 if !self.nofill {
                     self.h.br();

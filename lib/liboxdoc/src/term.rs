@@ -308,7 +308,7 @@ impl Term {
                 continue;
             }
             match c {
-                mark::ZERO | mark::CONT => {}
+                mark::ZERO | mark::CONT | mark::LINE => {}
                 // mandoc ignores `\%`: a word still breaks at its hyphens.
                 mark::NOHYPH => {}
                 mark::BREAK => parts.push(std::mem::take(&mut cells)),

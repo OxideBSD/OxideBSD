@@ -380,11 +380,29 @@ impl Html {
     }
 }
 
+/// Text without what `\l` draws, which HTML leaves out.
+fn undrawn(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains([mark::LINE, mark::RULE]) {
+        return s.into();
+    }
+    let mut out = String::new();
+    let mut inside: Option<char> = None;
+    for c in s.chars() {
+        match inside {
+            Some(m) if c == m => inside = None,
+            Some(_) => {}
+            None if c == mark::LINE || c == mark::RULE => inside = Some(c),
+            None => out.push(c),
+        }
+    }
+    out.into()
+}
+
 /// Text escaped for HTML: markup characters as entities, anything beyond ASCII as a numeric
 /// reference, and roff's markers resolved.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+    for c in undrawn(s).chars() {
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -614,6 +632,7 @@ impl Html {
     /// closed at its end. In `literal` mode (inside `pre`) spaces are kept as they are; else
     /// they separate words, where the line may break.
     pub fn text(&mut self, text: &str, fonts: &mut Fonts, literal: bool) {
+        let text = &*undrawn(text);
         let mut buf = String::new();
         // (Something before, in the same word: what follows attaches.)
         let mut glue = false;
