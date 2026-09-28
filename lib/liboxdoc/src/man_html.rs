@@ -26,15 +26,17 @@ struct R {
     /// before the next line.
     pre_start: bool,
     pre_break: bool,
-    /// In no-fill mode: the `.sp` requests since the last line, each a newline before the next.
+    /// In no-fill mode: the `.sp` requests since the last line, each a newline before the next,
+    /// and whether a blank line came since (ending the block, it ends the last line).
     pre_sp: usize,
+    pre_blank: bool,
     /// The tag list open, and the macro and indent its items were made with.
     list: Option<(String, Option<String>)>,
 }
 
 pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String {
     let meta = &doc.meta;
-    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, pre_sp: 0, list: None };
+    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, pre_sp: 0, pre_blank: false, list: None };
     let title = format!("{}({})", plain(&meta.title), plain(&meta.section));
     html::begin_document(&mut r.h, opts, &title, comments);
     let vol = if meta.volume_given {
@@ -249,12 +251,20 @@ impl R {
     /// Ends an open preformatted block, staying in no-fill mode.
     fn close_pre(&mut self) {
         if self.h.is_open("pre") {
-            if self.example {
-                self.h.literal_raw("\n");
-            }
+            self.end_pre_lines();
             self.h.font_close(&mut self.fonts, true);
             self.h.close("pre");
         }
+    }
+
+    /// Newlines for the `.sp` requests last in a preformatted block, and the last line's own, if
+    /// there was one: an example ends with it, other blocks only before such a `.sp` or a blank
+    /// line.
+    fn end_pre_lines(&mut self) {
+        let sp = std::mem::take(&mut self.pre_sp);
+        let blank = std::mem::take(&mut self.pre_blank);
+        let end = !self.pre_start && (self.example || sp > 0 || blank);
+        self.h.literal_raw(&"\n".repeat(sp + end as usize));
     }
 
     /// In no-fill mode, a preformatted block for what comes next, if one isn't open.
@@ -299,6 +309,9 @@ impl R {
     fn pre_line(&mut self, spaces: bool) {
         let brk = spaces || std::mem::take(&mut self.pre_break);
         let sp = std::mem::take(&mut self.pre_sp);
+        // (First in the block, a break's newline stands for one of them.)
+        let sp = if self.pre_start && brk { sp.saturating_sub(1) } else { sp };
+        self.pre_blank = false;
         self.h.literal_raw(&"\n".repeat(sp));
         if brk {
             self.h.literal_raw("\n<br/>\n");
@@ -366,12 +379,17 @@ impl R {
                 }
             }
             "sp" => {
-                // A paragraph within whatever holds it; in no-fill mode, a newline (a blank line
-                // vanishes).
+                // A paragraph within whatever holds it; in no-fill mode, a newline. Blank lines
+                // there are one newline before the first line, or after the last; between lines,
+                // nothing.
                 if self.nofill {
+                    self.ensure_pre();
                     if n.text != "blank" {
-                        self.ensure_pre();
                         self.pre_sp += 1;
+                    } else if self.pre_start {
+                        self.pre_sp = self.pre_sp.max(1);
+                    } else {
+                        self.pre_blank = true;
                     }
                 } else {
                     self.close_p();
@@ -393,17 +411,14 @@ impl R {
                     self.pre_start = true;
                     self.pre_break = false;
                     self.pre_sp = 0;
+                    self.pre_blank = false;
                 }
             }
             "fi" | "EE" => {
                 if self.nofill {
                     // (Ending no-fill mode between blocks leaves an empty one.)
                     self.ensure_pre();
-                    // Newlines for the `.sp` requests last, and the last line's own, if there was
-                    // one: an example ends with it, other blocks only before such a `.sp`.
-                    let sp = std::mem::take(&mut self.pre_sp);
-                    let end = !self.pre_start && (self.example || sp > 0);
-                    self.h.literal_raw(&"\n".repeat(sp + end as usize));
+                    self.end_pre_lines();
                     while let Some(t) = self.font.pop() {
                         self.h.literal_raw(&format!("</{t}>"));
                     }

@@ -461,14 +461,10 @@ impl Term {
         self.blank_header = false;
     }
 
-    /// A man(7) `.sp`: a blank line, unless paragraph space was just output, which absorbs it.
+    /// A man(7) `.sp`: a blank line, paragraph space before it or not.
     pub fn sp_line(&mut self) {
         self.flush();
         if std::mem::take(&mut self.skip_vspace) {
-            return;
-        }
-        if self.at_blank && !self.blank_explicit && !self.blank_header {
-            // Absorbed by the paragraph space before it, which stays what the output ends with.
             return;
         }
         self.out.push('\n');

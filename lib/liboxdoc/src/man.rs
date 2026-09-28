@@ -83,7 +83,8 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 crate::lint::macro_line_tabs(p.diag, line, &p.raw, col, p.nofill || p.in_preproc);
                 match name.as_str() {
                     "nf" | "EX" => p.nofill = true,
-                    "fi" | "EE" => p.nofill = false,
+                    // (A heading ends no-fill mode too.)
+                    "fi" | "EE" | "SH" | "SS" => p.nofill = false,
                     _ => {}
                 }
                 if FONT_MACROS.contains(&name.as_str()) {
@@ -130,7 +131,12 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                     p.diag.report(Level::Warning, line, 1, "skipping blank line in line scope", "");
                     continue;
                 }
-                p.flow.blank(p.diag, line);
+                // (In no-fill mode, content to the paragraph checks, not a break.)
+                if p.nofill {
+                    p.flow.content();
+                } else {
+                    p.flow.blank(p.diag, line);
+                }
                 // A blank line is `.sp`, even before the first section (unlike in mdoc); marked,
                 // since at the start of a section it is ignored where `.sp` isn't.
                 let mut n = Node::new(Kind::Elem, "sp", line);
