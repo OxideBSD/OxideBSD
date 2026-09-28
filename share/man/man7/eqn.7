@@ -1,0 +1,403 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 28, 2026
+.Dt EQN 7
+.Os OxideBSD
+.Sh NAME
+.Nm eqn
+.Nd equations in manual pages
+.Sh DESCRIPTION
+The
+.Nm
+language describes mathematical notation inside a manual page written in
+.Xr mdoc 7
+or
+.Xr man 7 .
+It describes how an equation is laid out, not what it means.
+Like
+.Xr tbl 7 ,
+it began as a preprocessor that turned its input into
+.Xr roff 7
+requests;
+.Xr oxdoc 1
+reads it directly, as part of the page.
+.Pp
+An equation starts with a
+.Ic \&EQ
+line and ends with an
+.Ic \&EN
+line; the lines between them are the equation.
+It takes its place in the text around it, as a word would:
+.Bd -literal -offset indent
+The sum
+\&.EQ
+sum from i=1 to n i sup 2
+\&.EN
+grows as the cube of n.
+.Ed
+.Pp
+An equation can also be written inside a text line, between the
+delimiters the
+.Cm delim
+statement sets.
+.Sh WORDS
+An equation is a sequence of words separated by white space: spaces, tabs,
+line ends, and the characters
+.Ql ^
+and
+.Ql ~ ,
+which are only separators here.
+Braces
+.Pq Ql {\& No and Ql }\&
+are words by themselves, and a string in double quotes is one word, spaces
+and all; inside quotes,
+.Ql \e\(dq
+stands for a quote.
+Anything else runs up to the next separator, brace or quote, so
+.Ql x+1
+is one word.
+.Pp
+A word that is not a keyword is set as text.
+An unquoted word is split where its characters change kind: letters, digits
+(with a decimal point), and anything else.
+Letters are set in italic, the rest in roman, and the pieces are spaced as
+mathematics usually is: a space around an operator such as
+.Ql + ,
+none before a comma or a closing parenthesis, none after an opening one.
+.Pp
+Some words are set as a symbol instead:
+.Bl -column -offset indent "partial" "∂ partial derivative" "partial" "∂ partial derivative"
+.It Cm alpha Ta \(*a Ta Cm DELTA Ta \(*D
+.It Cm beta Ta \(*b Ta Cm GAMMA Ta \(*G
+.It Cm gamma Ta \(*g Ta Cm LAMBDA Ta \(*L
+.It Cm delta Ta \(*d Ta Cm OMEGA Ta \(*W
+.It Cm epsilon Ta \(*e Ta Cm PHI Ta \(*F
+.It Cm zeta Ta \(*z Ta Cm PI Ta \(*P
+.It Cm eta Ta \(*y Ta Cm PSI Ta \(*Q
+.It Cm theta Ta \(*h Ta Cm SIGMA Ta \(*S
+.It Cm iota Ta \(*i Ta Cm THETA Ta \(*H
+.It Cm kappa Ta \(*k Ta Cm UPSILON Ta \(*U
+.It Cm lambda Ta \(*l Ta Cm XI Ta \(*C
+.It Cm mu Ta \(*m Ta Cm sum Ta \[sum]
+.It Cm nu Ta \(*n Ta Cm prod Ta \[product]
+.It Cm xi Ta \(*c Ta Cm int Ta \[integral]
+.It Cm omicron Ta \(*o Ta Cm union Ta \(cu
+.It Cm pi Ta \(*p Ta Cm inter Ta \(ca
+.It Cm rho Ta \(*r Ta Cm grad , del Ta \(gr
+.It Cm sigma Ta \(*s Ta Cm partial Ta \(pd
+.It Cm tau Ta \(*t Ta Cm inf Ta \(if
+.It Cm upsilon Ta \(*u Ta Cm times Ta \(mu
+.It Cm phi Ta \(*f Ta Cm cdot Ta \(pc
+.It Cm chi Ta \(*x Ta Cm approx Ta \(~~
+.It Cm psi Ta \(*q Ta Cm prime Ta \(fm
+.It Cm omega Ta \(*w Ta Cm half Ta \(12
+.El
+.Pp
+The operators
+.Ql <= ,
+.Ql >= ,
+.Ql != ,
+.Ql == ,
+.Ql +- ,
+.Ql -> ,
+.Ql <- ,
+.Ql <<
+and
+.Ql >> ,
+as words of their own, are set as the symbols
+.Sq \(<= ,
+.Sq \(>= ,
+.Sq \(!= ,
+.Sq \(== ,
+.Sq \(+- ,
+.Sq \(-> ,
+.Sq \(<- ,
+.Sq \(<<
+and
+.Sq \(>> ;
+.Cm nothing
+is an empty word.
+The names of common functions,
+.Cm sin , cos , tan , sinh , cosh , tanh , coth , sec , csc , atan , arc ,
+.Cm exp , log , ln , lim , max , min , det , \&Re , Im ,
+and the words
+.Cm and , if
+and
+.Cm for ,
+are set in roman.
+Escape sequences, such as the special characters of
+.Xr roff 7 ,
+work in any word.
+.Sh BOXES
+An equation is built of boxes.
+A word is a box, and braces make a sequence of boxes into one.
+The keywords combine boxes:
+.Bl -tag -width "matrix { lcol { ... } ... }"
+.It Ar a Cm over Ar b
+A fraction,
+.Ar a
+over
+.Ar b .
+.It Ar a Cm sup Ar b
+.Ar b
+as a superscript of
+.Ar a .
+.It Ar a Cm sub Ar b
+.Ar b
+as a subscript of
+.Ar a .
+.Ar a Cm sub Ar b Cm sup Ar c
+sets both on
+.Ar a .
+.It Ar a Cm from Ar b
+.Ar b
+under
+.Ar a ,
+as the limits of a sum or an integral are set.
+.It Ar a Cm to Ar b
+.Ar b
+over
+.Ar a .
+.Ar a Cm from Ar b Cm to Ar c
+sets both on
+.Ar a .
+.It Cm sqrt Ar a
+The square root of
+.Ar a .
+.It Cm left Ar c Ar ... Cm right Ar d
+The boxes between, enclosed in the delimiters
+.Ar c
+and
+.Ar d ,
+which may be empty
+.Pq Ql \(dq\(dq .
+Without
+.Cm right ,
+the equation ends with a closing parenthesis.
+.It Cm pile Brq Ar a Cm above Ar b Cm above Ar ...
+The boxes one above the other, centred;
+.Cm lpile
+and
+.Cm rpile
+align them left and right,
+.Cm cpile
+centres them.
+.It Cm matrix Brq Cm lcol Brq Ar ... Cm ccol Brq Ar ... Cm rcol Brq Ar ...
+A matrix of columns, each a pile of the same number of boxes, aligned left,
+centred or right.
+.It Ar a Cm bar , Cm under
+A line over or under
+.Ar a .
+.It Ar a Cm dot , Cm dotdot , Cm hat , Cm tilde , Cm vec , Cm dyad
+A dot, two dots, a circumflex, a tilde, an arrow or a double arrow over
+.Ar a .
+.It Cm roman , Cm italic , Cm bold , Cm fat Ar a
+.Ar a
+in that font;
+.Cm fat
+is bold.
+Words inside
+.Ar a
+are not split.
+.It Cm size Ar n Ar a
+.Ar a
+in point size
+.Ar n ;
+the size is ignored.
+.El
+.Pp
+Marks bind tightest: a mark belongs to the box just before it.
+Then come the fonts,
+.Cm size
+and
+.Cm sqrt ,
+each taking the one box after it.
+.Cm sub
+and
+.Cm sup
+come next and group to the right, so
+.Ql x sup a sup b
+is
+.Ql x sup { a sup b } ;
+.Cm over
+is looser and groups to the left.
+.Cm from
+and
+.Cm to
+group to the right, and apply to what the other operations have made of the
+boxes before them.
+Braces override all of this.
+.Sh STATEMENTS
+These words change how the rest of the page's equations are read; they set
+no box.
+.Bl -tag -width "define name 'value'"
+.It Cm define Ar name Ar value
+From here on, the word
+.Ar name
+stands for
+.Ar value .
+The first character of
+.Ar value
+is its delimiter: it runs up to the next occurrence of that character, so
+.Ql define half \&'1 over 2\&'
+defines
+.Ql half .
+A definition may use others; they are expanded when it is used.
+.Cm ndefine
+is the same;
+.Cm tdefine
+is read and discarded.
+.It Cm undef Ar name
+Forgets a definition.
+.It Cm delim Ar xy
+Makes
+.Ar x
+and
+.Ar y
+the delimiters of equations inside text lines.
+.Ql delim off
+turns them off, and
+.Ql delim on
+back on.
+.It Cm gfont Ar font , Cm gsize Ar size
+Set the default font and size; they are read and ignored.
+.It Cm back , fwd , up , down Ar n
+Move the next box; they are read and ignored.
+.It Cm mark , lineup
+Align equations with each other; they are ignored.
+.El
+.Sh IN-LINE EQUATIONS
+Once
+.Cm delim
+has set delimiters, an equation can be written in the middle of a text or
+macro line:
+.Bd -literal -offset indent
+\&.EQ
+delim $$
+\&.EN
+The area is $pi r sup 2$.
+.Ed
+.Pp
+The line is cut around the equation.
+The text before it stays as it was; the equation follows it, without a
+space unless the line has one there; and the rest of the line is text,
+even after a macro's arguments, joined to the equation the same way.
+.Sh OUTPUT
+On a terminal, an equation is set on one line, with parentheses where its
+structure would otherwise be lost:
+.Bl -column -offset indent "x sub i sup 2" "(a + b)/(c + d)"
+.It Sy Input Ta Sy Output
+.It Li a+b over c+d Ta a + b/(c + d)
+.It Li {a+b} over {c+d} Ta (a + b)/(c + d)
+.It Li x sub i sup 2 Ta x_i^2
+.It Li sqrt {x+1} Ta \(sr(x + 1)
+.It Li x bar Ta x\(rn
+.El
+.Pp
+In HTML, an equation is MathML.
+.Sh EXAMPLES
+The quadratic formula,
+.Bd -literal -offset indent
+\&.EQ
+x = {-b +- sqrt {b sup 2 - 4ac}} over 2a
+\&.EN
+.Ed
+.Pp
+is shown as
+.EQ
+x = {-b +- sqrt {b sup 2 - 4ac}} over 2a
+.EN
+.Pp
+A sum with limits, using a definition:
+.Bd -literal -offset indent
+\&.EQ
+define sq 'i sup 2'
+sum from i=1 to n sq = {n(n+1)(2n+1)} over 6
+\&.EN
+.Ed
+.Pp
+is shown as
+.EQ
+define sq 'i sup 2'
+sum from i=1 to n sq = {n(n+1)(2n+1)} over 6
+.EN
+.Sh DIAGNOSTICS
+In lint mode,
+.Xr oxdoc 1
+reports problems in equations at the levels
+.Xr mandoc 1
+uses: a closing brace,
+.Cm right
+or
+.Cm above
+with nothing open for it to close, an operation missing its first box, a
+statement missing its argument, an unterminated quoted word or definition,
+and a definition that uses itself.
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr oxdoc 1 ,
+.Xr man 7 ,
+.Xr mdoc 7 ,
+.Xr roff 7 ,
+.Xr tbl 7
+.Rs
+.%A Brian W. Kernighan
+.%A Lorinda L. Cherry
+.%T A System for Typesetting Mathematics
+.%J Communications of the ACM
+.%V 18
+.%N 3
+.%P 151\(en157
+.%D March 1975
+.Re
+.Rs
+.%A Brian W. Kernighan
+.%A Lorinda L. Cherry
+.%T Typesetting Mathematics \(em User's Guide (Second Edition)
+.%I Bell Laboratories
+.%D 1978
+.Re
+.Sh HISTORY
+The
+.Nm
+preprocessor was written by
+.An Brian W. Kernighan
+and
+.An Lorinda L. Cherry
+at Bell Laboratories and first appeared in
+.At v5 .
+This manual was written for OxideBSD.
+.Sh CAVEATS
+Where the
+.Nm
+of
+.Xr mandoc 1
+differs from the language's original description,
+.Xr oxdoc 1
+follows
+.Xr mandoc 1 ,
+the formatter the BSDs share:
+.Cm sqrt
+takes a single box, not an expression;
+.Cm from
+and
+.Cm to
+bind as tightly as
+.Cm over ;
+and a
+.Cm from
+or
+.Cm to
+inside braces that are the operand of
+.Cm sub ,
+.Cm sup ,
+.Cm over
+or
+.Cm sqrt
+applies to that operation, leaving the braces.
+.Sh BUGS
+Positions, sizes and the
+.Cm mark
+and
+.Cm lineup
+alignment are ignored.
+Equations inside tables are not supported.

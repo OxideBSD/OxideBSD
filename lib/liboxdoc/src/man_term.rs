@@ -175,6 +175,11 @@ impl R<'_> {
                     crate::tbl_term::render(&mut self.t, t, true);
                 }
             }
+            Kind::Eqn => {
+                if let Some(e) = &n.eqn {
+                    crate::eqn_term::render(e, &mut self.t);
+                }
+            }
             Kind::Elem => self.elem(n, style),
             Kind::Block => self.block(n, style),
             _ => self.children(n, style),

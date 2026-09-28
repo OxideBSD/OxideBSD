@@ -18,6 +18,8 @@ pub mod unicode;
 pub mod lint;
 pub mod tbl;
 pub mod tbl_term;
+pub mod eqn;
+pub mod eqn_term;
 pub mod regex;
 pub mod keys;
 pub mod db;

@@ -62,6 +62,9 @@ pub enum Line {
     Blank { line: usize },
     /// A table (`.TS` ... `.TE`).
     Table(Box<crate::tbl::Table>),
+    /// An equation, `.EQ` ... `.EN` or between `delim` delimiters in a line. `nospace_before`:
+    /// it attaches to what came before; `nospace_after`: what follows attaches to it.
+    Eqn { eqn: Box<crate::eqn::Eqn>, nospace_before: bool, nospace_after: bool },
 }
 
 /// A condition being skipped or taken, for `.if`/`.ie`/`.el` with a `\{` ... `\}` body.
@@ -99,6 +102,10 @@ pub struct Roff<'a> {
     total_lines: usize,
     /// An open table: where it started, and its lines so far.
     table: Option<(usize, Vec<(usize, String)>)>,
+    /// An open equation: where it started, and its lines so far.
+    equation: Option<(usize, Vec<String>)>,
+    /// Definitions and delimiters, which last from one equation to the next.
+    eqn_state: crate::eqn::State,
     /// An input trap (`.it`): text lines to go, and the macro to call then (empty for a break).
     trap: Option<(usize, String)>,
     /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
@@ -133,6 +140,29 @@ pub fn plain_text(s: &str) -> String {
         .collect()
 }
 
+/// The byte position of `c` in `s` where no escape character comes right before it.
+fn find_unescaped(s: &str, c: char, ec: Option<char>) -> Option<usize> {
+    let mut escaped = false;
+    for (i, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if Some(ch) == ec {
+            escaped = true;
+        } else if ch == c {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// A `.\"` comment line.
+fn is_comment_line(s: &str, cc: char, ec: Option<char>) -> bool {
+    let Some(ec) = ec else { return false };
+    s.strip_prefix([cc, '\'']).is_some_and(|r| r.trim_start_matches([' ', '\t']).starts_with(&format!("{ec}\"")))
+}
+
 /// Macro expansion depth limit, so a recursive `.de` can't hang.
 const MAX_DEPTH: usize = 64;
 
@@ -163,6 +193,8 @@ impl<'a> Roff<'a> {
             check_line: None,
             total_lines: 0,
             table: None,
+            equation: None,
+            eqn_state: Default::default(),
             trap: None,
             out: Vec::new(),
         }
@@ -305,6 +337,18 @@ impl<'a> Roff<'a> {
                 return;
             }
         }
+        // Inside an equation: its lines as typed, up to `.EN`.
+        if self.equation.is_some() {
+            if raw.trim_end().strip_prefix(self.cc).is_some_and(|r| r.trim_start_matches([' ', '\t']).split([' ', '\t']).next() == Some("EN")) {
+                let (start, lines) = self.equation.take().unwrap();
+                self.equation(&lines.join("\n"), start, false, false);
+                return;
+            }
+            if let Some((_, lines)) = &mut self.equation {
+                lines.push(raw.to_string());
+            }
+            return;
+        }
         // Inside a false `\{` body: only track nesting.
         if self.conds.last().is_some_and(|c| !c.active) {
             self.skip_conds(raw);
@@ -313,6 +357,16 @@ impl<'a> Roff<'a> {
         // Whitespace in a comment at the end of the line: reported here, as the comment goes.
         if self.ec.is_some_and(|ec| raw.contains(&format!("{ec}\"")) || raw.contains(&format!("{ec}#"))) {
             self.trailing_space_at(0);
+        }
+
+        // An equation between the `delim` delimiters: the line is cut around it.
+        if let Some((open, close)) = self.eqn_state.delims()
+            && self.conds.last().is_none_or(|c| c.active)
+            && let Some(i) = find_unescaped(raw, open, self.ec)
+            && !is_comment_line(raw, self.cc, self.ec)
+        {
+            self.inline_equation(raw, i, open, close, lineno, depth);
+            return;
         }
 
         let text = raw;
@@ -350,6 +404,10 @@ impl<'a> Roff<'a> {
             }
             if name == "TS" {
                 self.table = Some((lineno, Vec::new()));
+                return;
+            }
+            if name == "EQ" {
+                self.equation = Some((lineno, Vec::new()));
                 return;
             }
             if self.request(&name, argstr, lineno, depth) {
@@ -421,6 +479,45 @@ impl<'a> Roff<'a> {
         let last = lineno == self.total_lines && depth == 0;
         self.emit(Line::Text { text: expanded, raw: raw_text, line: lineno, last });
         self.spring_trap(lineno, depth);
+    }
+
+    /// Parses an equation's text and emits it.
+    fn equation(&mut self, src: &str, lineno: usize, nospace_before: bool, nospace_after: bool) {
+        let mut state = std::mem::take(&mut self.eqn_state);
+        let mut d = Diagnostics::new("");
+        let mut decode = |s: &str| self.expand(s, lineno);
+        let eqn = crate::eqn::parse(src, lineno, &mut state, &mut decode, &mut d);
+        self.eqn_state = state;
+        self.diag.list.extend(d.list);
+        self.emit(Line::Eqn { eqn: Box::new(eqn), nospace_before, nospace_after });
+    }
+
+    /// A line with an in-line equation opening at byte `i`: the text before it is a line of its
+    /// own, then the equation, then the rest, a text line, is processed in turn.
+    fn inline_equation(&mut self, raw: &str, i: usize, open: char, close: char, lineno: usize, depth: usize) {
+        let before = &raw[..i];
+        let rest = &raw[i + open.len_utf8()..];
+        let (src, after) = match rest.find(close) {
+            Some(j) => (&rest[..j], Some(&rest[j + close.len_utf8()..])),
+            None => (rest, None),
+        };
+        let trimmed = before.trim_end_matches([' ', '\t']);
+        let nospace_before = !before.is_empty() && trimmed.len() == before.len();
+        let check = self.check_line.take();
+        if !trimmed.is_empty() {
+            self.line(trimmed, lineno, depth);
+        }
+        let after = after.filter(|a| !a.is_empty());
+        let nospace_after = after.is_some_and(|a| !a.starts_with([' ', '\t']));
+        self.equation(src, lineno, nospace_before, nospace_after);
+        if let Some(a) = after {
+            let a = a.trim_start_matches([' ', '\t']);
+            if !a.is_empty() {
+                self.check_line = check;
+                let ec = self.ec.unwrap_or('\\');
+                self.line(&format!("{ec}&{a}"), lineno, depth);
+            }
+        }
     }
 
     /// Counts a text line against an input trap (`.it`), calling its macro when it springs.

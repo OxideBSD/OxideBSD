@@ -247,6 +247,16 @@ impl Term {
     }
 
     /// Suppresses the space before the next word.
+    /// The columns text `s` takes in this encoding: in ASCII, a character's fallback's width.
+    pub fn text_width(&self, s: &str) -> usize {
+        s.chars().map(|c| if c.is_ascii() || self.encoding == Encoding::Utf8 { 1 } else { ascii_for(c).chars().count() }).sum()
+    }
+
+    /// Cancels a pending [`Term::nospace`].
+    pub fn clear_nospace(&mut self) {
+        self.nospace = false;
+    }
+
     pub fn nospace(&mut self) {
         self.nospace = true;
     }
@@ -296,7 +306,8 @@ impl Term {
                 // mandoc ignores `\%`: a word still breaks at its hyphens.
                 mark::NOHYPH => {}
                 mark::BREAK => parts.push(std::mem::take(&mut cells)),
-                mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: Style::None }),
+                // (In UTF-8 it is a character of its own, and takes the font.)
+                mark::NBSP => cells.push(Cell { ch: HARD_SPACE, style: if self.encoding == Encoding::Utf8 { cur } else { Style::None } }),
                 mark::MINUS => cells.push(Cell { ch: HARD_HYPHEN, style: cur }),
                 mark::BACKSLASH => cells.push(Cell { ch: '\\', style: cur }),
                 mark::BACK => cells.push(Cell { ch: mark::BACK, style: Style::None }),
@@ -605,7 +616,8 @@ impl Term {
         for c in line.iter_mut() {
             match c.ch {
                 HARD_HYPHEN => c.ch = '-',
-                HARD_SPACE => c.ch = ' ',
+                // (An unpaddable space is a no-break space in UTF-8, as mandoc prints it.)
+                HARD_SPACE => c.ch = if self.encoding == Encoding::Utf8 { '\u{a0}' } else { ' ' },
                 _ => {}
             }
         }

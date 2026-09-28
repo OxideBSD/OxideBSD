@@ -96,6 +96,15 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
                 p.text_line(&text);
             }
+            Line::Eqn { eqn, nospace_before, nospace_after } => {
+                let mut n = Node::new(Kind::Eqn, "EQ", eqn.line);
+                n.eqn = Some(eqn);
+                if nospace_before {
+                    p.nospace = true;
+                }
+                p.push(n);
+                p.nospace = nospace_after;
+            }
             Line::Table(table) => {
                 let mut n = Node::new(Kind::Table, "TS", table.line);
                 n.table = Some(table);

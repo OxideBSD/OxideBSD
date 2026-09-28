@@ -15,6 +15,8 @@ pub enum Kind {
     Text,
     /// A tbl table (`node.table`).
     Table,
+    /// An eqn equation (`node.eqn`).
+    Eqn,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,11 +49,13 @@ pub struct Node {
     pub flags: Flags,
     /// A table's contents, for a `Kind::Table` node.
     pub table: Option<Box<crate::tbl::Table>>,
+    /// An equation, for a `Kind::Eqn` node.
+    pub eqn: Option<Box<crate::eqn::Eqn>>,
 }
 
 impl Node {
     pub fn new(kind: Kind, tok: &str, line: usize) -> Node {
-        Node { kind, tok: tok.to_string(), text: String::new(), args: Vec::new(), children: Vec::new(), line, flags: Flags::default(), table: None }
+        Node { kind, tok: tok.to_string(), text: String::new(), args: Vec::new(), children: Vec::new(), line, flags: Flags::default(), table: None, eqn: None }
     }
 
     pub fn text(text: &str, line: usize) -> Node {
@@ -89,6 +93,9 @@ impl Node {
         match self.kind {
             Kind::Text => out.push_str(&format!("{pad}{:?}{}{}\n", self.text, if self.flags.nospace { " (nospace)" } else { "" }, if self.flags.eos { " (eos)" } else { "" })),
             _ => out.push_str(&format!("{pad}{} ({:?}){} {}\n", self.tok, self.kind, if self.args.is_empty() { String::new() } else { format!(" {:?}", self.args) }, self.line)),
+        }
+        if let Some(e) = &self.eqn {
+            e.root.dump(depth + 1, out);
         }
         for c in &self.children {
             c.dump(depth + 1, out);

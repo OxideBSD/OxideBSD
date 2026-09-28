@@ -168,6 +168,12 @@ impl R<'_> {
             }
             return;
         }
+        if n.kind == Kind::Eqn {
+            if let Some(e) = &n.eqn {
+                crate::eqn_term::render(e, &mut self.t);
+            }
+            return;
+        }
         // The arguments of these macros break at hyphens like text; nested macros' don't.
         let saved = self.t.hyph_args;
         if matches!(n.kind, Kind::Elem | Kind::Block) {
@@ -768,19 +774,17 @@ impl R<'_> {
     }
 
     fn column_row(&mut self, bl: &Node, it: &Node, base: usize) {
-        // Column widths: the arguments after -column, each the width of its string.
+        // Column widths: the arguments after -column, each the width of its string; other
+        // options may come between them.
         let mut widths: Vec<usize> = Vec::new();
-        let mut after = false;
-        for a in &bl.args {
-            if a == "-column" {
-                after = true;
-                continue;
-            }
-            if after {
-                if a.starts_with('-') && matches!(a.as_str(), "-compact" | "-offset") {
-                    break;
+        let mut args = bl.args.iter().skip_while(|a| *a != "-column").skip(1);
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "-compact" => {}
+                "-offset" | "-width" => {
+                    args.next();
                 }
-                widths.push(scaled(a));
+                _ => widths.push(if a.is_ascii() { scaled(a) } else { self.t.text_width(a) }),
             }
         }
         let cells: Vec<&Node> = it.children.iter().filter(|c| c.kind == Kind::Body).collect();
@@ -845,10 +849,11 @@ pub(crate) fn os_name(tok: &str, args: &[String]) -> String {
             Some("v5") => "Version\u{E002}5 AT&T UNIX".into(),
             Some("v6") => "Version\u{E002}6 AT&T UNIX".into(),
             Some("v7") => "Version\u{E002}7 AT&T UNIX".into(),
-            Some("32v") => "Version\u{E002}32V AT&T UNIX".into(),
+            Some("32v") => "Version\u{E002}7 AT&T UNIX/32V".into(),
             Some("III") => "AT&T System\u{E002}III UNIX".into(),
             Some("V") => "AT&T System\u{E002}V UNIX".into(),
             Some(r) if r.starts_with("V.") => format!("AT&T System\u{E002}V Release\u{E002}{} UNIX", &r[2..]),
+            Some(other) if !other.is_empty() => format!("AT&T UNIX {other}"),
             _ => "AT&T UNIX".into(),
         },
         "St" => crate::standards::name(args.first().map(String::as_str).unwrap_or("")).to_string(),

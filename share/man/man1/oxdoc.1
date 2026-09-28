@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd September 27, 2026
+.Dd September 28, 2026
 .Dt OXDOC 1
 .Os OxideBSD
 .Sh NAME
@@ -16,7 +16,13 @@ The
 .Nm
 utility formats manual pages written in the
 .Xr mdoc 7
-language, and in the
+or
+.Xr man 7
+language, with tables
+.Pq Xr tbl 7
+and equations
+.Pq Xr eqn 7 ,
+and in the
 .Xr roff 7
 requests and escapes that pages use.
 It reads each
@@ -102,6 +108,7 @@ Diagnostics have the form
 .Sh SEE ALSO
 .Xr man 1 ,
 .Xr more 1 ,
+.Xr eqn 7 ,
 .Xr man 7 ,
 .Xr mdoc 7 ,
 .Xr roff 7 ,
@@ -115,7 +122,4 @@ The
 .Nm
 utility was written for OxideBSD.
 .Sh BUGS
-The
-.Xr eqn 7
-preprocessor is not implemented yet; neither are the HTML and Markdown
-devices.
+The HTML and Markdown devices are not implemented yet.
