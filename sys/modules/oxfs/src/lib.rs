@@ -8021,6 +8021,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
     let man_man7 = ensure_dir(usr_share_man, b"man7");
+    ok &= seed_file(man_man7, b"man.7", include_bytes!("../../../../share/man/man7/man.7"));
     ok &= seed_file(man_man7, b"mdoc.7", include_bytes!("../../../../share/man/man7/mdoc.7"));
     ok &= seed_file(man_man7, b"roff.7", include_bytes!("../../../../share/man/man7/roff.7"));
     let man_man8 = ensure_dir(usr_share_man, b"man8");

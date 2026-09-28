@@ -1,0 +1,345 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 27, 2026
+.Dt MAN 7
+.Os OxideBSD
+.Sh NAME
+.Nm man
+.Nd legacy formatting language for manual pages
+.Sh DESCRIPTION
+The
+.Nm
+language describes a manual page by how it looks: headings, paragraphs,
+indentation and fonts.
+It is older than
+.Xr mdoc 7 ,
+in which OxideBSD's own pages are written, but most manual pages of
+third-party software use it, and
+.Xr oxdoc 1
+formats both.
+Like
+.Xr mdoc 7 ,
+it is written as
+.Xr roff 7
+input: text lines, and macro lines starting with a dot and a macro name.
+.Pp
+A macro's arguments are separated by spaces; an argument containing spaces
+is quoted with double quotes, and a double quote inside one is written
+twice.
+Spaces inside a quoted argument are kept as they are, and the line may
+break at any of them.
+.Pp
+Text lines are filled and adjusted into paragraphs.
+A sentence should end at the end of an input line, so that it can be
+followed by two spaces.
+A blank line is a paragraph break with vertical space, like
+.Ic \&sp ,
+but
+.Ic \&PP
+should be used instead.
+.Sh MANUAL STRUCTURE
+A page starts with
+.Ic \&TH
+and continues with sections, conventionally NAME, SYNOPSIS, DESCRIPTION
+and those listed in
+.Xr mdoc 7 .
+The NAME section holds one line: the names the page describes, separated by
+commas, then
+.Ql \e-
+and a short description.
+.Bd -literal -offset indent
+\&.TH NAME 1 2026-09-27 "OxideBSD" "General Commands Manual"
+\&.SH NAME
+name \e- one-line description
+\&.SH SYNOPSIS
+\&.B name
+\&.RI [ file ...]
+\&.SH DESCRIPTION
+The
+\&.B name
+utility ...
+.Ed
+.Sh MACRO OVERVIEW
+.Ss Document structure
+.Bl -column "UR, UE" description -compact
+.It Ic \&TH Ta the title line
+.It Ic \&SH Ta section heading
+.It Ic \&SS Ta subsection heading
+.El
+.Ss Paragraphs and indentation
+.Bl -column "UR, UE" description -compact
+.It Ic \&PP , \&LP , \&P Ta paragraph
+.It Ic \&TP Ta paragraph with a tag on the next line
+.It Ic \&TQ Ta another tag for the same paragraph
+.It Ic \&IP Ta paragraph, optionally with a tag
+.It Ic \&HP Ta paragraph with a hanging indent
+.It Ic \&RS , \&RE Ta move the left margin right and back
+.It Ic \&PD Ta the space between paragraphs
+.El
+.Ss Fonts
+.Bl -column "UR, UE" description -compact
+.It Ic \&B Ta bold
+.It Ic \&I Ta italic
+.It Ic \&SB Ta small bold, shown bold
+.It Ic \&SM Ta small, shown in the regular font
+.It Ic \&R Ta the regular font
+.It Ic \&BI , \&BR , \&IB , \&IR , \&RB , \&RI Ta two fonts in turn
+.El
+.Ss Hyperlinks and cross-references
+.Bl -column "UR, UE" description -compact
+.It Ic \&UR , \&UE Ta a link to a URL
+.It Ic \&MT , \&ME Ta a link to an e-mail address
+.It Ic \&MR Ta a reference to another manual page
+.El
+.Ss Synopses and examples
+.Bl -column "UR, UE" description -compact
+.It Ic \&SY , \&YS Ta a command synopsis
+.It Ic \&OP Ta an optional command-line option
+.It Ic \&EX , \&EE Ta an example, not filled
+.El
+.Ss Obsolete macros
+.Bl -column "UR, UE" description -compact
+.It Ic \&AT Ta the AT&T system the page belongs to
+.It Ic \&UC Ta the Berkeley system the page belongs to
+.It Ic \&DT Ta restore the default tab stops
+.El
+.Sh MACRO REFERENCE
+.Bl -tag -width Ds
+.It Ic \&TH Ar title section Op Ar date Op Ar source Op Ar volume
+The title line, which must come first.
+.Ar title
+is conventionally in capitals.
+The page header shows it with
+.Ar section
+in parentheses at both ends and
+.Ar volume
+in the middle; the footer shows
+.Ar source ,
+the system or package the page belongs to, at the left,
+.Ar date
+in the middle and the title again at the right.
+Without
+.Ar volume ,
+the section's usual name is used, such as
+.Dq General Commands Manual
+for section 1.
+.It Ic \&SH Op Ar heading
+A section heading, printed at the left margin in bold.
+Without
+.Ar heading ,
+the next input line is the heading.
+It ends any open paragraph and
+.Ic \&RS
+indentation.
+.It Ic \&SS Op Ar heading
+A subsection heading, indented less than the text of the section; a long
+one wraps to the text's indentation.
+.It Ic \&PP , \&LP , \&P
+A paragraph: a blank line, then text at the section's indentation.
+Empty paragraphs, and one right after a heading, produce no blank line.
+.It Ic \&TP Op Ar width
+A tagged paragraph.
+The next input line is the tag, printed at the current indentation; the
+text after it is indented by
+.Ar width ,
+by default seven columns or the width last given.
+When the tag is too wide for that indentation, the text starts on the next
+line.
+Blank lines between
+.Ic \&TP
+and the tag are ignored.
+.It Ic \&TQ
+Another tag for the paragraph of the
+.Ic \&TP
+before it, printed on its own line with no space above it.
+.It Ic \&IP Op Ar tag Op Ar width
+An indented paragraph, with the optional
+.Ar tag
+in the margin like
+.Ic \&TP .
+.It Ic \&HP Op Ar width
+A paragraph whose first line starts at the current indentation and whose
+other lines are indented by
+.Ar width .
+.It Ic \&RS Op Ar width
+Moves the left margin right by
+.Ar width ,
+by default the width of the last tagged paragraph, until the matching
+.Ic \&RE .
+.It Ic \&RE Op Ar level
+Ends the innermost
+.Ic \&RS ,
+or all of them down to
+.Ar level .
+.It Ic \&PD Op Ar distance
+Sets the vertical space before paragraphs and headings, in lines; without
+.Ar distance ,
+one line.
+.Ql \&.PD 0
+is used before a
+.Ic \&TP
+that should follow the one before it without space.
+.It Ic \&B , \&I , \&SB , \&SM , \&R Op Ar text ...
+Prints
+.Ar text ,
+or without it the next input line, in the macro's font.
+.It Ic \&BI , \&BR , \&IB , \&IR , \&RB , \&RI Ar text ...
+Prints its arguments joined without spaces, in the two fonts of its name in
+turn: bold, italic or regular.
+For example,
+.Ql \&.BR ls (1)
+prints
+.Sy ls
+in bold and
+.Ql (1)
+in the regular font.
+.It Ic \&UR Ar url
+The text up to
+.Ic \&UE
+is a link to
+.Ar url ,
+which is printed after it in angle brackets.
+.It Ic \&UE Op Ar punctuation
+Ends a
+.Ic \&UR
+link;
+.Ar punctuation
+is printed right after it.
+.It Ic \&MT Ar address , Ic \&ME Op Ar punctuation
+The same for an e-mail address.
+.It Ic \&MR Ar name section Op Ar suffix
+A reference to the manual page
+.Ar name
+in
+.Ar section ,
+as
+.Ql name(section) .
+.It Ic \&SY Ar command
+Starts a synopsis of
+.Ar command :
+the command in bold, then the following text with its continuation lines
+indented to line up after it.
+.It Ic \&YS
+Ends a synopsis.
+.It Ic \&OP Ar flag Op Ar argument
+An optional option in a synopsis: the flag in bold and the argument in
+italics, in brackets.
+.It Ic \&EX , \&EE
+An example: the lines between them are printed as they are, not filled.
+.It Ic \&AT Op Ar version Op Ar release
+Sets the footer's source to an AT&T system:
+.Dq 7th Edition
+by default, or System III or System V for version 4 or 5.
+.It Ic \&UC Op Ar version
+Sets the footer's source to a Berkeley system, from
+.Dq 3rd Berkeley Distribution
+for version 3 to
+.Dq 4.4 Berkeley Distribution
+for version 7.
+.It Ic \&DT
+Restores the default tab stops, every half inch (five columns).
+.El
+.Pp
+A font macro or a line of text ending in
+.Ql \ec
+continues on the next line without a space.
+.Sh ROFF REQUESTS
+These
+.Xr roff 7
+requests are commonly used in manual pages and have their usual effect on a
+terminal:
+.Bl -tag -width Ds
+.It Ic \&br
+Ends the output line.
+.It Ic \&sp Op Ar distance
+Ends the line and leaves
+.Ar distance
+blank lines, by default one; an exact half line leaves none.
+.It Ic \&nf , \&fi
+Stops and resumes filling: in between, each input line is an output line.
+.It Ic \&in Op Oo \(pl|\- Oc Ns Ar width
+Sets the left margin: to
+.Ar width
+columns from the left edge of the page, or moved by it with a sign, or with
+no argument back to the paragraph's own margin.
+The next paragraph or heading macro resets it.
+.It Ic \&ti Op Oo \(pl|\- Oc Ns Ar width
+Indents only the next output line.
+.It Ic \&ft Op Ar font
+Changes the font, like
+.Ic \ef ;
+an unknown font name is ignored.
+.It Ic \&ta Ar stop ...
+Sets tab stops, in columns from the left margin.
+A stop written
+.Ql \(pl Ns Ar n
+is
+.Ar n
+columns after the one before it, and
+.Ql T Ar n
+repeats every
+.Ar n
+columns after the last one.
+Past the last stop a tab moves nowhere.
+.El
+.Pp
+Other typesetting requests, such as
+.Ic \&ad ,
+.Ic \&na ,
+.Ic \&hy ,
+.Ic \&nh ,
+.Ic \&ne
+and
+.Ic \&ll ,
+are accepted and have no effect.
+A page cannot redefine the
+.Nm
+macros with
+.Ic \&de ;
+such definitions are ignored.
+.Pp
+The number register
+.Va an-margin
+holds the left margin set by
+.Ic \&RS
+and
+.Ic \&RE ,
+in basic units (24 to a column), as groff's man macros keep it.
+.Sh SCALING UNITS
+Widths and distances are numbers with an optional unit:
+.Bl -column "Unit" "one column (default for widths)" -compact
+.It Sy Unit Ta Sy Meaning
+.It Li n , m Ta one column (default for widths)
+.It Li v Ta one line (default for vertical distances)
+.It Li i Ta an inch, ten columns
+.It Li c Ta a centimetre
+.It Li p , P Ta a point, a pica
+.It Li u Ta a basic unit, 1/24 of a column
+.El
+Only a leading number and unit are read; anything after them, such as the
+rest of
+.Ql 3n+2n ,
+is ignored.
+Fractions are rounded to whole columns or lines, an exact half down.
+.Sh SEE ALSO
+.Xr man 1 ,
+.Xr oxdoc 1 ,
+.Xr mdoc 7 ,
+.Xr roff 7
+.Sh HISTORY
+The
+.Nm
+language first appeared in
+.At v7 ,
+replacing the
+.Nm
+macros of earlier editions.
+The
+.Ic \&SY ,
+.Ic \&OP ,
+.Ic \&EX ,
+.Ic \&UR ,
+.Ic \&MT
+and
+.Ic \&MR
+macros are extensions from GNU troff.
+This manual was written for OxideBSD.
