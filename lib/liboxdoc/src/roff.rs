@@ -95,6 +95,8 @@ pub struct Roff<'a> {
     check_line: Option<(usize, usize)>,
     /// The number of input lines.
     total_lines: usize,
+    /// An input trap (`.it`): text lines to go, and the macro to call then (empty for a break).
+    trap: Option<(usize, String)>,
     /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
     language: Option<bool>,
     /// `an-margin` values saved by man(7)'s `.RS`, for `.RE` to restore.
@@ -142,6 +144,7 @@ impl<'a> Roff<'a> {
             language: None,
             check_line: None,
             total_lines: 0,
+            trap: None,
             out: Vec::new(),
         }
     }
@@ -320,6 +323,20 @@ impl<'a> Roff<'a> {
         self.trailing_space_at(0);
         let last = lineno == self.total_lines && depth == 0;
         self.emit(Line::Text { text: expanded, raw: raw_text, line: lineno, last });
+        self.spring_trap(lineno, depth);
+    }
+
+    /// Counts a text line against an input trap (`.it`), calling its macro when it springs.
+    fn spring_trap(&mut self, lineno: usize, depth: usize) {
+        let Some((n, name)) = self.trap.take() else { return };
+        if n > 1 {
+            self.trap = Some((n - 1, name));
+        } else if name.is_empty() {
+            self.emit(Line::Macro { name: "br".into(), args: Vec::new(), line: lineno, col: 2, raw: "br".into(), no_break: false, trailing: None });
+        } else if depth < MAX_DEPTH {
+            let l = format!("{}{name}", self.cc);
+            self.line(&l, lineno, depth + 1);
+        }
     }
 
     /// Reports whitespace at the end of the current input line, if it has some, at its last
@@ -538,8 +555,20 @@ impl<'a> Roff<'a> {
                 self.ec = None;
                 true
             }
+            "it" => {
+                // An input trap: after `n` more text lines, the macro is called. mandoc makes
+                // DocBook's `.it 1 an-trap` (ending a font macro's next-line scope) a break.
+                let mut it = argstr.split_whitespace();
+                let n = it.next().map(|n| self.number(n, b'u')).unwrap_or(0);
+                match it.next() {
+                    // (Only `.it 1 an-trap`: a longer one calls the undefined macro.)
+                    Some(m) if n > 0 => self.trap = Some((n as usize, if n == 1 && m == "an-trap" { String::new() } else { m.to_string() })),
+                    _ => self.trap = None,
+                }
+                true
+            }
             // Requests with no effect on terminal or HTML output.
-            "hy" | "nh" | "hw" | "hc" | "ad" | "na" | "pl" | "pn" | "po" | "ps" | "vs" | "ss" | "cs" | "bd" | "uf" | "lg" | "ev" | "mk" | "rt" | "ch" | "wh" | "dt" | "it" | "itc" | "em" | "pc" | "lf" | "tm" | "tm1" | "tmc" | "ab" | "ex" | "fl" | "ftr" | "fam" | "fcolor" | "gcolor" | "defcolor" | "do" | "cp" | "nx" | "rd" | "pso" | "open" | "opena" | "write" | "close" | "trf" | "cf" | "shift" | "while" | "break" | "continue" | "blm" | "lsm" | "kern" | "nm" | "nn" | "sy" | "warn" | "hla" | "hlm" | "hpf" | "hym" | "hys" | "pvs" | "tkf" | "vpt" | "ecs" | "ecr" | "nop" | "char" | "fchar" | "schar" | "rchar" | "fschar" | "return" | "substring" | "length" | "chop" | "asciify" | "unformat" | "di" | "da" | "box" | "boxa" | "tl" | "mc" | "ns" | "rs" | "os" | "sv" | "rj" | "fp" | "fspecial" | "special" | "sizes" | "ptr" | "pm" | "psbb" | "fzoom" | "gtl" | "ss_" | "tag" | "taga" | "spreadwarn" => {
+            "hy" | "nh" | "hw" | "hc" | "ad" | "na" | "pl" | "pn" | "po" | "ps" | "vs" | "ss" | "cs" | "bd" | "uf" | "lg" | "ev" | "mk" | "rt" | "ch" | "wh" | "dt" | "itc" | "em" | "pc" | "lf" | "tm" | "tm1" | "tmc" | "ab" | "ex" | "fl" | "ftr" | "fam" | "fcolor" | "gcolor" | "defcolor" | "do" | "cp" | "nx" | "rd" | "pso" | "open" | "opena" | "write" | "close" | "trf" | "cf" | "shift" | "while" | "break" | "continue" | "blm" | "lsm" | "kern" | "nm" | "nn" | "sy" | "warn" | "hla" | "hlm" | "hpf" | "hym" | "hys" | "pvs" | "tkf" | "vpt" | "ecs" | "ecr" | "nop" | "char" | "fchar" | "schar" | "rchar" | "fschar" | "return" | "substring" | "length" | "chop" | "asciify" | "unformat" | "di" | "da" | "box" | "boxa" | "tl" | "mc" | "ns" | "rs" | "os" | "sv" | "rj" | "fp" | "fspecial" | "special" | "sizes" | "ptr" | "pm" | "psbb" | "fzoom" | "gtl" | "ss_" | "tag" | "taga" | "spreadwarn" => {
                 if name == "nop" {
                     // `.nop text`: the text as a text line.
                     let t = self.expand(argstr, lineno);

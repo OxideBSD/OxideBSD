@@ -47,10 +47,12 @@ struct Parser<'a> {
     trailing: Option<(usize, usize)>,
     /// In no-fill mode (`.nf`, `.EX`), where text lines aren't checked.
     nofill: bool,
+    /// The paragraph checks.
+    flow: crate::lint::ManFlow,
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, nofill: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, nofill: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, flow: Default::default() };
     for l in lines {
         match l {
             Line::Macro { name, args, line, col, raw, trailing, .. } => {
@@ -70,6 +72,9 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
                 p.col = col;
                 p.raw = raw;
+                // An `.RE` with no `.RS` open is a line break.
+                let stray_re = name == "RE" && !p.stack.iter().any(|n| n.kind == Kind::Block && n.tok == "RS");
+                p.flow.macro_line(p.diag, if stray_re { "br" } else { &name }, line, col, !args.is_empty());
                 match name.as_str() {
                     "nf" | "EX" => p.nofill = true,
                     "fi" | "EE" => p.nofill = false,
@@ -85,6 +90,9 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.line = line;
                 p.col = 1;
                 crate::lint::text_line(p.diag, line, &raw, last, p.nofill || p.in_preproc, false);
+                if !p.in_preproc {
+                    p.flow.text(p.diag, &raw);
+                }
                 p.text_line(&text);
             }
             Line::Blank { line } => {
@@ -94,6 +102,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 if p.pending_head {
                     continue;
                 }
+                p.flow.blank(p.diag, line);
                 // A blank line is `.sp`, even before the first section (unlike in mdoc); marked,
                 // since at the start of a section it is ignored where `.sp` isn't.
                 let mut n = Node::new(Kind::Elem, "sp", line);
@@ -102,6 +111,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             }
         }
     }
+    p.flow.end(p.diag);
     while p.stack.len() > 1 {
         p.close_top();
     }
@@ -275,7 +285,7 @@ impl Parser<'_> {
             "RE" => {
                 // Closes the innermost `.RS` (or the one numbered by the argument).
                 let Some(pos) = self.stack.iter().rposition(|n| n.kind == Kind::Block && n.tok == "RS") else {
-                    self.diag.report(Level::Error, self.line, 0, "no matching RS, ending the paragraph", "RE");
+                    self.diag.report(Level::Error, self.line, self.col, "skipping end of block that is not open", "RE");
                     self.drop_trailing_pp();
                     self.close_paragraph();
                     self.push(Node::new(Kind::Elem, "RE", self.line));
