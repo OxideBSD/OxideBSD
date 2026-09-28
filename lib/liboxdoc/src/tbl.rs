@@ -116,11 +116,18 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
             next = 0;
             continue;
         }
-        if line.starts_with('.') || line.starts_with('\'') {
-            ignore_macro(line, *lineno, diag);
-            i += 1;
-            continue;
-        }
+        // A macro isn't formatted; any but a break's arguments make a row of their own.
+        let line = if line.starts_with('.') || line.starts_with('\'') {
+            match ignore_macro(line, *lineno, diag) {
+                Some(args) => args.to_string(),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            line.clone()
+        };
         match line.as_str() {
             "_" => {
                 rows.push(Row::Line(1));
@@ -138,7 +145,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
         next += 1;
         // The cells, text blocks spanning lines.
         let mut cells = Vec::new();
-        let mut rest = line.clone();
+        let mut rest = line;
         let row_line = *lineno;
         i += 1;
         loop {
@@ -159,7 +166,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                     }
                     if l.starts_with('.') || l.starts_with('\'') {
                         // A macro inside a block: ignored, but its arguments stay as text.
-                        if let Some(args) = ignore_macro(l, lines[i - 1].0, diag) {
+                        if let Some(args) = ignore_macro(l, lines[i - 1].0, diag).filter(|a| !a.is_empty()) {
                             text.push(decode(args, lines[i - 1].0));
                         }
                         continue;
@@ -195,7 +202,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
 
 /// Reports a macro line in a table, which isn't formatted. The requests that break or place
 /// text (`br`, `sp`, `ce`, `rj`) are reported at their arguments and leave nothing; any other
-/// macro is reported at its name, and its arguments (returned) stay as text.
+/// macro is reported at its name, and its arguments (returned, maybe empty) stay as text.
 fn ignore_macro<'a>(line: &'a str, lineno: usize, diag: &mut Diagnostics) -> Option<&'a str> {
     let body = line[1..].trim_start_matches([' ', '\t']);
     if body.is_empty() || body.starts_with('\\') {
@@ -209,7 +216,7 @@ fn ignore_macro<'a>(line: &'a str, lineno: usize, diag: &mut Diagnostics) -> Opt
         return None;
     }
     diag.report(Level::Unsupported, lineno, name_col, "ignoring macro in table", body);
-    (!args.is_empty()).then_some(args)
+    Some(args)
 }
 
 fn parse_opts(line: &str) -> Opts {

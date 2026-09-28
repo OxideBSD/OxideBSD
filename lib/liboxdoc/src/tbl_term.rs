@@ -224,14 +224,35 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             widths[j] = eq;
         }
     }
-    // A spanning cell wider than its columns widens them evenly, the leftmost first by the
-    // odd columns.
+    // A spanning cell wider than its columns widens them.
     for &(j, span, w) in &spans {
         let have: usize = (j..j + span).map(|c| widths[c]).sum::<usize>() + (j..j + span - 1).map(|c| spacing[c]).sum::<usize>();
         if w > have {
-            let extra = w - have;
-            for (i, c) in (j..j + span).enumerate() {
-                widths[c] += extra / span + usize::from(i < extra % span);
+            // The missing width goes to the narrowest columns, raising them together to the
+            // next narrowest; when it can't, each of them from the left takes an even share
+            // rounded up, until it runs out.
+            let mut extra = w - have;
+            while extra > 0 {
+                let cols = j..j + span;
+                let min = cols.clone().map(|c| widths[c]).min().unwrap_or(0);
+                let low: Vec<usize> = cols.clone().filter(|c| widths[*c] == min).collect();
+                let next = cols.map(|c| widths[c]).filter(|w| *w > min).min();
+                match next {
+                    Some(next) if extra >= low.len() * (next - min) => {
+                        for c in &low {
+                            widths[*c] = next;
+                        }
+                        extra -= low.len() * (next - min);
+                    }
+                    _ => {
+                        let share = extra.div_ceil(low.len());
+                        for c in low {
+                            let add = share.min(extra);
+                            widths[c] += add;
+                            extra -= add;
+                        }
+                    }
+                }
             }
         }
     }
