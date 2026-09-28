@@ -164,7 +164,7 @@ impl R<'_> {
         }
         if n.kind == Kind::Table {
             if let Some(t) = &n.table {
-                crate::tbl_term::render(&mut self.t, t);
+                crate::tbl_term::render(&mut self.t, t, false);
             }
             return;
         }

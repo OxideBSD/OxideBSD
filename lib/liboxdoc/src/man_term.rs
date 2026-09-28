@@ -26,6 +26,18 @@ struct R<'a> {
     after_sh: Option<(usize, bool)>,
     /// The `.sp` at the start of this section has been swallowed.
     sp_swallowed: bool,
+    /// A table comes next, after requests that print nothing (for a paragraph macro whose
+    /// text follows it, not in a body of its own).
+    table_next: bool,
+}
+
+/// Requests that print nothing, which don't stop a table from being first in a paragraph.
+fn prints_nothing(c: &Node) -> bool {
+    c.kind == Kind::Elem && matches!(c.tok.as_str(), "ne" | "ft" | "ta" | "ll" | "hy" | "nh" | "ad" | "na")
+}
+
+fn table_first(nodes: &[Node]) -> bool {
+    nodes.iter().find(|c| !prints_nothing(c)).is_some_and(|c| c.kind == Kind::Table)
 }
 
 pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
@@ -33,7 +45,7 @@ pub fn render(doc: &Document, t: Term, synopsis_only: bool) -> String {
     // man(7) sets tab stops every half inch, five columns.
     t.tab_width = 5;
     t.nofill_zero_lines = true;
-    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), pd: 1, after_sh: None, sp_swallowed: false };
+    let mut r = R { t, meta: &doc.meta, base: INDENT, width: WIDTH, levels: Vec::new(), pd: 1, after_sh: None, sp_swallowed: false, table_next: false };
     if synopsis_only {
         for sh in doc.root.children.iter().filter(|n| n.tok == "SH") {
             if sh.part(Kind::Head).is_some_and(|h| h.plain_text().trim() == "SYNOPSIS")
@@ -87,7 +99,8 @@ impl R<'_> {
     /// A paragraph's space, except when its body starts with a table, whose own blank line
     /// stands in for it.
     fn para_space_unless_table(&mut self, n: &Node) {
-        if n.part(Kind::Body).and_then(|b| b.children.first()).is_some_and(|c| c.kind == Kind::Table) {
+        let body = n.part(Kind::Body).map(|b| &b.children[..]);
+        if body.map_or(self.table_next, |b| b.is_empty() && self.table_next || table_first(b)) {
             self.t.flush();
             return;
         }
@@ -141,7 +154,8 @@ impl R<'_> {
     }
 
     fn children(&mut self, n: &Node, style: Style) {
-        for c in &n.children {
+        for (i, c) in n.children.iter().enumerate() {
+            self.table_next = table_first(&n.children[i + 1..]);
             self.node(c, style);
         }
     }
@@ -158,7 +172,7 @@ impl R<'_> {
             Kind::Text => text_node(&mut self.t, n, style),
             Kind::Table => {
                 if let Some(t) = &n.table {
-                    crate::tbl_term::render(&mut self.t, t);
+                    crate::tbl_term::render(&mut self.t, t, true);
                 }
             }
             Kind::Elem => self.elem(n, style),

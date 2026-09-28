@@ -8,11 +8,13 @@ use crate::term::{Style, Term};
 /// A cell formatted: its lines and their printed widths.
 struct Formatted {
     lines: Vec<(String, usize)>,
+    /// The width it claims even when its lines are shorter.
+    min_width: usize,
 }
 
 impl Formatted {
     fn width(&self) -> usize {
-        self.lines.iter().map(|(_, w)| *w).max().unwrap_or(0)
+        self.lines.iter().map(|(_, w)| *w).max().unwrap_or(0).max(self.min_width)
     }
 }
 
@@ -71,7 +73,7 @@ fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
     if lines.is_empty() {
         lines.push((String::new(), 0));
     }
-    Formatted { lines }
+    Formatted { lines, min_width: 0 }
 }
 
 fn style_of(spec: &Spec) -> Style {
@@ -92,13 +94,26 @@ fn numeric_split(s: &str, point: char) -> (usize, usize) {
     (int, w - int)
 }
 
+/// A text block's width: its words, filled with single spaces between them (whatever was
+/// typed) into lines at most `limit` wide, and the longest of those lines.
+fn measure_block(t: &Term, text: &[String], style: Style, limit: usize) -> usize {
+    let (mut longest, mut line) = (0, 0);
+    for w in text.iter().flat_map(|l| l.split(' ')).filter(|w| !w.is_empty()) {
+        let ww = format(t, &[w.to_string()], style, 10_000).width();
+        line = if line > 0 && line + 1 + ww <= limit { line + 1 + ww } else { ww };
+        longest = longest.max(line);
+    }
+    longest
+}
+
 /// One laid-out data row: for each column, the formatted cell (if it starts there), its
 /// kind, and the number of columns it spans.
 struct Laid {
     cells: Vec<Option<(Formatted, char, usize, Option<u8>)>>,
 }
 
-pub fn render(t: &mut Term, tbl: &Table) {
+/// Lays out a table; man(7) puts a blank line before it, mdoc doesn't.
+pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     let n = tbl.ncols.max(1);
     let o = &tbl.opts;
     // A text block's width, unless the layout gives one: the line over the columns plus one.
@@ -124,7 +139,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
         }
     }
     let mut laid_rows: Vec<Option<Laid>> = Vec::new();
-    // Text blocks in `x` columns, formatted once the widths are known: row, column, text.
+    // Text blocks, formatted once the widths are known: row, column, text.
     let mut later: Vec<(usize, usize, &[String], Style)> = Vec::new();
     for (ri, row) in tbl.rows.iter().enumerate() {
         let Row::Data { cells, layout, .. } = row else {
@@ -158,11 +173,14 @@ pub fn render(t: &mut Term, tbl: &Table) {
                 (_, '_') => (format(t, &none, style, big), Some(1)),
                 (_, '=') => (format(t, &none, style, big), Some(2)),
                 (Some(Cell::Line(d)), _) => (format(t, &none, style, big), Some(*d)),
-                (Some(Cell::Block(text)), _) if max[j] && spec.width.is_none() => {
+                (Some(Cell::Block(text)), _) => {
+                    // A block claims the width of its words filled with single spaces up to its
+                    // width, and is formatted once the column's width is known.
                     later.push((ri, j, text, style));
-                    (format(t, &none, style, big), None)
+                    let mut f = format(t, &none, style, big);
+                    f.min_width = measure_block(t, text, style, spec.width.unwrap_or(block_width));
+                    (f, None)
                 }
-                (Some(Cell::Block(text)), _) => (format(t, text, style, spec.width.unwrap_or(block_width)), None),
                 (Some(Cell::Text(text)), _) => (format(t, std::slice::from_ref(text), style, big), None),
                 (Some(Cell::ShortLine), _) => (format(t, &none, style, big), Some(0)),
                 _ => (format(t, &none, style, big), None),
@@ -230,7 +248,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
             }
         }
     }
-    // Blocks in `x` columns, at their column's width.
+    // Text blocks, at their column's width.
     for (ri, j, text, style) in later {
         if let Some(Some(laid)) = laid_rows.get_mut(ri)
             && let Some(cell) = laid.cells[j].as_mut()
@@ -248,16 +266,23 @@ pub fn render(t: &mut Term, tbl: &Table) {
     }
     let content = start[n - 1] + widths[n - 1] + 1;
     let frame = o.frame > 0;
-    let total = content + if frame { 2 } else { 0 };
+    // Lines down the table's edges: a frame's, or the layout's first and last `|` (one line,
+    // even for `||`).
+    let left = frame || vlines[0] > 0;
+    let right = frame || vlines[n] > 0;
+    let total = content + usize::from(left) + usize::from(right);
     let avail = t.rmargin.saturating_sub(t.offset);
     let indent = t.offset + if o.center { (avail.saturating_sub(total) + 1) / 2 } else { 0 };
     let pad = " ".repeat(indent);
 
     // A horizontal line across the table, with `+` where vertical lines cross it.
-    let rule = |double: bool| -> String {
+    let rule = |double: bool, cross: bool| -> String {
         let fill = if double { '=' } else { '-' };
         let mut line: Vec<char> = vec![fill; content];
         for j in 0..n.saturating_sub(1) {
+            if !cross {
+                break;
+            }
             let at = start[j] + widths[j] + 1;
             for v in 0..vlines[j + 1] as usize {
                 if at + v < content {
@@ -266,25 +291,30 @@ pub fn render(t: &mut Term, tbl: &Table) {
             }
         }
         let body: String = line.into_iter().collect();
-        if frame { format!("{pad}+{body}+") } else { format!("{pad}{body}") }
+        format!("{pad}{}{body}{}", if left { "+" } else { "" }, if right { "+" } else { "" })
     };
 
-    t.table_space();
+    if space_before {
+        t.table_space();
+    } else {
+        t.flush();
+    }
+    // A double frame's outer line doesn't show where the columns' lines cross it.
     if frame {
-        for _ in 0..o.frame {
-            t.raw_line(&rule(false));
+        for i in 0..o.frame {
+            t.raw_line(&rule(false, i + 1 == o.frame));
         }
     }
     let nrows = laid_rows.len();
     for (ri, (row, laid)) in tbl.rows.iter().zip(&laid_rows).enumerate() {
         match (row, laid) {
-            (Row::Line(d), _) => t.raw_line(&rule(*d == 2)),
+            (Row::Line(d), _) => t.raw_line(&rule(*d == 2, true)),
             (_, Some(laid)) => {
                 let height = laid.cells.iter().flatten().map(|(f, ..)| f.lines.len()).max().unwrap_or(1);
                 for li in 0..height {
                     let mut s = String::new();
                     s.push_str(&pad);
-                    if frame {
+                    if left {
                         s.push('|');
                     }
                     let mut col = 0;
@@ -316,7 +346,7 @@ pub fn render(t: &mut Term, tbl: &Table) {
                         s.push_str(&text.0);
                         col = start[j] + lead + text.1;
                     }
-                    if frame {
+                    if right {
                         while col < content {
                             s.push(' ');
                             col += 1;
@@ -327,15 +357,15 @@ pub fn render(t: &mut Term, tbl: &Table) {
                 }
                 // allbox: a line after every row but the last.
                 if o.allbox && ri + 1 < nrows {
-                    t.raw_line(&rule(false));
+                    t.raw_line(&rule(false, true));
                 }
             }
             _ => {}
         }
     }
     if frame {
-        for _ in 0..o.frame {
-            t.raw_line(&rule(false));
+        for i in 0..o.frame {
+            t.raw_line(&rule(false, i == 0));
         }
         t.skip_vspace = true;
     }
