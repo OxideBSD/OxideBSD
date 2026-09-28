@@ -277,8 +277,9 @@ impl R {
             if n.text.is_empty() {
                 return;
             }
+            // (A line starting with a space breaks; with a tab, it doesn't.)
             if !n.flags.continues {
-                self.pre_line(n.text.starts_with([' ', '\t']));
+                self.pre_line(n.text.starts_with(' '));
             }
             self.h.text(&n.text, &mut self.fonts, true);
             return;

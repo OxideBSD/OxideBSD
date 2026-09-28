@@ -165,7 +165,16 @@ impl ManFlow {
                 }
                 self.stack.push(Container { kind, children: Vec::new() });
             }
+            // A synopsis block ends the paragraph as a paragraph macro does.
+            "SY" => {
+                self.close_para(diag);
+                self.top().children.push(Child::Content);
+            }
             "RS" => {
+                // (A bare `.IP` with nothing in it yet ends there, empty.)
+                if matches!(self.top().kind, Kind::Para("IP", ..)) && self.top().children.is_empty() {
+                    self.close(diag);
+                }
                 self.top().children.push(Child::Content);
                 self.stack.push(Container { kind: Kind::Rs, children: Vec::new() });
             }
@@ -260,9 +269,10 @@ impl ManFlow {
     /// an empty paragraph, are reported and dropped.
     fn close(&mut self, diag: &mut Diagnostics) {
         let Some(mut c) = self.stack.pop() else { return };
+        // (In a bare `.IP`, a break first counts as content.)
         let name = match c.kind {
             Kind::Section(s) => s,
-            Kind::Para(p, ..) => p,
+            Kind::Para(p, ..) if p != "IP" => p,
             _ => "",
         };
         if !name.is_empty() {

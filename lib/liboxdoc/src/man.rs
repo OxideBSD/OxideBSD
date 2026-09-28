@@ -17,6 +17,9 @@ pub const FONT_MACROS: &[&str] = &["B", "I", "SB", "SM", "BI", "BR", "IB", "IR",
 const PARAGRAPHS: &[&str] = &["PP", "LP", "P", "TP", "TQ", "IP", "HP"];
 
 /// Macros with no text of their own that the renderer interprets.
+/// Macros that break a `.TP` head's line scope: the paragraph goes, head and all.
+const BREAK_HEAD: &[&str] = &["br", "sp", "RS", "RE", "IP", "SH", "SS", "TP", "TQ", "HP", "LP", "P", "PP", "UR", "UE", "MT", "ME", "SY", "YS", "EX", "EE", "ti", "ce"];
+
 const CONTROL: &[&str] = &["br", "sp", "nf", "fi", "EX", "EE", "in", "ti", "PD", "DT", "ne", "ce", "ad", "na", "hy", "nh", "ta", "ft", "UC", "AT", "ll", "bp", "Sp", "Vb", "Ve"];
 
 struct Parser<'a> {
@@ -27,6 +30,8 @@ struct Parser<'a> {
     pending_font: Option<String>,
     /// A `.SH`/`.SS`/`.TP` head waiting for the next line.
     pending_head: bool,
+    /// Where the last `.TP`/`.TQ` was, for a report if its head never comes.
+    head_at: (usize, usize),
     /// The last text line ended in `\c`: the next node attaches without a space.
     nospace: bool,
     /// The last text line ended in `\c`.
@@ -52,7 +57,7 @@ struct Parser<'a> {
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, nofill: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, flow: Default::default() };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, head_at: (0, 0), nospace: false, continued: false, joined: false, nofill: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false, flow: Default::default() };
     for l in lines {
         match l {
             Line::Macro { name, args, line, col, raw, trailing, .. } => {
@@ -117,6 +122,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 // Where a head line is expected (after `.TP` or an empty `.SS`), blank lines are
                 // skipped.
                 if p.pending_head {
+                    p.diag.report(Level::Warning, line, 1, "skipping blank line in line scope", "");
                     continue;
                 }
                 p.flow.blank(p.diag, line);
@@ -128,6 +134,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             }
         }
     }
+    p.break_head("EOF");
     p.flow.end(p.diag);
     let skipped = std::mem::take(&mut p.flow.skipped);
     while p.stack.len() > 1 {
@@ -251,6 +258,9 @@ impl Parser<'_> {
     }
 
     fn macro_line(&mut self, name: &str, args: &[String]) {
+        if BREAK_HEAD.contains(&name) {
+            self.break_head(name);
+        }
         match name {
             "TH" => {
                 crate::lint::man_th(self.diag, self.line, self.col, &self.raw);
@@ -289,6 +299,7 @@ impl Parser<'_> {
                 self.stack.last_mut().unwrap().args = args.to_vec();
                 self.open(Kind::Head, name);
                 self.pending_head = true;
+                self.head_at = (self.line, self.col);
             }
             "IP" | "HP" => {
                 self.close_paragraph();
@@ -420,6 +431,19 @@ impl Parser<'_> {
                 }
             }
         }
+    }
+
+    /// A `.TP`/`.TQ` still waiting for its head line when `by` comes is dropped whole.
+    fn break_head(&mut self, by: &str) {
+        let Some(top) = self.stack.last() else { return };
+        if !(self.pending_head && top.kind == Kind::Head && matches!(top.tok.as_str(), "TP" | "TQ")) {
+            return;
+        }
+        let what = format!("{by} breaks {}", top.tok);
+        self.diag.report(Level::Warning, self.head_at.0, self.head_at.1, "line scope broken", &what);
+        self.stack.pop();
+        self.stack.pop();
+        self.pending_head = false;
     }
 
     /// `.RS` right after `.TP` (before its head line) doesn't start a head.
