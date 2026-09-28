@@ -120,12 +120,15 @@ struct Container {
 /// the rest when its paragraph or section ends, on what comes first or last in it.
 pub struct ManFlow {
     stack: Vec<Container>,
+    /// The line and macro of every paragraph macro and break reported as skipped, for the
+    /// parser to drop from the tree, as mandoc does.
+    pub skipped: Vec<(usize, &'static str)>,
 }
 
 impl Default for ManFlow {
     fn default() -> Self {
         // (Before the first `.SH`, as in a section without a name.)
-        ManFlow { stack: vec![Container { kind: Kind::Other, children: Vec::new() }] }
+        ManFlow { stack: vec![Container { kind: Kind::Other, children: Vec::new() }], skipped: Vec::new() }
     }
 }
 
@@ -199,7 +202,13 @@ impl ManFlow {
         {
             top.children.pop();
             diag.report(Level::Warning, l, c, SKIP, "br before text line with leading blank");
+            self.skipped.push((l, "br"));
         }
+        self.top().children.push(Child::Content);
+    }
+
+    /// Something that isn't text or a macro, a table or an equation: content all the same.
+    pub fn content(&mut self) {
         self.top().children.push(Child::Content);
     }
 
@@ -219,14 +228,21 @@ impl ManFlow {
         if let Some(Child::Br(l, c)) = top.children.last().copied() {
             top.children.pop();
             diag.report(Level::Warning, l, c, SKIP, "br before sp");
+            self.skipped.push((l, "br"));
         }
         self.top().children.push(Child::Sp(line, col));
     }
 
     fn br(&mut self, diag: &mut Diagnostics, line: usize, col: usize) {
         match self.top().children.last() {
-            Some(Child::Br(..)) => diag.report(Level::Warning, line, col, SKIP, "br after br"),
-            Some(Child::Sp(..)) => diag.report(Level::Warning, line, col, SKIP, "br after sp"),
+            Some(Child::Br(..)) => {
+                diag.report(Level::Warning, line, col, SKIP, "br after br");
+                self.skipped.push((line, "br"));
+            }
+            Some(Child::Sp(..)) => {
+                diag.report(Level::Warning, line, col, SKIP, "br after sp");
+                self.skipped.push((line, "br"));
+            }
             _ => self.top().children.push(Child::Br(line, col)),
         }
     }
@@ -251,10 +267,12 @@ impl ManFlow {
             match c.children.first().copied() {
                 Some(Child::Sp(l, col)) => {
                     diag.report(Level::Warning, l, col, SKIP, &format!("sp after {name}"));
+                    self.skipped.push((l, "sp"));
                     c.children.remove(0);
                 }
                 Some(Child::Br(l, col)) => {
                     diag.report(Level::Warning, l, col, SKIP, &format!("br after {name}"));
+                    self.skipped.push((l, "br"));
                     c.children.remove(0);
                 }
                 Some(Child::Para) if matches!(c.kind, Kind::Section(_)) => {}
@@ -265,15 +283,18 @@ impl ManFlow {
             && let Some(Child::Br(l, col)) = c.children.last().copied()
         {
             diag.report(Level::Warning, l, col, SKIP, &format!("br at the end of {s}"));
+            self.skipped.push((l, "br"));
         }
         let Some(parent) = self.stack.last_mut() else { return };
         if let Kind::Para(p, l, col) = c.kind {
             if c.children.is_empty() {
                 diag.report(Level::Warning, l, col, SKIP, &format!("{p} empty"));
+                self.skipped.push((l, p));
             } else {
                 // A paragraph first in its section is useless (reported with the section).
                 if p == "PP" && matches!(parent.kind, Kind::Section(_)) && parent.children.is_empty() {
                     diag.report(Level::Warning, l, col, SKIP, &format!("PP after {}", if let Kind::Section(s) = parent.kind { s } else { "" }));
+                    self.skipped.push((l, "PP"));
                 }
                 parent.children.push(Child::Para);
             }

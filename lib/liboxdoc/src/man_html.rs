@@ -1,11 +1,655 @@
-//! Renders a man(7) document tree as HTML (MAN.md §5, `-T html`).
+//! Renders a man(7) document tree as HTML (MAN.md §5, `-T html`), in the markup mandoc
+//! produces: fonts as `b`/`i`, paragraphs as `p`, tagged paragraphs as a tag list.
+
+use std::collections::HashMap;
 
 use crate::html::{self, Html, HtmlOptions};
-use crate::tree::Document;
+use crate::mdoc_term::volume;
+use crate::roff::mark;
+use crate::tree::{Document, Kind, Node};
+
+struct R {
+    h: Html,
+    /// Text directly in a section starts a paragraph until the section has had one.
+    para: bool,
+    in_ss: bool,
+    /// Identifiers of headings and tagged paragraphs, by node address.
+    ids: HashMap<usize, String>,
+    /// The font an escape selected, still open.
+    font: Vec<&'static str>,
+    /// No-fill mode (`.nf`, `.EX`), and whether `.EX` started it.
+    nofill: bool,
+    example: bool,
+    /// In no-fill mode: nothing has been output in the block yet, and a break (`.br`) is due
+    /// before the next line.
+    pre_start: bool,
+    pre_break: bool,
+    /// The tag list open, and the macro and indent its items were made with.
+    list: Option<(String, Option<String>)>,
+}
 
 pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String {
-    let mut h = Html::new();
-    html::begin_document(&mut h, opts, &format!("{}({})", doc.meta.title, doc.meta.section), comments);
-    html::end_document(&mut h, opts);
-    h.finish()
+    let meta = &doc.meta;
+    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, list: None };
+    let title = format!("{}({})", plain(&meta.title), plain(&meta.section));
+    html::begin_document(&mut r.h, opts, &title, comments);
+    // (A volume given empty is a no-break space.)
+    let vol = if meta.volume_given {
+        if meta.volume.is_empty() { mark::NBSP.to_string() } else { plain(&meta.volume) }
+    } else {
+        volume(&meta.section).to_string()
+    };
+    r.table("head", &[("head-ltitle", &title), ("head-vol", &vol), ("head-rtitle", &title)]);
+    r.h.open("div", "class=\"manual-text\"");
+    r.children(&doc.root);
+    r.end_list();
+    r.close_p();
+    while r.h.is_open("section") {
+        r.h.close("section");
+    }
+    r.h.close("div");
+    let date = plain(&crate::format_date(&meta.date));
+    let source = plain(&meta.os);
+    r.table("foot", &[("foot-date", &date), ("foot-os", &source)]);
+    html::end_document(&mut r.h, opts);
+    r.h.finish()
+}
+
+/// Headings and the heads of tagged paragraphs get identifiers, numbered when repeated.
+fn tags(doc: &Document) -> HashMap<usize, String> {
+    fn walk(n: &Node, out: &mut Vec<(usize, String)>) {
+        for c in &n.children {
+            if c.kind == Kind::Block {
+                let text = match c.tok.as_str() {
+                    "SH" | "SS" => c.part(Kind::Head).map(|h| plain(&h.plain_text())),
+                    "TP" | "TQ" => c.part(Kind::Head).and_then(|h| first_word(&text_of(h))),
+                    "IP" => c.args.first().and_then(|a| first_word(a)),
+                    _ => None,
+                };
+                if let Some(t) = text.filter(|t| !t.is_empty() && t.is_ascii()) {
+                    out.push((c as *const Node as usize, t));
+                }
+            }
+            walk(c, out);
+        }
+    }
+    let mut claims = Vec::new();
+    walk(&doc.root, &mut claims);
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut out = HashMap::new();
+    for (node, text) in claims {
+        let n = seen.entry(text.clone()).or_default();
+        *n += 1;
+        let id = html::make_id(&text);
+        out.insert(node, if *n == 1 { id } else { format!("{id}~{n}") });
+    }
+    out
+}
+
+/// The text of a node's words and its macros' arguments.
+fn text_of(n: &Node) -> String {
+    let mut out = String::new();
+    for c in &n.children {
+        let t = match c.kind {
+            Kind::Text => c.text.clone(),
+            Kind::Elem => c.args.join(" "),
+            _ => text_of(c),
+        };
+        if !t.is_empty() {
+            if !out.is_empty() && !c.flags.nospace {
+                out.push(' ');
+            }
+            out.push_str(&t);
+        }
+    }
+    out
+}
+
+/// A tag's text: its first word, without leading dashes and fonts, up to an escape.
+fn first_word(s: &str) -> Option<String> {
+    let s = s.trim_start_matches(|c: char| c == '-' || c == mark::MINUS || c == mark::BACKSLASH || mark::is_font(c) || c == ' ');
+    let s: String = s.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c) && *c != ' ').collect();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The element a font marker opens.
+fn font_tags(f: char) -> &'static [&'static str] {
+    match f {
+        mark::FONT_B => &["b"],
+        mark::FONT_I => &["i"],
+        mark::FONT_BI => &["b", "i"],
+        _ => &[],
+    }
+}
+
+impl R {
+    fn table(&mut self, class: &str, cells: &[(&str, &str)]) {
+        self.h.open("table", &format!("class=\"{class}\""));
+        self.h.open("tr", "");
+        for (c, text) in cells {
+            self.h.open("td", &format!("class=\"{c}\""));
+            for w in text.split(' ').filter(|w| !w.is_empty()) {
+                self.h.word(w);
+            }
+            self.h.close("td");
+        }
+        self.h.close("tr");
+        self.h.close("table");
+    }
+
+    fn ensure_p(&mut self) {
+        if self.h.top() == Some("section") && self.para {
+            self.h.open("p", "class=\"Pp\"");
+            self.para = false;
+        }
+    }
+
+    fn close_p(&mut self) {
+        self.close_font();
+        if self.h.top() == Some("p") {
+            self.h.close("p");
+        }
+    }
+
+    /// Closes the tag list, if one is open.
+    fn end_list(&mut self) {
+        if let Some((k, _)) = self.list.take() {
+            self.close_font();
+            self.h.close(if k == "bullet" { "ul" } else { "dl" });
+        }
+    }
+
+    fn close_font(&mut self) {
+        while let Some(t) = self.font.pop() {
+            self.h.close(t);
+        }
+    }
+
+    /// Sets the escape font `f`, closing the one before.
+    fn set_font(&mut self, f: char) {
+        self.close_font();
+        for t in font_tags(f) {
+            self.h.open(t, "");
+            self.font.push(t);
+        }
+    }
+
+    fn children(&mut self, n: &Node) {
+        for c in &n.children {
+            self.node(c);
+        }
+    }
+
+    fn node(&mut self, n: &Node) {
+        if n.flags.nospace {
+            self.h.nospace();
+        }
+        match n.kind {
+            Kind::Text => self.text(n),
+            Kind::Elem => self.elem(n),
+            Kind::Block => self.block(n),
+            Kind::Table => {
+                self.close_p();
+                if let Some(t) = &n.table {
+                    crate::tbl_html::render(&mut self.h, t);
+                }
+            }
+            Kind::Eqn => {
+                self.ensure_p();
+                if let Some(e) = &n.eqn {
+                    crate::eqn_html::render(e, &mut self.h);
+                }
+            }
+            _ => self.children(n),
+        }
+    }
+
+    /// Text, with its font escapes as elements.
+    fn text(&mut self, n: &Node) {
+        if self.nofill {
+            // (Blank lines vanish.)
+            if n.text.is_empty() {
+                return;
+            }
+            if !n.flags.continues {
+                self.pre_line(n.text.starts_with([' ', '\t']));
+            }
+            self.literal(&n.text);
+            return;
+        }
+        self.ensure_p();
+        self.words(&n.text, n.flags.line_start);
+    }
+
+    /// The start of a line in no-fill mode: after a newline, or a break where the line starts
+    /// with spaces (or `.br` came before it).
+    fn pre_line(&mut self, spaces: bool) {
+        let brk = spaces || std::mem::take(&mut self.pre_break);
+        if brk {
+            self.h.literal_raw("\n<br/>\n");
+        } else if !self.pre_start {
+            self.h.literal_raw("\n");
+        }
+        self.pre_start = false;
+    }
+
+    /// Text in no-fill mode, spaces kept, font escapes as elements.
+    fn literal(&mut self, text: &str) {
+        let mut buf = String::new();
+        for c in text.chars() {
+            if mark::is_font(c) {
+                if !buf.is_empty() {
+                    self.h.literal_text(&std::mem::take(&mut buf));
+                }
+                while let Some(t) = self.font.pop() {
+                    self.h.literal_raw(&format!("</{t}>"));
+                }
+                for t in font_tags(c) {
+                    self.h.literal_raw(&format!("<{t}>"));
+                    self.font.push(t);
+                }
+                continue;
+            }
+            buf.push(c);
+        }
+        if !buf.is_empty() {
+            self.h.literal_text(&buf);
+        }
+    }
+
+    /// Words of text, font escapes switching elements.
+    fn words(&mut self, text: &str, _line: bool) {
+        let text = text.trim_matches([' ', '\t']);
+        let mut first = true;
+        for w in text.split(' ').filter(|w| !w.is_empty()) {
+            if !first {
+                self.h.clear_nospace();
+            }
+            first = false;
+            let mut buf = String::new();
+            let mut started = false;
+            for c in w.chars() {
+                if mark::is_font(c) {
+                    if !buf.is_empty() {
+                        self.h.word(&buf);
+                        self.h.nospace();
+                        buf.clear();
+                        started = true;
+                    }
+                    if !started {
+                        // (A font change before the word's first character comes after the
+                        // space.)
+                        self.h.word("");
+                        self.h.nospace();
+                        started = true;
+                    }
+                    self.set_font(c);
+                    self.h.nospace();
+                    continue;
+                }
+                buf.push(c);
+            }
+            if !buf.is_empty() {
+                self.h.word(&buf);
+            }
+        }
+    }
+
+    fn elem(&mut self, n: &Node) {
+        let tok = n.tok.as_str();
+        match tok {
+            "PP" | "LP" | "P" => {
+                self.end_list();
+                self.close_p();
+                self.h.open("p", "class=\"Pp\"");
+                self.para = false;
+            }
+            "br" => {
+                if self.nofill {
+                    self.pre_break = true;
+                } else {
+                    self.h.br();
+                }
+            }
+            "sp" => {
+                self.end_list();
+                self.close_p();
+                self.h.open("p", "class=\"Pp\"");
+                self.para = false;
+            }
+            "nf" | "EX" => {
+                if !self.nofill {
+                    self.close_p();
+                    self.h.open("pre", "");
+                    self.nofill = true;
+                    self.example = tok == "EX";
+                    self.pre_start = true;
+                    self.pre_break = false;
+                }
+            }
+            "fi" | "EE" => {
+                if self.nofill {
+                    // (An example ends with its last line's newline.)
+                    if self.example {
+                        self.h.literal_raw("\n");
+                    }
+                    while let Some(t) = self.font.pop() {
+                        self.h.literal_raw(&format!("</{t}>"));
+                    }
+                    self.h.close("pre");
+                    // Text after it starts a paragraph.
+                    self.para = true;
+                }
+                self.nofill = false;
+            }
+            "SM" | "SB" => {
+                self.ensure_p();
+                self.h.open("small", "");
+                if tok == "SB" {
+                    self.h.open("b", "");
+                }
+                for (i, a) in n.args.iter().enumerate() {
+                    if i > 0 {
+                        self.h.clear_nospace();
+                    }
+                    self.words(a, false);
+                }
+                if tok == "SB" {
+                    self.h.close("b");
+                }
+                self.h.close("small");
+            }
+            "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" if self.nofill => {
+                if !n.flags.continues {
+                    self.pre_line(false);
+                }
+                let fonts: [&str; 2] = match tok {
+                    "B" => ["b", "b"],
+                    "I" => ["i", "i"],
+                    "BI" => ["b", "i"],
+                    "IB" => ["i", "b"],
+                    "BR" => ["b", ""],
+                    "RB" => ["", "b"],
+                    "IR" => ["i", ""],
+                    _ => ["", "i"],
+                };
+                let alternating = tok.len() == 2;
+                for (i, a) in n.args.iter().enumerate() {
+                    if i > 0 && !alternating {
+                        self.h.literal_text(" ");
+                    }
+                    let f = fonts[i % 2];
+                    if !f.is_empty() {
+                        self.h.literal_raw(&format!("<{f}>"));
+                    }
+                    self.literal(a);
+                    while let Some(t) = self.font.pop() {
+                        self.h.literal_raw(&format!("</{t}>"));
+                    }
+                    if !f.is_empty() {
+                        self.h.literal_raw(&format!("</{f}>"));
+                    }
+                }
+            }
+            "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" => {
+                self.ensure_p();
+                self.close_font();
+                let fonts: [&str; 2] = match tok {
+                    "B" => ["b", "b"],
+                    "I" => ["i", "i"],
+                    "BI" => ["b", "i"],
+                    "IB" => ["i", "b"],
+                    "BR" => ["b", ""],
+                    "RB" => ["", "b"],
+                    "IR" => ["i", ""],
+                    _ => ["", "i"],
+                };
+                let alternating = tok.len() == 2;
+                if !alternating {
+                    self.h.open(fonts[0], "");
+                    for (i, a) in n.args.iter().enumerate() {
+                        if i > 0 {
+                            self.h.clear_nospace();
+                        }
+                        self.words(a, false);
+                    }
+                    self.close_font();
+                    self.h.close(fonts[0]);
+                } else {
+                    for (i, a) in n.args.iter().enumerate() {
+                        if i > 0 {
+                            self.h.nospace();
+                        }
+                        let f = fonts[i % 2];
+                        if !f.is_empty() {
+                            self.h.open(f, "");
+                        }
+                        self.words(a, false);
+                        self.close_font();
+                        if !f.is_empty() {
+                            self.h.close(f);
+                        }
+                    }
+                }
+            }
+            "OP" => {
+                self.ensure_p();
+                self.h.word("[");
+                self.h.nospace();
+                self.h.open("span", "class=\"Op\"");
+                if let Some(a) = n.args.first() {
+                    self.h.open("b", "");
+                    self.words(a, false);
+                    self.h.close("b");
+                }
+                if let Some(a) = n.args.get(1) {
+                    self.h.open("i", "");
+                    self.words(a, false);
+                    self.h.close("i");
+                }
+                self.h.nospace();
+                self.h.word("]");
+                self.h.close("span");
+            }
+            "RE" => {}
+            "ft" => {
+                if let Some(f) = n.args.first().and_then(|a| a.chars().next()) {
+                    let m = match f {
+                        'B' | '3' => mark::FONT_B,
+                        'I' | '2' => mark::FONT_I,
+                        _ => mark::FONT_R,
+                    };
+                    self.set_font(m);
+                }
+            }
+            _ => {
+                for a in &n.args {
+                    self.words(a, false);
+                }
+            }
+        }
+    }
+
+    fn block(&mut self, n: &Node) {
+        let tok = n.tok.as_str();
+        match tok {
+            "SH" | "SS" => self.section(n),
+            "IP" if n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*") => {
+                // An indented paragraph tagged with a bullet is an item of a bullet list.
+                self.close_p();
+                let same = self.list.as_ref().is_some_and(|(k, _)| k == "bullet");
+                if !same {
+                    self.end_list();
+                    self.h.open("ul", "class=\"Bl-bullet\"");
+                }
+                self.list = Some(("bullet".into(), None));
+                self.h.open("li", "");
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.close_font();
+                self.h.close("li");
+            }
+            "TP" | "TQ" | "IP" => {
+                self.close_p();
+                let width = if tok == "IP" { n.args.get(1).cloned() } else { n.args.first().cloned() };
+                let kind = if tok == "IP" { "IP" } else { "TP" };
+                // (A list goes on through items of its kind; an indented paragraph with a new
+                // indent starts another.)
+                let same = self.list.as_ref().is_some_and(|(k, w)| k == kind && (kind == "TP" || width.is_none() || *w == width));
+                if !same {
+                    self.end_list();
+                    self.h.open("dl", "class=\"Bl-tag\"");
+                }
+                self.list = Some((kind.to_string(), if width.is_some() { width } else { self.list.as_ref().and_then(|l| l.1.clone()) }));
+                match self.ids.get(&(n as *const Node as usize)).cloned() {
+                    Some(id) => {
+                        self.h.open("dt", &format!("id=\"{}\"", html::escape(&id)));
+                        self.h.open("a", &format!("class=\"permalink\" href=\"#{}\"", html::escape(&id)));
+                        self.head(n);
+                        self.close_font();
+                        self.h.close("a");
+                    }
+                    None => {
+                        self.h.open("dt", "");
+                        self.head(n);
+                        self.close_font();
+                    }
+                }
+                self.h.close("dt");
+                self.h.open("dd", "");
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.close_font();
+                self.h.close("dd");
+            }
+            "HP" => {
+                self.end_list();
+                self.close_p();
+                self.para = false;
+                self.h.open("p", "class=\"Pp HP\"");
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.close_p();
+            }
+            "RS" => {
+                self.end_list();
+                self.close_p();
+                self.h.open("div", "class=\"Bd-indent\"");
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.end_list();
+                self.close_p();
+                self.h.close("div");
+            }
+            "UR" | "MT" => {
+                self.ensure_p();
+                let url = n.args.first().cloned().unwrap_or_default();
+                let (class, href) = if tok == "UR" { ("Lk", url) } else { ("Mt", format!("mailto:{url}")) };
+                self.h.open("a", &format!("class=\"{class}\" href=\"{}\"", html::escape(&href)));
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.close_font();
+                self.h.close("a");
+            }
+            "SY" => {
+                self.end_list();
+                self.close_p();
+                self.h.open("table", "class=\"Nm\"");
+                self.h.open("tr", "");
+                self.h.open("td", "");
+                self.h.open("code", "class=\"Nm\"");
+                for a in &n.args {
+                    self.words(a, false);
+                }
+                self.h.close("code");
+                self.h.close("td");
+                self.h.open("td", "");
+                if let Some(b) = n.part(Kind::Body) {
+                    self.children(b);
+                }
+                self.close_font();
+                self.h.close("td");
+                self.h.close("tr");
+                self.h.close("table");
+            }
+            _ => {
+                for part in &n.children {
+                    self.children(part);
+                }
+            }
+        }
+    }
+
+    /// A tagged paragraph's head: `.IP`'s tag argument, or the head line.
+    fn head(&mut self, n: &Node) {
+        if n.tok == "IP" {
+            if let Some(a) = n.args.first() {
+                self.words(a, false);
+            }
+        } else if let Some(h) = n.part(Kind::Head) {
+            self.children(h);
+        }
+    }
+
+    fn section(&mut self, n: &Node) {
+        self.end_list();
+        self.close_p();
+        let (class, h) = if n.tok == "SH" { ("Sh", "h1") } else { ("Ss", "h2") };
+        if n.tok == "SH" {
+            while self.h.is_open("section") {
+                self.h.close("section");
+            }
+            self.in_ss = false;
+        } else if self.in_ss {
+            self.h.close("section");
+        }
+        if n.tok == "SS" {
+            self.in_ss = true;
+        }
+        self.h.open("section", &format!("class=\"{class}\""));
+        let head = n.part(Kind::Head);
+        match self.ids.get(&(n as *const Node as usize)).cloned() {
+            Some(id) => {
+                self.h.open(h, &format!("class=\"{class}\" id=\"{}\"", html::escape(&id)));
+                self.h.open("a", &format!("class=\"permalink\" href=\"#{}\"", html::escape(&id)));
+                if let Some(hd) = head {
+                    self.children(hd);
+                }
+                self.close_font();
+                self.h.close("a");
+            }
+            None => {
+                self.h.open(h, &format!("class=\"{class}\""));
+                if let Some(hd) = head {
+                    self.children(hd);
+                }
+                self.close_font();
+            }
+        }
+        self.h.close(h);
+        self.para = true;
+        if let Some(b) = n.part(Kind::Body) {
+            self.children(b);
+        }
+        self.end_list();
+        self.close_p();
+    }
+}
+
+/// Prologue text with roff's markers resolved.
+fn plain(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            mark::MINUS => Some('-'),
+            mark::NBSP => Some(' '),
+            mark::BACKSLASH => Some('\\'),
+            c if ('\u{E000}'..='\u{E01F}').contains(&c) => None,
+            c => Some(c),
+        })
+        .collect()
 }

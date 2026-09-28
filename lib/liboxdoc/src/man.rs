@@ -97,6 +97,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.text_line(&text);
             }
             Line::Eqn { eqn, nospace_before, nospace_after } => {
+                p.flow.content();
                 let mut n = Node::new(Kind::Eqn, "EQ", eqn.line);
                 n.eqn = Some(eqn);
                 if nospace_before {
@@ -106,6 +107,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 p.nospace = nospace_after;
             }
             Line::Table(table) => {
+                p.flow.content();
                 let mut n = Node::new(Kind::Table, "TS", table.line);
                 n.table = Some(table);
                 p.stack.last_mut().unwrap().children.push(n);
@@ -127,10 +129,12 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
         }
     }
     p.flow.end(p.diag);
+    let skipped = std::mem::take(&mut p.flow.skipped);
     while p.stack.len() > 1 {
         p.close_top();
     }
-    let root = p.stack.pop().unwrap();
+    let mut root = p.stack.pop().unwrap();
+    drop_skipped(&mut root, &skipped);
     Document { language: Language::Man, meta: p.meta, root }
 }
 
@@ -423,5 +427,32 @@ impl Parser<'_> {
         if self.pending_head && self.stack.last().is_some_and(|t| t.kind == Kind::Head && t.tok != "SH" && t.tok != "SS") {
             self.head_done();
         }
+    }
+}
+
+/// Removes the paragraph macros and breaks the checks found to do nothing (`ManFlow`), as
+/// mandoc does: an empty paragraph goes whole.
+fn drop_skipped(n: &mut Node, skipped: &[(usize, &str)]) {
+    let mut out = Vec::with_capacity(n.children.len());
+    for c in std::mem::take(&mut n.children) {
+        let tok = match c.tok.as_str() {
+            "LP" | "P" => "PP",
+            t => t,
+        };
+        if matches!(c.kind, Kind::Elem | Kind::Block) && skipped.iter().any(|&(l, t)| l == c.line && t == tok) {
+            // (A paragraph block still holding something, say a table the checks don't see,
+            // gives it up to its parent.)
+            if c.kind == Kind::Block {
+                for part in c.children {
+                    out.extend(part.children);
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    n.children = out;
+    for c in &mut n.children {
+        drop_skipped(c, skipped);
     }
 }

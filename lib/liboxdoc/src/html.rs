@@ -352,6 +352,18 @@ impl Html {
         self.started = true;
     }
 
+    /// Markup going out as it is, inside `pre`.
+    pub fn literal_raw(&mut self, s: &str) {
+        self.flush_unit();
+        self.out.push_str(s);
+        match s.rfind('\n') {
+            Some(p) => self.col = s[p + 1..].chars().count(),
+            None => self.col += s.chars().count(),
+        }
+        self.started = true;
+        self.fresh = false;
+    }
+
     /// A raw line of the document frame, at the current indentation.
     pub fn line(&mut self, s: &str) {
         self.end_line();
@@ -394,8 +406,14 @@ pub fn leading_comments(input: &str) -> Vec<String> {
     for line in input.lines() {
         let body = line.strip_prefix(".\\\"").or_else(|| line.strip_prefix("'\\\""));
         match body {
-            Some(b) => out.push(b.to_string()),
-            None => break,
+            Some(b) => out.push(b.trim_end().to_string()),
+            None => {
+                // (The first other line's own comment, at its end, is the last.)
+                if let Some(p) = line.find("\\\"").filter(|p| !line[..*p].ends_with('\\')) {
+                    out.push(line[p + 2..].trim_end().to_string());
+                }
+                break;
+            }
         }
     }
     out
