@@ -75,6 +75,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 if !p.in_preproc {
                     p.flow.macro_line(p.diag, &name, line, col, !args.is_empty());
                 }
+                crate::lint::macro_line_tabs(p.diag, line, &p.raw, col, p.nofill || p.in_preproc);
                 match name.as_str() {
                     "nf" | "EX" => p.nofill = true,
                     "fi" | "EE" => p.nofill = false,

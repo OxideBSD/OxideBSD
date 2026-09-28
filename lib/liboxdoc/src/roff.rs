@@ -173,6 +173,33 @@ impl<'a> Roff<'a> {
     }
 
     /// Processes a whole document.
+    /// Control characters in an input line, as mandoc treats them: each is reported and
+    /// printed as `?`, except a carriage return, which goes. A few mandoc calls unsupported,
+    /// the rest bad.
+    fn control_chars(&mut self, line: &str, lineno: usize) -> String {
+        if !line.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+            return line.to_string();
+        }
+        let mut out = String::with_capacity(line.len());
+        for (i, c) in line.char_indices() {
+            let b = c as u32;
+            if !(b < 0x20 && c != '\t' || b == 0x7f) {
+                out.push(c);
+                continue;
+            }
+            let hex = format!("0x{b:x}");
+            if matches!(b, 1..=3 | 5..=8) {
+                self.diag.report(Level::Unsupported, lineno, i + 1, "unsupported control character", &hex);
+            } else {
+                self.diag.report(Level::Error, lineno, i + 1, "skipping bad character", &hex);
+            }
+            if c != '\r' {
+                out.push('?');
+            }
+        }
+        out
+    }
+
     pub fn run(mut self, input: &str) -> Vec<Line> {
         let input = input.strip_suffix('\n').unwrap_or(input);
         let mut pending = String::new();
@@ -181,6 +208,8 @@ impl<'a> Roff<'a> {
         for (i, line) in input.split('\n').enumerate() {
             // A line ending in an unescaped backslash continues on the next one.
             let line = line.strip_suffix('\r').unwrap_or(line);
+            let clean = self.control_chars(line, i + 1);
+            let line = clean.as_str();
             let trailing = line.len() - line.trim_end_matches('\\').len();
             if pending.is_empty() {
                 start = i + 1;

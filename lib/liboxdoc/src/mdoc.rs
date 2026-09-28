@@ -139,6 +139,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
                 p.pending_nd = crate::lint::mdoc_args(p.diag, line, p.col, &name, &p.raw);
                 p.lint.macro_line(p.diag, line, p.col, &name, &p.raw);
+                crate::lint::macro_line_tabs(p.diag, line, &p.raw, p.col, p.in_literal() || p.in_preproc);
                 p.macro_line(&name, &args, first);
                 if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MDOC_MACROS.contains(&name.as_str())) {
                     p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");

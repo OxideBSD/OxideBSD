@@ -74,8 +74,9 @@ pub enum Cell {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
-    /// Cells, and the layout row they follow.
-    Data { cells: Vec<Cell>, layout: Layout, line: usize },
+    /// Cells, and the layout row they follow. `raw` has each text cell as typed (empty for
+    /// the others): mandoc aligns numbers by it.
+    Data { cells: Vec<Cell>, raw: Vec<String>, layout: Layout, line: usize },
     /// `_` or `=` alone on a line: a line across the table.
     Line(u8),
 }
@@ -151,6 +152,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
         next += 1;
         // The cells, text blocks spanning lines.
         let mut cells = Vec::new();
+        let mut raw = Vec::new();
         let mut rest = line;
         let row_line = *lineno;
         i += 1;
@@ -186,6 +188,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                     text.push(decode(l, lines[i - 1].0));
                 }
                 cells.push(Cell::Block(text));
+                raw.push(String::new());
                 match after {
                     // `T}` then the next cell, after a tab.
                     Some(a) if a.starts_with(opts.tab) => {
@@ -195,6 +198,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                     _ => break,
                 }
             }
+            raw.push(cell.clone());
             cells.push(match cell.as_str() {
                 "_" => Cell::Line(1),
                 "=" => Cell::Line(2),
@@ -207,7 +211,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                 None => break,
             }
         }
-        rows.push(Row::Data { cells, layout, line: row_line });
+        rows.push(Row::Data { cells, raw, layout, line: row_line });
     }
     Table { opts, rows, ncols, line: start }
 }

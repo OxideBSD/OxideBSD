@@ -25,6 +25,40 @@ pub fn text_line(diag: &mut Diagnostics, line: usize, raw: &str, last: bool, lit
     }
 }
 
+/// The checks on a macro line as typed (`raw` from the macro's name, at column `col`), in fill
+/// mode (not `literal`): its tabs. One inside a quoted argument is placed as mandoc places
+/// anything there: at the quote's column plus its index in the unquoted text.
+pub fn macro_line_tabs(diag: &mut Diagnostics, line: usize, raw: &str, col: usize, literal: bool) {
+    if literal || !raw.contains('\t') {
+        return;
+    }
+    let b = raw.as_bytes();
+    let mut i = 0;
+    // In a quoted argument: its quote's column, and the unquoted text's length so far.
+    let mut quoted: Option<(usize, usize)> = None;
+    while i < b.len() {
+        match (b[i], quoted) {
+            (b'"', None) if i == 0 || matches!(b[i - 1], b' ' | b'\t') => quoted = Some((col + i, 0)),
+            (b'"', Some((q, n))) => {
+                if b.get(i + 1) == Some(&b'"') {
+                    quoted = Some((q, n + 1));
+                    i += 1;
+                } else {
+                    quoted = None;
+                }
+            }
+            (b'\t', None) => diag.report(Level::Warning, line, col + i, "tab in filled text", ""),
+            (b'\t', Some((q, n))) => {
+                diag.report(Level::Warning, line, q + n, "tab in filled text", "");
+                quoted = Some((q, n + 1));
+            }
+            (_, Some((q, n))) => quoted = Some((q, n + 1)),
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 /// A sentence that doesn't start on a new line: a period after two letters or digits (but not
 /// "Inc." or "vs."), then one to three spaces and a capital letter.
 fn new_sentence(diag: &mut Diagnostics, line: usize, raw: &str) {

@@ -122,20 +122,26 @@ fn style_of(spec: &Spec) -> Style {
     }
 }
 
-/// Where a number aligns, as a byte offset into its decoded text: the last `\&`, or else the
-/// last decimal point next to a digit, or else just after the last digit. `None` when the text
-/// has no digit: it isn't a number.
-fn number_point(s: &str, point: char) -> Option<usize> {
-    if let Some(p) = s.rfind(crate::roff::mark::ZERO) {
-        return Some(p);
-    }
-    let last_digit = s.char_indices().filter(|(_, c)| c.is_ascii_digit()).last()?;
-    let chars: Vec<(usize, char)> = s.char_indices().collect();
-    let dot = (0..chars.len()).rev().find(|&k| {
-        chars[k].1 == point
-            && (k > 0 && chars[k - 1].1.is_ascii_digit() || chars.get(k + 1).is_some_and(|(_, c)| c.is_ascii_digit()))
-    });
-    Some(dot.map_or(last_digit.0 + last_digit.1.len_utf8(), |k| chars[k].0))
+/// The width of a number's part before its alignment point, which is the last `\&`, or else
+/// the last decimal point next to a digit, or else just after the last digit. mandoc measures
+/// that part as typed, each escape as its length less the backslash, so a number with escapes
+/// before its point can sit off the column's alignment, and this does the same. `None` when
+/// the text has neither a digit nor `\&`: it isn't a number.
+fn number_int(raw: &str, point: char) -> Option<usize> {
+    let chars: Vec<char> = raw.chars().collect();
+    let amp = (0..chars.len().saturating_sub(1)).rev().find(|&k| chars[k] == '\\' && chars[k + 1] == '&');
+    let at = match amp {
+        Some(k) => k,
+        None => {
+            let last_digit = chars.iter().rposition(|c| c.is_ascii_digit())?;
+            (0..chars.len())
+                .rev()
+                .find(|&k| chars[k] == point && (k > 0 && chars[k - 1].is_ascii_digit() || chars.get(k + 1).is_some_and(|c| c.is_ascii_digit())))
+                .unwrap_or(last_digit + 1)
+        }
+    };
+    let part = &chars[..at];
+    Some(part.len() - part.iter().filter(|c| **c == '\\').count())
 }
 
 /// Characters drawn as an overstrike (`+\bo`) in `s`: mandoc measures each as three columns.
@@ -198,7 +204,7 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
     // Text blocks, formatted once the widths are known: row, column, text.
     let mut later: Vec<(usize, usize, &[String], Style)> = Vec::new();
     for (ri, row) in tbl.rows.iter().enumerate() {
-        let Row::Data { cells, layout, .. } = row else {
+        let Row::Data { cells, raw: raw_cells, layout, .. } = row else {
             laid_rows.push(None);
             continue;
         };
@@ -258,10 +264,9 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             let w = f.width();
             if span > 1 {
                 spans.push((j, span, w));
-            } else if let (Some(Cell::Text(raw)), 'n', None) = (cell, spec.kind, line)
-                && let Some(p) = number_point(raw, o.decimal)
+            } else if let (Some(Cell::Text(_)), 'n', None) = (cell, spec.kind, line)
+                && let Some(int) = raw_cells.get(k - 1).and_then(|r| number_int(r, o.decimal))
             {
-                let int = format(t, &[raw[..p].to_string()], style, big).width();
                 ints[j] = ints[j].max(int);
                 fracs[j] = fracs[j].max(w.saturating_sub(int));
                 laid.nums[j] = Some(int);
