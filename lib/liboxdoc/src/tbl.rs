@@ -372,7 +372,10 @@ fn parse_layout_row(s: &str) -> Layout {
                         i += 1;
                     }
                 }
-                l.specs.last_mut().unwrap().width = Some(crate::mdoc_term::scaled(&arg));
+                // Only a number counts; anything else (`w(\n(.lu)`) gives no width.
+                if arg.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+                    l.specs.last_mut().unwrap().width = Some(crate::mdoc_term::scaled(&arg));
+                }
             }
             'p' | 'P' | 'v' | 'V' => {
                 // Point size and vertical spacing: skipped with their number.

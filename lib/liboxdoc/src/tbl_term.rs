@@ -138,18 +138,20 @@ fn number_point(s: &str, point: char) -> Option<usize> {
     Some(dot.map_or(last_digit.0 + last_digit.1.len_utf8(), |k| chars[k].0))
 }
 
+/// Characters drawn as an overstrike (`+\bo`) in `s`: mandoc measures each as three columns.
+fn struck(t: &Term, s: &str) -> usize {
+    if t.encoding != crate::term::Encoding::Ascii {
+        return 0;
+    }
+    s.chars().filter(|c| !c.is_ascii() && crate::term::ascii_for(*c).contains('\u{8}')).count()
+}
+
 /// A text block's width: its words, filled with single spaces between them (whatever was
 /// typed) into lines at most `limit` wide, and the longest of those lines.
 fn measure_block(t: &Term, text: &[String], style: Style, limit: usize) -> usize {
     let (mut longest, mut line) = (0, 0);
     for w in text.iter().flat_map(|l| l.split(' ')).filter(|w| !w.is_empty()) {
-        // mandoc measures a character drawn as an overstrike (`+\bo`) as three columns.
-        let struck = if t.encoding == crate::term::Encoding::Ascii {
-            w.chars().filter(|c| !c.is_ascii() && crate::term::ascii_for(*c).contains('\u{8}')).count()
-        } else {
-            0
-        };
-        let ww = format(t, &[w.to_string()], style, 10_000).width() + 2 * struck;
+        let ww = format(t, &[w.to_string()], style, 10_000).width() + 2 * struck(t, w);
         line = if line > 0 && line + 1 + ww <= limit { line + 1 + ww } else { ww };
         longest = longest.max(line);
     }
@@ -243,7 +245,11 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                     f.min_width = measure_block(t, text, style, spec.width.unwrap_or(block_width));
                     (f, None)
                 }
-                (Some(Cell::Text(text)), _) => (format(t, std::slice::from_ref(text), style, big), None),
+                (Some(Cell::Text(text)), _) => {
+                    let mut f = format(t, std::slice::from_ref(text), style, big);
+                    f.min_width = f.min_width.max(f.width() + 2 * struck(t, text));
+                    (f, None)
+                }
                 (Some(Cell::ShortLine), _) => (format(t, &none, style, big), Some(0)),
                 _ => (format(t, &none, style, big), None),
             };
