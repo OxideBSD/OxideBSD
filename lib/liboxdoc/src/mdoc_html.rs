@@ -229,15 +229,9 @@ impl R<'_> {
 
     /// Text: its words, with font escapes as elements.
     fn text(&mut self, s: &str) {
+        // (In mdoc a font escape lasts to the end of its line or argument.)
         let s = s.trim_matches([' ', '\t']);
-        let mut first = true;
-        for w in s.split(' ').filter(|w| !w.is_empty()) {
-            if !first {
-                self.h.clear_nospace();
-            }
-            self.h.word(w);
-            first = false;
-        }
+        self.h.text(s, &mut html::Fonts::default(), false);
     }
 
     fn elem(&mut self, n: &Node) {

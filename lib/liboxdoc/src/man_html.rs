@@ -15,7 +15,9 @@ struct R {
     in_ss: bool,
     /// Identifiers of headings and tagged paragraphs, by node address.
     ids: HashMap<usize, String>,
-    /// The font an escape selected, still open.
+    /// The font escapes selected, lasting across text lines.
+    fonts: html::Fonts,
+    /// The font an escape selected inside a macro's arguments.
     font: Vec<&'static str>,
     /// No-fill mode (`.nf`, `.EX`), and whether `.EX` started it.
     nofill: bool,
@@ -30,12 +32,11 @@ struct R {
 
 pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String {
     let meta = &doc.meta;
-    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, list: None };
+    let mut r = R { h: Html::new(), para: false, in_ss: false, ids: tags(doc), fonts: Default::default(), font: Vec::new(), nofill: false, example: false, pre_start: false, pre_break: false, list: None };
     let title = format!("{}({})", plain(&meta.title), plain(&meta.section));
     html::begin_document(&mut r.h, opts, &title, comments);
-    // (A volume given empty is a no-break space.)
     let vol = if meta.volume_given {
-        if meta.volume.is_empty() { mark::NBSP.to_string() } else { plain(&meta.volume) }
+        plain(&meta.volume)
     } else {
         volume(&meta.section).to_string()
     };
@@ -55,19 +56,21 @@ pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String
     r.h.finish()
 }
 
-/// Headings and the heads of tagged paragraphs get identifiers, numbered when repeated.
+/// Headings and the heads of tagged paragraphs get identifiers, numbered when repeated. A
+/// head's claim is weaker with dashes before its word than without, and only the best claims
+/// on a text stand.
 fn tags(doc: &Document) -> HashMap<usize, String> {
-    fn walk(n: &Node, out: &mut Vec<(usize, String)>) {
+    fn walk(n: &Node, out: &mut Vec<(usize, String, usize)>) {
         for c in &n.children {
             if c.kind == Kind::Block {
-                let text = match c.tok.as_str() {
-                    "SH" | "SS" => c.part(Kind::Head).map(|h| plain(&h.plain_text())),
+                let claim = match c.tok.as_str() {
+                    "SH" | "SS" => c.part(Kind::Head).map(|h| (plain(&h.plain_text()), 0)),
                     "TP" | "TQ" => c.part(Kind::Head).and_then(|h| first_word(&text_of(h))),
                     "IP" => c.args.first().and_then(|a| first_word(a)),
                     _ => None,
                 };
-                if let Some(t) = text.filter(|t| !t.is_empty() && t.is_ascii()) {
-                    out.push((c as *const Node as usize, t));
+                if let Some((t, dashes)) = claim.filter(|(t, _)| !t.is_empty() && t.is_ascii()) {
+                    out.push((c as *const Node as usize, t, dashes.min(1)));
                 }
             }
             walk(c, out);
@@ -75,9 +78,17 @@ fn tags(doc: &Document) -> HashMap<usize, String> {
     }
     let mut claims = Vec::new();
     walk(&doc.root, &mut claims);
+    let mut best: HashMap<String, usize> = HashMap::new();
+    for (_, t, p) in &claims {
+        let b = best.entry(t.clone()).or_insert(*p);
+        *b = (*b).min(*p);
+    }
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut out = HashMap::new();
-    for (node, text) in claims {
+    for (node, text, p) in claims {
+        if p != best[&text] {
+            continue;
+        }
         let n = seen.entry(text.clone()).or_default();
         *n += 1;
         let id = html::make_id(&text);
@@ -105,11 +116,14 @@ fn text_of(n: &Node) -> String {
     out
 }
 
-/// A tag's text: its first word, without leading dashes and fonts, up to an escape.
-fn first_word(s: &str) -> Option<String> {
+/// A tag's text: its first word, without leading dashes and fonts, up to an escape; it must
+/// start with a letter or digit. With the number of dashes that came before it.
+fn first_word(s: &str) -> Option<(String, usize)> {
+    let lead = s.trim_start_matches(|c: char| mark::is_font(c) || c == ' ');
+    let dashes = lead.chars().take_while(|c| *c == '-' || *c == mark::MINUS).count();
     let s = s.trim_start_matches(|c: char| c == '-' || c == mark::MINUS || c == mark::BACKSLASH || mark::is_font(c) || c == ' ');
     let s: String = s.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c) && *c != ' ').collect();
-    (!s.is_empty()).then_some(s)
+    s.starts_with(|c: char| c.is_ascii_alphanumeric()).then_some((s, dashes))
 }
 
 /// The element a font marker opens.
@@ -165,15 +179,6 @@ impl R {
         }
     }
 
-    /// Sets the escape font `f`, closing the one before.
-    fn set_font(&mut self, f: char) {
-        self.close_font();
-        for t in font_tags(f) {
-            self.h.open(t, "");
-            self.font.push(t);
-        }
-    }
-
     fn children(&mut self, n: &Node) {
         for c in &n.children {
             self.node(c);
@@ -204,8 +209,27 @@ impl R {
         }
     }
 
+    /// Ends an open preformatted block, staying in no-fill mode.
+    fn close_pre(&mut self) {
+        if self.h.is_open("pre") {
+            if self.example {
+                self.h.literal_raw("\n");
+            }
+            self.h.font_close(&mut self.fonts, true);
+            self.h.close("pre");
+        }
+    }
+
     /// Text, with its font escapes as elements.
     fn text(&mut self, n: &Node) {
+        if self.nofill && !self.h.is_open("pre") {
+            if n.text.is_empty() {
+                return;
+            }
+            self.close_p();
+            self.h.open("pre", "");
+            self.pre_start = true;
+        }
         if self.nofill {
             // (Blank lines vanish.)
             if n.text.is_empty() {
@@ -214,11 +238,13 @@ impl R {
             if !n.flags.continues {
                 self.pre_line(n.text.starts_with([' ', '\t']));
             }
-            self.literal(&n.text);
+            self.h.text(&n.text, &mut self.fonts, true);
             return;
         }
         self.ensure_p();
-        self.words(&n.text, n.flags.line_start);
+        let text = n.text.trim_end_matches([' ', '\t']);
+        let text = text.trim_start_matches([' ', '\t']);
+        self.h.text(text, &mut self.fonts, false);
     }
 
     /// The start of a line in no-fill mode: after a newline, or a break where the line starts
@@ -257,47 +283,23 @@ impl R {
         }
     }
 
-    /// Words of text, font escapes switching elements.
+    /// A macro argument's words, its font escapes lasting to its end.
     fn words(&mut self, text: &str, _line: bool) {
-        let text = text.trim_matches([' ', '\t']);
-        let mut first = true;
-        for w in text.split(' ').filter(|w| !w.is_empty()) {
-            if !first {
-                self.h.clear_nospace();
-            }
-            first = false;
-            let mut buf = String::new();
-            let mut started = false;
-            for c in w.chars() {
-                if mark::is_font(c) {
-                    if !buf.is_empty() {
-                        self.h.word(&buf);
-                        self.h.nospace();
-                        buf.clear();
-                        started = true;
-                    }
-                    if !started {
-                        // (A font change before the word's first character comes after the
-                        // space.)
-                        self.h.word("");
-                        self.h.nospace();
-                        started = true;
-                    }
-                    self.set_font(c);
-                    self.h.nospace();
-                    continue;
-                }
-                buf.push(c);
-            }
-            if !buf.is_empty() {
-                self.h.word(&buf);
-            }
-        }
+        let mut f = html::Fonts::default();
+        self.h.text(text, &mut f, false);
     }
 
     fn elem(&mut self, n: &Node) {
         let tok = n.tok.as_str();
+        // Font macros and paragraphs end the escape font.
+        if matches!(tok, "PP" | "LP" | "P" | "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" | "SM" | "SB") {
+            self.fonts.reset();
+        }
         match tok {
+            "PP" | "LP" | "P" if self.nofill => {
+                // It ends the preformatted block; the next text starts another.
+                self.close_pre();
+            }
             "PP" | "LP" | "P" => {
                 self.end_list();
                 self.close_p();
@@ -312,10 +314,22 @@ impl R {
                 }
             }
             "sp" => {
-                self.end_list();
-                self.close_p();
-                self.h.open("p", "class=\"Pp\"");
-                self.para = false;
+                // A paragraph within whatever holds it; in no-fill mode, a blank line, which
+                // vanishes.
+                if self.nofill {
+                    if n.text != "blank" {
+                        self.pre_break = true;
+                    }
+                } else {
+                    self.close_p();
+                    self.h.open("p", "class=\"Pp\"");
+                    self.para = false;
+                }
+            }
+            "in" => {
+                if !self.nofill {
+                    self.h.br();
+                }
             }
             "nf" | "EX" => {
                 if !self.nofill {
@@ -359,6 +373,7 @@ impl R {
                 }
                 self.h.close("small");
             }
+            "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" if n.args.is_empty() => {}
             "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" if self.nofill => {
                 if !n.flags.continues {
                     self.pre_line(false);
@@ -374,15 +389,18 @@ impl R {
                     _ => ["", "i"],
                 };
                 let alternating = tok.len() == 2;
-                for (i, a) in n.args.iter().enumerate() {
-                    if i > 0 && !alternating {
-                        self.h.literal_text(" ");
-                    }
+                // (A single font's arguments are one element, spaced.)
+                let groups: Vec<(usize, String)> = if alternating {
+                    n.args.iter().cloned().enumerate().collect()
+                } else {
+                    vec![(0, n.args.join(" "))]
+                };
+                for (i, a) in groups {
                     let f = fonts[i % 2];
                     if !f.is_empty() {
                         self.h.literal_raw(&format!("<{f}>"));
                     }
-                    self.literal(a);
+                    self.literal(&a);
                     while let Some(t) = self.font.pop() {
                         self.h.literal_raw(&format!("</{t}>"));
                     }
@@ -417,7 +435,9 @@ impl R {
                     self.h.close(fonts[0]);
                 } else {
                     for (i, a) in n.args.iter().enumerate() {
-                        if i > 0 {
+                        // (Arguments join, but for a space a roman one ends with; one in a font
+                        // keeps its space inside.)
+                        if i > 0 && !(n.args[i - 1].ends_with(' ') && fonts[(i - 1) % 2].is_empty()) {
                             self.h.nospace();
                         }
                         let f = fonts[i % 2];
@@ -453,25 +473,35 @@ impl R {
             }
             "RE" => {}
             "ft" => {
-                if let Some(f) = n.args.first().and_then(|a| a.chars().next()) {
-                    let m = match f {
-                        'B' | '3' => mark::FONT_B,
-                        'I' | '2' => mark::FONT_I,
-                        _ => mark::FONT_R,
-                    };
-                    self.set_font(m);
+                self.fonts.esc = match n.args.first().map(String::as_str) {
+                    Some("B") | Some("3") => Some(mark::FONT_B),
+                    Some("I") | Some("2") => Some(mark::FONT_I),
+                    Some("BI") | Some("4") => Some(mark::FONT_BI),
+                    _ => None,
+                };
+            }
+            "MR" => {
+                self.ensure_p();
+                self.h.open("a", "class=\"Xr\"");
+                let name = n.args.first().cloned().unwrap_or_default();
+                let sec = n.args.get(1).cloned().unwrap_or_default();
+                self.h.word(&format!("{name}({sec})"));
+                self.h.close("a");
+                if let Some(p) = n.args.get(2) {
+                    self.h.nospace();
+                    self.h.word(p);
                 }
             }
-            _ => {
-                for a in &n.args {
-                    self.words(a, false);
-                }
-            }
+            // (Other requests print nothing.)
+            _ => {}
         }
     }
 
     fn block(&mut self, n: &Node) {
         let tok = n.tok.as_str();
+        if matches!(tok, "SH" | "SS" | "TP" | "TQ" | "IP" | "HP") {
+            self.fonts.reset();
+        }
         match tok {
             "SH" | "SS" => self.section(n),
             "IP" if n.args.first().is_some_and(|a| a == "\u{2022}" || a == "*") => {
@@ -598,6 +628,13 @@ impl R {
 
     fn section(&mut self, n: &Node) {
         self.end_list();
+        if self.nofill {
+            while let Some(t) = self.font.pop() {
+                self.h.literal_raw(&format!("</{t}>"));
+            }
+            self.h.close("pre");
+            self.nofill = false;
+        }
         self.close_p();
         let (class, h) = if n.tok == "SH" { ("Sh", "h1") } else { ("Ss", "h2") };
         if n.tok == "SH" {
@@ -641,12 +678,12 @@ impl R {
     }
 }
 
-/// Prologue text with roff's markers resolved.
+/// Prologue text with roff's markers resolved (a no-break space stays one).
 fn plain(s: &str) -> String {
     s.chars()
         .filter_map(|c| match c {
             mark::MINUS => Some('-'),
-            mark::NBSP => Some(' '),
+            mark::NBSP => Some(mark::NBSP),
             mark::BACKSLASH => Some('\\'),
             c if ('\u{E000}'..='\u{E01F}').contains(&c) => None,
             c => Some(c),

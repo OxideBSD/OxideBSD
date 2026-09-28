@@ -450,9 +450,9 @@ pub fn begin_document(h: &mut Html, opts: &HtmlOptions, title: &str, comments: &
         c.push_str(if comments.last().is_some_and(|l| l.is_empty()) { " -->\n" } else { "\n -->\n" });
         h.push_raw(&c);
     }
-    h.push_raw("<head>\n");
-    h.push_raw("  <meta charset=\"utf-8\"/>\n");
-    h.push_raw("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>\n");
+    h.open("head", "");
+    h.line("<meta charset=\"utf-8\"/>");
+    h.line("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>");
     match &opts.style {
         Some(s) => h.push_raw(&format!("  <link rel=\"stylesheet\" href=\"{}\" type=\"text/css\" media=\"all\"/>\n", escape(s))),
         None => {
@@ -463,8 +463,14 @@ pub fn begin_document(h: &mut Html, opts: &HtmlOptions, title: &str, comments: &
             h.push_raw("  </style>\n");
         }
     }
-    h.push_raw(&format!("  <title>{}</title>\n", escape(title)));
-    h.push_raw("</head>\n<body>\n");
+    // (The title is filled like text.)
+    h.open("title", "");
+    for w in title.split(' ').filter(|w| !w.is_empty()) {
+        h.word(w);
+    }
+    h.close("title");
+    h.close("head");
+    h.push_raw("<body>\n");
 }
 
 pub fn end_document(h: &mut Html, opts: &HtmlOptions) {
@@ -521,5 +527,137 @@ mod tests {
         }
         h.close("p");
         assert_eq!(h.finish(), "<p class=\"Pp\">Every object can be thought of as having associated with it an ACL\n    qualifier, and a set</p>\n");
+    }
+}
+
+/// The font roman escapes (`\fB`, `\fI`...) have selected: it lasts across text lines, each
+/// line reopening it, until a font macro or paragraph resets it.
+#[derive(Clone, Debug, Default)]
+pub struct Fonts {
+    /// The escape font's marker, `None` for roman.
+    pub esc: Option<char>,
+    prev: Option<char>,
+    /// Its elements, open now.
+    open: Vec<&'static str>,
+}
+
+impl Fonts {
+    /// Back to roman (a font macro or a paragraph).
+    pub fn reset(&mut self) {
+        self.esc = None;
+        self.prev = None;
+    }
+}
+
+fn font_elements(f: Option<char>) -> &'static [&'static str] {
+    match f {
+        Some(mark::FONT_B) => &["b"],
+        Some(mark::FONT_I) => &["i"],
+        Some(mark::FONT_BI) => &["b", "i"],
+        _ => &[],
+    }
+}
+
+impl Html {
+    fn font_open(&mut self, fonts: &mut Fonts, literal: bool) {
+        for t in font_elements(fonts.esc) {
+            if literal {
+                self.literal_raw(&format!("<{t}>"));
+            } else {
+                self.open(t, "");
+            }
+            fonts.open.push(t);
+        }
+    }
+
+    /// Closes the escape font's elements (it stays selected).
+    pub fn font_close(&mut self, fonts: &mut Fonts, literal: bool) {
+        while let Some(t) = fonts.open.pop() {
+            if literal {
+                self.literal_raw(&format!("</{t}>"));
+            } else {
+                self.close(t);
+            }
+        }
+    }
+
+    /// Text with roff's font escapes as elements: the escape font reopened at its start and
+    /// closed at its end. In `literal` mode (inside `pre`) spaces are kept as they are; else
+    /// they separate words, where the line may break.
+    pub fn text(&mut self, text: &str, fonts: &mut Fonts, literal: bool) {
+        let mut buf = String::new();
+        // (Something before, in the same word: what follows attaches.)
+        let mut glue = false;
+        let flush = |h: &mut Html, buf: &mut String, glue: &mut bool| {
+            if !buf.is_empty() {
+                if literal {
+                    h.literal_text(buf);
+                } else {
+                    if *glue {
+                        h.nospace();
+                    }
+                    h.word(buf);
+                }
+                buf.clear();
+                *glue = true;
+            }
+        };
+        if !fonts.open.is_empty() {
+            self.font_close(fonts, literal);
+        }
+        if fonts.esc.is_some() {
+            self.font_open(fonts, literal);
+            glue = true;
+        }
+        // (A font change with nothing after it in the text joins nothing.)
+        let mut last_font = false;
+        for c in text.chars() {
+            if !mark::is_font(c) {
+                last_font = false;
+            }
+            if c == ' ' && !literal {
+                flush(self, &mut buf, &mut glue);
+                self.clear_nospace();
+                glue = false;
+                continue;
+            }
+            if mark::is_font(c) {
+                flush(self, &mut buf, &mut glue);
+                let new = match c {
+                    mark::FONT_P => fonts.prev,
+                    mark::FONT_R | mark::FONT_CW => None,
+                    c => Some(c),
+                };
+                self.font_close(fonts, literal);
+                fonts.prev = fonts.esc;
+                fonts.esc = new;
+                if !literal && glue {
+                    self.nospace();
+                }
+                self.font_open(fonts, literal);
+                last_font = true;
+                if !literal && !font_elements(new).is_empty() {
+                    glue = true;
+                }
+                continue;
+            }
+            buf.push(c);
+        }
+        flush(self, &mut buf, &mut glue);
+        if last_font && !literal {
+            self.clear_nospace();
+        }
+        // (A space at the end comes before what closes.)
+        if !literal && text.ends_with(' ') {
+            self.space();
+        }
+        self.font_close(fonts, literal);
+    }
+
+    /// A space here, where the line may break, whatever attaches.
+    pub fn space(&mut self) {
+        self.flush_unit();
+        self.unit_space = true;
+        self.nospace = false;
     }
 }
