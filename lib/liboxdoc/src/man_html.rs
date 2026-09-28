@@ -121,9 +121,11 @@ fn text_of(n: &Node) -> String {
 fn first_word(s: &str) -> Option<(String, usize)> {
     let lead = s.trim_start_matches(|c: char| mark::is_font(c) || c == ' ');
     let dashes = lead.chars().take_while(|c| *c == '-' || *c == mark::MINUS).count();
-    let s = s.trim_start_matches(|c: char| c == '-' || c == mark::MINUS || c == mark::BACKSLASH || mark::is_font(c) || c == ' ');
-    let s: String = s.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c) && *c != ' ').collect();
-    s.starts_with(|c: char| c.is_ascii_alphanumeric()).then_some((s, dashes))
+    let s = lead.trim_start_matches(|c: char| c == '-' || c == mark::MINUS || c == mark::BACKSLASH || mark::is_font(c));
+    let word: String = s.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c) && *c != ' ').collect();
+    // (Cut short at an escape, it claims more weakly, as with dashes.)
+    let cut = s.chars().nth(word.chars().count()).is_some_and(|c| ('\u{E000}'..='\u{E0FF}').contains(&c) && !mark::is_font(c));
+    word.starts_with(|c: char| c.is_ascii_alphabetic()).then_some((word, dashes + cut as usize))
 }
 
 /// The element a font marker opens.
@@ -220,15 +222,22 @@ impl R {
         }
     }
 
+    /// In no-fill mode, a preformatted block for what comes next, if one isn't open.
+    fn ensure_pre(&mut self) {
+        if self.nofill && !self.h.is_open("pre") {
+            self.close_p();
+            self.h.open("pre", "");
+            self.pre_start = true;
+        }
+    }
+
     /// Text, with its font escapes as elements.
     fn text(&mut self, n: &Node) {
         if self.nofill && !self.h.is_open("pre") {
             if n.text.is_empty() {
                 return;
             }
-            self.close_p();
-            self.h.open("pre", "");
-            self.pre_start = true;
+            self.ensure_pre();
         }
         if self.nofill {
             // (Blank lines vanish.)
@@ -292,7 +301,7 @@ impl R {
     fn elem(&mut self, n: &Node) {
         let tok = n.tok.as_str();
         // Font macros and paragraphs end the escape font.
-        if matches!(tok, "PP" | "LP" | "P" | "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" | "SM" | "SB") {
+        if matches!(tok, "PP" | "LP" | "P" | "sp" | "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" | "SM" | "SB") {
             self.fonts.reset();
         }
         match tok {
@@ -375,6 +384,7 @@ impl R {
             }
             "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" if n.args.is_empty() => {}
             "B" | "I" | "BI" | "IB" | "BR" | "RB" | "IR" | "RI" if self.nofill => {
+                self.ensure_pre();
                 if !n.flags.continues {
                     self.pre_line(false);
                 }

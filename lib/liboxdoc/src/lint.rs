@@ -190,6 +190,8 @@ impl ManFlow {
     pub fn blank(&mut self, diag: &mut Diagnostics, line: usize) {
         let top = self.stack.last().unwrap();
         if matches!(top.kind, Kind::Section(_)) && top.children.is_empty() {
+            // (Dropped from the tree all the same.)
+            self.skipped.push((line, "sp"));
             return;
         }
         self.sp(diag, line, 1);

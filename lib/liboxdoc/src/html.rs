@@ -360,7 +360,8 @@ impl Html {
             Some(p) => self.col = s[p + 1..].chars().count(),
             None => self.col += s.chars().count(),
         }
-        self.started = true;
+        // (After a newline, an end tag starts its own indented line.)
+        self.started = !self.out.ends_with('\n');
         self.fresh = false;
     }
 
@@ -611,18 +612,28 @@ impl Html {
         }
         // (A font change with nothing after it in the text joins nothing.)
         let mut last_font = false;
+        // A space not yet placed: before a font change it goes before the end tag.
+        let mut space = false;
         for c in text.chars() {
             if !mark::is_font(c) {
                 last_font = false;
+                if c != ' ' {
+                    space = false;
+                }
             }
             if c == ' ' && !literal {
                 flush(self, &mut buf, &mut glue);
                 self.clear_nospace();
                 glue = false;
+                space = true;
                 continue;
             }
             if mark::is_font(c) {
                 flush(self, &mut buf, &mut glue);
+                if std::mem::take(&mut space) && !fonts.open.is_empty() {
+                    self.space();
+                    glue = true;
+                }
                 let new = match c {
                     mark::FONT_P => fonts.prev,
                     mark::FONT_R | mark::FONT_CW => None,
