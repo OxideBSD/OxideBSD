@@ -72,9 +72,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 }
                 p.col = col;
                 p.raw = raw;
-                // An `.RE` with no `.RS` open is a line break.
-                let stray_re = name == "RE" && !p.stack.iter().any(|n| n.kind == Kind::Block && n.tok == "RS");
-                p.flow.macro_line(p.diag, if stray_re { "br" } else { &name }, line, col, !args.is_empty());
+                p.flow.macro_line(p.diag, &name, line, col, !args.is_empty());
                 match name.as_str() {
                     "nf" | "EX" => p.nofill = true,
                     "fi" | "EE" => p.nofill = false,

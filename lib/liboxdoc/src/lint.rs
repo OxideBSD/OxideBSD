@@ -51,46 +51,46 @@ fn new_sentence(diag: &mut Diagnostics, line: usize, raw: &str) {
     }
 }
 
-/// What came last in the flow of a man(7) page, for its paragraph checks. Deleting a skipped
-/// macro doesn't change it, except that a `.br` before `.sp` is gone before the `.sp` is judged.
-#[derive(Clone, Debug, PartialEq)]
-enum Prev {
-    /// The start of a section (`SH`) or subsection (`SS`).
+/// A child of a man(7) container, as far as the paragraph checks care.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Child {
+    /// `.sp` or a blank line, at its line and column.
+    Sp(usize, usize),
+    /// `.br`, at its line and column.
+    Br(usize, usize),
+    /// A paragraph (`PP`) that turned out not to be empty.
+    Para,
+    Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    /// A section or subsection body: `SH` or `SS`.
     Section(&'static str),
-    /// A paragraph macro (`PP` for `LP`/`P` too, or `IP`).
-    Para(&'static str),
-    Sp,
-    /// A `.br` at its line and column, and what came before it. Whether it is skipped is
-    /// decided by what comes next.
-    Br { line: usize, col: usize, before: Box<Prev> },
-    /// A `.br` already judged, and whether it was skipped.
-    BrDone(bool),
+    /// An `.RS` block.
+    Rs,
+    /// A paragraph, `PP` (for `LP`/`P` too) or `IP`, at the macro's line and column.
+    Para(&'static str, usize, usize),
+    /// A paragraph whose start isn't checked (`TP`, `HP`, `IP` with a tag).
     Other,
 }
 
-/// The open paragraph: its macro, position, the section it starts (if it is first in one),
-/// and whether anything has been put in it.
-struct Para {
-    name: &'static str,
-    line: usize,
-    col: usize,
-    at_start: Option<&'static str>,
-    content: bool,
+struct Container {
+    kind: Kind,
+    children: Vec<Child>,
 }
 
-/// mandoc's checks on man(7) paragraph macros and breaks that do nothing: a break or paragraph
-/// at the start of a section, one right after another, an empty paragraph. Fed the page's lines
-/// in order.
+/// mandoc's checks on man(7) paragraph macros and breaks that do nothing, fed the page's lines
+/// in order. Some are made as a macro arrives (`.br` after `.br` or `.sp`, `.br` before `.sp`);
+/// the rest when its paragraph or section ends, on what comes first or last in it.
 pub struct ManFlow {
-    prev: Prev,
-    para: Option<Para>,
-    /// The current section macro, for "at the end of" messages.
-    section: &'static str,
+    stack: Vec<Container>,
 }
 
 impl Default for ManFlow {
     fn default() -> Self {
-        ManFlow { prev: Prev::Other, para: None, section: "SH" }
+        // (Before the first `.SH`, as in a section without a name.)
+        ManFlow { stack: vec![Container { kind: Kind::Other, children: Vec::new() }] }
     }
 }
 
@@ -99,151 +99,142 @@ const SKIP: &str = "skipping paragraph macro";
 impl ManFlow {
     /// A macro line: `name` at `line`:`col`, with or without arguments.
     pub fn macro_line(&mut self, diag: &mut Diagnostics, name: &str, line: usize, col: usize, has_args: bool) {
-        if name != "sp" {
-            self.resolve_br(diag, name == "SH" || name == "SS");
-        }
         match name {
             "SH" | "SS" => {
-                self.end_section(diag);
+                while self.stack.len() > 1 {
+                    self.close(diag);
+                }
+                self.close(diag);
                 let s = if name == "SH" { "SH" } else { "SS" };
-                self.section = s;
-                self.prev = Prev::Section(s);
+                self.stack.push(Container { kind: Kind::Section(s), children: Vec::new() });
+            }
+            "PP" | "LP" | "P" | "IP" | "TP" | "TQ" | "HP" => {
+                self.close_para(diag);
+                let kind = match name {
+                    "IP" if has_args => Kind::Other,
+                    "IP" => Kind::Para("IP", line, col),
+                    "PP" | "LP" | "P" => Kind::Para("PP", line, col),
+                    _ => Kind::Other,
+                };
+                if kind == Kind::Other {
+                    self.top().children.push(Child::Content);
+                }
+                self.stack.push(Container { kind, children: Vec::new() });
+            }
+            "RS" => {
+                self.top().children.push(Child::Content);
+                self.stack.push(Container { kind: Kind::Rs, children: Vec::new() });
             }
             "RE" => {
-                self.close_para(diag);
-                self.prev = Prev::Other;
-            }
-            "PP" | "LP" | "P" | "IP" => {
-                self.close_para(diag);
-                let name = if name == "IP" { "IP" } else { "PP" };
-                let at_start = match self.prev {
-                    Prev::Section(s) if name == "PP" => Some(s),
-                    _ => None,
-                };
-                // An `.IP` with a tag isn't empty.
-                self.para = Some(Para { name, line, col, at_start, content: false });
-                if name == "IP" && has_args {
-                    self.content(diag);
+                // Closes the innermost `.RS`; one with none open is a `.br`, after the paragraph.
+                if let Some(pos) = self.stack.iter().rposition(|c| c.kind == Kind::Rs) {
+                    while self.stack.len() > pos {
+                        self.close(diag);
+                    }
+                } else {
+                    self.close_para(diag);
+                    self.br(diag, line, col);
                 }
-                self.prev = Prev::Para(name);
-            }
-            "TP" | "TQ" | "HP" => {
-                self.close_para(diag);
-                self.prev = Prev::Other;
             }
             "sp" => self.sp(diag, line, col),
-            "br" => {
-                let before = Box::new(std::mem::replace(&mut self.prev, Prev::Other));
-                self.prev = Prev::Br { line, col, before };
-            }
-            _ => {
-                self.content(diag);
-                self.prev = Prev::Other;
-            }
+            "br" => self.br(diag, line, col),
+            _ => self.top().children.push(Child::Content),
         }
     }
 
-    /// A blank line: `.sp`, except at the start of a section, where it is ignored.
+    /// A blank line: `.sp`, except first in a section, where it is ignored.
     pub fn blank(&mut self, diag: &mut Diagnostics, line: usize) {
-        if !matches!(self.prev, Prev::Section(_)) {
-            // (A `.br` before it is judged by `sp`.)
-            self.sp(diag, line, 1);
+        let top = self.stack.last().unwrap();
+        if matches!(top.kind, Kind::Section(_)) && top.children.is_empty() {
+            return;
         }
+        self.sp(diag, line, 1);
     }
 
     pub fn text(&mut self, diag: &mut Diagnostics, raw: &str) {
-        if let Prev::Br { line, col, .. } = self.prev
-            && raw.starts_with(' ')
-            && !self.br_skipped()
+        let top = self.top();
+        if raw.starts_with(' ')
+            && let Some(Child::Br(l, c)) = top.children.last().copied()
         {
-            diag.report(Level::Warning, line, col, SKIP, "br before text line with leading blank");
-            self.prev = Prev::BrDone(true);
+            top.children.pop();
+            diag.report(Level::Warning, l, c, SKIP, "br before text line with leading blank");
         }
-        self.resolve_br(diag, false);
-        self.content(diag);
-        self.prev = Prev::Other;
+        self.top().children.push(Child::Content);
     }
 
     /// The end of the input.
     pub fn end(&mut self, diag: &mut Diagnostics) {
-        self.resolve_br(diag, true);
-        self.end_section(diag);
-    }
-
-    /// What a pending `.br` comes after, if that makes it useless.
-    fn br_after(before: &Prev) -> Option<&'static str> {
-        match before {
-            Prev::Section(s) | Prev::Para(s) => Some(s),
-            Prev::Br { .. } | Prev::BrDone(_) => Some("br"),
-            Prev::Sp => Some("sp"),
-            Prev::Other => None,
+        while !self.stack.is_empty() {
+            self.close(diag);
         }
     }
 
-    fn br_skipped(&self) -> bool {
-        matches!(&self.prev, Prev::Br { before, .. } if Self::br_after(before).is_some())
-    }
-
-    /// Judges a pending `.br` by what came before it, now that something other than `.sp`
-    /// follows; at the end of a section, a `.br` not otherwise skipped is.
-    fn resolve_br(&mut self, diag: &mut Diagnostics, section_end: bool) {
-        let Prev::Br { line, col, before } = &self.prev else { return };
-        let (line, col) = (*line, *col);
-        let skipped = match Self::br_after(before) {
-            Some(w) => {
-                diag.report(Level::Warning, line, col, SKIP, &format!("br after {w}"));
-                true
-            }
-            None if section_end => {
-                diag.report(Level::Warning, line, col, SKIP, &format!("br at the end of {}", self.section));
-                true
-            }
-            None => {
-                self.content(diag);
-                false
-            }
-        };
-        self.prev = Prev::BrDone(skipped);
+    fn top(&mut self) -> &mut Container {
+        self.stack.last_mut().unwrap()
     }
 
     fn sp(&mut self, diag: &mut Diagnostics, line: usize, col: usize) {
-        let mut prev = std::mem::replace(&mut self.prev, Prev::Sp);
-        if let Prev::Br { line: l, col: c, before } = prev {
+        let top = self.top();
+        if let Some(Child::Br(l, c)) = top.children.last().copied() {
+            top.children.pop();
             diag.report(Level::Warning, l, c, SKIP, "br before sp");
-            prev = *before;
         }
-        match prev {
-            Prev::Section(s) | Prev::Para(s) => diag.report(Level::Warning, line, col, SKIP, &format!("sp after {s}")),
-            _ => self.content(diag),
+        self.top().children.push(Child::Sp(line, col));
+    }
+
+    fn br(&mut self, diag: &mut Diagnostics, line: usize, col: usize) {
+        match self.top().children.last() {
+            Some(Child::Br(..)) => diag.report(Level::Warning, line, col, SKIP, "br after br"),
+            Some(Child::Sp(..)) => diag.report(Level::Warning, line, col, SKIP, "br after sp"),
+            _ => self.top().children.push(Child::Br(line, col)),
         }
     }
 
-    fn end_section(&mut self, diag: &mut Diagnostics) {
-        self.close_para(diag);
+    /// Closes the open paragraph, if the innermost container is one.
+    fn close_para(&mut self, diag: &mut Diagnostics) {
+        if matches!(self.stack.last().map(|c| c.kind), Some(Kind::Para(..) | Kind::Other)) && self.stack.len() > 1 {
+            self.close(diag);
+        }
     }
 
-    /// Something in the open paragraph: it isn't empty, and one first in its section is
-    /// reported as useless there.
-    fn content(&mut self, diag: &mut Diagnostics) {
-        if let Some(p) = self.para.as_mut()
-            && !p.content
-        {
-            p.content = true;
-            if let Some(s) = p.at_start {
-                diag.report(Level::Warning, p.line, p.col, SKIP, &format!("PP after {s}"));
+    /// Ends the innermost container: a useless `.sp` or `.br` first in it, or `.br` last, and
+    /// an empty paragraph, are reported and dropped.
+    fn close(&mut self, diag: &mut Diagnostics) {
+        let Some(mut c) = self.stack.pop() else { return };
+        let name = match c.kind {
+            Kind::Section(s) => s,
+            Kind::Para(p, ..) => p,
+            _ => "",
+        };
+        if !name.is_empty() {
+            match c.children.first().copied() {
+                Some(Child::Sp(l, col)) => {
+                    diag.report(Level::Warning, l, col, SKIP, &format!("sp after {name}"));
+                    c.children.remove(0);
+                }
+                Some(Child::Br(l, col)) => {
+                    diag.report(Level::Warning, l, col, SKIP, &format!("br after {name}"));
+                    c.children.remove(0);
+                }
+                Some(Child::Para) if matches!(c.kind, Kind::Section(_)) => {}
+                _ => {}
             }
         }
-    }
-
-    /// Ends the open paragraph; one with nothing in it is reported, and doesn't count as having
-    /// started its section.
-    fn close_para(&mut self, diag: &mut Diagnostics) {
-        if let Some(p) = self.para.take()
-            && !p.content
+        if let Kind::Section(s) = c.kind
+            && let Some(Child::Br(l, col)) = c.children.last().copied()
         {
-            diag.report(Level::Warning, p.line, p.col, SKIP, &format!("{} empty", p.name));
-            if let Some(s) = p.at_start {
-                self.prev = Prev::Section(s);
+            diag.report(Level::Warning, l, col, SKIP, &format!("br at the end of {s}"));
+        }
+        let Some(parent) = self.stack.last_mut() else { return };
+        if let Kind::Para(p, l, col) = c.kind {
+            if c.children.is_empty() {
+                diag.report(Level::Warning, l, col, SKIP, &format!("{p} empty"));
+            } else {
+                // A paragraph first in its section is useless (reported with the section).
+                if p == "PP" && matches!(parent.kind, Kind::Section(_)) && parent.children.is_empty() {
+                    diag.report(Level::Warning, l, col, SKIP, &format!("PP after {}", if let Kind::Section(s) = parent.kind { s } else { "" }));
+                }
+                parent.children.push(Child::Para);
             }
         }
     }
