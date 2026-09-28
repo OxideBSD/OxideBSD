@@ -86,6 +86,10 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                     "fi" | "EE" => p.nofill = false,
                     _ => {}
                 }
+                if FONT_MACROS.contains(&name.as_str()) {
+                    let rest = p.raw.get(name.len()..).unwrap_or("").to_string();
+                    p.head_source(|| args_id_source(&rest));
+                }
                 p.macro_line(&name, &args);
                 // (Requests such as `.sp` aren't the language's own: no report.)
                 if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MAN_MACROS.contains(&name.as_str()) || name == "MR") {
@@ -99,6 +103,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                 if !p.in_preproc {
                     p.flow.text(p.diag, &raw);
                 }
+                p.head_source(|| text_id_source(&raw));
                 p.text_line(&text);
             }
             Line::Eqn { eqn, nospace_before, nospace_after } => {
@@ -281,6 +286,7 @@ impl Parser<'_> {
                     // The heading is the next line.
                     self.pending_head = true;
                 } else {
+                    self.stack.last_mut().unwrap().text = args_id_source(self.raw.get(name.len()..).unwrap_or(""));
                     let mut t = Node::text(&args.join(" "), self.line);
                     t.flags.line_start = true;
                     self.stack.last_mut().unwrap().children.push(t);
@@ -433,6 +439,17 @@ impl Parser<'_> {
         }
     }
 
+    /// For a `.SH`/`.SS` head waiting for its line: the text its identifier is made from.
+    fn head_source(&mut self, source: impl FnOnce() -> String) {
+        if let Some(top) = self.stack.last_mut()
+            && self.pending_head
+            && top.kind == Kind::Head
+            && matches!(top.tok.as_str(), "SH" | "SS")
+        {
+            top.text = source();
+        }
+    }
+
     /// A `.TP`/`.TQ` still waiting for its head line when `by` comes is dropped whole.
     fn break_head(&mut self, by: &str) {
         let Some(top) = self.stack.last() else { return };
@@ -452,6 +469,60 @@ impl Parser<'_> {
             self.head_done();
         }
     }
+}
+
+/// A heading's identifier comes from its source up to the first escape, as mandoc makes it.
+/// From a text line: with a `-` between letters as a hyphenation point.
+fn text_id_source(raw: &str) -> String {
+    let s = raw.split('\\').next().unwrap_or("");
+    let c: Vec<char> = s.chars().collect();
+    (0..c.len())
+        .map(|i| {
+            let hyph = c[i] == '-' && i > 0 && c[i - 1].is_ascii_alphabetic() && c.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic());
+            if hyph { '_' } else { c[i] }
+        })
+        .collect()
+}
+
+/// From macro arguments as typed (after the name): the arguments joined by a space.
+fn args_id_source(raw: &str) -> String {
+    let mut out = String::new();
+    let mut it = raw.chars().peekable();
+    loop {
+        while it.peek().is_some_and(|c| *c == ' ' || *c == '\t') {
+            it.next();
+        }
+        let Some(&first) = it.peek() else { break };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if first == '"' {
+            it.next();
+            while let Some(c) = it.next() {
+                match c {
+                    '"' if it.peek() == Some(&'"') => {
+                        it.next();
+                        out.push('"');
+                    }
+                    '"' => break,
+                    '\\' => return out,
+                    c => out.push(c),
+                }
+            }
+        } else {
+            while let Some(&c) = it.peek() {
+                if c == ' ' || c == '\t' {
+                    break;
+                }
+                if c == '\\' {
+                    return out;
+                }
+                out.push(c);
+                it.next();
+            }
+        }
+    }
+    out
 }
 
 /// Removes the paragraph macros and breaks the checks found to do nothing (`ManFlow`), as

@@ -68,7 +68,7 @@ fn tags(doc: &Document) -> HashMap<usize, String> {
         for c in &n.children {
             if c.kind == Kind::Block {
                 let claim = match c.tok.as_str() {
-                    "SH" | "SS" => c.part(Kind::Head).map(|h| (plain(&h.plain_text()), 0)),
+                    "SH" | "SS" => c.part(Kind::Head).map(|h| (h.text.clone(), 0)),
                     "TP" | "TQ" => c.part(Kind::Head).and_then(|h| first_word(&head_text(h))),
                     "IP" => c.args.first().and_then(|a| first_word(a)),
                     _ => None,
