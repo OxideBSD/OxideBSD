@@ -150,7 +150,8 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
             Line::Text { text, raw, line, last } => {
                 // A description continued on a text line doesn't end where its macro line does.
                 p.pending_nd = None;
-                p.lint.text();
+                let literal = p.in_literal() || p.in_preproc;
+                p.lint.text(p.diag, line, &raw, literal);
                 p.line = line;
                 p.col = 1;
                 let literal = p.in_literal() || p.in_preproc;
@@ -169,7 +170,7 @@ pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
                     n.flags.line_start = true;
                     p.push(n);
                 } else {
-                    p.diag.report(Level::Warning, line, 0, "blank line in fill mode, using .sp", "");
+                    p.diag.report(Level::Warning, line, 1, "blank line in fill mode, using .sp", "");
                     p.push(Node::new(Kind::Elem, "sp", line));
                 }
             }
@@ -665,12 +666,8 @@ impl Parser<'_> {
             "Nm" => self.meta.name.clone(),
             "Pa" => "~".to_string(),
             "Fl" => String::new(),
-            _ => {
-                if !matches!(name, "Fl" | "Li" | "No") {
-                    self.diag.report(Level::Warning, self.line, 0, "macro requires an argument", name);
-                }
-                return;
-            }
+            // (Reported by the lint checks, in mandoc's words.)
+            _ => return,
         };
         self.open(Kind::Elem, name);
         self.push(Node::text(&text, self.line));

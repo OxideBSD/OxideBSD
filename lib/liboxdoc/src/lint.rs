@@ -422,15 +422,17 @@ pub fn mdoc_args(diag: &mut Diagnostics, line: usize, col: usize, name: &str, ra
     let mut groups: Vec<(&str, Vec<(usize, &str)>)> = vec![(name, Vec::new())];
     let mut macro_cols = vec![col];
     for (c, a) in &args {
-        if crate::mdoc::CALLABLE.contains(&a.as_str()) {
+        if crate::mdoc::CALLABLE.contains(&a.as_str()) && !NOT_PARSED.contains(&name) {
             groups.push((a.as_str(), Vec::new()));
             macro_cols.push(*c);
         } else {
             groups.last_mut().unwrap().1.push((*c, a.as_str()));
         }
     }
-    for ((m, _), c) in groups.iter().zip(&macro_cols) {
+    for ((m, margs), c) in groups.iter().zip(&macro_cols) {
         match *m {
+            // (An empty `.Tn` is reported as empty instead.)
+            "Tn" if margs.is_empty() => {}
             "Tn" | "Bt" | "Ud" => diag.report(Level::Style, line, *c, "useless macro", m),
             "Fr" | "Hf" | "Ot" | "Es" | "En" | "Db" => diag.report(Level::Warning, line, *c, "obsolete macro", m),
             _ => {}
@@ -507,6 +509,16 @@ pub struct MdocState {
     authors: Option<(usize, usize)>,
 }
 
+/// mdoc macros whose arguments are never macro calls.
+const NOT_PARSED: &[&str] = &[
+    "Bd", "Bf", "Bk", "Bl", "Cd", "Dd", "Dt", "Ed", "Ef", "Ek", "El", "Fd", "Lb", "Os", "Pp", "Rs", "Re", "Sm", "Ud", "Bt", "Db", "Lp", "Rv", "Ex", "%A", "%B", "%C", "%D", "%I", "%J", "%N", "%O", "%P", "%Q", "%R", "%T", "%U", "%V",
+];
+
+/// mdoc macros skipped, with a warning, when they have no arguments.
+const EMPTY_SKIPPED: &[&str] = &[
+    "Ad", "An", "Cd", "Cm", "Dv", "Er", "Ev", "Fa", "Fd", "Fn", "Ft", "Ic", "In", "Li", "Ms", "Sy", "Tn", "Va", "Vt", "No", "Em", "Sx", "Lk", "Xr",
+];
+
 /// The standard mdoc sections, in their conventional order.
 const SECTIONS: &[&str] = &[
     "NAME", "LIBRARY", "SYNOPSIS", "DESCRIPTION", "CONTEXT", "IMPLEMENTATION NOTES", "RETURN VALUES", "ENVIRONMENT", "FILES", "EXIT STATUS", "EXAMPLES", "DIAGNOSTICS", "COMPATIBILITY", "ERRORS", "SEE ALSO", "STANDARDS", "HISTORY", "AUTHORS", "CAVEATS", "BUGS", "SECURITY CONSIDERATIONS",
@@ -537,15 +549,35 @@ impl MdocState {
         // Each macro on the line with its column and arguments.
         let mut groups: Vec<(&str, usize, Vec<(usize, &str)>)> = vec![(name, col, Vec::new())];
         for (c, a) in &args {
-            if crate::mdoc::CALLABLE.contains(&a.as_str()) {
+            if crate::mdoc::CALLABLE.contains(&a.as_str()) && !NOT_PARSED.contains(&name) {
                 groups.push((a.as_str(), *c, Vec::new()));
             } else {
                 groups.last_mut().unwrap().2.push((*c, a.as_str()));
             }
         }
-        for (m, mcol, margs) in groups {
+        let ngroups = groups.len();
+        for (gi, (m, mcol, margs)) in groups.into_iter().enumerate() {
             if m == "An" {
                 self.authors = None;
+            }
+            if EMPTY_SKIPPED.contains(&m) && margs.is_empty() {
+                diag.report(Level::Warning, line, mcol, "skipping empty macro", m);
+            }
+            match m {
+                "D1" | "Dl" if gi == 0 && ngroups == 1 && margs.is_empty() => diag.report(Level::Warning, line, mcol, "empty block", m),
+                "Pf" if gi + 1 == ngroups && margs.len() <= 1 => diag.report(Level::Warning, line, mcol, "nothing follows prefix", "Pf at eol"),
+                "Ns" if gi == 0 => diag.report(Level::Warning, line, mcol, "skipping no-space macro", ""),
+                "Lb" => {
+                    if let Some(&(c, lib)) = margs.first()
+                        && !crate::libraries::LIBRARIES.iter().any(|(l, _)| *l == lib)
+                    {
+                        diag.report(Level::Warning, line, c, "unknown library name", &format!("Lb {lib}"));
+                    }
+                }
+                "Bl" if margs.iter().any(|(_, a)| *a == "-tag") && !margs.iter().any(|(_, a)| *a == "-width") => {
+                    diag.report(Level::Warning, line, mcol, "missing -width in -tag list, using 6n", "Bl -tag");
+                }
+                _ => {}
             }
             if m != "Xr" {
                 // A block interrupting a run of cross-references ends it, as the section's end
@@ -583,9 +615,24 @@ impl MdocState {
         }
     }
 
-    /// A text line: it breaks a run of cross-references.
-    pub fn text(&mut self) {
+    /// A text line, as typed: it breaks a run of cross-references. Outside literal displays,
+    /// names of BSD systems suggest their macros, and `--` an em dash.
+    pub fn text(&mut self, diag: &mut Diagnostics, line: usize, raw: &str, literal: bool) {
         self.last_xr = None;
+        if literal {
+            return;
+        }
+        for (word, m) in [("OpenBSD", "Ox"), ("NetBSD", "Nx"), ("FreeBSD", "Fx"), ("DragonFly", "Dx")] {
+            let found = raw.match_indices(word).find(|(p, _)| *p == 0 || !raw.as_bytes()[p - 1].is_ascii_alphanumeric());
+            if let Some((p, _)) = found {
+                diag.report(Level::Style, line, p + 1, "consider using OS macro", m);
+            }
+        }
+        // (A dash of three or more is someone's own choice.)
+        let b = raw.as_bytes();
+        if let Some((p, _)) = raw.match_indices("--").find(|(p, _)| (*p == 0 || b[p - 1] != b'-') && b.get(p + 2) != Some(&b'-')) {
+            diag.report(Level::Style, line, p + 1, "verbatim \"--\", maybe consider using \\(em", "");
+        }
     }
 
     /// The end of the input.
