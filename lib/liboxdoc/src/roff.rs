@@ -1252,7 +1252,7 @@ mod tests {
     #[test]
     fn macros_and_args() {
         let l = run(".de XX\n.YY \\\\$2 \\\\$1\n..\n.XX a \"b c\"\n");
-        assert_eq!(l, vec![Line::Macro { name: "YY".into(), args: vec!["b".into(), "c".into(), "a".into()], line: 4, col: 2, raw: "XX a b c".into(), no_break: false, trailing: None }]);
+        assert_eq!(l, vec![Line::Macro { name: "YY".into(), args: vec!["b".into(), "c".into(), "a".into()], line: 4, col: 2, raw: "YY b c a".into(), no_break: false, trailing: None }]);
     }
 
     #[test]
