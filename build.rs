@@ -68,18 +68,6 @@ fn build_jobs() -> usize {
 // cascade, found live).
 include!("build_busybox.rs");
 
-/// Builds Limine's small C deploy/install tool (`limine.c` -> `limine`) from the vendored
-/// `-binary`-branch submodule (`external/bsd/limine`, a personal fork pinned the same way as
-/// musl/busybox), then stages it plus every prebuilt bootloader-stage blob this project
-/// needs into a fixed location, `target/limine-stage/`, that `scripts/qemu_runner.sh` reads from
-/// directly -- the runner never reaches into `external/bsd/limine` itself, mirroring how nothing
-/// else in this file hands another tool a path into `external/*` directly either (env-var/
-/// fixed-path handoff instead). The `-binary` branch ships every actual bootloader stage
-/// (`limine-bios.sys`, `limine-bios-cd.bin`, `limine-uefi-cd.bin`, `BOOTX64.EFI`, `BOOTIA32.EFI`)
-/// as pre-built, committed blobs -- `make` here only compiles the deploy tool itself (`limine.c`,
-/// a plain host-native C program with a trivial `.POSIX` Makefile that already does its own real
-/// incremental-rebuild tracking, unlike BusyBox's own more elaborate out-of-tree build -- no
-/// separate staleness bookkeeping needed here, `make` is cheap to just always invoke).
 /// The index of the system's manual pages (MAN.md §7 in OxideBSD-doc): liboxdoc's makewhatis,
 /// built for the host, over a copy of `share/man`. oxfs seeds it as `/usr/share/man/oxdoc.db`,
 /// so apropos(1) and man(1)'s lookup by any page name work from the first boot, as the BSDs
@@ -127,22 +115,54 @@ fn build_man_index() -> PathBuf {
     stage.join("oxdoc.db")
 }
 
+/// Builds Limine from source (`external/bsd/limine`, a fork pinned the same way as musl/busybox:
+/// upstream's release tag plus the release tarball's bootstrapped files, so no network is needed)
+/// out of tree in `target/limine-build`, then stages the deploy tool and the bootloader stages
+/// `scripts/qemu_runner.sh` needs into `target/limine-stage/` -- the runner never reaches into
+/// `external/*` itself. Limine 12 stopped publishing the prebuilt `-binary` branch this used to
+/// track. `configure` reruns only when its arguments or the source's `version` change; `make`
+/// always runs, its own dependency tracking makes a no-op build about a second.
 fn build_limine_deploy_tool() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let limine_dir = Path::new(manifest_dir).join("external/bsd/limine");
+    let build_dir = Path::new(manifest_dir).join("target/limine-build");
     let stage_dir = Path::new(manifest_dir).join("target/limine-stage");
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        limine_dir.join("limine.c").display()
-    );
+    println!("cargo:rerun-if-changed={}", limine_dir.display());
+
+    const CONFIGURE_ARGS: &[&str] = &[
+        "--enable-bios",
+        "--enable-bios-cd",
+        "--enable-uefi-x86-64",
+        "--enable-uefi-ia32",
+        "--enable-uefi-cd",
+    ];
+    let version = std::fs::read_to_string(limine_dir.join("version"))
+        .unwrap_or_else(|e| panic!("{}/version: {e} (submodule not checked out?)", limine_dir.display()));
+    let stamp_contents = format!("{}\n{}", version.trim(), CONFIGURE_ARGS.join(" "));
+    let stamp = build_dir.join("oxidebsd-configure.stamp");
+    if std::fs::read_to_string(&stamp).ok().as_deref() != Some(stamp_contents.as_str()) {
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir)
+            .unwrap_or_else(|e| panic!("failed to create {}: {e}", build_dir.display()));
+        let status = Command::new(limine_dir.join("configure"))
+            .current_dir(&build_dir)
+            .args(CONFIGURE_ARGS)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run limine's configure: {e}"));
+        if !status.success() {
+            panic!("configuring limine failed: {status}");
+        }
+        std::fs::write(&stamp, &stamp_contents)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", stamp.display()));
+    }
 
     let status = Command::new("make")
-        .current_dir(&limine_dir)
+        .current_dir(&build_dir)
         .status()
-        .unwrap_or_else(|e| panic!("failed to run make for external/bsd/limine: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run make for limine: {e}"));
     if !status.success() {
-        panic!("building limine's deploy tool failed: {status}");
+        panic!("building limine failed: {status}");
     }
 
     std::fs::create_dir_all(&stage_dir)
@@ -161,7 +181,7 @@ fn build_limine_deploy_tool() {
         "BOOTIA32.EFI",
     ];
     for name in STAGE_FILES {
-        let src = limine_dir.join(name);
+        let src = build_dir.join("bin").join(name);
         let dst = stage_dir.join(name);
         std::fs::copy(&src, &dst).unwrap_or_else(|e| {
             panic!(
