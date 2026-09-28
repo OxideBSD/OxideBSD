@@ -187,8 +187,12 @@ impl R<'_> {
     fn arg_words(&mut self, text: &str, style: Style, eos: bool) {
         let body = text.trim_matches(' ');
         if body.is_empty() {
-            // Only spaces: still that many spaces.
-            self.t.add_space(text.len());
+            // Only spaces: still that many spaces, printed even at the start of a line.
+            if self.t.at_line_start() && !text.is_empty() {
+                self.t.word(&mark::NBSP.to_string().repeat(text.len()), style);
+            } else {
+                self.t.add_space(text.len());
+            }
             return;
         }
         let lead = text.len() - text.trim_start_matches(' ').len();

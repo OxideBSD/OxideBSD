@@ -141,6 +141,12 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
             }
             _ => {}
         }
+        // A layout row of lines only is a line across the table, taking no data line.
+        while next + 1 < layouts.len() && !layouts[next].specs.is_empty() && layouts[next].specs.iter().all(|s| matches!(s.kind, '_' | '=')) {
+            let double = layouts[next].specs.iter().all(|s| s.kind == '=');
+            rows.push(Row::Line(if double { 2 } else { 1 }));
+            next += 1;
+        }
         let layout = layouts.get(next.min(layouts.len().saturating_sub(1))).cloned().unwrap_or_default();
         next += 1;
         // The cells, text blocks spanning lines.
@@ -165,6 +171,12 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                         break;
                     }
                     if l.starts_with('.') || l.starts_with('\'') {
+                        // A lone control character or a comment line leaves the dot as text.
+                        let body = l[1..].trim_start_matches([' ', '\t']);
+                        if body.is_empty() || body.starts_with("\\\"") || body.starts_with("\\#") {
+                            text.push(".".into());
+                            continue;
+                        }
                         // A macro inside a block: ignored, but its arguments stay as text.
                         if let Some(args) = ignore_macro(l, lines[i - 1].0, diag).filter(|a| !a.is_empty()) {
                             text.push(decode(args, lines[i - 1].0));

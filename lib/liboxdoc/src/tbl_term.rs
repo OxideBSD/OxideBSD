@@ -42,21 +42,48 @@ fn visible(s: &str) -> usize {
 /// width, or wide enough for any cell). Spaces between words are kept as typed; a sentence
 /// ending a line gets no extra one, unlike running text.
 fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
+    use crate::roff::mark::BACK;
+    // Moving left overprints what follows; at the end of a line it prints nothing, and a cell
+    // is as wide as its text without it, as in mandoc.
+    if text.iter().any(|l| l.contains(BACK)) {
+        let trimmed: Vec<String> = text.iter().map(|l| l.trim_end_matches(BACK).to_string()).collect();
+        let mut f = format_filled(t, &trimmed, style, width);
+        let plain: Vec<String> = text.iter().map(|l| l.replace(BACK, "")).collect();
+        f.min_width = format_filled(t, &plain, style, width).width();
+        return f;
+    }
+    format_filled(t, text, style, width)
+}
+
+fn format_filled(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
     let mut s = Term::new(width, t.encoding, t.styling);
     s.tab_width = t.tab_width;
     let mut lines = Vec::new();
-    for line in text {
-        let line = line.trim_end_matches(' ');
-        let mut words: Vec<(&str, usize)> = Vec::new();
+    let nbsp = |n: usize| crate::roff::mark::NBSP.to_string().repeat(n);
+    let last_line = text.len().saturating_sub(1);
+    for (li, line) in text.iter().enumerate() {
+        // Spaces at the cell's edges are kept, and count in its width.
+        let lead = if li == 0 { line.len() - line.trim_start_matches(' ').len() } else { 0 };
+        let trail = if li == last_line { line.len() - line.trim_end_matches(' ').len() } else { 0 };
+        let body = line.trim_matches(' ');
+        if body.is_empty() {
+            if lead > 0 {
+                s.word(&nbsp(lead), style);
+            }
+            continue;
+        }
+        let mut words: Vec<(String, usize)> = Vec::new();
         let mut spaces = 0;
-        for w in line.split(' ') {
+        for w in body.split(' ') {
             if w.is_empty() {
                 spaces += 1;
                 continue;
             }
-            words.push((w, spaces + 1));
+            words.push((w.to_string(), spaces + 1));
             spaces = 0;
         }
+        words[0].0.insert_str(0, &nbsp(lead));
+        words.last_mut().unwrap().0.push_str(&nbsp(trail));
         for (i, (w, sp)) in words.iter().enumerate() {
             if i > 0 {
                 s.set_space(*sp);
@@ -71,6 +98,14 @@ fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
     }
     if lines.is_empty() {
         lines.push((String::new(), 0));
+    }
+    // The terminal drops spaces at the end of a line; a cell keeps its trailing ones.
+    let trail = text.last().map_or(0, |l| l.len() - l.trim_end_matches(' ').len());
+    if trail > 0 && text.last().is_some_and(|l| !l.trim().is_empty())
+        && let Some(last) = lines.last_mut()
+    {
+        last.0.push_str(&" ".repeat(trail));
+        last.1 += trail;
     }
     Formatted { lines, min_width: 0 }
 }
@@ -396,15 +431,17 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
                             }
                             _ => f.lines.get(li).cloned().unwrap_or_default(),
                         };
+                        // A one-line cell aligns by its measured width.
+                        let tw = if f.lines.len() == 1 && line.is_none() { text.1.max(f.min_width) } else { text.1 };
                         let lead = match kind {
-                            'r' => w.saturating_sub(text.1),
-                            'c' => w.saturating_sub(text.1) / 2,
+                            'r' => w.saturating_sub(tw),
+                            'c' => w.saturating_sub(tw) / 2,
                             // Alphabetic: one column in, without widening the column.
                             'a' if line.is_none() => 1,
                             'n' if line.is_none() && *span == 1 => match laid.nums[j] {
                                 Some(int) => num_lead[j] + ints[j] - int,
                                 // Not a number: centred.
-                                None => w.saturating_sub(text.1) / 2,
+                                None => w.saturating_sub(tw) / 2,
                             },
                             _ => 0,
                         };
