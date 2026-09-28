@@ -6,7 +6,9 @@ use liboxdoc::{Device, Options};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut opts = Options { styling: Styling::Overstrike, ..Options::default() };
+    // Today in the local time zone, as mandoc prints a bare `$Mdocdate$`.
+    let today = std::process::Command::new("date").arg("+%B %-d, %Y").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let mut opts = Options { styling: Styling::Overstrike, today, ..Options::default() };
     let mut min = Level::Warning;
     let mut files = Vec::new();
     let mut i = 0;

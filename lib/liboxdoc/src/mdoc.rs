@@ -92,22 +92,54 @@ struct Parser<'a> {
     spacing_off: bool,
     in_synopsis: bool,
     line: usize,
+    /// The column of the current macro's name, for diagnostics.
+    col: usize,
+    /// The current macro line as typed, from its name on.
+    raw: String,
+    /// Unknown macros already reported.
+    unknown: Vec<String>,
+    /// Inside a tbl or eqn block (`.TS`/`.TE`, `.EQ`/`.EN`), whose lines aren't text.
+    in_preproc: bool,
+    /// Whitespace at the end of the current macro line: where to report it, if the macro is
+    /// known.
+    trailing: Option<(usize, usize)>,
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0 };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, nospace: false, spacing_off: false, in_synopsis: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false };
     let mut first = true;
     for l in lines {
         match l {
-            Line::Macro { name, args, line, .. } => {
+            Line::Macro { name, args, line, col, raw, trailing, .. } => {
                 p.line = line;
+                p.trailing = trailing;
+                // tbl and eqn blocks: not formatted yet, and not checked.
+                match name.as_str() {
+                    "TS" | "EQ" => {
+                        p.in_preproc = true;
+                        continue;
+                    }
+                    "TE" | "EN" => {
+                        p.in_preproc = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+                p.col = col;
+                p.raw = raw;
                 p.macro_line(&name, &args, first);
+                if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MDOC_MACROS.contains(&name.as_str())) {
+                    p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
+                }
                 // An `.Xc` may have closed the last open part of an `.It` head.
                 p.end_item_head();
                 first = false;
             }
-            Line::Text { text, line } => {
+            Line::Text { text, raw, line } => {
                 p.line = line;
+                p.col = 1;
+                let literal = p.in_literal() || p.in_preproc;
+                crate::lint::text_line(p.diag, line, &raw, literal, true);
                 p.text_line(&text);
             }
             Line::Blank { line } => {
@@ -315,7 +347,12 @@ impl Parser<'_> {
                 self.words(&prepend(name, args), None);
             }
             _ => {
-                self.diag.report(Level::Error, self.line, 0, "skipping unknown macro", &format!(".{name}"));
+                self.trailing = None;
+                // Each unknown macro is reported once, as mandoc does.
+                if !self.unknown.iter().any(|u| u == name) {
+                    self.unknown.push(name.to_string());
+                    self.diag.report(Level::Error, self.line, self.col, "skipping unknown macro", &format!(".{}", self.raw));
+                }
             }
         }
     }

@@ -15,6 +15,7 @@ pub mod standards;
 pub mod term;
 pub mod tree;
 pub mod unicode;
+pub mod lint;
 
 use diag::Diagnostics;
 use term::{Encoding, Styling, Term};
@@ -38,11 +39,14 @@ pub struct Options {
     pub os: Option<String>,
     /// Only the SYNOPSIS section, without heading, header or footer (`man -h`).
     pub synopsis_only: bool,
+    /// Today's date in the local time zone, `Month D, YYYY`, for a `$Mdocdate$` with no date;
+    /// without it, today in UTC. (This library doesn't read the time zone itself.)
+    pub today: Option<String>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None, synopsis_only: false }
+        Options { device: Device::Utf8, width: 78, styling: Styling::Sgr, os: None, synopsis_only: false, today: None }
     }
 }
 
@@ -74,6 +78,12 @@ pub fn format(input: &str, file: &str, opts: &Options) -> (String, Diagnostics) 
         && doc.meta.os.is_empty()
     {
         doc.meta.os = os.clone();
+    }
+    if let Some(today) = &opts.today
+        && doc.meta.date.trim().trim_start_matches("$Mdocdate").trim_matches([':', '$', ' ']).is_empty()
+        && doc.meta.date.trim().starts_with("$Mdocdate")
+    {
+        doc.meta.date = today.clone();
     }
     let out = match opts.device {
         Device::Ascii | Device::Utf8 => {
@@ -147,6 +157,11 @@ fn parse_date(s: &str, comma: bool) -> Option<String> {
         return None;
     }
     Some(format!("{m} {day}, {year}"))
+}
+
+/// A date as `.Dd` writes it, `Month D, YYYY`, from a month 1-12.
+pub fn civil_date(year: i64, month: usize, day: u32) -> String {
+    format!("{} {day}, {year}", MONTHS[month.clamp(1, 12) - 1])
 }
 
 /// Today's date, `Month D, YYYY`, in UTC.

@@ -52,9 +52,12 @@ pub mod mark {
 pub enum Line {
     /// A macro or request the language parser handles: its name and arguments, with quotes
     /// removed and escapes decoded.
-    Macro { name: String, args: Vec<String>, line: usize, no_break: bool },
-    /// A text line, escapes decoded. `sentence_end` is set when it ends a sentence (§4.1).
-    Text { text: String, line: usize },
+    /// `col` is the 1-based column of the name, and `raw` the rest of the line as typed (for
+    /// diagnostics).
+    Macro { name: String, args: Vec<String>, line: usize, col: usize, raw: String, no_break: bool, trailing: Option<(usize, usize)> },
+    /// A text line, escapes decoded; `raw` is the line with strings interpolated and escapes
+    /// still as typed, which diagnostics look at.
+    Text { text: String, raw: String, line: usize },
     /// An empty line: a paragraph break in both languages.
     Blank { line: usize },
 }
@@ -87,6 +90,9 @@ pub struct Roff<'a> {
     diag: &'a mut Diagnostics,
     /// Reads a `.so` include by its path, relative to the manual tree root.
     include: Option<&'a dyn Fn(&str) -> Option<String>>,
+    /// The next line is a new input line, whose own checks (trailing whitespace) are due; a
+    /// conditional's body, processed as a line of its own, is not.
+    check_line: Option<(usize, usize)>,
     /// The page's language once its first `.Dd` (`true`, mdoc) or `.TH` has been seen.
     language: Option<bool>,
     /// `an-margin` values saved by man(7)'s `.RS`, for `.RE` to restore.
@@ -96,12 +102,12 @@ pub struct Roff<'a> {
 
 /// man(7)'s macros, which a page can't redefine. (`.MR` is newer than mandoc 1.14.6, so a
 /// page's own definition, as groff's pages carry for older formatters, is used.)
-const MAN_MACROS: &[&str] = &[
+pub const MAN_MACROS: &[&str] = &[
     "TH", "SH", "SS", "TP", "TQ", "LP", "PP", "P", "IP", "HP", "SM", "SB", "BI", "IB", "BR", "RB", "R", "B", "I", "IR", "RI", "RE", "RS", "DT", "UC", "PD", "AT", "SY", "YS", "OP", "EX", "EE", "UR", "UE", "MT", "ME",
 ];
 
 /// mdoc(7)'s macros, which a page can't redefine.
-const MDOC_MACROS: &[&str] = &[
+pub const MDOC_MACROS: &[&str] = &[
     "Dd", "Dt", "Os", "Sh", "Ss", "Pp", "D1", "Dl", "Bd", "Ed", "Bl", "El", "It", "Ad", "An", "Ap", "Ar", "Cd", "Cm", "Dv", "Er", "Ev", "Ex", "Fa", "Fd", "Fl", "Fn", "Ft", "Ic", "In", "Li", "Nd", "Nm", "Op", "Ot", "Pa", "Rv", "St", "Va", "Vt", "Xr", "%A", "%B", "%D", "%I", "%J", "%N", "%O", "%P", "%R", "%T", "%V", "Ac", "Ao", "Aq", "At", "Bc", "Bf", "Bo", "Bq", "Bsx", "Bx", "Db", "Dc", "Do", "Dq", "Ec", "Ef", "Em", "Eo", "Fx", "Ms", "No", "Ns", "Nx", "Ox", "Pc", "Pf", "Po", "Pq", "Qc", "Ql", "Qo", "Qq", "Re", "Rs", "Sc", "So", "Sq", "Sm", "Sx", "Sy", "Tn", "Ux", "Xc", "Xo", "Fo", "Fc", "Oo", "Oc", "Bk", "Ek", "Bt", "Hf", "Fr", "Ud", "Lb", "Lp", "Lk", "Mt", "Brq", "Bro", "Brc", "%C", "Es", "En", "Dx", "%Q", "%U", "Ta",
 ];
 
@@ -132,6 +138,7 @@ impl<'a> Roff<'a> {
             include: None,
             rs_saved: Vec::new(),
             language: None,
+            check_line: None,
             out: Vec::new(),
         }
     }
@@ -158,10 +165,12 @@ impl<'a> Roff<'a> {
             }
             pending.push_str(line);
             let l = std::mem::take(&mut pending);
+            self.check_line = l.ends_with([' ', '\t']).then_some((i + 1, l.len()));
             self.line(&l, start, 0);
         }
         if !pending.is_empty() {
             let l = std::mem::take(&mut pending);
+            self.check_line = None;
             self.line(&l, start, 0);
         }
         if self.defining.is_some() {
@@ -203,6 +212,10 @@ impl<'a> Roff<'a> {
             self.skip_conds(raw);
             return;
         }
+        // Whitespace in a comment at the end of the line: reported here, as the comment goes.
+        if self.ec.is_some_and(|ec| raw.contains(&format!("{ec}\"")) || raw.contains(&format!("{ec}#"))) {
+            self.trailing_space_at(0);
+        }
 
         let text = raw;
         // An escaped control character (`\.`) at the start of a line still makes it a control
@@ -236,6 +249,9 @@ impl<'a> Roff<'a> {
                 return;
             }
             if self.request(&name, argstr, lineno, depth) {
+                // Whitespace after a request isn't reported (a conditional's body, processed as a
+                // line of its own, has reported it if it holds text or a macro).
+                self.check_line = None;
                 // `.if`/`.ie`/`.el` process their own rest of line, closes included.
                 if !matches!(name.as_str(), "if" | "ie" | "el") {
                     self.close_conds(raw);
@@ -255,9 +271,11 @@ impl<'a> Roff<'a> {
                     return;
                 }
                 let args = self.macro_args(argstr, lineno);
+                self.check_line = None;
                 for l in body {
                     let l = self.substitute_args(&l, &args);
                     self.frames.push(args.clone());
+                    self.check_line = l.ends_with([' ', '\t']).then_some((lineno, l.len()));
                     self.line(&l, lineno, depth + 1);
                     self.frames.pop();
                 }
@@ -270,7 +288,12 @@ impl<'a> Roff<'a> {
             if self.language.is_none() && (name == "Dd" || name == "TH") {
                 self.language = Some(name == "Dd");
             }
-            self.emit(Line::Macro { name, args, line: lineno, no_break });
+            let col = text.len() - rest.len() + 1;
+            let raw_rest = rest.to_string();
+            // Trailing whitespace on a macro line is the language parser's to report, one column
+            // past the end, if it knows the macro.
+            let trailing = self.check_line.take().map(|(l, len)| (l, len + 1));
+            self.emit(Line::Macro { name, args, line: lineno, col, raw: raw_rest, no_break, trailing });
             return;
         }
 
@@ -278,6 +301,7 @@ impl<'a> Roff<'a> {
             self.emit(Line::Blank { line: lineno });
             return;
         }
+        let raw_text = self.interpolate(text, lineno, 0);
         let mut expanded = self.expand(text, lineno);
         // A line holding only a comment or a `\}` produces nothing.
         if expanded.is_empty() {
@@ -288,7 +312,16 @@ impl<'a> Roff<'a> {
             expanded = expanded.chars().map(|c| *self.translate.get(&c).unwrap_or(&c)).collect();
         }
         self.close_conds(raw);
-        self.emit(Line::Text { text: expanded, line: lineno });
+        self.trailing_space_at(0);
+        self.emit(Line::Text { text: expanded, raw: raw_text, line: lineno });
+    }
+
+    /// Reports whitespace at the end of the current input line, if it has some, at its last
+    /// column plus `extra`.
+    fn trailing_space_at(&mut self, extra: usize) {
+        if let Some((line, len)) = self.check_line.take() {
+            self.diag.report(Level::Style, line, len + extra, "whitespace at end of input line", "");
+        }
     }
 
     fn emit(&mut self, line: Line) {
@@ -504,7 +537,7 @@ impl<'a> Roff<'a> {
                 if name == "nop" {
                     // `.nop text`: the text as a text line.
                     let t = self.expand(argstr, lineno);
-                    self.emit(Line::Text { text: t, line: lineno });
+                    self.emit(Line::Text { raw: t.clone(), text: t, line: lineno });
                 }
                 true
             }
@@ -1213,13 +1246,13 @@ mod tests {
     #[test]
     fn strings_and_escapes() {
         let l = run(".ds Xx hello\n\\*(Xx \\(em \\fBb\\fR\n");
-        assert_eq!(l, vec![Line::Text { text: format!("hello \u{2014} {}b{}", mark::FONT_B, mark::FONT_R), line: 2 }]);
+        assert_eq!(l, vec![Line::Text { text: format!("hello \u{2014} {}b{}", mark::FONT_B, mark::FONT_R), raw: "hello \\(em \\fBb\\fR".into(), line: 2 }]);
     }
 
     #[test]
     fn macros_and_args() {
         let l = run(".de XX\n.YY \\\\$2 \\\\$1\n..\n.XX a \"b c\"\n");
-        assert_eq!(l, vec![Line::Macro { name: "YY".into(), args: vec!["b".into(), "c".into(), "a".into()], line: 4, no_break: false }]);
+        assert_eq!(l, vec![Line::Macro { name: "YY".into(), args: vec!["b".into(), "c".into(), "a".into()], line: 4, col: 2, raw: "XX a b c".into(), no_break: false, trailing: None }]);
     }
 
     #[test]

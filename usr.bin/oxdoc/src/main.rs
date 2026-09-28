@@ -28,6 +28,17 @@ fn terminal_width() -> Option<usize> {
     }
 }
 
+/// Today's date in the local time zone, for a page dated `$Mdocdate$`.
+fn local_today() -> Option<String> {
+    // SAFETY: time(NULL) and localtime_r into a local tm.
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+        return None;
+    }
+    Some(liboxdoc::civil_date(tm.tm_year as i64 + 1900, tm.tm_mon as usize + 1, tm.tm_mday as u32))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let tty = std::io::stdout().is_terminal();
@@ -36,6 +47,7 @@ fn main() -> ExitCode {
     let mut opts = Options {
         styling: if tty { Styling::Sgr } else { Styling::Plain },
         width: terminal_width().map(|w| w.min(80).saturating_sub(2)).unwrap_or(78),
+        today: local_today(),
         ..Options::default()
     };
     // UTF-8 output only when the locale asks for it, as mandoc does; otherwise ASCII.

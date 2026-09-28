@@ -34,18 +34,57 @@ struct Parser<'a> {
     /// The next node continues the last input line, which ended in `\c`.
     joined: bool,
     line: usize,
+    /// The column of the current macro's name, for diagnostics.
+    col: usize,
+    /// The current macro line as typed, from its name on.
+    raw: String,
+    /// Unknown macros already reported.
+    unknown: Vec<String>,
+    /// Inside a tbl or eqn block (`.TS`/`.TE`, `.EQ`/`.EN`), whose lines aren't text.
+    in_preproc: bool,
+    /// Whitespace at the end of the current macro line: where to report it, if the macro is
+    /// known.
+    trailing: Option<(usize, usize)>,
+    /// In no-fill mode (`.nf`, `.EX`), where text lines aren't checked.
+    nofill: bool,
 }
 
 pub fn parse(lines: Vec<Line>, diag: &mut Diagnostics) -> Document {
-    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, line: 0 };
+    let mut p = Parser { stack: vec![Node::new(Kind::Root, "", 0)], meta: Meta::default(), diag, pending_font: None, pending_head: false, nospace: false, continued: false, joined: false, nofill: false, line: 0, col: 0, raw: String::new(), trailing: None, unknown: Vec::new(), in_preproc: false };
     for l in lines {
         match l {
-            Line::Macro { name, args, line, .. } => {
+            Line::Macro { name, args, line, col, raw, trailing, .. } => {
                 p.line = line;
+                p.trailing = trailing;
+                // tbl and eqn blocks: not formatted yet, and not checked.
+                match name.as_str() {
+                    "TS" | "EQ" => {
+                        p.in_preproc = true;
+                        continue;
+                    }
+                    "TE" | "EN" => {
+                        p.in_preproc = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+                p.col = col;
+                p.raw = raw;
+                match name.as_str() {
+                    "nf" | "EX" => p.nofill = true,
+                    "fi" | "EE" => p.nofill = false,
+                    _ => {}
+                }
                 p.macro_line(&name, &args);
+                // (Requests such as `.sp` aren't the language's own: no report.)
+                if let Some((l, c)) = p.trailing.take().filter(|_| crate::roff::MAN_MACROS.contains(&name.as_str()) || name == "MR") {
+                    p.diag.report(Level::Style, l, c, "whitespace at end of input line", "");
+                }
             }
-            Line::Text { text, line } => {
+            Line::Text { text, raw, line } => {
                 p.line = line;
+                p.col = 1;
+                crate::lint::text_line(p.diag, line, &raw, p.nofill || p.in_preproc, false);
                 p.text_line(&text);
             }
             Line::Blank { line } => {
@@ -343,7 +382,12 @@ impl Parser<'_> {
                 self.stack.last_mut().unwrap().children.push(e);
             }
             _ => {
-                self.diag.report(Level::Error, self.line, 0, "skipping unknown macro", &format!(".{name}"));
+                self.trailing = None;
+                // Each unknown macro is reported once, as mandoc does.
+                if !self.unknown.iter().any(|u| u == name) {
+                    self.unknown.push(name.to_string());
+                    self.diag.report(Level::Error, self.line, self.col, "skipping unknown macro", &format!(".{}", self.raw));
+                }
             }
         }
     }
