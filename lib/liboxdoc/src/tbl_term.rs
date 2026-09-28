@@ -242,6 +242,8 @@ pub fn render(t: &mut Term, tbl: &Table, space_before: bool) {
             k += 1;
             let style = style_of(&spec);
             let (f, line) = match (cell, spec.kind) {
+                // Continued from the cell above: its own data is dropped.
+                (_, '^') => (format(t, &none, style, big), None),
                 (_, '_') => (format(t, &none, style, big), Some(1)),
                 (_, '=') => (format(t, &none, style, big), Some(2)),
                 (Some(Cell::Line(d)), _) => (format(t, &none, style, big), Some(*d)),

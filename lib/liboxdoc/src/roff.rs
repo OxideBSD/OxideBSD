@@ -293,7 +293,12 @@ impl<'a> Roff<'a> {
             }
             if !define {
                 // A control line's strings and registers are interpolated, as for any request.
-                let line = if control { self.interpolate(raw, lineno, 0) } else { raw.to_string() };
+                let line = if control {
+                    let body = strip_comment(raw, self.ec).trim_end_matches([' ', '\t']).to_string();
+                    self.interpolate(&body, lineno, 0)
+                } else {
+                    raw.to_string()
+                };
                 if let Some((_, lines)) = &mut self.table {
                     lines.push((lineno, line));
                 }

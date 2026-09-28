@@ -98,27 +98,33 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
     if let Some((_, first)) = lines.first()
         && first.trim_end().ends_with(';')
     {
-        opts = parse_opts(first);
+        opts = parse_opts(first, lines[0].0, diag);
         i = 1;
     }
     let mut layouts: Vec<Layout> = Vec::new();
     let mut ncols = 0;
-    i = parse_layout(lines, i, &mut layouts);
+    i = parse_layout(lines, i, &mut layouts, diag);
     ncols = ncols.max(layouts.iter().map(|l| l.specs.len()).max().unwrap_or(0));
     let mut rows = Vec::new();
     let mut next = 0;
+    let mut any_data = false;
     while i < lines.len() {
         let (lineno, line) = &lines[i];
         // `.T&`: a new layout for the rows after it.
         if line.trim_end() == ".T&" {
             layouts.clear();
-            i = parse_layout(lines, i + 1, &mut layouts);
+            i = parse_layout(lines, i + 1, &mut layouts, diag);
             ncols = ncols.max(layouts.iter().map(|l| l.specs.len()).max().unwrap_or(0));
             next = 0;
             continue;
         }
+        // A blank line is an empty row, but not data.
+        if !line.is_empty() {
+            any_data = true;
+        }
         // A macro isn't formatted; any but a break's arguments make a row of their own.
-        let line = if line.starts_with('.') || line.starts_with('\'') {
+        let from_macro = line.starts_with('.') || line.starts_with('\'');
+        let line = if from_macro {
             match ignore_macro(line, *lineno, diag) {
                 Some(args) => args.to_string(),
                 None => {
@@ -153,14 +159,18 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
         // The cells, text blocks spanning lines.
         let mut cells = Vec::new();
         let mut raw = Vec::new();
-        let mut rest = line;
         let row_line = *lineno;
+        // Where each cell was typed: its line, the line, and its column.
+        let mut at: Vec<(usize, String, usize)> = Vec::new();
+        let (mut cur_no, mut cur_text, mut offset) = (row_line, line.clone(), 0);
+        let mut rest = line;
         i += 1;
         loop {
             let (cell, tail) = match rest.find(opts.tab) {
                 Some(p) => (rest[..p].to_string(), Some(rest[p + opts.tab.len_utf8()..].to_string())),
                 None => (rest.clone(), None),
             };
+            at.push((cur_no, cur_text.clone(), offset + 1));
             if cell == "T{" {
                 // A text block: the following lines up to one starting `T}`.
                 let mut text: Vec<String> = Vec::new();
@@ -170,6 +180,7 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                     i += 1;
                     if let Some(t) = l.strip_prefix("T}") {
                         after = Some(t.to_string());
+                        (cur_no, cur_text, offset) = (lines[i - 1].0, l.clone(), 2);
                         break;
                     }
                     if l.starts_with('.') || l.starts_with('\'') {
@@ -187,12 +198,16 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                     }
                     text.push(decode(l, lines[i - 1].0));
                 }
+                if after.is_none() {
+                    diag.report(Level::Error, start, 2, "data block open at end of tbl", "TE");
+                }
                 cells.push(Cell::Block(text));
                 raw.push(String::new());
                 match after {
                     // `T}` then the next cell, after a tab.
                     Some(a) if a.starts_with(opts.tab) => {
                         rest = a[opts.tab.len_utf8()..].to_string();
+                        offset += opts.tab.len_utf8();
                         continue;
                     }
                     _ => break,
@@ -207,11 +222,33 @@ pub fn parse(lines: &[(usize, String)], start: usize, decode: &mut dyn FnMut(&st
                 c => Cell::Text(decode(c, row_line)),
             });
             match tail {
-                Some(t) => rest = t,
+                Some(t) => {
+                    offset += cell.len() + opts.tab.len_utf8();
+                    rest = t;
+                }
                 None => break,
             }
         }
+        if !from_macro {
+            // Cells past the layout's columns, and data where a cell spans down, are dropped.
+            let takes: Vec<&Spec> = layout.specs.iter().filter(|s| s.kind != 's').collect();
+            for (k, cell) in cells.iter().enumerate() {
+                let (no, text, col) = &at[k];
+                if k >= takes.len() {
+                    if !takes.is_empty() {
+                        diag.report(Level::Error, *no, *col, "ignoring extra tbl data cells", &text[col - 1..]);
+                    }
+                    break;
+                }
+                if takes[k].kind == '^' && !raw[k].is_empty() && matches!(cell, Cell::Text(_)) {
+                    diag.report(Level::Error, *no, *col, "ignoring data in spanned tbl cell", &raw[k]);
+                }
+            }
+        }
         rows.push(Row::Data { cells, raw, layout, line: row_line });
+    }
+    if !any_data {
+        diag.report(Level::Error, start, 2, "tbl without any data cells", "");
     }
     Table { opts, rows, ncols, line: start }
 }
@@ -235,7 +272,7 @@ fn ignore_macro<'a>(line: &'a str, lineno: usize, diag: &mut Diagnostics) -> Opt
     Some(args)
 }
 
-fn parse_opts(line: &str) -> Opts {
+fn parse_opts(line: &str, lineno: usize, diag: &mut Diagnostics) -> Opts {
     let mut o = Opts::default();
     let s = line.trim_end().trim_end_matches(';');
     let b: Vec<char> = s.chars().collect();
@@ -249,13 +286,15 @@ fn parse_opts(line: &str) -> Opts {
         while i < b.len() && b[i].is_ascii_alphabetic() {
             i += 1;
         }
-        let word: String = b[start..i].iter().collect::<String>().to_lowercase();
+        let typed: String = b[start..i].iter().collect();
+        let word = typed.to_lowercase();
         // An argument in parentheses, maybe after spaces.
         let mut arg = String::new();
         let mut k = i;
         while b.get(k).is_some_and(|c| *c == ' ' || *c == '\t') {
             k += 1;
         }
+        let arg_col = k + 2;
         if b.get(k) == Some(&'(') {
             i = k;
             i += 1;
@@ -264,6 +303,24 @@ fn parse_opts(line: &str) -> Opts {
                 i += 1;
             }
             i += 1;
+        }
+        // The options taking an argument, and how long it must be.
+        let want = match word.as_str() {
+            "tab" | "decimalpoint" => Some(1),
+            "delim" => Some(2),
+            "linesize" => Some(0),
+            _ => None,
+        };
+        if let Some(want) = want {
+            if arg.is_empty() {
+                diag.report(Level::Error, lineno, arg_col, "missing tbl option argument", &typed);
+                continue;
+            }
+            if want > 0 && arg.chars().count() != want {
+                let msg = format!("{typed} want {want} have {}", arg.chars().count());
+                diag.report(Level::Error, lineno, arg_col, "wrong tbl option argument size", &msg);
+                continue;
+            }
         }
         match word.as_str() {
             "box" | "frame" => o.frame = o.frame.max(1),
@@ -277,33 +334,72 @@ fn parse_opts(line: &str) -> Opts {
             "tab" => o.tab = arg.chars().next().unwrap_or('\t'),
             "decimalpoint" => o.decimal = arg.chars().next().unwrap_or('.'),
             "nospaces" => o.nospaces = true,
-            _ => {}
+            "delim" | "linesize" | "nowarn" | "nokeep" => {}
+            _ => diag.report(Level::Error, lineno, start + 1, "skipping unknown tbl option", &typed),
         }
     }
     o
 }
 
-/// Reads layout lines from `i` up to and including the one ending in `.`; returns the index
-/// after it.
-fn parse_layout(lines: &[(usize, String)], mut i: usize, out: &mut Vec<Layout>) -> usize {
+/// Reads layout lines from `i` up to and including the one ending the layout with `.`;
+/// returns the index after it. Rows end at `,` or a line's end; parentheses hold arguments.
+fn parse_layout(lines: &[(usize, String)], mut i: usize, out: &mut Vec<Layout>, diag: &mut Diagnostics) -> usize {
+    let first = out.len();
     while i < lines.len() {
-        let line = lines[i].1.trim_end();
+        let (lineno, line) = (lines[i].0, &lines[i].1);
         i += 1;
-        let (body, last) = match line.strip_suffix('.') {
-            Some(b) => (b, true),
-            None => (line, false),
-        };
-        for row in body.split(',') {
-            let l = parse_layout_row(row);
-            if !l.specs.is_empty() {
-                out.push(l);
+        let b: Vec<char> = line.chars().collect();
+        let mut row = String::new();
+        let mut row_col = 1;
+        let mut k = 0;
+        let mut done = false;
+        while k < b.len() {
+            match b[k] {
+                '(' => {
+                    match b[k..].iter().position(|c| *c == ')') {
+                        Some(p) => {
+                            row.extend(&b[k..=k + p]);
+                            k += p + 1;
+                        }
+                        None => {
+                            diag.report(Level::Error, lineno, b.len() + 1, "unmatched parenthesis in tbl layout", "");
+                            row.extend(&b[k..]);
+                            k = b.len();
+                        }
+                    }
+                    continue;
+                }
+                ',' => {
+                    push_row(&row, lineno, row_col, out, diag);
+                    row.clear();
+                    row_col = k + 2;
+                }
+                '.' => {
+                    push_row(&row, lineno, row_col, out, diag);
+                    row.clear();
+                    done = true;
+                    if out.len() == first {
+                        diag.report(Level::Error, lineno, k + 2, "empty tbl layout", "");
+                    }
+                    break;
+                }
+                c => row.push(c),
             }
+            k += 1;
         }
-        if last {
+        if done {
             break;
         }
+        push_row(&row, lineno, row_col, out, diag);
     }
     i
+}
+
+fn push_row(row: &str, lineno: usize, col: usize, out: &mut Vec<Layout>, diag: &mut Diagnostics) {
+    let l = parse_layout_row(row, lineno, col, diag);
+    if !l.specs.is_empty() {
+        out.push(l);
+    }
 }
 
 fn set_font(sp: &mut Spec, name: &str) {
@@ -315,13 +411,18 @@ fn set_font(sp: &mut Spec, name: &str) {
     };
 }
 
-fn parse_layout_row(s: &str) -> Layout {
+fn parse_layout_row(s: &str, lineno: usize, col: usize, diag: &mut Diagnostics) -> Layout {
     let mut l = Layout::default();
     let b: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
         i += 1;
+        if c == 's' || c == 'S' {
+            if l.specs.is_empty() {
+                diag.report(Level::Warning, lineno, col + i - 1, "tbl line starts with span", "");
+            }
+        }
         match c {
             '|' => match l.specs.last_mut() {
                 Some(sp) => sp.vline += 1,
@@ -333,6 +434,21 @@ fn parse_layout_row(s: &str) -> Layout {
                     k => k,
                 };
                 l.specs.push(Spec::new(kind));
+            }
+            ' ' | '\t' => {}
+            // A group in parentheses not after `f` or `w` (or the rest of an unmatched one,
+            // already reported): skipped.
+            '(' => {
+                while i < b.len() && b[i] != ')' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            '.' => {}
+            // Vertical placement and zero width: no effect on a terminal.
+            'z' | 'Z' | 't' | 'T' | 'd' | 'D' | 'u' | 'U' if !l.specs.is_empty() => {}
+            _ if l.specs.is_empty() && !"bBiIeExXfFwWpPvV0123456789".contains(c) => {
+                diag.report(Level::Error, lineno, col + i - 1, "invalid character in tbl layout", &c.to_string());
             }
             _ if l.specs.is_empty() => {}
             // A font replaces the one before: `b`, `i`, or `f` and a name. mandoc takes a
@@ -395,7 +511,7 @@ fn parse_layout_row(s: &str) -> Layout {
                 }
                 l.specs.last_mut().unwrap().spacing = Some(n);
             }
-            _ => {}
+            _ => diag.report(Level::Error, lineno, col + i - 1, "invalid character in tbl layout", &c.to_string()),
         }
     }
     l
