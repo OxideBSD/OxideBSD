@@ -34,7 +34,8 @@ pub mod mark {
     pub const NOHYPH: char = '\u{E007}';
     /// `\:`: the line may break here, with no hyphen.
     pub const BREAK: char = '\u{E008}';
-    /// Brackets what a `\l` of a given length draws: text on a terminal, nothing in HTML.
+    /// Brackets what a `\l` of a given length draws, and a `\h` motion: text on a terminal,
+    /// nothing in HTML.
     pub const LINE: char = '\u{E009}';
     /// Font changes: `\fR`, `\fB`, `\fI`, `\f(BI`, `\fC`..., and `\fP` (previous).
     pub const FONT_R: char = '\u{E010}';
@@ -1144,8 +1145,13 @@ impl<'a> Roff<'a> {
                             let arg = self.expand_depth(&arg, lineno, depth + 1);
                             let n = (self.number(&arg, b'm') as f64 / 24.0).round() as i64;
                             let c = if n < 0 { mark::BACK } else { mark::NBSP };
-                            for _ in 0..n.unsigned_abs().min(80) {
-                                out.push(c);
+                            // (Bracketed: HTML moves nothing.)
+                            if n != 0 {
+                                out.push(mark::LINE);
+                                for _ in 0..n.unsigned_abs().min(80) {
+                                    out.push(c);
+                                }
+                                out.push(mark::LINE);
                             }
                         }
                         'w' => {

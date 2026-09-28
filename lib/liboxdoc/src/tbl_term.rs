@@ -42,11 +42,11 @@ fn visible(s: &str) -> usize {
 /// width, or wide enough for any cell). Spaces between words are kept as typed; a sentence
 /// ending a line gets no extra one, unlike running text.
 fn format(t: &Term, text: &[String], style: Style, width: usize) -> Formatted {
-    use crate::roff::mark::BACK;
+    use crate::roff::mark::{BACK, LINE};
     // Moving left overprints what follows; at the end of a line it prints nothing, and a cell
     // is as wide as its text without it, as in mandoc.
     if text.iter().any(|l| l.contains(BACK)) {
-        let trimmed: Vec<String> = text.iter().map(|l| l.trim_end_matches(BACK).to_string()).collect();
+        let trimmed: Vec<String> = text.iter().map(|l| l.trim_end_matches([BACK, LINE]).to_string()).collect();
         let mut f = format_filled(t, &trimmed, style, width);
         let plain: Vec<String> = text.iter().map(|l| l.replace(BACK, "")).collect();
         f.min_width = format_filled(t, &plain, style, width).width();
