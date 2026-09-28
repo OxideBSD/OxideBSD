@@ -312,10 +312,20 @@ impl R {
             self.h.text(&n.text, &mut self.fonts, true);
             return;
         }
+        // A line starting with spaces breaks the line before it (before the paragraph a
+        // section's text starts), and starts with one space.
+        let lead = n.flags.line_start && !n.flags.continues && n.text.starts_with(' ');
+        if lead {
+            self.h.br();
+        }
         self.ensure_p();
         let text = n.text.trim_end_matches(' ');
         // (Leading tabs stay.)
         let text = text.trim_start_matches(' ');
+        if lead {
+            self.h.raw(" ");
+            self.h.nospace();
+        }
         self.h.text(text, &mut self.fonts, false);
         self.fonts.line_end();
     }
