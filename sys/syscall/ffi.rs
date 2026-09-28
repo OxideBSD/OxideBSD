@@ -1073,17 +1073,18 @@ const fn utsname_field(s: &str) -> [u8; 65] {
 /// derived-argument computation from the pointer the way `open`'s `strlen` needed, so no
 /// argument-convention patch was needed on the musl side beyond the usual number remap).
 ///
-/// `nodename` is the host name `sethostname(2)` set (`HOSTNAME`). The other fields are fixed
-/// placeholders -- this kernel has no real build-timestamp source (`version` is a plausible-looking, hand-picked string, not derived
-/// from anything). `release` is the one field that isn't fully static: it's this crate's own
+/// `nodename` is the host name `sethostname(2)` set (`HOSTNAME`). `release` is this crate's own
 /// `CARGO_PKG_VERSION`, so bumping `Cargo.toml`'s `version` moves what `uname -a`/`uname -r`
-/// reports without touching this function again.
+/// report. `version` is shaped as the BSDs shape it -- system, release, kernel configuration
+/// (FreeBSD's `FreeBSD 14.1-RELEASE ... GENERIC`, NetBSD's `NetBSD 10.0 (GENERIC) #0: ...`) --
+/// without a build number or date, which this kernel has no source for, and without Linux's
+/// feature tags (it used to claim `SMP PREEMPT`, on a single-core kernel).
 pub(crate) fn sys_uname(uts_ptr: u64) -> Result<u64, u64> {
     let uts = RawUtsname {
         sysname: utsname_field("OxideBSD"),
         nodename: *HOSTNAME.lock(),
         release: utsname_field(env!("CARGO_PKG_VERSION")),
-        version: utsname_field("#1 SMP PREEMPT"),
+        version: utsname_field(concat!("OxideBSD ", env!("CARGO_PKG_VERSION"), " GENERIC")),
         machine: utsname_field("x86_64"),
         domainname: utsname_field("(none)"),
     };
