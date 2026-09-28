@@ -221,7 +221,8 @@ impl Parser<'_> {
 
     fn text_line(&mut self, text: &str) {
         use crate::roff::mark::{CONT, NBSP};
-        let text = text.trim_end_matches([' ', '\t']);
+        // (Tabs at the end stay; in no-fill mode, spaces too.)
+        let text = if self.nofill { text } else { text.trim_end_matches(' ') };
         // `\c`: the next line continues this one without a space. Spaces before it are kept,
         // and the line may break at the last of them.
         let cont = text.ends_with(CONT);

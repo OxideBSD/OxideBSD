@@ -275,8 +275,8 @@ impl R {
             self.ensure_pre();
         }
         if self.nofill {
-            // (Blank lines vanish.)
-            if n.text.is_empty() {
+            // (Blank lines vanish, and lines of only zero-width escapes.)
+            if n.text.chars().all(|c| c == mark::ZERO || c == mark::BREAK) {
                 return;
             }
             // (A line starting with a space breaks; with a tab, it doesn't.)
@@ -287,8 +287,9 @@ impl R {
             return;
         }
         self.ensure_p();
-        let text = n.text.trim_end_matches([' ', '\t']);
-        let text = text.trim_start_matches([' ', '\t']);
+        let text = n.text.trim_end_matches(' ');
+        // (Leading tabs stay.)
+        let text = text.trim_start_matches(' ');
         self.h.text(text, &mut self.fonts, false);
         self.fonts.line_end();
     }
