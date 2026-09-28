@@ -164,7 +164,7 @@ impl Html {
     }
 
     /// Ends the current line, if it has anything on it.
-    fn end_line(&mut self) {
+    pub fn end_line(&mut self) {
         self.flush_unit();
         if self.started {
             self.newline();
@@ -268,8 +268,9 @@ impl Html {
                 self.append(&text);
             }
             Class::Block => {
-                // A section's end tag has a line of its own.
-                if tag == "section" {
+                // A section's end tag has a line of its own, and so has a table's, a row's or a
+                // list's, even with nothing in it.
+                if matches!(tag, "section" | "table" | "tr" | "dl" | "ul" | "ol") {
                     self.end_line();
                 }
                 // The end tag ends the pending run, and counts in whether it fits.

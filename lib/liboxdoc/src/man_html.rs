@@ -746,8 +746,11 @@ impl R {
     /// A tagged paragraph's head: `.IP`'s tag argument, or the head line.
     fn head(&mut self, n: &Node) {
         if n.tok == "IP" {
-            if let Some(a) = n.args.first() {
-                self.words(a, false);
+            match n.args.first() {
+                // (An empty tag given ends the line.)
+                Some(a) if a.is_empty() => self.h.end_line(),
+                Some(a) => self.words(a, false),
+                None => {}
             }
         } else if let Some(h) = n.part(Kind::Head) {
             self.children(h);

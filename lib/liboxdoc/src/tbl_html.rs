@@ -62,11 +62,7 @@ fn push_style(style: &mut String, s: &str) {
 /// A data row's cells: one element for each cell that starts a column, up to the row's data.
 fn row_cells(h: &mut Html, t: &Table, ri: usize, cells: &[Cell], layout: &Layout) {
     let n = layout.specs.len().min(t.ncols.max(1));
-    // (A tab ending the line starts no cell.)
-    let cells = match cells.split_last() {
-        Some((Cell::Text(last), rest)) if last.is_empty() => rest,
-        _ => cells,
-    };
+    let cells = row_data(cells);
     let mut k = 0;
     for j in 0..n {
         let spec = &layout.specs[j];
@@ -115,15 +111,26 @@ fn row_cells(h: &mut Html, t: &Table, ri: usize, cells: &[Cell], layout: &Layout
     }
 }
 
-/// The number of data rows right below row `ri` continuing its cell in column `j`.
+/// A row's data cells. (A tab ending the line starts no cell.)
+fn row_data(cells: &[Cell]) -> &[Cell] {
+    match cells.split_last() {
+        Some((Cell::Text(last), rest)) if last.is_empty() => rest,
+        _ => cells,
+    }
+}
+
+/// The number of data rows right below row `ri` continuing its cell in column `j` (with data
+/// there).
 fn rows_below(t: &Table, ri: usize, j: usize) -> usize {
     let mut count = 0;
     for row in &t.rows[ri + 1..] {
         let Row::Data { cells, layout, .. } = row else { continue };
+        let cells = row_data(cells);
         let spec = layout.specs.get(j);
         // The data cell for column `j`: one for each column before it that isn't a span.
         let k = layout.specs.iter().take(j).filter(|s| s.kind != 's').count();
-        if spec.is_some_and(|s| s.kind == '^') || matches!(cells.get(k), Some(Cell::SpanDown)) {
+        let cell = cells.get(k);
+        if cell.is_some() && (spec.is_some_and(|s| s.kind == '^') || matches!(cell, Some(Cell::SpanDown))) {
             count += 1;
         } else {
             break;
