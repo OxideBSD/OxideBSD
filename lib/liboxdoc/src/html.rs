@@ -574,22 +574,26 @@ impl Fonts {
     }
 }
 
-fn font_elements(f: Option<char>) -> &'static [&'static str] {
+/// The elements a font marker opens, with their attributes: constant width is a literal span.
+pub fn font_elements(f: Option<char>) -> &'static [(&'static str, &'static str)] {
     match f {
-        Some(mark::FONT_B) => &["b"],
-        Some(mark::FONT_I) => &["i"],
-        Some(mark::FONT_BI) => &["b", "i"],
+        Some(mark::FONT_B) => &[("b", "")],
+        Some(mark::FONT_I) => &[("i", "")],
+        Some(mark::FONT_BI) => &[("b", ""), ("i", "")],
+        Some(mark::FONT_CW) => &[("span", "class=\"Li\"")],
+        Some(mark::FONT_CB) => &[("span", "class=\"Li\""), ("b", "")],
+        Some(mark::FONT_CI) => &[("span", "class=\"Li\""), ("i", "")],
         _ => &[],
     }
 }
 
 impl Html {
     fn font_open(&mut self, fonts: &mut Fonts, literal: bool) {
-        for t in font_elements(fonts.esc) {
+        for &(t, attrs) in font_elements(fonts.esc) {
             if literal {
-                self.literal_raw(&format!("<{t}>"));
+                self.literal_raw(&if attrs.is_empty() { format!("<{t}>") } else { format!("<{t} {attrs}>") });
             } else {
-                self.open(t, "");
+                self.open(t, attrs);
             }
             fonts.open.push(t);
         }
@@ -660,7 +664,7 @@ impl Html {
                 }
                 let new = match c {
                     mark::FONT_P => fonts.prev,
-                    mark::FONT_R | mark::FONT_CW => None,
+                    mark::FONT_R => None,
                     c => Some(c),
                 };
                 self.font_close(fonts, literal);

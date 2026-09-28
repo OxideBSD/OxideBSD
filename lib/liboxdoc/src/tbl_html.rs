@@ -3,6 +3,7 @@
 //! `rowspan`; a line in a cell becomes `hr`.
 
 use crate::html::{self, Html};
+use crate::roff::mark;
 use crate::tbl::{Cell, Layout, Row, Spec, Table};
 
 /// A line's border style: single or double.
@@ -131,19 +132,14 @@ fn rows_below(t: &Table, ri: usize, j: usize) -> usize {
     count
 }
 
-/// Text in a cell, in the column's font.
+/// Text in a cell, starting in the column's font, which its escapes change.
 fn cell_text(h: &mut Html, spec: &Spec, text: &str) {
-    let tags: &[&str] = match (spec.bold, spec.italic) {
-        (true, true) => &["b", "i"],
-        (true, false) => &["b"],
-        (false, true) => &["i"],
-        _ => &[],
+    let mut fonts = html::Fonts::default();
+    fonts.esc = match (spec.bold, spec.italic) {
+        (true, true) => Some(mark::FONT_BI),
+        (true, false) => Some(mark::FONT_B),
+        (false, true) => Some(mark::FONT_I),
+        _ => None,
     };
-    for t in tags {
-        h.open(t, "");
-    }
-    h.text(text, &mut html::Fonts::default(), false);
-    for t in tags.iter().rev() {
-        h.close(t);
-    }
+    h.text(text, &mut fonts, false);
 }

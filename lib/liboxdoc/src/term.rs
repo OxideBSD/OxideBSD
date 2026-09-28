@@ -200,8 +200,8 @@ impl Term {
         let cur = self.esc_font.unwrap_or(base);
         let new = match f {
             mark::FONT_R | mark::FONT_CW => Style::None,
-            mark::FONT_B => Style::Bold,
-            mark::FONT_I => Style::Under,
+            mark::FONT_B | mark::FONT_CB => Style::Bold,
+            mark::FONT_I | mark::FONT_CI => Style::Under,
             mark::FONT_BI => Style::BoldUnder,
             mark::FONT_P => self.esc_prev.unwrap_or(base),
             _ => return None,

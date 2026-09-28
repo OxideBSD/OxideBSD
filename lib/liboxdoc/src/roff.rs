@@ -40,6 +40,9 @@ pub mod mark {
     pub const FONT_I: char = '\u{E012}';
     pub const FONT_BI: char = '\u{E013}';
     pub const FONT_CW: char = '\u{E014}';
+    /// Constant-width bold and italic (`\f(CB`, `\f(CI`).
+    pub const FONT_CB: char = '\u{E015}';
+    pub const FONT_CI: char = '\u{E016}';
     pub const FONT_P: char = '\u{E01F}';
 
     pub fn is_font(c: char) -> bool {
@@ -1314,8 +1317,10 @@ fn scale_cols(s: &str) -> usize {
 /// The font marker for a `\f` name; `None` for a name mandoc doesn't know, which it ignores.
 pub fn font_mark(name: &str) -> Option<char> {
     Some(match name {
-        "B" | "3" | "CB" => mark::FONT_B,
-        "I" | "2" | "CI" => mark::FONT_I,
+        "B" | "3" => mark::FONT_B,
+        "I" | "2" => mark::FONT_I,
+        "CB" => mark::FONT_CB,
+        "CI" => mark::FONT_CI,
         "BI" | "4" => mark::FONT_BI,
         "CW" | "CR" => mark::FONT_CW,
         "P" | "" => mark::FONT_P,

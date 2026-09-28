@@ -157,15 +157,6 @@ fn first_word(s: &str) -> Option<(String, usize)> {
     word.starts_with(|c: char| c.is_ascii_alphabetic()).then_some((word, more as usize))
 }
 
-/// The element a font marker opens.
-fn font_tags(f: char) -> &'static [&'static str] {
-    match f {
-        mark::FONT_B => &["b"],
-        mark::FONT_I => &["i"],
-        mark::FONT_BI => &["b", "i"],
-        _ => &[],
-    }
-}
 
 impl R {
     fn table(&mut self, class: &str, cells: &[(&str, &str)]) {
@@ -334,8 +325,8 @@ impl R {
                 while let Some(t) = self.font.pop() {
                     self.h.literal_raw(&format!("</{t}>"));
                 }
-                for t in font_tags(c) {
-                    self.h.literal_raw(&format!("<{t}>"));
+                for &(t, attrs) in html::font_elements(Some(c)) {
+                    self.h.literal_raw(&if attrs.is_empty() { format!("<{t}>") } else { format!("<{t} {attrs}>") });
                     self.font.push(t);
                 }
                 continue;
@@ -553,6 +544,9 @@ impl R {
                     Some("B") | Some("3") => Some(Some(mark::FONT_B)),
                     Some("I") | Some("2") => Some(Some(mark::FONT_I)),
                     Some("BI") | Some("4") => Some(Some(mark::FONT_BI)),
+                    Some("CW") | Some("CR") => Some(Some(mark::FONT_CW)),
+                    Some("CB") => Some(Some(mark::FONT_CB)),
+                    Some("CI") => Some(Some(mark::FONT_CI)),
                     _ => Some(None),
                 });
             }
