@@ -237,6 +237,8 @@ impl R {
                 if let Some(t) = &n.table {
                     crate::tbl_html::render(&mut self.h, t);
                 }
+                // Text after it starts a paragraph.
+                self.para = true;
             }
             Kind::Eqn => {
                 self.ensure_p();
