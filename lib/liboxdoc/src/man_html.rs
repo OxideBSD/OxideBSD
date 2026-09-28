@@ -49,7 +49,9 @@ pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String
         r.h.close("section");
     }
     r.h.close("div");
-    let date = plain(&crate::format_date(&meta.date));
+    // (A date left as written keeps its spaces.)
+    let date = crate::format_date(&meta.date);
+    let date = plain(if date == meta.date.trim() { &meta.date } else { &date });
     let source = plain(&meta.os);
     r.table("foot", &[("foot-date", &date), ("foot-os", &source)]);
     html::end_document(&mut r.h, opts);
@@ -57,20 +59,20 @@ pub fn render(doc: &Document, opts: &HtmlOptions, comments: &[String]) -> String
 }
 
 /// Headings and the heads of tagged paragraphs get identifiers, numbered when repeated. A
-/// head's claim is weaker with dashes before its word than without, and only the best claims
-/// on a text stand.
+/// head's claim is weaker when more follows its word, and only the best claims on a text
+/// stand.
 fn tags(doc: &Document) -> HashMap<usize, String> {
     fn walk(n: &Node, out: &mut Vec<(usize, String, usize)>) {
         for c in &n.children {
             if c.kind == Kind::Block {
                 let claim = match c.tok.as_str() {
                     "SH" | "SS" => c.part(Kind::Head).map(|h| (plain(&h.plain_text()), 0)),
-                    "TP" | "TQ" => c.part(Kind::Head).and_then(|h| first_word(&text_of(h))),
+                    "TP" | "TQ" => c.part(Kind::Head).and_then(|h| first_word(&head_text(h))),
                     "IP" => c.args.first().and_then(|a| first_word(a)),
                     _ => None,
                 };
-                if let Some((t, dashes)) = claim.filter(|(t, _)| !t.is_empty() && t.is_ascii()) {
-                    out.push((c as *const Node as usize, t, dashes.min(1)));
+                if let Some((t, p)) = claim.filter(|(t, _)| !t.is_empty() && t.is_ascii()) {
+                    out.push((c as *const Node as usize, t, p));
                 }
             }
             walk(c, out);
@@ -102,7 +104,7 @@ fn text_of(n: &Node) -> String {
     let mut out = String::new();
     for c in &n.children {
         let t = match c.kind {
-            Kind::Text => c.text.clone(),
+            Kind::Text => hyphens(&c.text),
             Kind::Elem => c.args.join(" "),
             _ => text_of(c),
         };
@@ -116,16 +118,39 @@ fn text_of(n: &Node) -> String {
     out
 }
 
-/// A tag's text: its first word, without leading dashes and fonts, up to an escape; it must
-/// start with a letter or digit. With the number of dashes that came before it.
+/// The text a tagged paragraph's head claims with: its first line of text, or its first macro's
+/// arguments (only the first of an alternating font macro's).
+fn head_text(h: &Node) -> String {
+    match h.children.first() {
+        Some(c) if c.kind == Kind::Text => hyphens(&c.text),
+        Some(c) if c.kind == Kind::Elem && matches!(c.tok.as_str(), "B" | "I" | "SM" | "SB") => c.args.join(" "),
+        Some(c) if c.kind == Kind::Elem => c.args.first().cloned().unwrap_or_default(),
+        _ => text_of(h),
+    }
+}
+
+/// A text line's hyphenation points as an identifier sees them: roff marks a `-` between two
+/// letters of the source line as one, and it turns into an underscore.
+fn hyphens(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let alpha = |ch: char| ch.is_ascii_alphabetic();
+    (0..c.len())
+        .map(|i| {
+            let hyph = c[i] == '-' && i > 0 && alpha(c[i - 1]) && c.get(i + 1).is_some_and(|&n| alpha(n));
+            if hyph { '_' } else { c[i] }
+        })
+        .collect()
+}
+
+/// A tag's text: its first word, without leading dashes and fonts, up to a space or an escape;
+/// it must start with a letter. With the strength of its claim: 0 when the word is all there
+/// is, 1 when more follows (even a font escape).
 fn first_word(s: &str) -> Option<(String, usize)> {
     let lead = s.trim_start_matches(|c: char| mark::is_font(c) || c == ' ');
-    let dashes = lead.chars().take_while(|c| *c == '-' || *c == mark::MINUS).count();
     let s = lead.trim_start_matches(|c: char| c == '-' || c == mark::MINUS || c == mark::BACKSLASH || mark::is_font(c));
     let word: String = s.chars().take_while(|c| !('\u{E000}'..='\u{E0FF}').contains(c) && *c != ' ').collect();
-    // (Cut short at an escape, it claims more weakly, as with dashes.)
-    let cut = s.chars().nth(word.chars().count()).is_some_and(|c| ('\u{E000}'..='\u{E0FF}').contains(&c) && !mark::is_font(c));
-    word.starts_with(|c: char| c.is_ascii_alphabetic()).then_some((word, dashes + cut as usize))
+    let more = s.len() > word.len();
+    word.starts_with(|c: char| c.is_ascii_alphabetic()).then_some((word, more as usize))
 }
 
 /// The element a font marker opens.
@@ -144,8 +169,16 @@ impl R {
         self.h.open("tr", "");
         for (c, text) in cells {
             self.h.open("td", &format!("class=\"{c}\""));
+            // (Runs of spaces count as one, at the ends too.)
+            if text.starts_with(' ') {
+                self.h.raw(" ");
+                self.h.nospace();
+            }
             for w in text.split(' ').filter(|w| !w.is_empty()) {
                 self.h.word(w);
+            }
+            if text.ends_with(' ') && text.trim() != "" {
+                self.h.raw(" ");
             }
             self.h.close("td");
         }
@@ -306,8 +339,11 @@ impl R {
         }
         match tok {
             "PP" | "LP" | "P" if self.nofill => {
-                // It ends the preformatted block; the next text starts another.
-                self.close_pre();
+                // It ends the preformatted block, unless nothing is in it yet; the next text
+                // starts another.
+                if !(self.h.is_open("pre") && self.pre_start) {
+                    self.close_pre();
+                }
             }
             "PP" | "LP" | "P" => {
                 self.end_list();
@@ -352,6 +388,8 @@ impl R {
             }
             "fi" | "EE" => {
                 if self.nofill {
+                    // (Ending no-fill mode between blocks leaves an empty one.)
+                    self.ensure_pre();
                     // (An example ends with its last line's newline.)
                     if self.example {
                         self.h.literal_raw("\n");
