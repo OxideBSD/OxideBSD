@@ -1,0 +1,81 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt GETSOCKNAME 2
+.Os OxideBSD
+.Sh NAME
+.Nm getsockname ,
+.Nm getpeername
+.Nd get the name of a socket or its peer
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fo getsockname
+.Fa "int s"
+.Fa "struct sockaddr *restrict name"
+.Fa "socklen_t *restrict namelen"
+.Fc
+.Ft int
+.Fo getpeername
+.Fa "int s"
+.Fa "struct sockaddr *restrict name"
+.Fa "socklen_t *restrict namelen"
+.Fc
+.Sh DESCRIPTION
+The
+.Fn getsockname
+system call stores the local address of the socket
+.Fa s
+at
+.Fa name ,
+and
+.Fn getpeername
+the address of its peer.
+At most
+.Fa *namelen
+bytes are stored, and
+.Fa *namelen
+is set to the address's full length, which may be more.
+.Pp
+A local socket's address and its length are described in
+.Xr unix 4 ;
+an unbound one has an unnamed address.
+An Internet socket's address is the interface address and its port, 0 if
+it is not bound.
+.Pp
+The peer of a connection is the socket at its other end; a local socket
+whose peer has closed, and a TCP socket still connecting, have none.
+The peer of a datagram socket is its default destination, set by
+.Xr connect 2 .
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er ENOTCONN
+.Pq Fn getpeername
+The socket has no peer.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.El
+.Sh SEE ALSO
+.Xr accept 2 ,
+.Xr bind 2 ,
+.Xr connect 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+These calls conform to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn getsockname
+and
+.Fn getpeername
+system calls first appeared in
+.Bx 4.2 .
+In OxideBSD they are system calls 559 and 581.

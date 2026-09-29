@@ -1,0 +1,217 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt GETSOCKOPT 2
+.Os OxideBSD
+.Sh NAME
+.Nm getsockopt ,
+.Nm setsockopt
+.Nd get and set options on sockets
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fo getsockopt
+.Fa "int s"
+.Fa "int level"
+.Fa "int optname"
+.Fa "void *restrict optval"
+.Fa "socklen_t *restrict optlen"
+.Fc
+.Ft int
+.Fo setsockopt
+.Fa "int s"
+.Fa "int level"
+.Fa "int optname"
+.Fa "const void *optval"
+.Fa "socklen_t optlen"
+.Fc
+.Sh DESCRIPTION
+These calls read and set the option
+.Fa optname
+at protocol level
+.Fa level
+on the socket
+.Fa s .
+The level is
+.Dv SOL_SOCKET
+for options of the socket itself, a protocol number such as
+.Dv IPPROTO_TCP
+for a protocol's options, or
+.Dv SOL_LOCAL
+for local sockets' options.
+.Pp
+.Fn setsockopt
+sets the option from the
+.Fa optlen
+bytes at
+.Fa optval .
+.Fn getsockopt
+stores the option's value at
+.Fa optval ,
+at most
+.Fa *optlen
+bytes of it, and sets
+.Fa *optlen
+to the number of bytes stored.
+.Pp
+Most options are an
+.Vt int ,
+zero for off and anything else for on.
+.Ss Socket level
+The options of level
+.Dv SOL_SOCKET
+are:
+.Bl -tag -width SO_ACCEPTCONN
+.It Dv SO_ACCEPTCONN
+Whether the socket is listening.
+Read only.
+.It Dv SO_BROADCAST
+Permission to send broadcast datagrams.
+Recorded and reported, not yet acted on.
+.It Dv SO_DOMAIN
+The socket's domain, as given to
+.Xr socket 2 .
+Read only.
+.It Dv SO_ERROR
+The socket's pending error, or 0, which reading clears.
+A non-blocking
+.Xr connect 2
+reports its result here.
+Read only.
+.It Dv SO_KEEPALIVE
+Keep connections alive with periodic probes.
+Recorded and reported, not yet acted on.
+.It Dv SO_LINGER
+A
+.Vt struct linger
+.Pq Va l_onoff , l_linger .
+Recorded and reported, not yet acted on.
+.It Dv SO_NOSIGPIPE
+Do not raise
+.Dv SIGPIPE
+when a send or
+.Xr write 2
+on the socket fails with
+.Er EPIPE .
+.Fx Ns 's
+option, with its value, 0x0800.
+.It Dv SO_PASSCRED
+Receive the sender's credentials with every message
+.Pq local sockets ; see Xr unix 4 .
+.It Dv SO_PEERCRED
+The connected peer's credentials, a
+.Vt struct ucred
+.Pq local sockets ; see Xr unix 4 .
+Read only.
+.It Dv SO_PROTOCOL
+The socket's protocol, as given to
+.Xr socket 2 .
+Read only.
+.It Dv SO_RCVBUF
+The size of the receive buffer: 64 KiB by default; values set are kept
+between 512 bytes and 1 MiB.
+Acted on by local sockets; recorded and reported by Internet sockets.
+.It Dv SO_RCVLOWAT
+The least data a receive waits for; at least 1.
+Recorded and reported, not yet acted on.
+.It Dv SO_RCVTIMEO
+A
+.Vt struct timeval :
+how long a blocking receive or
+.Xr accept 2
+waits before failing with
+.Er EAGAIN ;
+zero, the default, waits indefinitely.
+.It Dv SO_REUSEADDR
+Allow reuse of local addresses.
+Recorded and reported, not yet acted on.
+.It Dv SO_SNDBUF
+The size of the send buffer, as
+.Dv SO_RCVBUF .
+A local datagram larger than it fails with
+.Er EMSGSIZE .
+.It Dv SO_SNDTIMEO
+As
+.Dv SO_RCVTIMEO ,
+for sends.
+.It Dv SO_TYPE
+The socket's type.
+Read only.
+.El
+.Ss Internet levels
+Internet sockets accept these options, which are recorded and reported
+back but do not yet change the packets sent:
+.Dv IP_TOS ,
+.Dv IP_TTL ,
+.Dv IP_MULTICAST_IF ,
+.Dv IP_MULTICAST_TTL
+and
+.Dv IP_MULTICAST_LOOP
+at level
+.Dv IPPROTO_IP ,
+and, on TCP sockets,
+.Dv TCP_NODELAY
+at level
+.Dv IPPROTO_TCP ,
+which reads as on until set, since every segment is sent at once.
+.Ss Local level
+.Dv LOCAL_PEERCRED ,
+.Dv LOCAL_CREDS
+and
+.Dv LOCAL_CREDS_PERSISTENT
+at level
+.Dv SOL_LOCAL
+are described in
+.Xr unix 4 .
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er EINVAL
+.Fa optlen
+is
+.Dv NULL
+.Pq Fn getsockopt ,
+the value is too short for the option, a time-out is negative or has
+microseconds out of range, a local-socket option was used on a socket of
+another family, both
+.Dv LOCAL_CREDS
+and
+.Dv LOCAL_CREDS_PERSISTENT
+would be set, or
+.Dv LOCAL_PEERCRED
+was set.
+.It Bq Er ENOPROTOOPT
+The option is unknown at that level, or read only and being set.
+.It Bq Er ENOTCONN
+.Dv SO_PEERCRED
+or
+.Dv LOCAL_PEERCRED
+was read on a socket that was never connected.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.El
+.Sh SEE ALSO
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+These calls conform to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn getsockopt
+and
+.Fn setsockopt
+system calls first appeared in
+.Bx 4.2 .
+In OxideBSD they are system calls 579 and 580, each taking its level,
+name, value and length in one structure, as the native system-call
+interface passes at most four arguments; the former three-argument
+.Fn setsockopt ,
+144, is retired and fails with
+.Er ENOSYS .

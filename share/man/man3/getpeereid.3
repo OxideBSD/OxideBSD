@@ -1,0 +1,70 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt GETPEEREID 3
+.Os OxideBSD
+.Sh NAME
+.Nm getpeereid
+.Nd get the effective credentials of a local socket's peer
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In unistd.h
+.Ft int
+.Fn getpeereid "int s" "uid_t *euid" "gid_t *egid"
+.Sh DESCRIPTION
+The
+.Fn getpeereid
+function stores the effective user and group IDs of the peer of the
+connected local socket
+.Fa s
+at
+.Fa euid
+and
+.Fa egid .
+.Pp
+They are the credentials the peer had when the connection was made: those
+of the listener at its
+.Xr listen 2
+for a socket that connected, those of the connecting process at its
+.Xr connect 2
+for a socket returned by
+.Xr accept 2 ,
+and those of the creator for either end of a
+.Xr socketpair 2 .
+They stay available after the peer closes.
+.Pp
+It is implemented with the
+.Dv LOCAL_PEERCRED
+option of
+.Xr getsockopt 2 ,
+described in
+.Xr unix 4 .
+.Sh RETURN VALUES
+.Rv -std getpeereid
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er EINVAL
+.Fa s
+is not a local socket.
+.It Bq Er ENOTCONN
+.Fa s
+was never connected.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.El
+.Sh SEE ALSO
+.Xr getsockopt 2 ,
+.Xr socketpair 2 ,
+.Xr unix 4
+.Sh HISTORY
+The
+.Fn getpeereid
+function first appeared in
+.Fx 4.6 ,
+and is in all three BSDs.
+Until OxideBSD has effective IDs distinct from real ones, the IDs returned
+are the peer's real ones.

@@ -1,0 +1,93 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt BIND 2
+.Os OxideBSD
+.Sh NAME
+.Nm bind
+.Nd assign a local address to a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn bind "int s" "const struct sockaddr *addr" "socklen_t addrlen"
+.Sh DESCRIPTION
+The
+.Fn bind
+system call gives the socket
+.Fa s
+the local address
+.Fa addr ,
+of
+.Fa addrlen
+bytes.
+.Pp
+For a local socket,
+.Fa addr
+is a
+.Vt struct sockaddr_un .
+A path name creates a socket file, an abstract name is claimed in the
+abstract namespace, and an unnamed address binds the socket to a fresh
+abstract name; see
+.Xr unix 4 .
+.Pp
+For an Internet socket,
+.Fa addr
+is a
+.Vt struct sockaddr_in .
+Port 0 picks a free ephemeral port.
+The family and the address part are not checked: the system has one
+interface address.
+A UDP port already bound fails at once; a TCP port is claimed, and a
+conflict reported, by
+.Xr listen 2 .
+A UDP or TCP socket that sends or connects without being bound is bound
+to an ephemeral port then.
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EACCES
+Search permission is denied on a directory of the path, or write
+permission on the directory in which the socket file would be created.
+.It Bq Er EADDRINUSE
+Something exists at the path, the abstract name or the UDP port is in use,
+or no ephemeral port is free.
+.It Bq Er EAFNOSUPPORT
+The address given for a local socket is not of family
+.Dv AF_UNIX .
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er EINVAL
+The local or UDP socket is already bound, or the address is too short
+(or, for a local socket, longer than a
+.Vt struct sockaddr_un ) .
+.It Bq Er EISCONN
+The TCP socket is already connected or listening.
+.It Bq Er ENAMETOOLONG
+The path is 108 bytes or longer.
+.It Bq Er ENOENT
+A directory of the path does not exist.
+.It Bq Er ENOTDIR
+A component of the path prefix is not a directory.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.El
+.Sh SEE ALSO
+.Xr connect 2 ,
+.Xr getsockname 2 ,
+.Xr listen 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn bind
+system call conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn bind
+system call first appeared in
+.Bx 4.2 .

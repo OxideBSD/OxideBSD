@@ -1,0 +1,117 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt CONNECT 2
+.Os OxideBSD
+.Sh NAME
+.Nm connect
+.Nd initiate a connection on a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn connect "int s" "const struct sockaddr *name" "socklen_t namelen"
+.Sh DESCRIPTION
+The
+.Fn connect
+system call connects the socket
+.Fa s
+to the address
+.Fa name ,
+of
+.Fa namelen
+bytes.
+.Pp
+On a stream or sequenced-packet socket it makes a connection to the
+listening socket at
+.Fa name .
+A local connection completes at once, entering the listener's queue; if
+the queue is full,
+.Fn connect
+fails with
+.Er ECONNREFUSED
+instead of waiting.
+A TCP connection waits for the handshake; on a non-blocking socket
+.Fn connect
+fails with
+.Er EINPROGRESS
+instead, the socket becomes writable when the attempt ends, and the
+.Dv SO_ERROR
+option of
+.Xr getsockopt 2
+then holds its result.
+.Pp
+On a datagram socket it sets the destination of sends that give no
+address.
+A connected UDP socket receives only from that destination, and datagrams
+already queued from anyone else are dropped; a local datagram socket still
+receives from anyone.
+It may be connected again, and connecting to an address of family
+.Dv AF_UNSPEC
+removes the destination.
+.Pp
+A UDP or TCP socket that is not bound is bound to an ephemeral port.
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EACCES
+Search permission is denied on a directory of the path, or write
+permission on the socket file.
+.It Bq Er EADDRINUSE
+No ephemeral port is free.
+.It Bq Er EAFNOSUPPORT
+The address given for a local socket is not of family
+.Dv AF_UNIX .
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er ECONNREFUSED
+No socket is bound to the local name, it is not listening, or its queue is
+full; or the TCP peer refused the connection.
+.It Bq Er EHOSTUNREACH
+The IPv4 destination cannot be reached.
+.It Bq Er EINPROGRESS
+The socket is non-blocking and the TCP connection cannot be completed at
+once.
+.It Bq Er EINTR
+A signal interrupted a TCP connection attempt; it is not restarted, even
+with
+.Dv SA_RESTART .
+.It Bq Er EINVAL
+The address is too short or malformed, a local socket was given an unnamed
+address, or the local socket is listening.
+.It Bq Er EISCONN
+The stream or sequenced-packet socket is already connected, or the TCP
+socket is connecting or listening.
+.It Bq Er ENAMETOOLONG
+The path is 108 bytes or longer.
+.It Bq Er ENOENT
+Nothing exists at the path.
+.It Bq Er ENOTDIR
+A component of the path prefix is not a directory.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket, or the path names a file that is not a socket.
+.It Bq Er EPROTOTYPE
+The local socket named is of another type.
+.It Bq Er ETIMEDOUT
+The TCP handshake went unanswered.
+.El
+.Sh SEE ALSO
+.Xr accept 2 ,
+.Xr getpeername 2 ,
+.Xr getsockopt 2 ,
+.Xr listen 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn connect
+system call conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn connect
+system call first appeared in
+.Bx 4.2 .

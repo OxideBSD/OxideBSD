@@ -1,0 +1,185 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SOCKET 2
+.Os OxideBSD
+.Sh NAME
+.Nm socket
+.Nd create an endpoint for communication
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn socket "int domain" "int type" "int protocol"
+.Sh DESCRIPTION
+The
+.Fn socket
+system call creates an unconnected socket and returns a descriptor for it.
+.Pp
+The
+.Fa domain
+selects the address family:
+.Bl -tag -width AF_UNIX -offset indent
+.It Dv AF_UNIX
+local sockets, also called
+.Dv AF_LOCAL ;
+see
+.Xr unix 4 .
+.It Dv AF_INET
+Internet version 4 protocols.
+.El
+.Pp
+The
+.Fa type
+selects the semantics of communication:
+.Bl -tag -width SOCK_SEQPACKET -offset indent
+.It Dv SOCK_STREAM
+a reliable, ordered, connected byte stream without record boundaries.
+.It Dv SOCK_DGRAM
+messages of limited size, each delivered whole or not at all.
+.It Dv SOCK_SEQPACKET
+a connected stream of records, which keep their boundaries
+.Pq Dv AF_UNIX No only .
+.It Dv SOCK_RAW
+raw access to a network protocol
+.Pq Dv AF_INET No with Dv IPPROTO_ICMP No only .
+.El
+.Pp
+Either or both of these flags may be OR'd into
+.Fa type :
+.Bl -tag -width SOCK_NONBLOCK -offset indent
+.It Dv SOCK_CLOEXEC
+set the close-on-exec flag on the new descriptor.
+.It Dv SOCK_NONBLOCK
+set
+.Dv O_NONBLOCK
+on the new open file description.
+.El
+.Pp
+The
+.Fa protocol
+is 0 for the default protocol of the domain and type.
+The supported combinations are:
+.Bl -column "AF_INET" "SOCK_SEQPACKET" "0 or IPPROTO_TCP" -offset indent
+.It Sy Domain Ta Sy Type Ta Sy Protocol
+.It Dv AF_UNIX Ta Dv SOCK_STREAM Ta 0
+.It Dv AF_UNIX Ta Dv SOCK_DGRAM Ta 0
+.It Dv AF_UNIX Ta Dv SOCK_SEQPACKET Ta 0
+.It Dv AF_INET Ta Dv SOCK_STREAM Ta 0 or Dv IPPROTO_TCP
+.It Dv AF_INET Ta Dv SOCK_DGRAM Ta 0 or Dv IPPROTO_UDP
+.It Dv AF_INET Ta Dv SOCK_RAW Ta Dv IPPROTO_ICMP
+.El
+.Pp
+A connected socket is made with
+.Xr connect 2
+on one side and
+.Xr listen 2
+and
+.Xr accept 2
+on the other, or both at once with
+.Xr socketpair 2 .
+Data is sent with
+.Xr send 2 ,
+.Xr sendto 2 ,
+.Xr sendmsg 2
+or
+.Xr write 2 ,
+and received with
+.Xr recv 2 ,
+.Xr recvfrom 2 ,
+.Xr recvmsg 2
+or
+.Xr read 2 ;
+.Xr read 2
+and
+.Xr write 2
+on a socket behave as
+.Xr recvmsg 2
+and
+.Xr sendmsg 2
+with no address, no control data and no flags.
+Options are read and set with
+.Xr getsockopt 2
+and
+.Xr setsockopt 2 ,
+and
+.Xr shutdown 2
+closes one direction or both.
+.Pp
+A blocking call on a socket waits with interrupts enabled.
+A signal caught during the wait makes it fail with
+.Er EINTR ,
+or restarts it if the handler was installed with
+.Dv SA_RESTART ,
+no data has been transferred, and no timeout
+.Pq Dv SO_RCVTIMEO , SO_SNDTIMEO
+is set.
+.Pp
+A socket is readable for
+.Xr poll 2
+and
+.Xr select 2
+when data, end-of-file, a pending error or, on a listening socket, a
+connection is waiting; writable when a send would not block; and reports
+.Dv POLLHUP
+once both directions are shut down or the peer has gone.
+.Xr fstat 2
+on a socket reports
+.Dv S_IFSOCK .
+.Sh RETURN VALUES
+On success
+.Fn socket
+returns the new descriptor, the lowest one free.
+Otherwise it returns \-1 and sets
+.Va errno .
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EAFNOSUPPORT
+The
+.Fa domain
+is not supported.
+.It Bq Er ENFILE
+The system limit on open files,
+.Va kern.maxfiles ,
+has been reached.
+.It Bq Er EPROTONOSUPPORT
+The
+.Fa type
+or
+.Fa protocol
+is not supported in the domain.
+.It Bq Er EPROTOTYPE
+The
+.Fa protocol
+exists, but under another type
+.Pq Dv IPPROTO_TCP No with Dv SOCK_DGRAM , for example .
+.El
+.Sh SEE ALSO
+.Xr accept 2 ,
+.Xr bind 2 ,
+.Xr connect 2 ,
+.Xr getsockname 2 ,
+.Xr getsockopt 2 ,
+.Xr listen 2 ,
+.Xr recvmsg 2 ,
+.Xr sendmsg 2 ,
+.Xr shutdown 2 ,
+.Xr socketpair 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn socket
+system call conforms to
+.St -p1003.1-2008 .
+.Dv SOCK_CLOEXEC
+and
+.Dv SOCK_NONBLOCK
+are in
+IEEE Std 1003.1-2024.
+.Sh HISTORY
+The
+.Fn socket
+system call first appeared in
+.Bx 4.2 .
+In OxideBSD every address family plugs into one socket layer through a
+protocol switch, as in the BSDs.

@@ -1,0 +1,454 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt UNIX 4
+.Os OxideBSD
+.Sh NAME
+.Nm unix
+.Nd local interprocess communication sockets
+.Sh SYNOPSIS
+.In sys/socket.h
+.In sys/un.h
+.Ft int
+.Fn socket AF_UNIX SOCK_STREAM 0
+.Ft int
+.Fn socket AF_UNIX SOCK_DGRAM 0
+.Ft int
+.Fn socket AF_UNIX SOCK_SEQPACKET 0
+.Sh DESCRIPTION
+Local sockets connect processes on the same machine.
+They are created with
+.Xr socket 2
+or
+.Xr socketpair 2
+in the domain
+.Dv AF_UNIX
+.Pq or Dv AF_LOCAL ,
+with one of three types:
+.Bl -tag -width SOCK_SEQPACKET
+.It Dv SOCK_STREAM
+a connected byte stream.
+.It Dv SOCK_DGRAM
+unconnected messages, which keep their boundaries.
+.It Dv SOCK_SEQPACKET
+a connected stream of records, which keep their boundaries; every record
+received carries
+.Dv MSG_EOR .
+.El
+.Pp
+The protocol must be 0.
+.Ss Addresses
+An address is a
+.Vt struct sockaddr_un :
+.Bd -literal -offset indent
+struct sockaddr_un {
+	sa_family_t	sun_family;	/* AF_UNIX */
+	char		sun_path[108];
+};
+.Ed
+.Pp
+The address length given with it decides which of three kinds of name it
+holds:
+.Bl -tag -width "Path name"
+.It Unnamed
+The length is
+.Li sizeof(sa_family_t) .
+.It Path name
+The first byte of
+.Fa sun_path
+is not NUL.
+The name is the bytes up to the first NUL or the end of the length given,
+at most 107 of them.
+.It Abstract
+The first byte of
+.Fa sun_path
+is NUL and the length is longer than
+.Li sizeof(sa_family_t) .
+The name is exactly the bytes after that first NUL up to the length given;
+further NUL bytes are part of it.
+.El
+.Pp
+.Xr bind 2
+to a path name creates a file of type
+.Dv S_IFSOCK
+at the path, with mode
+.Li 0777
+less the process's umask, owned by the caller.
+It fails with
+.Er EADDRINUSE
+if anything exists at the path, a dangling symbolic link included.
+The file names the socket, not the reverse: closing the socket leaves the
+file, which then refuses connections
+.Pq Er ECONNREFUSED ,
+and removing the file leaves connected peers working.
+A socket file left from an earlier boot refuses connections too; remove it
+with
+.Xr unlink 2
+before binding again.
+.Xr connect 2
+and sends to a path name need write permission on the file.
+.Xr open 2
+on a socket file fails with
+.Er EOPNOTSUPP .
+.Pp
+Abstract names, from Linux, are not files.
+They exist while a socket is bound to them, carry no permissions, are the
+same inside a
+.Xr chroot 2 ,
+and are released when the socket is closed.
+.Pp
+Binding with an unnamed address binds the socket to a fresh abstract name
+of five lowercase hexadecimal digits, as Linux does.
+A socket that sends a datagram without being bound sends it unnamed.
+.Pp
+.Xr getsockname 2 ,
+.Xr getpeername 2 ,
+.Xr accept 2
+and
+.Xr recvmsg 2
+return an address length of
+.Li offsetof(struct sockaddr_un, sun_path)
+plus the path's length plus one for a path name,
+.Li sizeof(sa_family_t)
+for an unnamed socket, and
+.Li sizeof(sa_family_t)
+plus one plus the name's length for an abstract name.
+A path name is returned as it was given to
+.Xr bind 2 ,
+relative or not.
+The side of a connection returned by
+.Xr accept 2
+has the listener's name.
+.Ss Connections
+.Xr listen 2
+on a bound stream or sequenced-packet socket queues at most
+.Fa backlog
+connections not yet accepted, and never more than 128; a backlog of zero
+or less means 1.
+.Xr connect 2
+to a listening socket completes at once: the connection enters the
+listener's queue, and both sides may send immediately.
+When the queue is full it fails with
+.Er ECONNREFUSED
+instead of waiting, as in the BSDs.
+.Pp
+Each direction of a connection has one buffer, whose size is the
+receiver's
+.Dv SO_RCVBUF
+(64 KiB by default, 512 bytes to 1 MiB).
+A send blocks while there is no room in it.
+A sequenced-packet record larger than the buffer fails with
+.Er EMSGSIZE .
+.Pp
+On a stream, a receive never returns bytes from two sends when the later one
+carried control data: control data stays with the bytes it was sent with.
+.Pp
+After
+.Li shutdown(SHUT_WR)
+the peer reads end-of-file once it has read what was sent; after
+.Li shutdown(SHUT_RD)
+the data queued and the data arriving are discarded, and reads return
+end-of-file.
+When one side closes, the other reads what remains and then end-of-file,
+and its sends fail with
+.Er EPIPE
+and raise
+.Dv SIGPIPE
+.Po
+unless
+.Dv MSG_NOSIGNAL
+or
+.Dv SO_NOSIGPIPE
+is set
+.Pc .
+Connections still queued when a listener is closed are reset: reads on
+their other ends fail with
+.Er ECONNRESET .
+.Ss Datagrams
+A datagram larger than the sender's
+.Dv SO_SNDBUF
+(64 KiB by default) fails with
+.Er EMSGSIZE .
+A receiving socket queues at most its
+.Dv SO_RCVBUF
+bytes; a datagram that does not fit is dropped and its send fails with
+.Er ENOBUFS ,
+as in the BSDs.
+A datagram longer than the receive buffer given is truncated and
+.Dv MSG_TRUNC
+set.
+.Pp
+.Xr connect 2
+on a datagram socket sets the destination of sends without an address; it
+does not filter what the socket receives.
+Connecting to an address of family
+.Dv AF_UNSPEC
+removes it.
+Once the destination's socket is closed, sends without an address fail with
+.Er ENOTCONN .
+.Ss Descriptor passing
+A control message of level
+.Dv SOL_SOCKET
+and type
+.Dv SCM_RIGHTS
+holding an array of
+.Vt int
+sends the open file descriptions those descriptors refer to.
+The kernel holds them from the send until they are received or the
+message is discarded, so the sender may close its descriptors at once.
+The receiver gets new descriptors, the lowest ones free, with the
+close-on-exec flag set if it passed
+.Dv MSG_CMSG_CLOEXEC .
+.Pp
+A receive whose control buffer is too small for all the descriptors
+installs as many as fit, closes the rest, and sets
+.Dv MSG_CTRUNC .
+The padding
+.Fn CMSG_SPACE
+adds after the last control message counts as room: a buffer of
+.Li CMSG_SPACE(sizeof(int))
+bytes takes two descriptors, as on Linux.
+.Xr read 2 ,
+which has no control buffer, closes every descriptor sent with the data it
+returns.
+A receive with
+.Dv MSG_PEEK
+leaves the descriptors in the message for the next receive.
+A message discarded unread
+.Po
+by
+.Li shutdown(SHUT_RD) ,
+by closing its socket, or by a datagram that could not be queued
+.Pc
+closes the descriptions it carried.
+.Pp
+A socket sent over itself, or a cycle of sockets sent over each other, can
+become reachable only through the messages in its own queue.
+When a descriptor of a socket with descriptions in flight is closed, the
+kernel collects such sockets, as the BSDs'
+.Fn unp_gc
+does, and closes them.
+.Pp
+At most 1024 descriptions sent by one user, and 4096 in all, may be in
+flight at once; a send beyond either limit fails with
+.Er ETOOMANYREFS .
+The superuser is held to the system-wide limit only.
+.Ss Credentials
+A process's credentials here are its process ID, user ID and group ID.
+Until effective and saved IDs exist, the effective IDs equal the real ones,
+and the group list is the single group ID.
+.Pp
+Each end of a connection records its peer's credentials when the
+connection is made: the connecting side the listener's as of
+.Xr listen 2 ,
+the accepted side the connector's as of
+.Xr connect 2 ,
+and each end of a
+.Xr socketpair 2
+its creator's.
+They are read with
+.Xr getpeereid 3 ,
+or with these options:
+.Bl -tag -width LOCAL_PEERCRED
+.It Dv LOCAL_PEERCRED
+Level
+.Dv SOL_LOCAL ,
+read only.
+A
+.Vt struct xucred
+from
+.In sys/ucred.h ,
+with
+.Va cr_version
+set to
+.Dv XUCRED_VERSION ,
+.Va cr_uid ,
+.Va cr_ngroups
+(1),
+.Va cr_groups
+and
+.Va cr_pid .
+.It Dv SO_PEERCRED
+Level
+.Dv SOL_SOCKET ,
+read only, from Linux.
+A
+.Vt struct ucred :
+.Va pid ,
+.Va uid ,
+.Va gid .
+.El
+.Pp
+Both fail with
+.Er ENOTCONN
+on a socket that was never connected.
+.Pp
+Credentials can also travel with each message, in three forms:
+.Bl -tag -width Ds
+.It Dv SCM_CREDS No from the sender
+A sender that includes a control message of type
+.Dv SCM_CREDS
+has its contents replaced by the kernel with its own
+.Vt struct cmsgcred
+.Pq Va cmcred_pid , cmcred_uid , cmcred_euid , cmcred_gid , cmcred_ngroups , cmcred_groups ,
+which the receiver gets as sent.
+Whatever the sender wrote there is ignored, so it cannot be forged.
+.It Dv SO_PASSCRED
+From Linux.
+A receiver with this
+.Dv SOL_SOCKET
+option set gets an
+.Dv SCM_CREDENTIALS
+control message holding a
+.Vt struct ucred
+with every message.
+A sender may supply one itself, which is refused with
+.Er EPERM
+unless it holds the sender's own process, user and group IDs or the sender
+is the superuser; without one, the kernel supplies the sender's.
+.It Dv LOCAL_CREDS
+Level
+.Dv SOL_LOCAL .
+The receiver gets an
+.Dv SCM_CREDS
+control message holding the sender's
+.Vt struct sockcred
+.Pq Va sc_uid , sc_euid , sc_gid , sc_egid , sc_ngroups , sc_groups :
+with every message on a datagram socket, and with the first receive only on
+a stream or sequenced-packet socket.
+.It Dv LOCAL_CREDS_PERSISTENT
+Level
+.Dv SOL_LOCAL .
+The receiver gets an
+.Dv SCM_CREDS2
+control message holding a
+.Vt struct sockcred2 ,
+which adds
+.Va sc_version
+and
+.Va sc_pid ,
+with every message.
+.El
+.Pp
+.Dv LOCAL_CREDS
+and
+.Dv LOCAL_CREDS_PERSISTENT
+exclude each other: setting one while the other is set fails with
+.Er EINVAL .
+While either is set, an
+.Dv SCM_CREDS
+message from the sender is dropped, so the receiver sees one set of
+credentials, the kernel's.
+A receive with
+.Dv MSG_PEEK
+shows the credentials without using up the one that
+.Dv LOCAL_CREDS
+gives a stream.
+.Pp
+The credential options belong to local sockets; on a socket of another
+family they fail with
+.Er EINVAL .
+The values of
+.Dv SOL_LOCAL
+.Pq 0x200 ,
+.Dv LOCAL_PEERCRED
+.Pq 0x1001 ,
+.Dv LOCAL_CREDS
+.Pq 0x1002
+and
+.Dv LOCAL_CREDS_PERSISTENT
+.Pq 0x1003
+are OxideBSD's own:
+.Fx Ns 's
+0 and 1 to 3 are
+.Dv SOL_IP
+and
+.Dv SO_*
+values in this C library.
+.Dv SCM_CREDS
+.Pq 3
+and
+.Dv SCM_CREDS2
+.Pq 8
+keep
+.Fx Ns 's
+values.
+.Sh ERRORS
+Besides those of the socket calls themselves, local sockets report:
+.Bl -tag -width Er
+.It Bq Er EACCES
+Search permission is denied on a directory of the path, write permission on
+the directory where
+.Xr bind 2
+would create the file, or write permission on the socket file for
+.Xr connect 2
+or a send.
+.It Bq Er EADDRINUSE
+Something exists at the path, or the abstract name is bound.
+.It Bq Er EAFNOSUPPORT
+The address's family is not
+.Dv AF_UNIX .
+.It Bq Er ECONNREFUSED
+No socket is bound to the name, the socket is not listening, or its queue
+is full.
+.It Bq Er ECONNRESET
+The listener closed before accepting the connection.
+.It Bq Er EINVAL
+The address is shorter than a family or longer than a
+.Vt struct sockaddr_un ;
+.Xr bind 2
+was called on a socket that already has a name;
+.Xr listen 2
+was called on an unbound or connected socket; or a control message is
+malformed or of an unsupported type.
+.It Bq Er EISCONN
+A connected stream or sequenced-packet socket was given a destination
+address, or
+.Xr connect 2
+was called on it again.
+.It Bq Er EMSGSIZE
+A datagram is larger than
+.Dv SO_SNDBUF ,
+or a record larger than the receiver's buffer.
+.It Bq Er ENAMETOOLONG
+The path is 108 bytes or longer.
+.It Bq Er ENOBUFS
+The receiving datagram socket's queue has no room for the message.
+.It Bq Er ENOTCONN
+The socket is not connected, or a datagram socket's destination has closed.
+.It Bq Er ENOTSOCK
+The path names a file that is not a socket.
+.It Bq Er EOPNOTSUPP
+An unconnected stream or sequenced-packet socket was given a destination
+address,
+.Xr listen 2
+was called on a datagram socket, or
+.Dv MSG_OOB
+was given.
+.It Bq Er EPIPE
+The socket's write side is shut down, or its peer has closed.
+.It Bq Er EPROTOTYPE
+The socket named is of another type.
+.It Bq Er ETOOMANYREFS
+Too many descriptions are in flight.
+.El
+.Sh SEE ALSO
+.Xr accept 2 ,
+.Xr bind 2 ,
+.Xr connect 2 ,
+.Xr getsockopt 2 ,
+.Xr listen 2 ,
+.Xr recvmsg 2 ,
+.Xr sendmsg 2 ,
+.Xr shutdown 2 ,
+.Xr socket 2 ,
+.Xr socketpair 2 ,
+.Xr getpeereid 3
+.Sh HISTORY
+Local sockets first appeared in
+.Bx 4.2 .
+OxideBSD's use the C library's Linux-shaped
+.Vt struct sockaddr_un ,
+without the BSDs'
+.Va sun_len ,
+and provide Linux's abstract namespace and credential interfaces alongside
+the BSD ones.

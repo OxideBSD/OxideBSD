@@ -1,0 +1,90 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SOCKETPAIR 2
+.Os OxideBSD
+.Sh NAME
+.Nm socketpair
+.Nd create a pair of connected sockets
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn socketpair "int domain" "int type" "int protocol" "int sv[2]"
+.Sh DESCRIPTION
+The
+.Fn socketpair
+system call creates two unnamed local sockets connected to each other and
+stores their descriptors in
+.Fa sv[0]
+and
+.Fa sv[1] .
+Either end can send and receive.
+.Pp
+The
+.Fa domain
+must be
+.Dv AF_UNIX ,
+the
+.Fa type
+one of
+.Dv SOCK_STREAM ,
+.Dv SOCK_DGRAM
+and
+.Dv SOCK_SEQPACKET ,
+and the
+.Fa protocol
+0.
+.Dv SOCK_CLOEXEC
+and
+.Dv SOCK_NONBLOCK
+may be OR'd into
+.Fa type ,
+as for
+.Xr socket 2 ;
+they apply to both descriptors.
+.Pp
+Each end records the creator's credentials as its peer's, for
+.Xr getpeereid 3
+and the options described in
+.Xr unix 4 .
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Fa sv
+is
+.Dv NULL .
+.It Bq Er ENFILE
+The system limit on open files,
+.Va kern.maxfiles ,
+would be exceeded.
+.It Bq Er EOPNOTSUPP
+The
+.Fa domain
+is not
+.Dv AF_UNIX .
+.It Bq Er EPROTONOSUPPORT
+The
+.Fa type
+or
+.Fa protocol
+is not supported.
+.El
+.Sh SEE ALSO
+.Xr pipe 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn socketpair
+system call conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn socketpair
+system call first appeared in
+.Bx 4.2 .
+OxideBSD's makes real local sockets, of any of the three types; before
+local sockets existed it made a pair of pipes.

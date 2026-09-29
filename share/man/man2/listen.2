@@ -1,0 +1,72 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt LISTEN 2
+.Os OxideBSD
+.Sh NAME
+.Nm listen
+.Nd listen for connections on a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn listen "int s" "int backlog"
+.Sh DESCRIPTION
+The
+.Fn listen
+system call marks the stream or sequenced-packet socket
+.Fa s
+as accepting connections, which
+.Xr accept 2
+then takes.
+.Pp
+The
+.Fa backlog
+limits the connections queued and not yet accepted.
+At most
+.Fa backlog
+are queued, and never more than 128; a backlog of zero or less means 1.
+A connection to a local socket whose queue is full is refused at once.
+.Pp
+A local socket must be bound first.
+A TCP socket that is not bound is bound to an ephemeral port; calling
+.Fn listen
+again on a listening TCP socket does nothing.
+A local listening socket records its owner's credentials as they are at
+the call, for connecting sockets to read; see
+.Xr unix 4 .
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EADDRINUSE
+Another TCP socket is listening on the port, or no ephemeral port is free.
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er EINVAL
+The local socket is not bound, or is connected.
+.It Bq Er EISCONN
+The TCP socket is connected or connecting.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.It Bq Er EOPNOTSUPP
+The socket is a datagram or raw socket.
+.El
+.Sh SEE ALSO
+.Xr accept 2 ,
+.Xr bind 2 ,
+.Xr connect 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn listen
+system call conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn listen
+system call first appeared in
+.Bx 4.2 .

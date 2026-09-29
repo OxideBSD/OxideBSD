@@ -1,0 +1,148 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt ACCEPT 2
+.Os OxideBSD
+.Sh NAME
+.Nm accept ,
+.Nm accept4
+.Nd accept a connection on a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn accept "int s" "struct sockaddr *restrict addr" "socklen_t *restrict addrlen"
+.Ft int
+.Fo accept4
+.Fa "int s"
+.Fa "struct sockaddr *restrict addr"
+.Fa "socklen_t *restrict addrlen"
+.Fa "int flags"
+.Fc
+.Sh DESCRIPTION
+The
+.Fn accept
+system call takes the oldest connection from the queue of the listening
+socket
+.Fa s
+.Po
+see
+.Xr listen 2
+.Pc
+and returns a new descriptor for it, the lowest one free.
+The new socket has the domain, type and protocol of
+.Fa s .
+It does not inherit
+.Dv O_NONBLOCK
+or any option of
+.Fa s .
+.Pp
+If
+.Fa addr
+and
+.Fa addrlen
+are not
+.Dv NULL ,
+the peer's address is stored at
+.Fa addr ,
+at most
+.Fa *addrlen
+bytes of it, and
+.Fa *addrlen
+is set to the address's full length.
+.Pp
+With no connection queued,
+.Fn accept
+blocks, or fails with
+.Er EAGAIN
+if
+.Fa s
+is non-blocking.
+A blocking
+.Fn accept
+waits at most as long as the
+.Dv SO_RCVTIMEO
+option of
+.Fa s
+says, if it is set.
+A listening socket is readable for
+.Xr poll 2
+and
+.Xr select 2
+when a connection is queued.
+.Pp
+.Fn accept4
+is
+.Fn accept
+with
+.Fa flags ,
+the OR of none or more of
+.Dv SOCK_CLOEXEC
+and
+.Dv SOCK_NONBLOCK ,
+which set the close-on-exec flag on the new descriptor and
+.Dv O_NONBLOCK
+on the new open file description.
+.Pp
+If no descriptor can be allocated, the connection stays queued.
+.Sh RETURN VALUES
+These calls return the new descriptor.
+Otherwise they return \-1 and set
+.Va errno .
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EAGAIN
+The socket is non-blocking and no connection is queued, or
+.Dv SO_RCVTIMEO
+expired first.
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er ECONNREFUSED
+The TCP connection was reset between its arrival and its acceptance.
+.It Bq Er EINTR
+A signal interrupted the call.
+Without a time-out, a handler installed with
+.Dv SA_RESTART
+restarts it instead.
+.It Bq Er EINVAL
+The local socket is not listening, or
+.Fa flags
+holds a flag other than
+.Dv SOCK_CLOEXEC
+and
+.Dv SOCK_NONBLOCK .
+.It Bq Er ENFILE
+The system limit on open files,
+.Va kern.maxfiles ,
+has been reached.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.It Bq Er EOPNOTSUPP
+The socket's type does not accept connections, or the TCP socket is not
+listening.
+.El
+.Sh SEE ALSO
+.Xr bind 2 ,
+.Xr connect 2 ,
+.Xr listen 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn accept
+system call conforms to
+.St -p1003.1-2008 .
+.Fn accept4
+is in IEEE Std 1003.1-2024.
+.Sh HISTORY
+The
+.Fn accept
+system call first appeared in
+.Bx 4.2 ,
+and
+.Fn accept4
+in Linux and
+.Fx 10.0 .
+In OxideBSD they are system calls 147 and 582.

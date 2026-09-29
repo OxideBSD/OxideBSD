@@ -1,0 +1,226 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt RECVMSG 2
+.Os OxideBSD
+.Sh NAME
+.Nm recv ,
+.Nm recvfrom ,
+.Nm recvmsg
+.Nd receive a message from a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft ssize_t
+.Fn recv "int s" "void *buf" "size_t len" "int flags"
+.Ft ssize_t
+.Fo recvfrom
+.Fa "int s"
+.Fa "void *buf"
+.Fa "size_t len"
+.Fa "int flags"
+.Fa "struct sockaddr *from"
+.Fa "socklen_t *fromlen"
+.Fc
+.Ft ssize_t
+.Fn recvmsg "int s" "struct msghdr *msg" "int flags"
+.Sh DESCRIPTION
+These calls receive data from the socket
+.Fa s .
+The
+.Fn recvmsg
+system call does the work; the C library implements
+.Fn recv
+and
+.Fn recvfrom
+over it, as the native system-call interface passes at most four
+arguments.
+.Pp
+.Fn recv
+receives at most
+.Fa len
+bytes into
+.Fa buf .
+.Fn recvfrom
+does the same and, if
+.Fa from
+is not
+.Dv NULL ,
+stores the sender's address there, at most
+.Fa *fromlen
+bytes of it, and sets
+.Fa *fromlen
+to the address's full length.
+.Pp
+.Fn recvmsg
+uses a
+.Vt struct msghdr ,
+described in
+.Xr sendmsg 2 .
+The data is scattered into the
+.Fa msg_iovlen
+buffers of
+.Fa msg_iov ,
+at most
+.Dv IOV_MAX
+(1024) of them.
+If
+.Fa msg_name
+is not
+.Dv NULL ,
+the sender's address is stored there, at most
+.Fa msg_namelen
+bytes of it, and
+.Fa msg_namelen
+is set to its full length, or to 0 if the message has no sender address
+(on a connection, for example).
+If
+.Fa msg_control
+is not
+.Dv NULL ,
+control data is stored there, at most
+.Fa msg_controllen
+bytes of it, and
+.Fa msg_controllen
+is set to the length stored.
+Only local sockets produce control data; see
+.Xr unix 4 .
+.Fa msg_flags
+is set to the OR of:
+.Bl -tag -width MSG_CTRUNC
+.It Dv MSG_TRUNC
+The datagram or record was longer than the buffers given; the rest of it
+has been discarded.
+.It Dv MSG_CTRUNC
+Some control data did not fit in
+.Fa msg_control ,
+or there was control data and
+.Fa msg_control
+is
+.Dv NULL .
+.It Dv MSG_EOR
+The data ends a record
+.Pq Dv SOCK_SEQPACKET No only .
+.El
+.Pp
+On a datagram or sequenced-packet socket each call receives one message.
+On a stream socket it receives what is there, up to the size of the
+buffers, and never more than 1 MiB; bytes sent with control data are never
+returned together with bytes sent before them.
+A receive of 0 bytes on a connection is end-of-file.
+With nothing to receive, the call blocks, or fails with
+.Er EAGAIN
+if the socket is non-blocking.
+A blocking receive waits at most as long as the socket's
+.Dv SO_RCVTIMEO
+option says, if it is set.
+.Pp
+The
+.Fa flags
+are the OR of none or more of:
+.Bl -tag -width MSG_CMSG_CLOEXEC
+.It Dv MSG_PEEK
+Return the data without removing it: the next receive returns it again.
+Descriptors sent with it stay in the message; credentials are shown.
+.It Dv MSG_WAITALL
+On a stream socket, keep receiving until the buffers are full, or
+end-of-file, an error, a signal, a timeout, or bytes that were sent with
+control data.
+It has no effect on other sockets or with
+.Dv MSG_PEEK .
+.It Dv MSG_DONTWAIT
+Do not block: fail with
+.Er EAGAIN
+instead, as if the socket had
+.Dv O_NONBLOCK .
+.It Dv MSG_TRUNC
+On a datagram or sequenced-packet socket, return the full length of the
+message even if it was longer than the buffers given, as Linux does.
+.It Dv MSG_CMSG_CLOEXEC
+Set the close-on-exec flag on descriptors received with
+.Dv SCM_RIGHTS .
+.El
+.Pp
+Any other flag, including
+.Dv MSG_OOB ,
+makes the call fail with
+.Er EOPNOTSUPP .
+.Pp
+.Xr read 2
+on a socket is
+.Fn recvmsg
+without an address, control data or flags; descriptors sent with the data
+it returns are closed.
+.Sh RETURN VALUES
+These calls return the number of bytes received, or the message's full
+length with
+.Dv MSG_TRUNC .
+Otherwise they return \-1 and set
+.Va errno .
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EAGAIN
+The socket is non-blocking or
+.Dv MSG_DONTWAIT
+was given, and nothing is waiting; or
+.Dv SO_RCVTIMEO
+expired first.
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er ECONNREFUSED , ECONNRESET , ETIMEDOUT
+A TCP connection failed; the error is reported once.
+.It Bq Er ECONNRESET
+A local connection was reset: its listener closed before accepting it.
+.It Bq Er EINTR
+A signal interrupted the call before anything was received.
+.It Bq Er EINVAL
+.Fa msg
+is
+.Dv NULL ,
+.Fa msg_controllen
+is more than 4096, an
+.Fa iov_len
+is too large, or a buffer pointer is
+.Dv NULL
+with a length that is not zero.
+.It Bq Er EMSGSIZE
+.Fa msg_iovlen
+is more than
+.Dv IOV_MAX .
+.It Bq Er ENOTCONN
+The socket is a stream or sequenced-packet socket that is not connected.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.It Bq Er EOPNOTSUPP
+A flag other than those above was given.
+.El
+.Sh SEE ALSO
+.Xr read 2 ,
+.Xr sendmsg 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+These calls conform to
+.St -p1003.1-2008 .
+.Dv MSG_CMSG_CLOEXEC
+is in IEEE Std 1003.1-2024.
+.Sh HISTORY
+The
+.Fn recv ,
+.Fn recvfrom
+and
+.Fn recvmsg
+system calls first appeared in
+.Bx 4.2 .
+In OxideBSD
+.Fn recv
+and
+.Fn recvfrom
+are library functions over
+.Fn recvmsg ,
+system call 578; the former
+.Fn recvfrom
+system call, 143, is retired and fails with
+.Er ENOSYS .

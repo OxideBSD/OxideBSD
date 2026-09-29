@@ -1,0 +1,239 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SENDMSG 2
+.Os OxideBSD
+.Sh NAME
+.Nm send ,
+.Nm sendto ,
+.Nm sendmsg
+.Nd send a message on a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft ssize_t
+.Fn send "int s" "const void *buf" "size_t len" "int flags"
+.Ft ssize_t
+.Fo sendto
+.Fa "int s"
+.Fa "const void *buf"
+.Fa "size_t len"
+.Fa "int flags"
+.Fa "const struct sockaddr *to"
+.Fa "socklen_t tolen"
+.Fc
+.Ft ssize_t
+.Fn sendmsg "int s" "const struct msghdr *msg" "int flags"
+.Sh DESCRIPTION
+These calls send data on the socket
+.Fa s .
+The
+.Fn sendmsg
+system call does the work; the C library implements
+.Fn send
+and
+.Fn sendto
+over it, as the native system-call interface passes at most four
+arguments.
+.Pp
+.Fn send
+sends
+.Fa len
+bytes from
+.Fa buf
+on a connected socket, or to a datagram socket's default destination.
+.Fn sendto
+sends them to the address
+.Fa to ,
+of
+.Fa tolen
+bytes, or behaves as
+.Fn send
+if
+.Fa to
+is
+.Dv NULL .
+.Pp
+.Fn sendmsg
+takes everything from a
+.Vt struct msghdr :
+.Bd -literal -offset indent
+struct msghdr {
+	void		*msg_name;	/* destination address, or NULL */
+	socklen_t	 msg_namelen;	/* its length */
+	struct iovec	*msg_iov;	/* data to send */
+	int		 msg_iovlen;	/* elements in msg_iov */
+	void		*msg_control;	/* control data */
+	socklen_t	 msg_controllen; /* its length */
+	int		 msg_flags;	/* not used when sending */
+};
+.Ed
+.Pp
+The data is gathered from the
+.Fa msg_iovlen
+buffers of
+.Fa msg_iov ,
+at most
+.Dv IOV_MAX
+(1024) of them.
+Control data is a series of
+.Vt struct cmsghdr ,
+each built with the
+.Fn CMSG_*
+macros of
+.In sys/socket.h ,
+at most 4096 bytes in all; only local sockets accept any, and
+.Xr unix 4
+describes the types
+.Pq Dv SCM_RIGHTS , SCM_CREDS , SCM_CREDENTIALS .
+Control data goes with the first byte of the data it was sent with.
+.Pp
+On a datagram or sequenced-packet socket the data is sent as one message,
+whole or not at all.
+On a stream socket as much is sent as fits; a blocking send waits for room
+until everything is sent, and returns what was sent so far if it is then
+interrupted, times out, or fails.
+.Pp
+A blocking send waits at most as long as the socket's
+.Dv SO_SNDTIMEO
+option says, if it is set.
+.Pp
+The
+.Fa flags
+are the OR of none or more of:
+.Bl -tag -width MSG_NOSIGNAL
+.It Dv MSG_DONTWAIT
+do not block: fail with
+.Er EAGAIN
+instead, as if the socket had
+.Dv O_NONBLOCK .
+.It Dv MSG_EOR
+end the record
+.Pq Dv SOCK_SEQPACKET No only ; every send ends one anyway .
+.It Dv MSG_NOSIGNAL
+do not raise
+.Dv SIGPIPE
+when the send fails with
+.Er EPIPE .
+.El
+.Pp
+Any other flag, including
+.Dv MSG_OOB ,
+makes the call fail with
+.Er EOPNOTSUPP ;
+flags are never ignored.
+.Pp
+A send that fails with
+.Er EPIPE
+raises
+.Dv SIGPIPE
+in the calling thread unless
+.Dv MSG_NOSIGNAL
+is given or the socket's
+.Dv SO_NOSIGPIPE
+option is set.
+.Sh RETURN VALUES
+These calls return the number of bytes sent.
+Otherwise they return \-1 and set
+.Va errno .
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EACCES
+Write permission is denied on the socket file named by
+.Fa to .
+.It Bq Er EAGAIN
+The socket is non-blocking or
+.Dv MSG_DONTWAIT
+was given, and the send would block; or
+.Dv SO_SNDTIMEO
+expired before anything was sent.
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor, or a descriptor in an
+.Dv SCM_RIGHTS
+message is not open.
+.It Bq Er ECONNREFUSED
+No socket is bound to the local name
+.Fa to .
+.It Bq Er EDESTADDRREQ
+No address was given, and the socket is a UDP socket without a default
+destination or a raw socket.
+.It Bq Er EHOSTUNREACH
+The IPv4 destination cannot be reached.
+.It Bq Er EINTR
+A signal interrupted the call before anything was sent.
+.It Bq Er EINVAL
+.Fa msg
+is
+.Dv NULL ,
+.Fa msg_controllen
+is more than 4096, an
+.Fa iov_len
+is too large, a buffer pointer is
+.Dv NULL
+with a length that is not zero, the address is malformed, or the control
+data is malformed.
+.It Bq Er EISCONN
+An address was given on a connected UDP socket, or on a connected local
+stream or sequenced-packet socket.
+A TCP socket ignores the address.
+.It Bq Er EMSGSIZE
+.Fa msg_iovlen
+is more than
+.Dv IOV_MAX ,
+or the message is too large to send in one piece.
+.It Bq Er ENOBUFS
+The receiving local datagram socket has no room for the message.
+.It Bq Er ENOTCONN
+The socket is not connected, or a local datagram socket's default
+destination has closed.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.It Bq Er EOPNOTSUPP
+A flag other than those above was given,
+.Dv MSG_EOR
+was given on a socket that is not
+.Dv SOCK_SEQPACKET ,
+control data was given on a socket that is not local, or an address was
+given on an unconnected local stream or sequenced-packet socket.
+.It Bq Er EPERM
+An
+.Dv SCM_CREDENTIALS
+message holds credentials other than the sender's.
+.It Bq Er EPIPE
+The socket's write side is shut down, or the connection's peer has gone.
+.It Bq Er EPROTOTYPE
+The local socket named by
+.Fa to
+is not a datagram socket.
+.It Bq Er ETOOMANYREFS
+Too many descriptions are in flight; see
+.Xr unix 4 .
+.El
+.Sh SEE ALSO
+.Xr recvmsg 2 ,
+.Xr socket 2 ,
+.Xr write 2 ,
+.Xr unix 4
+.Sh STANDARDS
+These calls conform to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn send ,
+.Fn sendto
+and
+.Fn sendmsg
+system calls first appeared in
+.Bx 4.2 .
+In OxideBSD
+.Fn send
+and
+.Fn sendto
+are library functions over
+.Fn sendmsg ,
+system call 577; the former
+.Fn sendto
+system call, 142, is retired and fails with
+.Er ENOSYS .

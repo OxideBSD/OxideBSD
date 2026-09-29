@@ -1,0 +1,77 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SHUTDOWN 2
+.Os OxideBSD
+.Sh NAME
+.Nm shutdown
+.Nd disable sends and receives on a socket
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/socket.h
+.Ft int
+.Fn shutdown "int s" "int how"
+.Sh DESCRIPTION
+The
+.Fn shutdown
+system call shuts down one or both directions of the socket
+.Fa s ,
+as
+.Fa how
+says:
+.Bl -tag -width SHUT_RDWR
+.It Dv SHUT_RD
+Further receives return end-of-file.
+On a local socket the data already queued, and any that arrives later, is
+discarded, and descriptors sent with it are closed.
+.It Dv SHUT_WR
+Further sends fail with
+.Er EPIPE .
+The peer of a connection reads end-of-file once it has read what was sent;
+a TCP connection sends its FIN.
+.It Dv SHUT_RDWR
+Both.
+.El
+.Pp
+The socket stays open until its last descriptor is closed.
+Once both directions are shut down,
+.Xr poll 2
+reports
+.Dv POLLHUP .
+.Pp
+Local sockets of every type, and TCP connections, support
+.Fn shutdown ;
+a local stream or sequenced-packet socket must be connected.
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa s
+is not an open descriptor.
+.It Bq Er EINVAL
+.Fa how
+is not one of the values above.
+.It Bq Er ENOTCONN
+The local stream or sequenced-packet socket, or the TCP socket, is not
+connected.
+.It Bq Er ENOTSOCK
+.Fa s
+is not a socket.
+.It Bq Er EOPNOTSUPP
+The socket is a UDP or raw socket.
+.El
+.Sh SEE ALSO
+.Xr close 2 ,
+.Xr socket 2 ,
+.Xr unix 4
+.Sh STANDARDS
+The
+.Fn shutdown
+system call conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+The
+.Fn shutdown
+system call first appeared in
+.Bx 4.2 .
