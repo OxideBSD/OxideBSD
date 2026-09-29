@@ -11,7 +11,7 @@ use x86_64::instructions::port::Port;
 use x86_64::structures::paging::{FrameAllocator, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
-use super::nic::{NicDriver, NicError};
+use crate::net::nic::{NicDriver, NicError};
 use crate::serial_println;
 
 const RTL8139_VENDOR: u16 = 0x10EC;
@@ -250,7 +250,7 @@ fn probe_and_init(
 pub fn init(frame_allocator: &mut impl FrameAllocator<Size4KiB>, phys_mem_offset: VirtAddr) {
     match probe_and_init(frame_allocator, phys_mem_offset) {
         Some(driver) => {
-            *super::nic::NIC.lock() = Some(Box::new(driver));
+            *crate::net::nic::NIC.lock() = Some(Box::new(driver));
             serial_println!("[net] rtl8139 driver installed");
         }
         None => {

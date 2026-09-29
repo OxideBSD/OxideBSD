@@ -31,8 +31,9 @@ use alloc::vec::Vec;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::net::nic::{NIC, NicDriver, NicError};
-use oxidebsd::net::tcp;
-use oxidebsd::net::{ethernet, ipv4};
+use oxidebsd::netinet::tcp;
+use oxidebsd::net::ethernet;
+use oxidebsd::netinet::ipv4;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
 use oxidebsd::syscall::oxidebsd_register_syscall;
@@ -121,7 +122,7 @@ fn build_arp_reply(
 }
 
 /// Ten parameters, one per real field this test needs to vary across the SYN/ACK/data segments
-/// it builds -- see `sys/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
+/// it builds -- see `sys/netinet/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn build_tcp_frame(
     dest_mac: [u8; 6],
@@ -168,7 +169,7 @@ fn build_tcp_frame(
     }
 
     // TCP checksum: a 12-byte pseudo-header prepended to the segment, checksum field zeroed while
-    // summing -- matches sys/net/tcp.rs's own tcp_checksum exactly, duplicated here on purpose
+    // summing -- matches sys/netinet/tcp.rs's own tcp_checksum exactly, duplicated here on purpose
     // (this test builds wire bytes independently, not by calling into the implementation it's
     // verifying).
     let mut pseudo = [0u8; 12 + 128];
@@ -327,17 +328,17 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    const NET_MOD: &[u8] = include_bytes!(env!("NET_MOD_PATH"));
-    const NET_PANIC_SYMBOL: &str = env!("NET_MOD_PANIC_SYMBOL");
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
-        "net",
-        NET_MOD,
-        NET_PANIC_SYMBOL,
+        "socket",
+        SOCKET_MOD,
+        SOCKET_PANIC_SYMBOL,
         false,
         &mut mapper,
         &mut frame_allocator,
     )
-    .unwrap_or_else(|e| panic!("failed to load the net module: {e:?}"));
+    .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();

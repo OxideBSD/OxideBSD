@@ -55,8 +55,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // Phase 1 of networking (see this repo's networking plan): probes for and brings up a real
     // NIC, if one is present, before any module loads. Not fatal either way -- logged, boot
     // continues regardless of whether a supported device was found. No protocol stack, no
-    // syscalls, no `sys/modules/net` yet -- just raw Ethernet frame TX/RX, IRQ-driven.
-    crate::net::rtl8139::init(&mut frame_allocator, physical_memory_offset);
+    // syscalls, no `sys/modules/socket` yet -- just raw Ethernet frame TX/RX, IRQ-driven.
+    crate::drivers::rtl8139::init(&mut frame_allocator, physical_memory_offset);
 
     // A real xHCI USB host controller + HID boot-protocol keyboard, if either is present -- this
     // kernel's only input path on hardware with no PS/2 controller (a Surface Pro; see
@@ -184,20 +184,20 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
 
     // Registers SYS_SOCKET/SYS_BIND/SYS_SENDTO/SYS_RECVFROM/SYS_SETSOCKOPT -- UDP sockets (see
-    // CLAUDE.md's networking plan; sys/net/udp.rs holds the real logic, this module is just the
+    // CLAUDE.md's networking plan; sys/netinet/udp.rs holds the real logic, this module is just the
     // usual thin syscall-registration shim). Must load before hush, below, is spawned, same as
     // every other syscall-registering module.
-    const NET_MOD: &[u8] = include_bytes!(env!("NET_MOD_PATH"));
-    const NET_PANIC_SYMBOL: &str = env!("NET_MOD_PANIC_SYMBOL");
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
     crate::module::load(
-        "net",
-        NET_MOD,
-        NET_PANIC_SYMBOL,
+        "socket",
+        SOCKET_MOD,
+        SOCKET_PANIC_SYMBOL,
         false,
         &mut mapper,
         &mut frame_allocator,
     )
-    .unwrap_or_else(|e| panic!("failed to load the net module: {e:?}"));
+    .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
     // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local
     // values from here on -- hand them over to memory's global state (moving frame_allocator by

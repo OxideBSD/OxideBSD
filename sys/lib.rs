@@ -16,6 +16,7 @@ pub mod kernel_main;
 pub mod memory;
 pub mod module;
 pub mod net;
+pub mod netinet;
 pub mod process;
 pub mod qemu;
 pub mod random;
@@ -173,7 +174,7 @@ fn test_syscall_dispatch_routes_registered_handlers() {
 
 #[test_case]
 fn test_ipv4_next_hop_routes_off_subnet_to_gateway() {
-    use net::ipv4::{self, GATEWAY_IP, GUEST_IP};
+    use netinet::ipv4::{self, GATEWAY_IP, GUEST_IP};
 
     // On-link (same /24 as GUEST_IP, e.g. SLIRP's own DNS relay): ARP the destination directly.
     assert_eq!(ipv4::next_hop(ipv4::DNS_SERVER_IP), ipv4::DNS_SERVER_IP);

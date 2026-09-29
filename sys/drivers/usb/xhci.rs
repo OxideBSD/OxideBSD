@@ -302,7 +302,7 @@ impl Xhci {
     /// Finds the first xHCI controller via PCI (class `0x0C`, subclass `0x03`, prog-if `0x30`),
     /// resets and brings it up (including the real BIOS-to-OS ownership handoff -- see
     /// `handoff_from_bios`), and returns a ready-to-use handle. `None` on any failure or absence,
-    /// always logged -- never fatal to boot, same precedent `net::rtl8139::init` already
+    /// always logged -- never fatal to boot, same precedent `drivers::rtl8139::init` already
     /// established for "no supported hardware found."
     pub(crate) fn init(
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,

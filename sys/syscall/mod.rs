@@ -128,7 +128,7 @@ pub(crate) const ENOTTY: u64 = 25;
 /// actually matters: whatever this file returns via the carry-flag ABI becomes musl's raw `errno`
 /// value directly (see `external/mit/musl/arch/x86_64/syscall_arch.h`'s `jnc`/`neg` conversion), so
 /// it must match musl's *own* macro value, not a real-BSD-authenticity nod like `ENOSYS` below is.
-/// `sys/net/udp.rs`'s own local copy of this constant (previously `43`, following this file's now-
+/// `sys/netinet/udp.rs`'s own local copy of this constant (previously `43`, following this file's now-
 /// corrected mistake) needs the same fix.
 pub(crate) const EPROTONOSUPPORT: u64 = 93;
 /// Returned by `crate::fs::pipe`'s `blocking_read` for a real `O_NONBLOCK` fd (`sys_fcntl`) with

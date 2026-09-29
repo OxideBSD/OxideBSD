@@ -948,18 +948,18 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_proc_modules" => Some(oxidebsd_proc_modules as *const () as u64),
         "oxidebsd_fd_at" => Some(crate::fs::fd::oxidebsd_fd_at as *const () as u64),
-        "oxidebsd_sys_socket" => Some(crate::net::udp::oxidebsd_sys_socket as *const () as u64),
-        "oxidebsd_sys_bind" => Some(crate::net::udp::oxidebsd_sys_bind as *const () as u64),
-        "oxidebsd_sys_sendto" => Some(crate::net::udp::oxidebsd_sys_sendto as *const () as u64),
-        "oxidebsd_sys_recvfrom" => Some(crate::net::udp::oxidebsd_sys_recvfrom as *const () as u64),
+        "oxidebsd_sys_socket" => Some(crate::netinet::udp::oxidebsd_sys_socket as *const () as u64),
+        "oxidebsd_sys_bind" => Some(crate::netinet::udp::oxidebsd_sys_bind as *const () as u64),
+        "oxidebsd_sys_sendto" => Some(crate::netinet::udp::oxidebsd_sys_sendto as *const () as u64),
+        "oxidebsd_sys_recvfrom" => Some(crate::netinet::udp::oxidebsd_sys_recvfrom as *const () as u64),
         "oxidebsd_sys_setsockopt" => {
-            Some(crate::net::udp::oxidebsd_sys_setsockopt as *const () as u64)
+            Some(crate::netinet::udp::oxidebsd_sys_setsockopt as *const () as u64)
         }
-        "oxidebsd_sys_connect" => Some(crate::net::tcp::oxidebsd_sys_connect as *const () as u64),
-        "oxidebsd_sys_listen" => Some(crate::net::tcp::oxidebsd_sys_listen as *const () as u64),
-        "oxidebsd_sys_accept" => Some(crate::net::tcp::oxidebsd_sys_accept as *const () as u64),
+        "oxidebsd_sys_connect" => Some(crate::netinet::tcp::oxidebsd_sys_connect as *const () as u64),
+        "oxidebsd_sys_listen" => Some(crate::netinet::tcp::oxidebsd_sys_listen as *const () as u64),
+        "oxidebsd_sys_accept" => Some(crate::netinet::tcp::oxidebsd_sys_accept as *const () as u64),
         "oxidebsd_sys_getsockname" => {
-            Some(crate::net::udp::oxidebsd_sys_getsockname as *const () as u64)
+            Some(crate::netinet::udp::oxidebsd_sys_getsockname as *const () as u64)
         }
         "oxidebsd_sys_poll" => Some(crate::net::oxidebsd_sys_poll as *const () as u64),
         "oxidebsd_sys_ppoll" => Some(crate::net::oxidebsd_sys_ppoll as *const () as u64),

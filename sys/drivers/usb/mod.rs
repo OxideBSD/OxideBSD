@@ -5,7 +5,7 @@
 //!
 //! **Polled, not IRQ-driven, deliberately**: `poll()` is called once per timer tick (100 Hz, see
 //! `cpu::interrupts::timer_interrupt_handler`) rather than registering a PCI IRQ handler the way
-//! `net::rtl8139` does. This kernel has no IOAPIC/MSI support, and this is its first real-hardware
+//! `drivers::rtl8139` does. This kernel has no IOAPIC/MSI support, and this is its first real-hardware
 //! (not just QEMU) boot target -- legacy PCI `INTx` routing on a modern UEFI-only chipset is a
 //! real, unquantified risk not worth taking just to shave a few milliseconds of keystroke latency
 //! a human typist will never notice. Matches `drivers::ata`'s own established polling-only
@@ -36,8 +36,8 @@ static STATE: Mutex<Option<UsbState>> = Mutex::new(None);
 
 /// Finds an xHCI controller via PCI, brings it up, scans its root ports once, and initializes the
 /// first HID boot-keyboard device found. Not fatal either way -- logged and skipped on any
-/// failure, exactly `net::rtl8139::init`'s own "no supported hardware found" precedent. Call once,
-/// at boot, before module loading (same ordering `net::rtl8139::init` already uses) so a USB
+/// failure, exactly `drivers::rtl8139::init`'s own "no supported hardware found" precedent. Call once,
+/// at boot, before module loading (same ordering `drivers::rtl8139::init` already uses) so a USB
 /// keyboard is live before `hush` is spawned.
 pub fn init(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,

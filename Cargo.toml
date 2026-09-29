@@ -80,7 +80,7 @@ members = [
   "sys/modules/signal",
   "sys/modules/clock",
   "sys/modules/oxfs",
-  "sys/modules/net",
+  "sys/modules/socket",
 ]
 
 [package]

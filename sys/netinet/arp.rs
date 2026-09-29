@@ -5,7 +5,7 @@
 
 use spin::Mutex;
 
-use super::ethernet::{self, BROADCAST_MAC, ETHERTYPE_ARP};
+use crate::net::ethernet::{self, BROADCAST_MAC, ETHERTYPE_ARP};
 use super::ipv4::{GUEST_IP, Ipv4Addr};
 
 const HTYPE_ETHERNET: u16 = 1;

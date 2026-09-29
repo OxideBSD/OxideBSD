@@ -5,7 +5,8 @@
 
 use alloc::vec::Vec;
 
-use super::{arp, ipv4, nic};
+use super::nic;
+use crate::netinet::{arp, ipv4};
 
 pub const ETHERTYPE_ARP: u16 = 0x0806;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;

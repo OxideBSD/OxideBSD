@@ -12,7 +12,8 @@ use core::panic::PanicInfo;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::cpu::interrupts;
 use oxidebsd::limine_entry_point;
-use oxidebsd::net::{nic, rtl8139};
+use oxidebsd::net::nic;
+use oxidebsd::drivers::rtl8139;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
 

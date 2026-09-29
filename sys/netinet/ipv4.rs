@@ -9,7 +9,8 @@
 
 use alloc::vec::Vec;
 
-use super::{arp, ethernet, icmp, tcp, udp};
+use super::{arp, icmp, tcp, udp};
+use crate::net::ethernet;
 
 pub type Ipv4Addr = [u8; 4];
 
@@ -155,7 +156,7 @@ fn resolve_with_retry(ip: Ipv4Addr) -> Option<[u8; 6]> {
     // oxidebsd_sys_poll` (see `crate::tsc`'s own doc comment) -- fixed here for the same reason.
     let deadline = crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(5000);
     while crate::cpu::tsc::now() < deadline {
-        super::poll();
+        crate::net::poll();
         if let Some(mac) = arp::resolve(ip) {
             return Some(mac);
         }

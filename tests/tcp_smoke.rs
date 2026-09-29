@@ -43,9 +43,10 @@ use alloc::vec::Vec;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::net::nic::{NIC, NicDriver, NicError};
-use oxidebsd::net::tcp::{self, oxidebsd_sys_accept, oxidebsd_sys_listen};
-use oxidebsd::net::udp::{oxidebsd_sys_bind, oxidebsd_sys_socket};
-use oxidebsd::net::{ethernet, ipv4};
+use oxidebsd::netinet::tcp::{self, oxidebsd_sys_accept, oxidebsd_sys_listen};
+use oxidebsd::netinet::udp::{oxidebsd_sys_bind, oxidebsd_sys_socket};
+use oxidebsd::net::ethernet;
+use oxidebsd::netinet::ipv4;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
 use oxidebsd::syscall::{oxidebsd_sys_fcntl, oxidebsd_sys_read, oxidebsd_sys_write};
@@ -109,7 +110,7 @@ fn build_arp_reply(
 }
 
 /// Ten parameters, one per real field this test needs to vary across the SYN/ACK/data segments
-/// it builds -- see `sys/net/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
+/// it builds -- see `sys/netinet/tcp.rs`'s own `send_segment` for the same shape, for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn build_tcp_frame(
     dest_mac: [u8; 6],
@@ -156,7 +157,7 @@ fn build_tcp_frame(
     }
 
     // TCP checksum: a 12-byte pseudo-header (src/dst IP, zero, protocol, TCP length) prepended to
-    // the segment itself, checksum field zeroed while summing -- matches sys/net/tcp.rs's own
+    // the segment itself, checksum field zeroed while summing -- matches sys/netinet/tcp.rs's own
     // `tcp_checksum` exactly, duplicated here on purpose (this test builds wire bytes
     // independently, not by calling into the implementation it's verifying).
     let mut pseudo = [0u8; 12 + 128];
@@ -333,7 +334,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     );
 
     // --- read() on an empty-but-still-open connection: with O_NONBLOCK set, must return EAGAIN
-    // immediately, not spin forever (see sys/net/tcp.rs's own tcp_read doc comment -- there's
+    // immediately, not spin forever (see sys/netinet/tcp.rs's own tcp_read doc comment -- there's
     // nothing else in this single-process test that would ever call poll() again on our behalf,
     // so a real hang here would mean the fix regressed, not just a slow test). ---
     let rc = oxidebsd_sys_fcntl(accepted as u64, F_SETFL, O_NONBLOCK);

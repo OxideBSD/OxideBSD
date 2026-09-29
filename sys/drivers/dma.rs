@@ -25,7 +25,7 @@ pub struct DmaBuffer {
 impl DmaBuffer {
     /// `pages` physically contiguous frames, or `None`. With `below_4g`, the whole buffer must
     /// sit below 4 GiB (for 32-bit DMA addresses, like IDE's PRD entries). Frames from a
-    /// discontiguous start are abandoned, as `net::rtl8139`'s ring allocation does: this runs a
+    /// discontiguous start are abandoned, as `drivers::rtl8139`'s ring allocation does: this runs a
     /// few times at boot, never at run time.
     pub fn alloc(
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,

@@ -33,7 +33,8 @@ Current state:
   binaries, `execve`'d individually (not a multi-call `busybox` binary), placed per HIER.md (see
   "Filesystem layout"). 12 utilities (`echo true false pwd cat ls mkdir rm cp mv ln touch`) are
   native `bin/<name>` PIE binaries over `lib/oxlibc` — see "Real PIE/ASLR loading" below.
-- A real networking stack (`sys/drivers/pci.rs`, `sys/net/*`, `sys/modules/net/`): PCI + an rtl8139
+- A real networking stack (`sys/drivers/{pci,rtl8139}.rs`, `sys/net/*` interfaces, `sys/netinet/*` protocols,
+  `sys/modules/socket/`): PCI + an rtl8139
   driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP/raw-ICMP sockets, `poll(2)`, and real hostname
   resolution over musl's own DNS stub resolver (no DNS protocol code of its own) — see "Real
   networking" below.
@@ -1157,18 +1158,22 @@ wrappers around it.
   sustained guest uptime — a real-time overrun test that passes in isolation can fail deep into a
   long continuous boot; not chased further (would need periodic recalibration).
 
-## Real networking (`sys/drivers/pci.rs`, `sys/net/*`, `sys/modules/net/`)
+## Real networking (`sys/drivers/{pci,rtl8139}.rs`, `sys/net/*`, `sys/netinet/*`, `sys/modules/socket/`)
+
+BSD layout: interfaces/Ethernet in `sys/net`, IPv4/ARP/ICMP/UDP/TCP in `sys/netinet`, the NIC
+driver in `sys/drivers`; the socket layer and `AF_UNIX` go in `sys/kern/uipc_*` (OxideBSD-doc
+`UNIX.md`).
 
 Real, phased stack: PCI enumeration, IRQ-driven rtl8139 driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP
 sockets, raw ICMP sockets, `poll(2)`, and real hostname resolution via musl's own stub resolver.
 
-- **`sys/net/rtl8139.rs`**: brought up unconditionally at boot, absence logged not fatal.
+- **`sys/drivers/rtl8139.rs`**: brought up unconditionally at boot, absence logged not fatal.
 - **`ipv4::next_hop`** is the *only* routing rule (anything outside `GUEST_IP`'s `/24` → gateway).
-- **`sys/net/udp.rs`/`tcp.rs`**: real sockets behind `SYS_SOCKET=140`/`SYS_BIND=141`/
+- **`sys/netinet/udp.rs`/`tcp.rs`**: real sockets behind `SYS_SOCKET=140`/`SYS_BIND=141`/
   `SYS_SENDTO=142`/`SYS_RECVFROM=143`/`SYS_SETSOCKOPT=144` (UDP) and `SYS_CONNECT=145`/
   `SYS_LISTEN=146`/`SYS_ACCEPT=147` (TCP; once `Established`, plain read/write). TCP is
   stop-and-wait (one segment in flight, fixed 536-byte MSS, no window/congestion control).
-- **`sys/net/icmp.rs`** raw sockets: not port-addressed, every inbound ICMP fans out to every open
+- **`sys/netinet/icmp.rs`** raw sockets: not port-addressed, every inbound ICMP fans out to every open
   raw socket.
 - **`SYS_POLL=148`**/`SYS_SELECT`: real `POLLIN`/`POLLOUT`/`POLLHUP`/`POLLERR` per fd
   (`fs::Readiness`: pipes, console, TCP; files always ready) and `EINTR`. Waits on pipes/console
@@ -1556,7 +1561,7 @@ licensed despite the "GNU" association, and its portable autotools build is exac
      Fixed: a real `console::stdin::has_bytes_available()` check, special-cased for `real_fd == 0`
      (a fixed, global mapping -- see `sys/fs/fd.rs`'s `init`) in both syscalls, instead of the
      blind fallback.
-  2. **A real, separate, pre-existing bug that fix #1 newly exposed rather than caused**: `sys/net/
+  2. **A real, separate, pre-existing bug that fix #1 newly exposed rather than caused**: `sys/drivers/
      rtl8139.rs`'s `poll_recv` had no genuine iteration bound, unlike every other syscall-reachable
      retry loop in this kernel (this section's own networking "architectural gotchas" already
      establish `spin_loop()` not `hlt()`, always `tsc`-bounded). Before fix #1, `oxidebsd_sys_poll`
@@ -1695,7 +1700,7 @@ there's no roster filter any more. Older sections below still say `/bin/clang` e
   prints `1.13.2` (verified headless; needs `src/third_party/` seeded, header-only deps).
   `tests/ninja_syscall_smoke.rs`: on-target `ninja -C /ninja-demo` (2 `clang -c` jobs + link via
   `/bin/sh`), then runs the result.
-- **`SYS_PPOLL=575`** (`sys/net/mod.rs`, net module): `poll` + atomic sigmask swap, reusing
+- **`SYS_PPOLL=575`** (`sys/net/mod.rs`, socket module): `poll` + atomic sigmask swap, reusing
   `do_sigsuspend`'s deferred restore (`begin/end_temporary_sigmask`). Limit inherited from `poll`:
   a signal arriving mid-wait isn't noticed until the wait ends. Fixed alongside: `poll(NULL, 0, t)`
   panicked the kernel (slice from a null pointer). `tests/ppoll_syscall_smoke.rs`.
@@ -2227,8 +2232,8 @@ a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the 
   future `std` gap surfacing as a mysterious `ENOTTY`/`ENOSYS`-shaped `io::Error` from a
   first-real-consumer program is probably this same allowlist-gap class, not a kernel bug.
 - **A real, previously-missing kernel syscall found this way, not just a std/libc gap**:
-  `getsockname(2)` had never been implemented at all (`sys/net/tcp.rs`'s `getsockname`/
-  `sys/net/udp.rs`'s `oxidebsd_sys_getsockname`, `SYS_GETSOCKNAME=559`) — real Linux's own stock
+  `getsockname(2)` had never been implemented at all (`sys/netinet/tcp.rs`'s `getsockname`/
+  `sys/netinet/udp.rs`'s `oxidebsd_sys_getsockname`, `SYS_GETSOCKNAME=559`) — real Linux's own stock
   `__NR_getsockname=51` had simply never been remapped, since nothing needed it before a real
   `std::net` consumer called `local_addr()`. `getpeername` remains a deliberately narrower,
   disclosed, still-open gap.

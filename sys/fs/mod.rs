@@ -15,7 +15,7 @@ pub mod sysv_msg;
 pub mod sysv_sem;
 pub mod sysv_shm;
 
-/// What `poll`/`select` can report for one fd right now (`fs::pipe`, `net::tcp`, ...).
+/// What `poll`/`select` can report for one fd right now (`fs::pipe`, `netinet::tcp`, ...).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Readiness {
     /// Data to read, or end-of-file (a read won't block).

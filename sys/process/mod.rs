@@ -976,7 +976,7 @@ pub struct Process {
     /// default. Copied by `fork` (real POSIX rlimit/fork semantics, same as `uid`/`gid`/`pgid`);
     /// preserved by `execve` (untouched, same as `cwd`/`pgid`). **Stored, never enforced** — an
     /// honest, documented gap, the same tier as several other accepted-but-unenforced fields
-    /// already in this codebase (e.g. `O_NONBLOCK` on a TCP socket, see `sys/net/tcp.rs`).
+    /// already in this codebase (e.g. `O_NONBLOCK` on a TCP socket, see `sys/netinet/tcp.rs`).
     pub rlimits: [(u64, u64); 16],
     /// `SYS_SETPRIORITY`/`SYS_GETPRIORITY`'s backing store — real `nice` range is `-20..=19`, `0`
     /// by default. Stored and echoed back honestly; this kernel's cooperative round-robin

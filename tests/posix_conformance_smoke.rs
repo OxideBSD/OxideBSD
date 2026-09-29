@@ -122,17 +122,17 @@ fn main(boot_info: &'static BootInfo) -> ! {
     // own assertion. No NIC/hardware dependency to worry about -- `module_init` here just
     // registers syscall handlers; it doesn't touch `rtl8139`/`ethernet` at all (unlike e.g.
     // `tests/udp_syscall_smoke.rs`, which genuinely needs a working NIC and checks for one).
-    const NET_MOD: &[u8] = include_bytes!(env!("NET_MOD_PATH"));
-    const NET_PANIC_SYMBOL: &str = env!("NET_MOD_PANIC_SYMBOL");
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
-        "net",
-        NET_MOD,
-        NET_PANIC_SYMBOL,
+        "socket",
+        SOCKET_MOD,
+        SOCKET_PANIC_SYMBOL,
         false,
         &mut mapper,
         &mut frame_allocator,
     )
-    .unwrap_or_else(|e| panic!("failed to load the net module: {e:?}"));
+    .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");

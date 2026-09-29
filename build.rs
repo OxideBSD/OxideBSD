@@ -322,7 +322,7 @@ fn main() {
     build_module_crate("posix_compat", "POSIX_COMPAT", &[]);
     build_module_crate("signal", "SIGNAL", &[]);
     build_module_crate("clock", "CLOCK", &[]);
-    build_module_crate("net", "NET", &[]);
+    build_module_crate("socket", "SOCKET", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.

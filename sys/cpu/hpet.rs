@@ -27,7 +27,7 @@
 //! non-memory-space Generic Address Structure all just leave `HPET` at `None` for the rest of the
 //! boot (logged), and every public accessor returns `None` -- `sys_clock_getres`/
 //! `process::timers` both already have an honest tick-based fallback for exactly this case. Same
-//! "logged, boot continues regardless" precedent `net::rtl8139::init`/`drivers::usb::init` already
+//! "logged, boot continues regardless" precedent `drivers::rtl8139::init`/`drivers::usb::init` already
 //! establish for optional hardware.
 
 use spin::Mutex;
@@ -304,7 +304,7 @@ fn discover_hpet_mmio_base(hhdm_offset: u64) -> Option<u64> {
 
 /// Finds a real ACPI HPET, maps its MMIO registers, and enables its main counter -- **counter
 /// only, no comparator/interrupt is ever configured**, see this module's own doc comment. Not
-/// fatal either way (matches `net::rtl8139::init`/`drivers::usb::init`'s own precedent) -- every
+/// fatal either way (matches `drivers::rtl8139::init`/`drivers::usb::init`'s own precedent) -- every
 /// caller of `now_ns`/`resolution_ns` already has an honest tick-based fallback for "no HPET
 /// found this boot." Call once, at boot, after paging/the frame allocator are ready (same
 /// prerequisite `drivers::usb::init` has) -- nothing downstream needs this any earlier.

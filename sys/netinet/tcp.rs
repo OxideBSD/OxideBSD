@@ -165,7 +165,7 @@ fn isn(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16) -> u32 {
         key
     });
     let mut h = Sha256::new();
-    h.update(crate::net::ipv4::GUEST_IP);
+    h.update(crate::netinet::ipv4::GUEST_IP);
     h.update(local_port.to_be_bytes());
     h.update(remote_ip);
     h.update(remote_port.to_be_bytes());
@@ -838,7 +838,7 @@ pub extern "C" fn oxidebsd_sys_connect(fd: u64, addr_ptr: u64, len: u64) -> i64 
     let deadline =
         crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(CONNECT_TIMEOUT_TICKS * 10);
     loop {
-        super::poll();
+        crate::net::poll();
         let outcome = {
             let state = STATE.lock();
             match state.sockets.get(&real_fd) {
@@ -905,7 +905,7 @@ pub extern "C" fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u
         return -(EBADF as i64);
     };
 
-    super::poll();
+    crate::net::poll();
 
     let conn_fd = {
         let mut state = STATE.lock();
@@ -958,9 +958,9 @@ pub extern "C" fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u
 /// **Spins (`core::hint::spin_loop()`), does *not* use `process::BlockReason`/
 /// `scheduler::schedule()` the way `crate::pipe`'s own blocking reads do** -- a deliberate,
 /// load-bearing difference, not an oversight: incoming-packet processing on this kernel is
-/// pull-based, driven entirely by whichever process happens to call `super::poll()` (the rtl8139
+/// pull-based, driven entirely by whichever process happens to call `crate::net::poll()` (the rtl8139
 /// IRQ handler itself does no heap allocation and touches no protocol state, just sets a flag --
-/// see `sys/net/rtl8139.rs`'s own doc comment). If this yielded to the scheduler the way a pipe
+/// see `sys/drivers/rtl8139.rs`'s own doc comment). If this yielded to the scheduler the way a pipe
 /// read does, nothing would ever call `poll()` again on this connection's behalf once the only
 /// process that cares about it (the one blocked right here) stops running -- a real hang, worse
 /// than the false-EOF bug this replaces. Same reasoning already established for `oxidebsd_sys_
@@ -974,7 +974,7 @@ pub extern "C" fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u
 /// CLAUDE.md's own `hlt()` fix already documents for this same class of wait.
 extern "C" fn tcp_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
     loop {
-        super::poll();
+        crate::net::poll();
         let bytes = {
             let mut state = STATE.lock();
             let Some(TcpSocket::Connection(conn)) = state.sockets.get_mut(&real_fd) else {

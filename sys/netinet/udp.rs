@@ -1,5 +1,5 @@
 //! UDP: header parse/build, a table of bound sockets, and the kernel-exported `oxidebsd_sys_*`
-//! functions `sys/modules/net/src/lib.rs`'s thin syscall shims call through to
+//! functions `sys/modules/socket/src/lib.rs`'s thin syscall shims call through to
 //! (`SYS_SOCKET`/`SYS_BIND`/`SYS_SENDTO`/`SYS_RECVFROM`/`SYS_SETSOCKOPT` = 140-144). `socket()`/
 //! `bind()`/`setsockopt()` are shared with `super::tcp` (the same three syscall numbers cover
 //! both `SOCK_DGRAM` and `SOCK_STREAM`) -- `socket()` dispatches by type at creation time,
@@ -376,7 +376,7 @@ pub extern "C" fn oxidebsd_sys_recvfrom(
     // `ipv4::send_packet`'s own ARP wait already uses) rather than relying on anything else to
     // have polled first, then reports "nothing yet" as a plain empty read rather than actually
     // blocking -- no `BlockReason` exists for socket data yet, see this repo's networking plan.
-    super::poll();
+    crate::net::poll();
 
     let mut state = STATE.lock();
     if !state.sockets.contains_key(&real_fd) {

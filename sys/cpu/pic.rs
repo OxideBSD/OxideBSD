@@ -133,7 +133,7 @@ pub unsafe fn unmask_irq(irq: u8) {
         // PIC2's INTR output pin *is* PIC1's IRQ2 line. `init_pics` only ever unmasks IRQ0/IRQ1
         // (the timer/keyboard), so IRQ2 stays masked at PIC1 unless something explicitly clears
         // it -- meaning no PIC2 line, unmasked here or not, could ever actually reach the CPU.
-        // Found live chasing why `net::rtl8139`'s own IRQ (line 11, PIC2) never fired despite
+        // Found live chasing why `drivers::rtl8139`'s own IRQ (line 11, PIC2) never fired despite
         // `register_irq_handler`/`unmask_irq(11)` both running correctly: PIC2's own mask bit
         // was clear, but PIC1's IRQ2 bit was still set from boot, silently swallowing the signal
         // one hop earlier. Any future PIC2-line driver would hit the exact same silent failure

@@ -11,6 +11,7 @@ pub mod disk;
 pub mod dma;
 pub mod fbdev;
 pub mod pci;
+pub mod rtl8139;
 pub mod usb;
 pub mod virtio;
 pub mod virtio_blk;

@@ -3,10 +3,10 @@
 //! `SYS_POLL = 148` -- UDP, TCP, and raw ICMP sockets (see CLAUDE.md's networking plan). Same
 //! "module registers, kernel implements" split every other syscall module in this codebase uses:
 //! real logic (the socket tables, port binding, the TCP state machine, header build/parse, the
-//! actual send over `sys/net/ipv4.rs`) is kernel-resident, since this module can't use `alloc`
-//! (see CLAUDE.md's module-loading section) -- `sys/net/udp.rs`'s `oxidebsd_sys_socket`/`_bind`/
-//! `_sendto`/`_recvfrom`/`_setsockopt`, `sys/net/tcp.rs`'s `oxidebsd_sys_connect`/`_listen`/
-//! `_accept`, `sys/net/icmp.rs`'s raw-socket handlers (reached through `udp.rs`'s own
+//! actual send over `sys/netinet/ipv4.rs`) is kernel-resident, since this module can't use `alloc`
+//! (see CLAUDE.md's module-loading section) -- `sys/netinet/udp.rs`'s `oxidebsd_sys_socket`/`_bind`/
+//! `_sendto`/`_recvfrom`/`_setsockopt`, `sys/netinet/tcp.rs`'s `oxidebsd_sys_connect`/`_listen`/
+//! `_accept`, `sys/netinet/icmp.rs`'s raw-socket handlers (reached through `udp.rs`'s own
 //! not-mine-vs-mine fallback chain, not registered here directly), and `sys/net/mod.rs`'s
 //! `oxidebsd_sys_poll` (needed to make musl's real DNS stub resolver work -- see that function's
 //! own doc comment). Once a TCP connection is established, its data flows over plain
@@ -51,8 +51,8 @@ const SYS_POLL: u64 = 148;
 const SYS_SELECT: u64 = 23;
 /// OxideBSD's own invention (`559`, continuing right past `SYS_GET_KEYEVENT=558`, the current
 /// highest assigned number as of this addition). Real `getsockname(2)` -- needed the moment any
-/// real `std::net` consumer calls `local_addr()` (see `sys/net/udp.rs`'s
-/// `oxidebsd_sys_getsockname`/`sys/net/tcp.rs`'s `getsockname`).
+/// real `std::net` consumer calls `local_addr()` (see `sys/netinet/udp.rs`'s
+/// `oxidebsd_sys_getsockname`/`sys/netinet/tcp.rs`'s `getsockname`).
 const SYS_GETSOCKNAME: u64 = 559;
 /// Real `ppoll(2)` -- see `crate::net::oxidebsd_sys_ppoll`. Continues past the `*at()` family's
 /// `560`-`574`, the highest numbers assigned before it.
@@ -123,7 +123,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_SELECT, handle_select);
     }
     log(
-        "[module] net: module_init running (registered SYS_SOCKET/SYS_BIND/SYS_SENDTO/\
+        "[module] socket: module_init running (registered SYS_SOCKET/SYS_BIND/SYS_SENDTO/\
          SYS_RECVFROM/SYS_SETSOCKOPT/SYS_CONNECT/SYS_LISTEN/SYS_ACCEPT/SYS_GETSOCKNAME/\
          SYS_POLL/SYS_SELECT)\n",
     );

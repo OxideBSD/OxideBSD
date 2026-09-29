@@ -43,7 +43,7 @@ type IrqHandlerSlot = Mutex<[Option<fn()>; HANDLERS_PER_IRQ]>;
 /// One slot per possible IRQ line (0-15); only 2-15 are ever populated -- 0/1 are permanently
 /// owned by the timer/keyboard's own dedicated handlers below, never routed through this table.
 /// Lets a driver whose IRQ line isn't known until runtime (e.g. read from a PCI device's
-/// interrupt-line register during `net::rtl8139::probe_and_init`) claim a vector without the
+/// interrupt-line register during `drivers::rtl8139::probe_and_init`) claim a vector without the
 /// static `IDT` needing to change shape.
 static IRQ_HANDLERS: [IrqHandlerSlot; 16] = [const { Mutex::new([None; HANDLERS_PER_IRQ]) }; 16];
 
@@ -178,7 +178,7 @@ pub fn init_pics() {
         // before handing off to the kernel (a real, documented protocol guarantee, not a bug) --
         // found live: with no explicit unmask here, `cpu::tsc::init()`'s own PIT-tick calibration
         // busy-wait (see that module's doc comment) spun forever, since the timer IRQ genuinely
-        // never fired. Every other IRQ line (e.g. `net::rtl8139`'s own) already unmasks itself
+        // never fired. Every other IRQ line (e.g. `drivers::rtl8139`'s own) already unmasks itself
         // explicitly once its own handler is registered -- timer/keyboard get the same treatment
         // here instead of relying on inherited firmware state, which is the more robust design
         // regardless of boot protocol.

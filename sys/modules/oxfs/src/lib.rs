@@ -7826,7 +7826,7 @@ fn format_fresh_filesystem() -> bool {
     // no DNS logic lives in this kernel; musl's resolver is a real UDP client already built on
     // socket/sendto/recvfrom/poll (see sys/net/mod.rs's oxidebsd_sys_poll doc comment), it just
     // needs a nameserver address to send queries to. 10.0.2.3 is QEMU SLIRP's own built-in DNS
-    // relay (must stay in sync with sys/net/ipv4.rs's own DNS_SERVER_IP -- this crate can't import
+    // relay (must stay in sync with sys/netinet/ipv4.rs's own DNS_SERVER_IP -- this crate can't import
     // that constant directly, it's a separate no_std module build, see CLAUDE.md's module-loading
     // section).
     let etc = alloc_inode().expect("oxfs: failed to allocate /etc inode");

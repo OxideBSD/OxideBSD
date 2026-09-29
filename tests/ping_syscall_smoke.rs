@@ -14,7 +14,7 @@ use core::panic::PanicInfo;
 
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
-use oxidebsd::net::rtl8139;
+use oxidebsd::drivers::rtl8139;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
 use oxidebsd::syscall::oxidebsd_register_syscall;
@@ -62,17 +62,17 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
 
-    const NET_MOD: &[u8] = include_bytes!(env!("NET_MOD_PATH"));
-    const NET_PANIC_SYMBOL: &str = env!("NET_MOD_PANIC_SYMBOL");
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
-        "net",
-        NET_MOD,
-        NET_PANIC_SYMBOL,
+        "socket",
+        SOCKET_MOD,
+        SOCKET_PANIC_SYMBOL,
         false,
         &mut mapper,
         &mut frame_allocator,
     )
-    .unwrap_or_else(|e| panic!("failed to load the net module: {e:?}"));
+    .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();

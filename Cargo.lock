@@ -331,10 +331,6 @@ name = "needs-syscall2-smoke"
 version = "0.1.0"
 
 [[package]]
-name = "net"
-version = "0.1.0"
-
-[[package]]
 name = "ninja-syscall-smoke"
 version = "0.1.0"
 
@@ -508,6 +504,10 @@ version = "0.1.0"
 
 [[package]]
 name = "sigsuspend-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "socket"
 version = "0.1.0"
 
 [[package]]

@@ -53,8 +53,8 @@
 //! everything else this module only ever calls through to.
 //!
 //! `SYS_SOCKETPAIR = 149` (see CLAUDE.md's "Real networking" known-gaps entry) continues the
-//! sequence right past `sys/modules/net`'s own `SYS_POLL = 148`. Registered here, not in
-//! `sys/modules/net/`, because it never touches the actual network stack at all -- real
+//! sequence right past `sys/modules/socket`'s own `SYS_POLL = 148`. Registered here, not in
+//! `sys/modules/socket/`, because it never touches the actual network stack at all -- real
 //! `socketpair(2)`'s `(domain, type, protocol, sv_ptr)` shape matches this ABI's 4-register width
 //! whole, so no argument-convention patch was needed on the musl side beyond the usual `__NR_*`
 //! remap. Real logic (`sys/syscall.rs`'s `sys_socketpair`, delegating to `crate::pipe::
@@ -69,7 +69,7 @@
 //! `wget.c` itself calls `shutdown(fd, SHUT_WR)` on the same kind of socketpair endpoint
 //! `SYS_SOCKETPAIR` already provides. Both `(fd, cmd, arg)`/`(fd, how)` already fit this ABI's
 //! register width whole, no argument-convention patch needed. `SYS_SHUTDOWN` lives here rather
-//! than `sys/modules/net/`, same reasoning as `SYS_SOCKETPAIR` above -- it only implements real
+//! than `sys/modules/socket/`, same reasoning as `SYS_SOCKETPAIR` above -- it only implements real
 //! half-close semantics for a `crate::pipe`-backed socketpair endpoint, not a real TCP/UDP socket.
 //! Real logic (`sys/syscall.rs`'s `sys_fcntl`/`sys_shutdown`) is kernel-resident, same reasoning as
 //! everything else this module only ever calls through to.

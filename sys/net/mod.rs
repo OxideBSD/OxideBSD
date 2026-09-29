@@ -1,25 +1,20 @@
 //! Networking. Phase 1: PCI discovery (`crate::pci`) + a real NIC driver (`rtl8139`) sending and
 //! receiving raw Ethernet frames, IRQ-driven. Phase 2: a real protocol stack on top of it
 //! (`ethernet`/`arp`/`ipv4`/`icmp`) -- enough to answer/originate ICMP echo requests against real
-//! (if virtualized) network traffic. No `sys/modules/net` syscall shim yet -- see this repo's
+//! (if virtualized) network traffic. No `sys/modules/socket` syscall shim yet -- see this repo's
 //! networking plan for what's still deferred.
 
+use crate::netinet::{icmp, tcp, udp};
 use crate::syscall::{EINTR, EINVAL};
 
-pub mod arp;
 pub mod ethernet;
-pub mod icmp;
-pub mod ipv4;
 pub mod nic;
-pub mod rtl8139;
-pub mod tcp;
-pub mod udp;
 
 /// Drains every frame currently queued in the NIC's RX ring and dispatches each through the
 /// protocol stack. Never blocks.
 ///
 /// Not wired into the normal boot path yet -- nothing outside a dedicated test needs live
-/// traffic processing until `sys/modules/net`'s syscalls exist (a later phase) give userland a
+/// traffic processing until `sys/modules/socket`'s syscalls exist (a later phase) give userland a
 /// reason to receive something. Callers today (`tests/icmp_smoke.rs`, `ipv4::send_packet`'s own
 /// ARP-resolution wait) call this directly from their own loop, the same pattern
 /// `tests/rtl8139_smoke.rs` established for raw frames.
@@ -311,7 +306,7 @@ fn fd_set_write_back(ptr: u64, words: &[u64; FD_SET_WORDS]) {
     }
 }
 
-/// `SYS_SELECT = 23` (registered by `sys/modules/net`, real Linux's own unclaimed legacy `select(2)`
+/// `SYS_SELECT = 23` (registered by `sys/modules/socket`, real Linux's own unclaimed legacy `select(2)`
 /// number -- this arch's `bits/syscall.h.in` still defines `__NR_select`, confirmed free in this
 /// ABI's own registry first, same reasoning `fchmod`/`sched_getaffinity` already established for
 /// landing directly on a real-but-inert Linux number instead of an invented one). Takes a single

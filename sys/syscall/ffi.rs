@@ -281,7 +281,7 @@ pub(crate) fn sys_dup(oldfd: u64) -> Result<u64, u64> {
 /// (see `external/mit/musl`'s own `arch/x86_64/bits/syscall.h.in` comment on `__NR_socketpair`).
 /// `AF_UNIX`/`SOCK_STREAM` only — the one shape BusyBox's `wget` needs (see CLAUDE.md's "Real
 /// networking" known-gaps entry on `spawn_ssl_client`); anything else is `EPROTONOSUPPORT`, same
-/// masking convention `net::udp::oxidebsd_sys_socket` already uses for `SOCK_CLOEXEC`/
+/// masking convention `netinet::udp::oxidebsd_sys_socket` already uses for `SOCK_CLOEXEC`/
 /// `SOCK_NONBLOCK`. Delegates to `crate::fs::pipe::do_socketpair` for the real logic — not a real
 /// `AF_UNIX` abstraction, just the same blocking pipe-buffer machinery `sys_pipe` already uses,
 /// cross-wired into a full-duplex pair (see that module's own doc comment).
@@ -331,7 +331,7 @@ pub(crate) fn sys_set_tid_address(_tidptr: u64) -> Result<u64, u64> {
 /// yet. `crate::fs::pipe::blocking_read` is the *only* reader that currently consults this flag
 /// (see that module's own doc comment) -- a TCP/UDP socket or oxfs file's own read path already
 /// returns promptly on "no data yet" by a different, pre-existing convention (see
-/// `sys/net/tcp.rs`'s `tcp_read`), so `O_NONBLOCK` on one of those is accepted and tracked but
+/// `sys/netinet/tcp.rs`'s `tcp_read`), so `O_NONBLOCK` on one of those is accepted and tracked but
 /// doesn't change behavior.
 ///
 /// **`F_GETFD`/`F_SETFD` are real now** -- `crate::fs::fd::is_cloexec`/`set_cloexec`, a genuine

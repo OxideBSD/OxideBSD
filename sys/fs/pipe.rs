@@ -35,7 +35,7 @@
 //! HTTPS path (see CLAUDE.md's "Real networking" known-gaps entry): `spawn_ssl_client`
 //! (`networking/wget.c`) forks a TLS-helper child and talks to it over a local socketpair, with no
 //! fallback if it doesn't exist. Not a real `AF_UNIX` abstraction — this kernel has no socket
-//! address-family concept beyond UDP/TCP/raw-ICMP's own `AF_INET` (`sys/net/udp.rs`) — just enough
+//! address-family concept beyond UDP/TCP/raw-ICMP's own `AF_INET` (`sys/netinet/udp.rs`) — just enough
 //! behavior (blocking full-duplex byte stream, real EOF/EPIPE on close) for that one handoff.
 
 use alloc::collections::{BTreeMap, VecDeque};
