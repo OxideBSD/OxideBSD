@@ -121,7 +121,7 @@ pub(crate) const ESRCH: u64 = 3;
 /// Returned by `sys_ioctl` for a tty-specific request issued against a non-console fd -- identical
 /// on Linux and the BSDs, same as most of this group.
 pub(crate) const ENOTTY: u64 = 25;
-/// Returned by `sys_socketpair` for any domain/type other than `AF_UNIX`/`SOCK_STREAM`. `93`, not
+/// Returned by `socket(2)`/`socketpair(2)` for an unsupported type or protocol. `93`, not
 /// FreeBSD's `43` (unlike this group's other members, Linux and the BSDs actually diverge here) --
 /// matches the value musl's own compiled-in `bits/errno.h` (`external/mit/musl/arch/generic/bits/
 /// errno.h`, since no x86_64-specific override exists) will compare `errno` against, which is what

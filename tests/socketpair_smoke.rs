@@ -1,13 +1,11 @@
-//! Smoke test for `SYS_SOCKETPAIR = 149` (`src/pipe.rs`'s `do_socketpair`), `SYS_FCNTL = 151`, and
+//! Smoke test for `SYS_SOCKETPAIR = 149` (local sockets, `sys/kern/uipc_usrreq.rs`), `SYS_FCNTL = 151`, and
 //! `SYS_SHUTDOWN = 152` -- all added to unblock BusyBox's `wget` HTTPS path (`spawn_ssl_client` in
 //! `networking/wget.c` uses a socketpair; `libbb/xfuncs.c`'s `ndelay_on`/`ndelay_off` need real
 //! `fcntl`; `wget.c` itself calls `shutdown(fd, SHUT_WR)` on the same kind of endpoint -- see
 //! CLAUDE.md's "Real networking" known-gaps entry). Calls the kernel's own FFI-level
 //! `oxidebsd_sys_*` entry points directly, same technique `tests/tcp_smoke.rs` already uses -- no
-//! module loading or real process needed, since this test never hits `do_socketpair`'s blocking
-//! path (see `src/pipe.rs`'s own doc comment: a read only blocks when its buffer is empty *and*
-//! still open, and every read here happens once data, a close, or a real `O_NONBLOCK` flag has
-//! already made the outcome immediate).
+//! module loading or real process needed, since this test never blocks: every read here happens
+//! once data, a close, or a real `O_NONBLOCK` flag has already made the outcome immediate.
 //!
 //! Covers: both directions of a full-duplex pair actually reach the peer; closing one end
 //! produces real EOF (on the peer's read) and EPIPE (on the peer's write); `fcntl(F_SETFL,

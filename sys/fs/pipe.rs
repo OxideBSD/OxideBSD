@@ -26,17 +26,6 @@
 //! blocks (`BlockReason::WaitingForPipeSpace`, the write-side mirror of `WaitingForPipeData`) once
 //! the buffer is full, writing what fits and looping rather than requiring the whole call to land
 //! in one shot — the same partial-write-then-block shape a real blocking pipe write has.
-//!
-//! **`SYS_SOCKETPAIR`'s `AF_UNIX`/`SOCK_STREAM` support (`do_socketpair` below) is built from this
-//! exact same `PipeBuffer`/blocking machinery**, not a separate abstraction — a full-duplex
-//! endpoint is just two one-directional buffers cross-wired (this end's writes are the peer's
-//! reads and vice versa), so `blocking_read`/`write_into`/`close_direction` are factored out of
-//! `pipe_read`/`pipe_write`/`pipe_close` for both to share. Added to unblock BusyBox's `wget`
-//! HTTPS path (see CLAUDE.md's "Real networking" known-gaps entry): `spawn_ssl_client`
-//! (`networking/wget.c`) forks a TLS-helper child and talks to it over a local socketpair, with no
-//! fallback if it doesn't exist. Not a real `AF_UNIX` abstraction — this kernel has no socket
-//! address-family concept beyond UDP/TCP/raw-ICMP's own `AF_INET` (`sys/netinet/udp.rs`) — just enough
-//! behavior (blocking full-duplex byte stream, real EOF/EPIPE on close) for that one handoff.
 
 use alloc::collections::{BTreeMap, VecDeque};
 
@@ -45,7 +34,7 @@ use spin::Mutex;
 use super::Readiness;
 use crate::process::scheduler;
 use crate::process::{self, BlockReason, ProcState};
-use crate::syscall::{EAGAIN, ENOTSOCK, EPIPE};
+use crate::syscall::{EAGAIN, EPIPE};
 
 struct PipeBuffer {
     data: VecDeque<u8>,
@@ -65,19 +54,6 @@ static PIPES: Mutex<BTreeMap<u64, PipeBuffer>> = Mutex::new(BTreeMap::new());
 /// `dup2` alias of that end, since `crate::fs::fd::read`/`write`/`close` always invoke a registered
 /// callback with `real_fd`, never whichever fd was actually looked up.
 static PIPE_ENDS: Mutex<BTreeMap<u64, (u64, End)>> = Mutex::new(BTreeMap::new());
-/// Same keying convention as `PIPE_ENDS`, but for a socketpair endpoint: each entry names *two*
-/// independent buffers (this end's own outgoing direction and incoming direction), since unlike a
-/// plain pipe end a socket endpoint is full-duplex — see this module's own doc comment.
-static SOCK_ENDS: Mutex<BTreeMap<u64, SocketEnd>> = Mutex::new(BTreeMap::new());
-
-#[derive(Clone, Copy)]
-struct SocketEnd {
-    /// Pipe id this end's writes land in — the peer's own `read_pipe`.
-    write_pipe: u64,
-    /// Pipe id this end's reads drain — the peer's own `write_pipe`.
-    read_pipe: u64,
-}
-
 const EBADF: i64 = 9;
 
 /// Matches real Linux's default pipe capacity — chosen for authenticity as much as for the fix
@@ -86,7 +62,7 @@ const EBADF: i64 = 9;
 const PIPE_CAPACITY: usize = 65536;
 
 /// Allocates a fresh, empty pipe buffer and returns its id — the shared first step `do_pipe` and
-/// `do_socketpair` both need (a socketpair is two of these, cross-wired, instead of one).
+/// FIFOs both need.
 fn new_pipe_buffer() -> u64 {
     let pipe_id = {
         let mut next = NEXT_PIPE_ID.lock();
@@ -105,8 +81,7 @@ fn new_pipe_buffer() -> u64 {
     pipe_id
 }
 
-/// Shared blocking-read body for a plain pipe's read end (`pipe_read`) and a socketpair
-/// endpoint's read half (`sock_read`) — see this module's own doc comment for why a real block,
+/// Shared blocking-read body for a plain pipe's read end (`pipe_read`) and a FIFO — see this module's own doc comment for why a real block,
 /// not `Ok(0)`/`EAGAIN`, is required by default here. `real_fd` is the *caller's own* fd (not
 /// necessarily `pipe_id`'s only reader, though today it always is) -- consulted against
 /// `crate::fd`'s own `O_NONBLOCK` tracking (`syscall::sys_fcntl`) so a real `fcntl(F_SETFL,
@@ -152,8 +127,7 @@ fn blocking_read(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
     }
 }
 
-/// Shared write body for a plain pipe's write end (`pipe_write`) and a socketpair endpoint's
-/// write half (`sock_write`). Blocks (writing what fits first) once the buffer is at
+/// Shared write body for a plain pipe's write end (`pipe_write`) and a FIFO. Blocks (writing what fits first) once the buffer is at
 /// `PIPE_CAPACITY` — see this module's own doc comment for why an unbounded buffer here was a
 /// real, live bug. `real_fd` is consulted the same way `blocking_read`'s own is, for a real
 /// `O_NONBLOCK` writer.
@@ -219,15 +193,10 @@ fn write_into(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
 }
 
 /// Marks one direction of `pipe_id`'s buffer closed, removing the buffer entirely once both
-/// directions are — shared by `pipe_close`/`sock_close` (a real close, both directions for a
-/// socket endpoint) and `do_shutdown` (a *partial* close: marks a direction without removing the
-/// fd's own registration, so the same buffer can legitimately receive a second, later call here
-/// once the real close eventually happens). That reuse is exactly why this doesn't `.expect()` a
-/// present `pipe_id` the way earlier revisions did -- a real close arriving after the peer already
-/// fully closed (or after this end's own prior partial shutdown let the buffer get removed first)
-/// must be a harmless no-op, not a panic. Wakes whichever side (if any) is blocked on the closed
-/// direction: a write close wakes a blocked reader (waiting to see EOF), a read close wakes a
-/// blocked writer (waiting to see `EPIPE`, now that closing the read side can never free space).
+/// directions are. A buffer already gone is a no-op. Wakes whichever side (if any) is blocked on
+/// the closed direction: a write close wakes a blocked reader (waiting to see EOF), a read close
+/// wakes a blocked writer (waiting to see `EPIPE`, now that closing the read side can never free
+/// space).
 fn close_direction(pipe_id: u64, dir: End) {
     {
         let mut pipes = PIPES.lock();
@@ -320,104 +289,7 @@ extern "C" fn pipe_close(real_fd: u64) -> i64 {
     0
 }
 
-/// `SYS_SOCKETPAIR`'s real logic (`AF_UNIX`/`SOCK_STREAM` only — validated by
-/// `syscall::sys_socketpair` before this is ever reached). Two fresh pipe buffers, cross-wired so
-/// each new fd's writes are the other's reads — see this module's own doc comment. Writes
-/// `[fd0, fd1]` at `fds_ptr` as two `i32`s, matching real `socketpair(2)`'s exact wire format (a
-/// pointer to `int sv[2]`).
-pub(crate) fn do_socketpair(fds_ptr: u64) -> Result<u64, u64> {
-    let pipe_a = new_pipe_buffer(); // fd0 -> fd1 direction
-    let pipe_b = new_pipe_buffer(); // fd1 -> fd0 direction
-
-    let fd0 = crate::fs::fd::oxidebsd_alloc_fd();
-    let fd1 = crate::fs::fd::oxidebsd_alloc_fd();
-    SOCK_ENDS.lock().insert(
-        fd0,
-        SocketEnd {
-            write_pipe: pipe_a,
-            read_pipe: pipe_b,
-        },
-    );
-    SOCK_ENDS.lock().insert(
-        fd1,
-        SocketEnd {
-            write_pipe: pipe_b,
-            read_pipe: pipe_a,
-        },
-    );
-    let user_fd0 = crate::fs::fd::oxidebsd_register_fd_ops(fd0, sock_read, sock_write, sock_close);
-    let user_fd1 = crate::fs::fd::oxidebsd_register_fd_ops(fd1, sock_read, sock_write, sock_close);
-    crate::fs::fd::set_kind(fd0, crate::fs::fd::FdKind::Socket(fd0));
-    crate::fs::fd::set_kind(fd1, crate::fs::fd::FdKind::Socket(fd1));
-
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- fds_ptr isn't checked against the caller's actual mappings first.
-    unsafe {
-        (fds_ptr as *mut i32).write(user_fd0 as i32);
-        (fds_ptr as *mut i32).add(1).write(user_fd1 as i32);
-    }
-    Ok(0)
-}
-
-extern "C" fn sock_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
-    let Some(end) = SOCK_ENDS.lock().get(&real_fd).copied() else {
-        return -EBADF;
-    };
-    blocking_read(end.read_pipe, ptr, len, real_fd)
-}
-
-extern "C" fn sock_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
-    let Some(end) = SOCK_ENDS.lock().get(&real_fd).copied() else {
-        return -EBADF;
-    };
-    write_into(end.write_pipe, ptr, len, real_fd)
-}
-
-extern "C" fn sock_close(real_fd: u64) -> i64 {
-    let Some(end) = SOCK_ENDS.lock().remove(&real_fd) else {
-        return -EBADF;
-    };
-    // Closing an endpoint closes both directions it owns: its own outgoing buffer's write side
-    // (the peer's next read sees EOF once drained, waking any blocked reader) and its own
-    // incoming buffer's read side (the peer's next write sees EPIPE, waking any blocked writer).
-    // `close_direction` wakes whichever applies for each.
-    close_direction(end.write_pipe, End::Write);
-    close_direction(end.read_pipe, End::Read);
-    0
-}
-
-/// `SYS_SHUTDOWN`'s real logic (`syscall::sys_shutdown`), for a socketpair endpoint only — a plain
-/// pipe end or any other fd kind (TCP/UDP, oxfs files, stdio) isn't a socket at all and gets
-/// `ENOTSOCK`, same as real `shutdown(2)` would. A *partial* close: unlike `sock_close`, the fd
-/// stays registered and fully usable in the direction(s) not shut down — only
-/// `close_direction`'s own idempotent-on-a-missing-buffer handling (see its doc comment) makes
-/// this safe to layer under a real, later `close()` of the same fd. Added specifically to unblock
-/// BusyBox's `wget` HTTPS path (`wget.c`'s own `shutdown(fileno(sfp), SHUT_WR)` after sending the
-/// request, over exactly this kind of pair — see CLAUDE.md's "Real networking" known-gaps entry).
-pub(crate) fn do_shutdown(real_fd: u64, how: u64) -> Result<u64, u64> {
-    let Some(end) = SOCK_ENDS.lock().get(&real_fd).copied() else {
-        return Err(ENOTSOCK);
-    };
-    const SHUT_RD: u64 = 0;
-    const SHUT_WR: u64 = 1;
-    const SHUT_RDWR: u64 = 2;
-    match how {
-        SHUT_RD => {
-            close_direction(end.read_pipe, End::Read);
-        }
-        SHUT_WR => {
-            close_direction(end.write_pipe, End::Write);
-        }
-        SHUT_RDWR => {
-            close_direction(end.read_pipe, End::Read);
-            close_direction(end.write_pipe, End::Write);
-        }
-        _ => return Err(crate::syscall::EINVAL),
-    }
-    Ok(0)
-}
-
-// `readiness` below reports `poll`/`select` state for a pipe or socketpair fd; `None` if `real_fd`
+// `readiness` below reports `poll`/`select` state for a pipe or FIFO fd; `None` if `real_fd`
 // isn't one.
 /// POSIX's atomic-write size; Linux likewise reports a pipe writable only with this much room.
 const PIPE_BUF: usize = 4096;
@@ -463,11 +335,7 @@ pub(crate) fn readiness(real_fd: u64) -> Option<Readiness> {
             }
         });
     }
-    let end = SOCK_ENDS.lock().get(&real_fd).copied()?;
-    let pipes = PIPES.lock();
-    let (readable, peer_done) = read_side(&pipes, end.read_pipe);
-    let (writable, write_done) = write_side(&pipes, end.write_pipe);
-    Some(Readiness { readable, writable, hangup: peer_done && write_done, error: false })
+    None
 }
 
 fn wake_blocked_readers(pipe_id: u64) {

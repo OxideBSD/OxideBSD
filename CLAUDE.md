@@ -1167,7 +1167,10 @@ driver in `sys/drivers`, the socket layer in `sys/kern/uipc_socket.rs` (OxideBSD
 raw ICMP; BSD `protosw`); each protocol keeps its own state keyed by the same `real_fd`. Every
 socket syscall (incl. `socketpair`/`shutdown`, now in `sys/modules/socket`, not `posix_compat` --
 a test using them must load the socket module) resolves and dispatches there; addresses cross as
-`sockaddr` bytes. `socketpair` is still the pipe pair in `sys/fs/pipe.rs` until `AF_UNIX` lands.
+`sockaddr` bytes. **Local sockets** (`AF_UNIX` stream/dgram/seqpacket, `sys/kern/uipc_usrreq.rs`):
+path names are oxfs `InodeKind::Socket` inodes made/looked up through callbacks oxfs registers
+(`oxidebsd_register_socket_nodes`), mapped inode -> socket kernel-side; abstract names and autobind
+too; `socketpair` is built on them (the pipe-backed pair is gone).
 All data goes through `sendmsg`/`recvmsg` (577/578, a real `struct msghdr`); musl's `sendto`/
 `recvfrom` are built on them, and `get/setsockopt` (579/580) take `{level, name, val, len}` by
 pointer (`musl src/internal/oxidebsd_sockopt.h`). A protocol never blocks: it returns `EAGAIN`
@@ -1216,8 +1219,7 @@ tcp}_syscall_smoke.rs`), using test-only syscalls (`SYS_TEST_EXIT=9999`,
 
 **Other real pieces landed for this stack**: `alarm()`/`setitimer()` (`SYS_SETITIMER=156`/
 `SYS_GETITIMER=157`, `sys/modules/clock/`, only `ITIMER_REAL`, expiry only sets `pending_signals`, not
-inherited by fork); `socketpair(AF_UNIX, SOCK_STREAM)` (`SYS_SOCKETPAIR=149`, built on
-`sys/fs/pipe.rs`); getting `wget` HTTPS working needed five further fixes in sequence:
+inherited by fork); `socketpair` (`SYS_SOCKETPAIR=149`, now on local sockets); getting `wget` HTTPS working needed five further fixes in sequence:
 `SYS_SET_TID_ADDRESS=150`, `SYS_FCNTL=151` (`F_GETFL`/`F_SETFL(O_NONBLOCK)`/`F_SETFD`/`F_DUPFD*`),
 `SYS_SHUTDOWN=152` (real half-close for a pipe-backed socketpair only), a synthetic
 `/dev/{u}random,null,zero` path backed by **`sys/random.rs`** (a real

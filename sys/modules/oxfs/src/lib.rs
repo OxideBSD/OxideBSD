@@ -136,6 +136,12 @@ unsafe extern "C" {
     /// Opens terminal `major:minor` (TTY.md §2.6) with `open(2)`'s `flags`; returns the new fd or
     /// `-errno` (`-ENXIO` for no such terminal, or `/dev/tty` without a controlling terminal).
     fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -> i64;
+    /// Hands the kernel's local sockets (UNIX.md §5.2) the two functions that create and look up
+    /// socket files; see `oxfs_create_socket_node`. Called once, from `module_init`.
+    fn oxidebsd_register_socket_nodes(
+        create: extern "C" fn(u64, u64) -> i64,
+        lookup: extern "C" fn(u64, u64) -> i64,
+    );
     /// What description `real_fd` is: an `FD_KIND_*` code, its argument stored through `arg`;
     /// `-1` if there's no such description.
     fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64;
@@ -423,6 +429,7 @@ const DT_LNK: u8 = 10;
 const DT_CHR: u8 = 2;
 const DT_BLK: u8 = 6;
 const DT_FIFO: u8 = 1;
+const DT_SOCK: u8 = 12;
 
 const EBADF: i64 = 9;
 const ENOENT: i64 = 2;
@@ -468,6 +475,8 @@ const EROFS: i64 = 30;
 /// read/write permission.
 const EPERM: i64 = 1;
 const EACCES: i64 = 13;
+const EADDRINUSE: i64 = 98;
+const ENOTSOCK: i64 = 88;
 /// musl's real *compiled* value (`external/mit/musl/arch/generic/bits/errno.h:11`) -- `EWOULDBLOCK`
 /// is a bare alias of this same value in musl (`#define EWOULDBLOCK EAGAIN`), not a distinct
 /// number, so this one constant covers both real POSIX names. Returned by `oxfs_flock` for any
@@ -816,6 +825,9 @@ enum InodeKind {
     /// A named pipe (`mkfifo`). Holds no data of its own: `open()` hands it to the kernel's pipe
     /// code, keyed by inode number.
     Fifo,
+    /// A local socket's name (`bind(2)` on an `AF_UNIX` path, UNIX.md §5.2). Holds no data; the
+    /// kernel maps the inode number to the socket bound to it, if any.
+    Socket,
 }
 
 #[derive(Clone, Copy)]
@@ -1602,6 +1614,7 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
             inode.nlink.max(1) as u64,
         ),
         InodeKind::Fifo => (S_IFIFO, inode.nlink.max(1) as u64),
+        InodeKind::Socket => (S_IFSOCK, inode.nlink.max(1) as u64),
         _ => (S_IFREG, inode.nlink.max(1) as u64),
     };
     let mode = type_bits | inode.mode as u32;
@@ -3891,6 +3904,9 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
             if flags & O_DIRECTORY != 0 && inode.kind != InodeKind::Dir {
                 return -ENOTDIR;
             }
+            if inode.kind == InodeKind::Socket {
+                return -EOPNOTSUPP; // UNIX.md §5.2, as in the BSDs
+            }
             let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
             // Real O_RDONLY is 0 -- "anything but that" in the low two bits means O_WRONLY/O_RDWR.
             let want_write = flags & O_ACCMODE != 0;
@@ -4926,7 +4942,7 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
     }
     if matches!(
         target_inode.kind,
-        InodeKind::File | InodeKind::Device | InodeKind::Fifo
+        InodeKind::File | InodeKind::Device | InodeKind::Fifo | InodeKind::Socket
     ) {
         target_inode.nlink = target_inode.nlink.saturating_sub(1);
         write_inode(target, target_inode);
@@ -4987,7 +5003,7 @@ fn link_impl(
     };
     let mut inode = read_inode(existing_inode);
     let linkable = match inode.kind {
-        InodeKind::File | InodeKind::Device | InodeKind::Fifo => true,
+        InodeKind::File | InodeKind::Device | InodeKind::Fifo | InodeKind::Socket => true,
         InodeKind::Symlink => !follow,
         _ => false,
     };
@@ -5040,17 +5056,6 @@ fn link_impl(
 extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
-    let cwd = match real_cwd_for_mutation(path) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let (parent, leaf) = match resolve_parent(cwd, path) {
-        Ok(v) => v,
-        Err(e) => return errno_for(e),
-    };
-    if dir_lookup(parent, leaf).is_some() {
-        return -EEXIST;
-    }
     let (kind, device_char) = match (mode as u32) & S_IFMT {
         S_IFREG => (InodeKind::File, false),
         S_IFCHR => (InodeKind::Device, true),
@@ -5058,29 +5063,81 @@ extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i
         S_IFIFO => (InodeKind::Fifo, false),
         _ => return -EINVAL,
     };
+    match make_node(path, kind, mode as u16 & 0o777, dev as u32, device_char) {
+        Ok(_) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Creates a new, empty inode of `kind` at `path` with permissions `perm & ~umask`, owned by the
+/// caller: `mknod(2)`'s body, shared with local-socket names (`oxfs_create_socket_node`).
+/// `-EEXIST` if the name exists. Returns the new inode's number.
+fn make_node(path: &[u8], kind: InodeKind, perm: u16, dev: u32, device_char: bool) -> Result<u32, i64> {
+    let cwd = real_cwd_for_mutation(path)?;
+    let (parent, leaf) = resolve_parent(cwd, path).map_err(errno_for)?;
+    if dir_lookup(parent, leaf).is_some() {
+        return Err(-EEXIST);
+    }
     let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
     if kind == InodeKind::Device && uid != 0 {
-        return -EPERM;
+        return Err(-EPERM);
     }
     if !check_access(&read_inode(parent), uid, gid, W_OK) {
-        return -EACCES;
+        return Err(-EACCES);
     }
     let Some(new_inode) = alloc_inode_in(parent) else {
-        return -ENOSPC;
+        return Err(-ENOSPC);
     };
     let mut inode = Inode::new(kind);
-    inode.mode = (mode as u16 & 0o777) & !(unsafe { oxidebsd_current_umask() } as u16);
+    inode.mode = perm & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
     inode.gid = gid as u32;
     if kind == InodeKind::Device {
-        inode.rdev = dev as u32;
+        inode.rdev = dev;
         inode.device_char = device_char;
     }
     write_inode(new_inode, inode);
-    match dir_insert(parent, leaf, new_inode) {
-        Ok(()) => 0,
-        Err(e) => errno_for(e),
+    dir_insert(parent, leaf, new_inode).map_err(errno_for)?;
+    Ok(new_inode)
+}
+
+/// For the kernel's local sockets (UNIX.md §5.2): `bind(2)` to a path creates a socket file there,
+/// mode `0777 & ~umask`. `-EADDRINUSE` if anything already exists at `path`, dangling symlinks
+/// included. Returns the inode number, which the kernel maps to the bound socket.
+extern "C" fn oxfs_create_socket_node(path_ptr: u64, path_len: u64) -> i64 {
+    // SAFETY: a kernel buffer holding the caller's path.
+    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match make_node(path, InodeKind::Socket, 0o777, 0, false) {
+        Ok(inode) => inode as i64,
+        Err(e) if e == -EEXIST => -EADDRINUSE,
+        Err(e) => e,
     }
+}
+
+/// For the kernel's local sockets: `connect(2)` and sends to a path. Follows symlinks; needs write
+/// permission on the socket file (`-EACCES`); `-ENOTSOCK` for another file type. Returns the inode
+/// number.
+extern "C" fn oxfs_lookup_socket_node(path_ptr: u64, path_len: u64) -> i64 {
+    // SAFETY: as `oxfs_create_socket_node`.
+    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    let cwd = match current_cwd() {
+        Cwd::Real(inode) => inode,
+        Cwd::Proc(_) if path.first() == Some(&b'/') => ROOT_INODE,
+        Cwd::Proc(_) => return -ENOENT,
+    };
+    let inode_num = match resolve_path(cwd, path) {
+        Ok(v) => v,
+        Err(e) => return errno_for(e),
+    };
+    let inode = read_inode(inode_num);
+    if inode.kind != InodeKind::Socket {
+        return -ENOTSOCK;
+    }
+    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if !check_access(&inode, uid, gid, W_OK) {
+        return -EACCES;
+    }
+    inode_num as i64
 }
 
 /// May the caller remove (or rename away) entry `target` from directory `parent`? Needs `W_OK` on
@@ -6553,6 +6610,7 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                     InodeKind::Device if child.device_char => DT_CHR,
                     InodeKind::Device => DT_BLK,
                     InodeKind::Fifo => DT_FIFO,
+                    InodeKind::Socket => DT_SOCK,
                     _ => DT_REG,
                 };
                 write_dirent_record(
@@ -6659,6 +6717,7 @@ fn pack_inode(inode: &Inode, out: &mut [u8]) {
         InodeKind::Symlink => 3,
         InodeKind::Device => 4,
         InodeKind::Fifo => 5,
+        InodeKind::Socket => 6,
     };
     // `size` widened 4 -> 8 bytes (real `u64`, see `Inode::size`'s own doc comment) -- every offset
     // from here on shifts +4 relative to `SUPERBLOCK_VERSION`'s prior (version 1) on-disk shape.
@@ -6705,6 +6764,7 @@ fn unpack_inode(data: &[u8]) -> Inode {
         3 => InodeKind::Symlink,
         4 => InodeKind::Device,
         5 => InodeKind::Fifo,
+        6 => InodeKind::Socket,
         _ => InodeKind::Free,
     };
     let size = u64::from_le_bytes(data[1..9].try_into().unwrap());
@@ -9156,6 +9216,7 @@ pub extern "C" fn module_init() -> i32 {
             oxfs_inode_content_write,
             oxfs_inode_content_size,
         );
+        oxidebsd_register_socket_nodes(oxfs_create_socket_node, oxfs_lookup_socket_node);
     }
 
     if ok { 0 } else { -1 }

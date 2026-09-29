@@ -217,6 +217,7 @@ fn find_protocol(domain: i64, ty: i64, protocol: i64) -> Result<&'static dyn Pro
             (SOCK_DGRAM, 6) | (SOCK_STREAM, 17) => Err(EPROTOTYPE),
             _ => Err(EPROTONOSUPPORT as i64),
         },
+        AF_UNIX => super::uipc_usrreq::protocol(ty, protocol),
         _ => Err(EAFNOSUPPORT),
     }
 }
@@ -228,6 +229,11 @@ struct Handle {
     proto: &'static dyn Protocol,
     ty: i64,
     opts: Options,
+}
+
+/// The `SOL_SOCKET` options of socket `so`.
+pub(crate) fn options(so: u64) -> Option<Options> {
+    SOCKETS.lock().get(&so).map(|s| s.opts)
 }
 
 fn handle_of(so: u64) -> Option<Handle> {
@@ -807,48 +813,41 @@ pub extern "C" fn oxidebsd_sys_getsockopt(fd: u64, args_ptr: u64) -> i64 {
     ffi(result.map(|()| 0))
 }
 
-/// `shutdown(2)`. A pipe-backed local socket pair (`crate::fs::pipe`) isn't in the socket table
-/// yet, and keeps its own implementation until local sockets replace it (`UNIX.md` §10).
+/// `shutdown(2)`.
 pub extern "C" fn oxidebsd_sys_shutdown(fd: u64, how: u64) -> i64 {
-    let Some(so) = fd::real_fd_of(fd) else { return -(EBADF as i64) };
     if how > 2 {
         return -(EINVAL as i64);
     }
-    match handle_of(so) {
-        Some(h) => ffi(h.proto.shutdown(so, how as i64).map(|()| 0)),
-        None => match crate::fs::pipe::do_shutdown(so, how) {
-            Ok(v) => v as i64,
-            Err(e) => -(e as i64),
-        },
-    }
+    ffi(lookup(fd).and_then(|h| h.proto.shutdown(h.so, how as i64)).map(|()| 0))
 }
 
-/// `socketpair(2)`: `AF_UNIX`/`SOCK_STREAM` only, over pipes (`crate::fs::pipe`), until local
-/// sockets exist (`UNIX.md` §10).
-pub extern "C" fn oxidebsd_sys_socketpair(domain: u64, ty: u64, _protocol: u64, fds_ptr: u64) -> i64 {
+/// `socketpair(2)`: two connected, unnamed local sockets of any local type (`UNIX.md` §10).
+pub extern "C" fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64 {
     let flags = ty as i64 & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     let base_ty = ty as i64 & !(SOCK_CLOEXEC | SOCK_NONBLOCK);
     if domain as i64 != AF_UNIX {
         return -EOPNOTSUPP;
     }
-    if base_ty != SOCK_STREAM {
-        return -(EPROTONOSUPPORT as i64);
+    let proto = match super::uipc_usrreq::protocol(base_ty, protocol as i64) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    if fds_ptr == 0 {
+        return -(EINVAL as i64);
     }
-    if let Err(e) = crate::fs::pipe::do_socketpair(fds_ptr) {
-        return -(e as i64);
+    let (a, b) = (fd::oxidebsd_alloc_fd(), fd::oxidebsd_alloc_fd());
+    for so in [a, b] {
+        if let Err(e) = proto.attach(so) {
+            return -e;
+        }
     }
-    // SAFETY: `do_socketpair` just wrote both descriptors there.
-    let fds = unsafe { core::slice::from_raw_parts(fds_ptr as *const i32, 2) };
-    for &user_fd in fds {
-        let user_fd = user_fd as u64;
-        if flags & SOCK_NONBLOCK != 0
-            && let Some(real_fd) = fd::real_fd_of(user_fd)
-        {
-            fd::set_nonblocking(real_fd, true);
-        }
-        if flags & SOCK_CLOEXEC != 0 {
-            fd::set_cloexec(crate::process::scheduler::current_tgid(), user_fd, true);
-        }
+    super::uipc_usrreq::pair(a, b);
+    let fd0 = install(a, AF_UNIX, base_ty, protocol as i64, proto, flags);
+    let fd1 = install(b, AF_UNIX, base_ty, protocol as i64, proto, flags);
+    // SAFETY: as `user_slice`: a caller-supplied `int sv[2]`.
+    unsafe {
+        (fds_ptr as *mut i32).write_unaligned(fd0 as i32);
+        (fds_ptr as *mut i32).add(1).write_unaligned(fd1 as i32);
     }
     0
 }
