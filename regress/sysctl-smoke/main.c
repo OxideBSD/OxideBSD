@@ -13,6 +13,9 @@
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/sysctl.h>
+#ifndef CTLFLAG_SKIP
+#define CTLFLAG_SKIP 0x01000000 /* FreeBSD's; not in OxideBSD's <sys/sysctl.h> yet */
+#endif
 #include <sys/utsname.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -178,7 +181,7 @@ static void walk(void)
 	int q[CTL_MAXNAME + 2] = { 0, 2 };
 	int cur[CTL_MAXNAME], prev[CTL_MAXNAME];
 	size_t curlen = 0, prevlen = 0;
-	int count = 0, ordered = 1, named = 1, saw_ostype = 0, saw_model = 0, leaves_only = 1;
+	int count = 0, ordered = 1, named = 1, saw_ostype = 0, saw_model = 0, leaves_only = 1, saw_skipped = 0;
 	for (;;) {
 		memcpy(q + 2, cur, curlen * sizeof(int));
 		int next[CTL_MAXNAME];
@@ -203,12 +206,16 @@ static void walk(void)
 		if (strcmp(name, "kern.ostype") == 0) saw_ostype++;
 		if (strcmp(name, "hw.model") == 0) saw_model++;
 		if ((kind(name, 0) & CTLTYPE) == CTLTYPE_NODE) leaves_only = 0;
+		if (strcmp(name, "kern.msgbuf") == 0 || strcmp(name, "kern.msgbuf_clear") == 0) saw_skipped++;
 		if (++count > 10000) break;
 	}
 	printf("     walked %d variables\n", count);
 	CHECK(count >= 20 && ordered, "{0,2}: the walk is in strictly increasing order");
 	CHECK(named && saw_ostype == 1 && saw_model == 1, "{0,2}: each variable visited once");
 	CHECK(leaves_only, "{0,2}: the walk visits variables, not nodes");
+	CHECK(saw_skipped == 0, "{0,2}: kern.msgbuf and kern.msgbuf_clear are skipped (CTLFLAG_SKIP)");
+	CHECK((kind("kern.msgbuf", 0) & CTLFLAG_SKIP) && (kind("kern.msgbuf_clear", 0) & CTLFLAG_SKIP),
+		"{0,4}: they carry CTLFLAG_SKIP");
 }
 
 static void semantics(void)

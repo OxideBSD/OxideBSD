@@ -32,6 +32,8 @@ pub(crate) const CTLFLAG_WR: u32 = 0x4000_0000;
 pub(crate) const CTLFLAG_RW: u32 = CTLFLAG_RD | CTLFLAG_WR;
 pub(crate) const CTLFLAG_TUN: u32 = 0x0008_0000;
 pub(crate) const CTLFLAG_RDTUN: u32 = CTLFLAG_RD | CTLFLAG_TUN;
+/// Left out of the `{0, 2}` walk, so `sysctl -a` doesn't show it; still read and set by name.
+pub(crate) const CTLFLAG_SKIP: u32 = 0x0100_0000;
 
 /// Top-level nodes (`CTL_*`).
 const CTL_KERN: i32 = 1;
@@ -401,7 +403,7 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             name: "msgbuf",
             kind: CTLTYPE_STRING,
             fmt: "A",
-            flags: CTLFLAG_RD,
+            flags: CTLFLAG_RD | CTLFLAG_SKIP,
             descr: "Contents of kernel message buffer",
             get: crate::kern::subr_msgbuf::contents,
             set: None,
@@ -421,7 +423,7 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             name: "msgbuf_clear",
             kind: CTLTYPE_INT,
             fmt: "I",
-            flags: CTLFLAG_RW,
+            flags: CTLFLAG_RW | CTLFLAG_SKIP,
             descr: "Clear kernel message buffer",
             get: || int(0),
             set: Some(|_| {
@@ -665,10 +667,12 @@ fn meta(a: &Args, name: &[i32]) -> Result<(), i64> {
         }
         NEXT => {
             use core::ops::Bound::{Excluded, Unbounded};
-            // The first leaf after `target` in depth-first order (under it, if it's a node).
+            // The first leaf after `target` in depth-first order (under it, if it's a node), not
+            // counting those flagged `CTLFLAG_SKIP`: the whole message buffer isn't `sysctl -a`
+            // material.
             let next = t
                 .range::<[i32], _>((Excluded(target), Unbounded))
-                .find(|(_, o)| o.kind != CTLTYPE_NODE)
+                .find(|(_, o)| o.kind != CTLTYPE_NODE && o.flags & CTLFLAG_SKIP == 0)
                 .map(|(k, _)| oid_bytes(k))
                 .ok_or(ENOENT as i64)?;
             drop(t);

@@ -35,7 +35,11 @@ line instead.
 The options are as follows:
 .Bl -tag -width indent
 .It Fl a
-Show every variable.
+Show every variable, except a few that are only read by name, such as
+.Va kern.msgbuf ,
+which
+.Xr dmesg 8
+shows.
 .It Fl b
 Write values as raw binary, with no names.
 .It Fl d

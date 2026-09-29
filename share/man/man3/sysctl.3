@@ -96,7 +96,9 @@ The node numbered 0 describes the tree.
 returns the text name of
 .Ar oid ;
 .Brq 0 , 2 , Ar oid
-returns the numeric name of the variable after it, in depth-first order;
+returns the numeric name of the variable after it, in depth-first order,
+passing over variables flagged
+.Dv CTLFLAG_SKIP ;
 .Brq 0 , 3
 converts the text name given as new data to a numeric name;
 .Brq 0 , 4 , Ar oid
