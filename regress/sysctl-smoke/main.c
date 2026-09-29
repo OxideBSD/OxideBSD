@@ -11,8 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -371,6 +373,110 @@ static void message_buffer(void)
 	free(m);
 }
 
+/* FreeBSD's layouts (<sys/resource.h>, <sys/vmmeter.h>); not yet in OxideBSD's <sys/sysctl.h>. */
+struct loadavg {
+	unsigned int ldavg[3];
+	long fscale;
+};
+
+struct vmtotal {
+	unsigned long t_vm, t_avm, t_rm, t_arm, t_vmshr, t_avmshr, t_rmshr, t_armshr, t_free;
+	short t_rq, t_dw, t_pw, t_sl, t_sw;
+	unsigned short t_pad[3];
+};
+
+static unsigned uval(const char *name)
+{
+	unsigned v;
+	size_t len = sizeof v;
+	if (sysctlbyname(name, &v, &len, 0, 0) < 0 || len != sizeof v) return 0;
+	return v;
+}
+
+static void memory(void)
+{
+	unsigned pages = uval("vm.stats.vm.v_page_count"), free_ = uval("vm.stats.vm.v_free_count");
+	unsigned wired = uval("vm.stats.vm.v_wire_count"), user = uval("vm.stats.vm.v_user_count");
+	printf("     pages %u free %u wired %u user %u\n", pages, free_, wired, user);
+	unsigned long phys, usermem;
+	size_t len = sizeof phys;
+	sysctlbyname("hw.physmem", &phys, &len, 0, 0);
+	len = sizeof usermem;
+	sysctlbyname("hw.usermem", &usermem, &len, 0, 0);
+	CHECK(pages == phys / 4096, "v_page_count is hw.physmem in pages");
+	CHECK(free_ > 0 && wired > 0 && user > 0, "free, wired and user pages are all counted");
+	CHECK(free_ + wired + user <= pages && free_ + wired + user + 64 >= pages,
+		"free + wired + user is every page (give or take what changed between reads)");
+	CHECK(usermem > 0 && usermem < phys && usermem / 4096 + wired <= pages + 64, "hw.usermem is physmem less wired");
+	unsigned kinds = kind("vm.stats.vm.v_free_count", 0);
+	CHECK((kinds & CTLTYPE) == CTLTYPE_UINT, "v_free_count is an unsigned int");
+	int mib[CTL_MAXNAME];
+	size_t n = CTL_MAXNAME;
+	sysctlnametomib("vm.stats.vm", mib, &n);
+	len = 0;
+	CHECK_ERR(sysctl(mib, n, 0, &len, 0, 0), EISDIR, "reading a node is EISDIR");
+
+	struct vmtotal vt;
+	len = sizeof vt;
+	CHECK(sysctlbyname("vm.vmtotal", &vt, &len, 0, 0) == 0 && len == 88 && vt.t_rq >= 1 &&
+		vt.t_free > 0 && vt.t_rm == uval("vm.stats.vm.v_user_count"), "vm.vmtotal: 88 bytes, t_rq, t_free, t_rm");
+
+	struct sysinfo si;
+	sysinfo(&si);
+	CHECK(si.freeram < si.totalram && si.freeram / 4096 + 64 >= uval("vm.stats.vm.v_free_count") &&
+		si.freeram / 4096 <= uval("vm.stats.vm.v_free_count") + 64, "sysinfo's freeram is the free pages");
+
+	/* A 64 MiB allocation, touched, lowers the free count; it comes back when the process exits. */
+	int p[2];
+	pipe(p);
+	unsigned before = uval("vm.stats.vm.v_free_count");
+	pid_t pid = fork();
+	if (pid == 0) {
+		size_t sz = 64 << 20;
+		char *big = malloc(sz);
+		for (size_t i = 0; i < sz; i += 4096) big[i] = 1;
+		write(p[1], "r", 1);
+		pause();
+		_exit(0);
+	}
+	char c;
+	read(p[0], &c, 1);
+	unsigned during = uval("vm.stats.vm.v_free_count");
+	kill(pid, SIGKILL);
+	waitpid(pid, 0, 0);
+	unsigned after = uval("vm.stats.vm.v_free_count");
+	printf("     free before %u, with 64 MiB allocated %u, after exit %u\n", before, during, after);
+	CHECK(before - during >= 16384, "a 64 MiB allocation lowers v_free_count by 16384 pages");
+	CHECK(after + 64 >= before, "v_free_count recovers once the process exits");
+}
+
+static void load_average(void)
+{
+	struct loadavg la;
+	size_t len = sizeof la;
+	CHECK(sysctlbyname("vm.loadavg", &la, &len, 0, 0) == 0 && len == sizeof la && la.fscale == 2048,
+		"vm.loadavg is a struct loadavg, fscale 2048");
+	/* Two busy processes for a minute: the one-minute average passes 1.0 (it tends to 2). */
+	pid_t a = fork();
+	if (a == 0) for (;;) {}
+	pid_t b = fork();
+	if (b == 0) for (;;) {}
+	sleep(62);
+	len = sizeof la;
+	sysctlbyname("vm.loadavg", &la, &len, 0, 0);
+	double avg[3];
+	int got = getloadavg(avg, 3);
+	kill(a, SIGKILL);
+	kill(b, SIGKILL);
+	waitpid(a, 0, 0);
+	waitpid(b, 0, 0);
+	printf("     loadavg %.2f %.2f %.2f\n", la.ldavg[0] / 2048.0, la.ldavg[1] / 2048.0, la.ldavg[2] / 2048.0);
+	CHECK(la.ldavg[0] > 2048, "vm.loadavg: the one-minute average rises above 1.0");
+	CHECK(la.ldavg[0] > la.ldavg[1] && la.ldavg[1] > la.ldavg[2], "vm.loadavg: 1 > 5 > 15 minutes while rising");
+	CHECK(got == 3 && avg[0] > 1.0 && avg[0] - la.ldavg[0] / 2048.0 < 0.2 && la.ldavg[0] / 2048.0 - avg[0] < 0.2,
+		"getloadavg(3) agrees");
+}
+
 int main(void)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
@@ -379,6 +485,8 @@ int main(void)
 	walk();
 	semantics();
 	message_buffer();
+	memory();
+	load_average();
 	printf("sysctl-smoke: %d failure(s)\n", failures);
 	return failures;
 }

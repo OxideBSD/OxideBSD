@@ -1282,27 +1282,30 @@ const _: () = assert!(core::mem::size_of::<RawSysinfo>() == 368);
 ///   (`oxidebsd_proc_uptime`) and `sys_clock_gettime`'s `CLOCK_MONOTONIC` arm already use.
 /// - `totalram`: real, `memory::usable_ram_bytes()`, with `mem_unit = 1` so the byte count needs
 ///   no further scaling -- matches `/proc/meminfo`'s own `MemTotal` source exactly.
-/// - `freeram`: set equal to `totalram`, same reasoning `/proc/meminfo`'s own doc comment already
-///   gives for `MemFree == MemTotal` -- no free-memory/deallocation tracking exists anywhere in
-///   this kernel (the frame allocator never reclaims a frame), so "as much as there ever was" is
-///   genuinely the most honest answer available, not an invented one.
+/// - `freeram`/`sharedram`: free pages and pages shared between processes, from
+///   `memory::vm_meter` (SYSCTL.md §10.3).
+/// - `loads`: the load average (`kern::kern_synch`), rescaled from `FSCALE` to `sysinfo`'s own
+///   16-bit fraction (SYSCTL.md §9.2).
 /// - `procs`: real, the live process table's own length (`process::table().lock().len()`) --
 ///   truncated to `u16` (real `sysinfo(2)`'s own field width; this table will never remotely
 ///   approach 65536 entries on this kernel).
-/// - `sharedram`/`bufferram`/`totalswap`/`freeswap`/`totalhigh`/`freehigh`/`loads`: honest `0` --
-///   no page cache, no swap, and no load-average tracking exist, same tier as `/proc/meminfo`'s
-///   own `Buffers`/`Cached`/`SwapTotal`/`SwapFree` placeholders.
+/// - `bufferram`/`totalswap`/`freeswap`/`totalhigh`/`freehigh`: honest `0` -- no page cache and
+///   no swap exist, same tier as `/proc/meminfo`'s own `Buffers`/`Cached`/`SwapTotal`/`SwapFree`
+///   placeholders.
 pub(crate) fn sys_sysinfo(info_ptr: u64) -> Result<u64, u64> {
     let ticks = crate::cpu::interrupts::ticks();
     let hz = crate::cpu::pit::TIMER_HZ as u64;
     let total_ram = crate::memory::usable_ram_bytes();
     let procs = crate::process::table().lock().len().min(u16::MAX as usize) as u16;
+    let vm = crate::memory::vm_meter::stats();
+    // `SI_LOAD_SHIFT` is 16, `FSHIFT` 11.
+    let loads = crate::kern::kern_synch::averages().map(|a| (a as u64) << (16 - crate::kern::kern_synch::FSHIFT));
     let info = RawSysinfo {
         uptime: ticks / hz,
-        loads: [0; 3],
+        loads,
         totalram: total_ram,
-        freeram: total_ram,
-        sharedram: 0,
+        freeram: vm.free * 4096,
+        sharedram: vm.shared * 4096,
         bufferram: 0,
         totalswap: 0,
         freeswap: 0,

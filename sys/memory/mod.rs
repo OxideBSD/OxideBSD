@@ -5,6 +5,7 @@
 pub mod address_space;
 pub mod allocator;
 pub mod kstack;
+pub mod vm_meter;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -149,6 +150,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             } else {
                 Some(PhysFrame::containing_address(PhysAddr::new(next)))
             };
+            FRAMES_IN_USE.fetch_add(1, Ordering::Relaxed);
             return Some(frame);
         }
         loop {
@@ -171,6 +173,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             }
             let frame_number = self.frame_number;
             self.frame_number += 1;
+            FRAMES_IN_USE.fetch_add(1, Ordering::Relaxed);
             return Some(PhysFrame::containing_address(x86_64::PhysAddr::new(
                 frame_number * 4096,
             )));
@@ -209,7 +212,18 @@ impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
         // every frame it passes here) -- safe to overwrite its content with free-list bookkeeping.
         unsafe { next_ptr.write(prev_head) };
         self.free_list = Some(frame);
+        FRAMES_IN_USE.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// Frames handed out by the frame allocator and not given back: everything the kernel and every
+/// process hold (`vm.stats.vm.*`, SYSCTL.md §10). Every physical frame goes through the allocator,
+/// DMA buffers and page tables included, so this is exact.
+static FRAMES_IN_USE: AtomicU64 = AtomicU64::new(0);
+
+/// `(usable frames, frames in use)`.
+pub fn frame_counts() -> (u64, u64) {
+    (usable_ram_bytes() / 4096, FRAMES_IN_USE.load(Ordering::Relaxed))
 }
 
 fn usable_ram_bytes_in(memory_map: &[&Entry]) -> u64 {

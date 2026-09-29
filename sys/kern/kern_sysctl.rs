@@ -23,6 +23,7 @@ pub(crate) const CTLTYPE_NODE: u32 = 1;
 pub(crate) const CTLTYPE_INT: u32 = 2;
 pub(crate) const CTLTYPE_STRING: u32 = 3;
 pub(crate) const CTLTYPE_OPAQUE: u32 = 5;
+pub(crate) const CTLTYPE_UINT: u32 = 6;
 pub(crate) const CTLTYPE_ULONG: u32 = 8;
 
 /// `CTLFLAG_*`: readable, writable, tunable (fixed at boot from the command line).
@@ -151,6 +152,11 @@ pub(crate) fn int(v: i32) -> Vec<u8> {
     v.to_ne_bytes().to_vec()
 }
 
+/// An `unsigned int` value; page counts are held as `u64` and fit.
+pub(crate) fn uint(v: u64) -> Vec<u8> {
+    (v as u32).to_ne_bytes().to_vec()
+}
+
 pub(crate) fn ulong(v: u64) -> Vec<u8> {
     v.to_ne_bytes().to_vec()
 }
@@ -182,11 +188,14 @@ const KERN_NGROUPS: i32 = 18;
 const KERN_BOOTTIME: i32 = 21;
 const KERN_NISDOMAINNAME: i32 = 22;
 const KERN_IOV_MAX: i32 = 35;
+const VM_TOTAL: i32 = 1;
+const VM_LOADAVG: i32 = 2;
 const HW_MACHINE: i32 = 1;
 const HW_MODEL: i32 = 2;
 const HW_NCPU: i32 = 3;
 const HW_BYTEORDER: i32 = 4;
 const HW_PHYSMEM: i32 = 5;
+const HW_USERMEM: i32 = 6;
 const HW_PAGESIZE: i32 = 7;
 const HW_MACHINE_ARCH: i32 = 11;
 
@@ -220,7 +229,7 @@ fn cpu_model() -> Vec<u8> {
 
 fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     let kern = add_node(t, &[], Some(CTL_KERN), "kern", "High kernel, proc, limits &c");
-    add_node(t, &[], Some(CTL_VM), "vm", "Virtual memory");
+    let vm = add_node(t, &[], Some(CTL_VM), "vm", "Virtual memory");
     add_node(t, &[], Some(CTL_VFS), "vfs", "File system");
     add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
     add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
@@ -463,6 +472,16 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             set: None,
         },
         Leaf {
+            number: Some(HW_USERMEM),
+            name: "usermem",
+            kind: CTLTYPE_ULONG,
+            fmt: "LU",
+            flags: CTLFLAG_RD,
+            descr: "Amount of memory (in bytes) which is not wired",
+            get: || ulong(crate::memory::usable_ram_bytes() - crate::memory::vm_meter::stats().wired * 4096),
+            set: None,
+        },
+        Leaf {
             number: Some(HW_PAGESIZE),
             name: "pagesize",
             kind: CTLTYPE_INT,
@@ -486,6 +505,70 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     for leaf in hw_leaves {
         add_leaf(t, &hw, leaf);
     }
+
+    let vm_leaves = [
+        Leaf {
+            number: Some(VM_TOTAL),
+            name: "vmtotal",
+            kind: CTLTYPE_OPAQUE,
+            fmt: "S,vmtotal",
+            flags: CTLFLAG_RD,
+            descr: "System virtual memory statistics",
+            get: vmtotal,
+            set: None,
+        },
+        Leaf {
+            number: Some(VM_LOADAVG),
+            name: "loadavg",
+            kind: CTLTYPE_OPAQUE,
+            fmt: "S,loadavg",
+            flags: CTLFLAG_RD,
+            descr: "Machine loadaverage history",
+            get: || {
+                // struct loadavg { fixpt_t ldavg[3]; long fscale; }
+                let mut v: Vec<u8> = crate::kern::kern_synch::averages().iter().flat_map(|a| a.to_ne_bytes()).collect();
+                v.extend_from_slice(&[0; 4]); // padding before the long
+                v.extend_from_slice(&(crate::kern::kern_synch::FSCALE as i64).to_ne_bytes());
+                v
+            },
+            set: None,
+        },
+    ];
+    for leaf in vm_leaves {
+        add_leaf(t, &vm, leaf);
+    }
+    let stats = add_node(t, &vm, None, "stats", "VM meter stats");
+    let stats_vm = add_node(t, &stats, None, "vm", "VM meter vm stats");
+    let counts: [(&'static str, &'static str, Getter); 4] = [
+        ("v_page_count", "Page count for system", || uint(crate::memory::vm_meter::stats().page_count)),
+        ("v_free_count", "Free pages", || uint(crate::memory::vm_meter::stats().free)),
+        ("v_wire_count", "Wired pages", || uint(crate::memory::vm_meter::stats().wired)),
+        ("v_user_count", "Pages mapped into processes", || uint(crate::memory::vm_meter::stats().user)),
+    ];
+    for (name, descr, get) in counts {
+        add_leaf(
+            t,
+            &stats_vm,
+            Leaf { number: None, name, kind: CTLTYPE_UINT, fmt: "IU", flags: CTLFLAG_RD, descr, get, set: None },
+        );
+    }
+}
+
+/// FreeBSD's `struct vmtotal`: nine `uint64_t` page counts, then five `int16_t` thread counts and
+/// padding (88 bytes). There is no paging, so virtual and real totals are the pages processes have
+/// mapped, all of them active.
+fn vmtotal() -> Vec<u8> {
+    let s = crate::memory::vm_meter::stats();
+    let mut v = Vec::with_capacity(88);
+    // t_vm, t_avm, t_rm, t_arm, t_vmshr, t_avmshr, t_rmshr, t_armshr, t_free
+    for n in [s.user, s.user, s.user, s.user, s.shared, s.shared, s.shared, s.shared, s.free] {
+        v.extend_from_slice(&n.to_ne_bytes());
+    }
+    // t_rq, t_dw, t_pw, t_sl, t_sw, t_pad[3]
+    for n in [s.runnable, s.disk_wait, 0, s.sleeping, 0, 0, 0, 0] {
+        v.extend_from_slice(&(n.min(i16::MAX as u64) as i16).to_ne_bytes());
+    }
+    v
 }
 
 // ---- sysctl(2) ----

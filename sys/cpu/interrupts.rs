@@ -434,6 +434,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
         {
             proc.cpu_ticks += 1;
         }
+        crate::kern::kern_synch::tick(&table, now);
         // Terminal reads whose VTIME ran out.
         crate::tty::expire_timers(&mut table, now);
         for (&pid, proc) in table.iter_mut() {

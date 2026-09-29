@@ -1,3 +1,4 @@
+use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 
 use x86_64::VirtAddr;
@@ -332,6 +333,43 @@ impl AddressSpace {
         // freed.
         unsafe { frame_allocator.deallocate_frame(*self.level_4_frame) };
     }
+}
+
+impl AddressSpace {
+    /// Identifies the address space (its PML4's physical address): threads share one.
+    pub fn id(&self) -> u64 {
+        self.level_4_frame.start_address().as_u64()
+    }
+
+    /// The data frames mapped into this address space's user half. A `SHARED_LEAF` frame (SysV
+    /// shared memory, a `MAP_SHARED` file page) is counted once across every call that passes the
+    /// same `shared` set. Reads the tables through the HHDM; doesn't change them.
+    pub fn count_user_frames(&self, physical_memory_offset: VirtAddr, shared: &mut BTreeSet<u64>) -> u64 {
+        // SAFETY: a live table of this address space, only read.
+        let table = unsafe { frame_to_page_table(*self.level_4_frame, physical_memory_offset) };
+        count_table_level(table, 4, physical_memory_offset, shared)
+    }
+}
+
+fn count_table_level(table: &PageTable, level: u8, pmo: VirtAddr, shared: &mut BTreeSet<u64>) -> u64 {
+    let mut n = 0;
+    for entry in table.iter() {
+        let flags = entry.flags();
+        if !flags.contains(PageTableFlags::PRESENT) || !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+            continue;
+        }
+        let Ok(frame) = entry.frame() else { continue };
+        if level == 1 {
+            if !flags.contains(SHARED_LEAF) || shared.insert(frame.start_address().as_u64()) {
+                n += 1;
+            }
+            continue;
+        }
+        // SAFETY: a present next-level table, only read.
+        let child = unsafe { frame_to_page_table(frame, pmo) };
+        n += count_table_level(child, level - 1, pmo, shared);
+    }
+    n
 }
 
 /// Recursively walks and frees every `USER_ACCESSIBLE` frame beneath `table` at `level` (`4` =
