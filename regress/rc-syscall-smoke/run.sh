@@ -115,8 +115,10 @@ check "a second shutdown is refused" not shutdown -h +10
 check "shutdown -C cancels it" shutdown -C
 check "the pid file goes away" eventually [ ! -e /var/run/shutdown.pid ]
 check "and so does nologin" eventually [ ! -e /etc/nologin ]
-out=$(shutdown -k now "just kidding" 2>&1)
-check "shutdown -k warns" contains "$out" "just kidding"
+# The warning itself goes to /dev/console, which a script can't read back; nologin carries the
+# same message.
+check "shutdown -k now succeeds" shutdown -k now "just kidding"
+check "and its message is in nologin" contains "$(cat /etc/nologin 2>/dev/null)" "just kidding"
 check "shutdown -k leaves logins blocked" [ -e /etc/nologin ]
 rm -f /etc/nologin
 
