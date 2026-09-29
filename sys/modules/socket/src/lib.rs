@@ -1,16 +1,10 @@
 //! `SYS_SOCKET = 140`, `SYS_BIND = 141`, `SYS_SENDTO = 142`, `SYS_RECVFROM = 143`,
 //! `SYS_SETSOCKOPT = 144`, `SYS_CONNECT = 145`, `SYS_LISTEN = 146`, `SYS_ACCEPT = 147`,
-//! `SYS_POLL = 148` -- UDP, TCP, and raw ICMP sockets (see CLAUDE.md's networking plan). Same
-//! "module registers, kernel implements" split every other syscall module in this codebase uses:
-//! real logic (the socket tables, port binding, the TCP state machine, header build/parse, the
-//! actual send over `sys/netinet/ipv4.rs`) is kernel-resident, since this module can't use `alloc`
-//! (see CLAUDE.md's module-loading section) -- `sys/netinet/udp.rs`'s `oxidebsd_sys_socket`/`_bind`/
-//! `_sendto`/`_recvfrom`/`_setsockopt`, `sys/netinet/tcp.rs`'s `oxidebsd_sys_connect`/`_listen`/
-//! `_accept`, `sys/netinet/icmp.rs`'s raw-socket handlers (reached through `udp.rs`'s own
-//! not-mine-vs-mine fallback chain, not registered here directly), and `sys/net/mod.rs`'s
-//! `oxidebsd_sys_poll` (needed to make musl's real DNS stub resolver work -- see that function's
-//! own doc comment). Once a TCP connection is established, its data flows over plain
-//! `SYS_READ`/`SYS_WRITE` instead -- no ninth data syscall needed for that.
+//! `SYS_POLL = 148`, `SYS_SOCKETPAIR = 149`, `SYS_SHUTDOWN = 152`, `SYS_GETSOCKNAME = 559`,
+//! `SYS_PPOLL = 575`, `SYS_SELECT`: the socket system calls, for every family, and the `poll`
+//! family. This module only registers them; the socket layer (`sys/kern/uipc_socket.rs`) and
+//! `sys/net/mod.rs` implement them, since a module can't use `alloc` (see CLAUDE.md's
+//! module-loading section).
 #![no_std]
 
 unsafe extern "C" {
@@ -28,6 +22,8 @@ unsafe extern "C" {
     fn oxidebsd_sys_listen(fd: u64, backlog: u64) -> i64;
     fn oxidebsd_sys_accept(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
     fn oxidebsd_sys_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64) -> i64;
+    fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64;
+    fn oxidebsd_sys_shutdown(fd: u64, how: u64) -> i64;
     fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) -> i64;
     fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, mask_ptr: u64) -> i64;
     fn oxidebsd_sys_select(req_ptr: u64) -> i64;
@@ -46,6 +42,8 @@ const SYS_CONNECT: u64 = 145;
 const SYS_LISTEN: u64 = 146;
 const SYS_ACCEPT: u64 = 147;
 const SYS_POLL: u64 = 148;
+const SYS_SOCKETPAIR: u64 = 149;
+const SYS_SHUTDOWN: u64 = 152;
 /// Real Linux's own unclaimed legacy `select(2)` number -- see `crate::net::oxidebsd_sys_select`'s
 /// own doc comment for the real logic.
 const SYS_SELECT: u64 = 23;
@@ -94,6 +92,14 @@ extern "C" fn handle_getsockname(fd: u64, addr_out_ptr: u64, addrlen_ptr: u64, _
     unsafe { oxidebsd_sys_getsockname(fd, addr_out_ptr, addrlen_ptr) }
 }
 
+extern "C" fn handle_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64 {
+    unsafe { oxidebsd_sys_socketpair(domain, ty, protocol, fds_ptr) }
+}
+
+extern "C" fn handle_shutdown(fd: u64, how: u64, _a2: u64, _a3: u64) -> i64 {
+    unsafe { oxidebsd_sys_shutdown(fd, how) }
+}
+
 extern "C" fn handle_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _r10: u64) -> i64 {
     unsafe { oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms) }
 }
@@ -118,6 +124,8 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_LISTEN, handle_listen);
         oxidebsd_register_syscall(SYS_ACCEPT, handle_accept);
         oxidebsd_register_syscall(SYS_GETSOCKNAME, handle_getsockname);
+        oxidebsd_register_syscall(SYS_SOCKETPAIR, handle_socketpair);
+        oxidebsd_register_syscall(SYS_SHUTDOWN, handle_shutdown);
         oxidebsd_register_syscall(SYS_POLL, handle_poll);
         oxidebsd_register_syscall(SYS_PPOLL, handle_ppoll);
         oxidebsd_register_syscall(SYS_SELECT, handle_select);
@@ -125,7 +133,7 @@ pub extern "C" fn module_init() -> i32 {
     log(
         "[module] socket: module_init running (registered SYS_SOCKET/SYS_BIND/SYS_SENDTO/\
          SYS_RECVFROM/SYS_SETSOCKOPT/SYS_CONNECT/SYS_LISTEN/SYS_ACCEPT/SYS_GETSOCKNAME/\
-         SYS_POLL/SYS_SELECT)\n",
+         SYS_SOCKETPAIR/SYS_SHUTDOWN/SYS_POLL/SYS_SELECT)\n",
     );
     0
 }

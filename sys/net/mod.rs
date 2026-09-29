@@ -4,7 +4,7 @@
 //! (if virtualized) network traffic. No `sys/modules/socket` syscall shim yet -- see this repo's
 //! networking plan for what's still deferred.
 
-use crate::netinet::{icmp, tcp, udp};
+use crate::netinet::tcp;
 use crate::syscall::{EINTR, EINVAL};
 
 pub mod ethernet;
@@ -75,11 +75,8 @@ fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
     if let Some(r) = crate::fs::pipe::readiness(real_fd) {
         return (r, Source::Wakeable);
     }
-    if let Some(r) = tcp::readiness(real_fd) {
-        return (r, Source::Pulled);
-    }
-    if let Some(readable) = udp::has_data_ready(real_fd).or_else(|| icmp::has_data_ready(real_fd)) {
-        return (Readiness { readable, writable: true, ..Default::default() }, Source::Pulled);
+    if let Some((r, pulled)) = crate::kern::uipc_socket::readiness(real_fd) {
+        return (r, if pulled { Source::Pulled } else { Source::Wakeable });
     }
     let always = Readiness { readable: true, writable: true, ..Default::default() };
     (always, Source::Wakeable)

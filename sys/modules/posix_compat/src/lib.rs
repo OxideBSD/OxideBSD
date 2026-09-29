@@ -52,27 +52,11 @@
 //! `sys_uname`, filling in a fixed `struct utsname`) is kernel-resident, same reasoning as
 //! everything else this module only ever calls through to.
 //!
-//! `SYS_SOCKETPAIR = 149` (see CLAUDE.md's "Real networking" known-gaps entry) continues the
-//! sequence right past `sys/modules/socket`'s own `SYS_POLL = 148`. Registered here, not in
-//! `sys/modules/socket/`, because it never touches the actual network stack at all -- real
-//! `socketpair(2)`'s `(domain, type, protocol, sv_ptr)` shape matches this ABI's 4-register width
-//! whole, so no argument-convention patch was needed on the musl side beyond the usual `__NR_*`
-//! remap. Real logic (`sys/syscall.rs`'s `sys_socketpair`, delegating to `crate::pipe::
-//! do_socketpair`) is kernel-resident and pipe-shaped, not socket-shaped -- see that module's own
-//! doc comment for why an `AF_UNIX`/`SOCK_STREAM` pair is just two cross-wired pipe buffers here,
-//! same reasoning as everything else this module only ever calls through to.
-//!
-//! `SYS_FCNTL = 151`/`SYS_SHUTDOWN = 152` continue the sequence past `sys/modules/native_abi`'s own
-//! `SYS_SET_TID_ADDRESS = 150` (itself right past this module's `SYS_SOCKETPAIR = 149`) -- found
-//! missing while tracing BusyBox's `wget` HTTPS path (see CLAUDE.md's "Real networking" known-gaps
-//! entry): `libbb/xfuncs.c`'s `ndelay_on`/`ndelay_off`/`close_on_exec_on` call `fcntl`, and
-//! `wget.c` itself calls `shutdown(fd, SHUT_WR)` on the same kind of socketpair endpoint
-//! `SYS_SOCKETPAIR` already provides. Both `(fd, cmd, arg)`/`(fd, how)` already fit this ABI's
-//! register width whole, no argument-convention patch needed. `SYS_SHUTDOWN` lives here rather
-//! than `sys/modules/socket/`, same reasoning as `SYS_SOCKETPAIR` above -- it only implements real
-//! half-close semantics for a `crate::pipe`-backed socketpair endpoint, not a real TCP/UDP socket.
-//! Real logic (`sys/syscall.rs`'s `sys_fcntl`/`sys_shutdown`) is kernel-resident, same reasoning as
-//! everything else this module only ever calls through to.
+//! `SYS_FCNTL = 151` continues the sequence past `sys/modules/native_abi`'s own
+//! `SYS_SET_TID_ADDRESS = 150` -- found missing while tracing BusyBox's `wget` HTTPS path:
+//! `libbb/xfuncs.c`'s `ndelay_on`/`ndelay_off`/`close_on_exec_on` call `fcntl`. Real logic
+//! (`sys/syscall.rs`'s `sys_fcntl`) is kernel-resident. (`socketpair(2)` and `shutdown(2)`, once
+//! registered here too, belong to `sys/modules/socket`.)
 //!
 //! `SYS_GETUID = 158`/`SYS_GETEUID = 159`/`SYS_GETGID = 160`/`SYS_GETEGID = 161`/
 //! `SYS_SETUID = 162`/`SYS_SETGID = 163`/`SYS_GETGROUPS = 164` (see CLAUDE.md's "BusyBox gap
@@ -133,9 +117,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_dup(oldfd: u64) -> i64;
     fn oxidebsd_sys_uname(uts_ptr: u64) -> i64;
     fn oxidebsd_sys_sethostname(name_ptr: u64, len: u64) -> i64;
-    fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64;
     fn oxidebsd_sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64;
-    fn oxidebsd_sys_shutdown(fd: u64, how: u64) -> i64;
     fn oxidebsd_sys_getuid() -> i64;
     fn oxidebsd_sys_geteuid() -> i64;
     fn oxidebsd_sys_getgid() -> i64;
@@ -217,9 +199,7 @@ const SYS_UNAME: u64 = 137;
 /// OxideBSD's own number (see `sys/syscall/ffi.rs`'s `sys_sethostname`); musl's
 /// `__NR_sethostname` is remapped to it.
 const SYS_SETHOSTNAME: u64 = 576;
-const SYS_SOCKETPAIR: u64 = 149;
 const SYS_FCNTL: u64 = 151;
-const SYS_SHUTDOWN: u64 = 152;
 const SYS_GETUID: u64 = 158;
 const SYS_GETEUID: u64 = 159;
 const SYS_GETGID: u64 = 160;
@@ -445,16 +425,8 @@ extern "C" fn handle_sethostname(name_ptr: u64, len: u64, _arg2: u64, _arg3: u64
     unsafe { oxidebsd_sys_sethostname(name_ptr, len) }
 }
 
-extern "C" fn handle_socketpair(domain: u64, ty: u64, protocol: u64, fds_ptr: u64) -> i64 {
-    unsafe { oxidebsd_sys_socketpair(domain, ty, protocol, fds_ptr) }
-}
-
 extern "C" fn handle_fcntl(fd: u64, cmd: u64, arg: u64, _arg3: u64) -> i64 {
     unsafe { oxidebsd_sys_fcntl(fd, cmd, arg) }
-}
-
-extern "C" fn handle_shutdown(fd: u64, how: u64, _arg2: u64, _arg3: u64) -> i64 {
-    unsafe { oxidebsd_sys_shutdown(fd, how) }
 }
 
 extern "C" fn handle_getuid(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
@@ -691,9 +663,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_DUP, handle_dup);
         oxidebsd_register_syscall(SYS_UNAME, handle_uname);
         oxidebsd_register_syscall(SYS_SETHOSTNAME, handle_sethostname);
-        oxidebsd_register_syscall(SYS_SOCKETPAIR, handle_socketpair);
         oxidebsd_register_syscall(SYS_FCNTL, handle_fcntl);
-        oxidebsd_register_syscall(SYS_SHUTDOWN, handle_shutdown);
         oxidebsd_register_syscall(SYS_GETUID, handle_getuid);
         oxidebsd_register_syscall(SYS_GETEUID, handle_geteuid);
         oxidebsd_register_syscall(SYS_GETGID, handle_getgid);
@@ -747,7 +717,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_SHMDT, handle_shmdt);
     }
     log(
-        "[module] posix_compat: module_init running (registered SYS_PIPE/SYS_PIPE2/SYS_SET_ROBUST_LIST/SYS_DUP2/SYS_SETPGID/SYS_GETPGID/SYS_SETSID/SYS_GETSID/SYS_IOCTL/SYS_DUP/SYS_UNAME/SYS_SOCKETPAIR/SYS_FCNTL/SYS_SHUTDOWN/SYS_GETUID/SYS_GETEUID/SYS_GETGID/SYS_GETEGID/SYS_SETUID/SYS_SETGID/SYS_SETRESUID/SYS_GETGROUPS/SYS_SETGROUPS/SYS_PRLIMIT64/SYS_SETPRIORITY/SYS_GETPRIORITY/SYS_SCHED_SETSCHEDULER/SYS_SCHED_SETPARAM/SYS_SCHED_GETSCHEDULER/SYS_SCHED_GETPARAM/SYS_SCHED_GETAFFINITY/SYS_SCHED_GET_PRIORITY_MAX/SYS_SCHED_GET_PRIORITY_MIN/SYS_SCHED_RR_GET_INTERVAL/SYS_SCHED_YIELD/SYS_REBOOT/SYS_FUTEX/SYS_FUTEX_REQUEUE/SYS_MLOCK/SYS_MUNLOCK/SYS_MLOCKALL/SYS_MUNLOCKALL/SYS_UMASK/SYS_GETRUSAGE/SYS_TIMES/SYS_GETRANDOM/SYS_SYSINFO/SYS_MQ_OPEN/SYS_MQ_UNLINK/SYS_MQ_TIMEDSEND/SYS_MQ_TIMEDRECEIVE/SYS_MQ_NOTIFY/SYS_MQ_GETSETATTR/SYS_MSGGET/SYS_MSGSND/SYS_MSGRCV/SYS_MSGCTL/SYS_SEMGET/SYS_SEMOP/SYS_SEMCTL/SYS_SEMTIMEDOP/SYS_SHMGET/SYS_SHMAT/SYS_SHMCTL/SYS_SHMDT/SYS_GET_KEYEVENT)\n",
+        "[module] posix_compat: module_init running (registered SYS_PIPE/SYS_PIPE2/SYS_SET_ROBUST_LIST/SYS_DUP2/SYS_SETPGID/SYS_GETPGID/SYS_SETSID/SYS_GETSID/SYS_IOCTL/SYS_DUP/SYS_UNAME/SYS_FCNTL/SYS_GETUID/SYS_GETEUID/SYS_GETGID/SYS_GETEGID/SYS_SETUID/SYS_SETGID/SYS_SETRESUID/SYS_GETGROUPS/SYS_SETGROUPS/SYS_PRLIMIT64/SYS_SETPRIORITY/SYS_GETPRIORITY/SYS_SCHED_SETSCHEDULER/SYS_SCHED_SETPARAM/SYS_SCHED_GETSCHEDULER/SYS_SCHED_GETPARAM/SYS_SCHED_GETAFFINITY/SYS_SCHED_GET_PRIORITY_MAX/SYS_SCHED_GET_PRIORITY_MIN/SYS_SCHED_RR_GET_INTERVAL/SYS_SCHED_YIELD/SYS_REBOOT/SYS_FUTEX/SYS_FUTEX_REQUEUE/SYS_MLOCK/SYS_MUNLOCK/SYS_MLOCKALL/SYS_MUNLOCKALL/SYS_UMASK/SYS_GETRUSAGE/SYS_TIMES/SYS_GETRANDOM/SYS_SYSINFO/SYS_MQ_OPEN/SYS_MQ_UNLINK/SYS_MQ_TIMEDSEND/SYS_MQ_TIMEDRECEIVE/SYS_MQ_NOTIFY/SYS_MQ_GETSETATTR/SYS_MSGGET/SYS_MSGSND/SYS_MSGRCV/SYS_MSGCTL/SYS_SEMGET/SYS_SEMOP/SYS_SEMCTL/SYS_SEMTIMEDOP/SYS_SHMGET/SYS_SHMAT/SYS_SHMCTL/SYS_SHMDT/SYS_GET_KEYEVENT)\n",
     );
     0
 }

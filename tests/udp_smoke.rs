@@ -23,7 +23,7 @@ use core::panic::PanicInfo;
 
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
-use oxidebsd::netinet::udp::{
+use oxidebsd::kern::uipc_socket::{
     oxidebsd_sys_bind, oxidebsd_sys_recvfrom, oxidebsd_sys_sendto, oxidebsd_sys_setsockopt,
     oxidebsd_sys_socket,
 };

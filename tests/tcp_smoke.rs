@@ -43,8 +43,10 @@ use alloc::vec::Vec;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::net::nic::{NIC, NicDriver, NicError};
-use oxidebsd::netinet::tcp::{self, oxidebsd_sys_accept, oxidebsd_sys_listen};
-use oxidebsd::netinet::udp::{oxidebsd_sys_bind, oxidebsd_sys_socket};
+use oxidebsd::kern::uipc_socket::{
+    oxidebsd_sys_accept, oxidebsd_sys_bind, oxidebsd_sys_listen, oxidebsd_sys_socket,
+};
+use oxidebsd::netinet::tcp;
 use oxidebsd::net::ethernet;
 use oxidebsd::netinet::ipv4;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};

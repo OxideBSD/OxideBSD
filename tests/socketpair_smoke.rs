@@ -25,9 +25,9 @@ use oxidebsd::fs::fd::oxidebsd_close_fd;
 use oxidebsd::limine_entry_point;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
+use oxidebsd::kern::uipc_socket::{oxidebsd_sys_shutdown, oxidebsd_sys_socketpair};
 use oxidebsd::syscall::{
-    oxidebsd_sys_fcntl, oxidebsd_sys_read, oxidebsd_sys_set_tid_address, oxidebsd_sys_shutdown,
-    oxidebsd_sys_socketpair, oxidebsd_sys_write,
+    oxidebsd_sys_fcntl, oxidebsd_sys_read, oxidebsd_sys_set_tid_address, oxidebsd_sys_write,
 };
 
 limine_entry_point!(main);

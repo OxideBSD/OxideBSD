@@ -21,7 +21,8 @@ use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
-use oxidebsd::syscall::{oxidebsd_sys_readv, oxidebsd_sys_socketpair, oxidebsd_sys_write};
+use oxidebsd::kern::uipc_socket::oxidebsd_sys_socketpair;
+use oxidebsd::syscall::{oxidebsd_sys_readv, oxidebsd_sys_write};
 
 limine_entry_point!(main);
 

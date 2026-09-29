@@ -21,7 +21,7 @@ use core::panic::PanicInfo;
 
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
-use oxidebsd::netinet::udp::{oxidebsd_sys_recvfrom, oxidebsd_sys_sendto, oxidebsd_sys_socket};
+use oxidebsd::kern::uipc_socket::{oxidebsd_sys_recvfrom, oxidebsd_sys_sendto, oxidebsd_sys_socket};
 use oxidebsd::netinet::ipv4;
 use oxidebsd::drivers::rtl8139;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};

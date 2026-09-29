@@ -1,7 +1,7 @@
 //! ICMP: answers echo requests (`ping`) directed at us, can originate our own echo requests, and
-//! -- since a real userspace `ping` needs it -- backs real `socket(AF_INET, SOCK_RAW,
-//! IPPROTO_ICMP)` sockets (`oxidebsd_sys_socket`'s `SOCK_RAW` case in `udp.rs`, which owns socket
-//! dispatch for every protocol, not just UDP). No other ICMP message types are handled.
+//! -- since a real userspace `ping` needs it -- is the socket layer's raw ICMP protocol
+//! (`RAW_ICMP`, `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`). No other ICMP message types are
+//! handled.
 //!
 //! Unlike UDP/TCP, a raw socket isn't port-addressed: real Linux delivers every inbound ICMP
 //! packet to every open raw ICMP socket (the app filters by `icmp_id`/type itself -- see
@@ -19,13 +19,14 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::ipv4::{self, Ipv4Addr};
-use crate::syscall::EINVAL;
+use crate::fs::Readiness;
+use crate::kern::uipc_socket::{Protocol, SockAddr};
+use crate::syscall::{EBADF, EINVAL};
 
 const TYPE_ECHO_REPLY: u8 = 0;
 const TYPE_ECHO_REQUEST: u8 = 8;
 const HEADER_LEN: usize = 8;
 
-const ENOTSOCK: i64 = 88;
 const EDESTADDRREQ: i64 = 89;
 const EHOSTUNREACH: i64 = 113;
 
@@ -88,104 +89,68 @@ fn deliver_to_raw_sockets(src_ip: Ipv4Addr, ip_packet: &[u8]) {
     }
 }
 
-/// `None` if `real_fd` isn't a raw ICMP socket (caller, `net::oxidebsd_sys_poll`, keeps looking in
-/// the other protocols' tables).
-pub fn has_data_ready(real_fd: u64) -> Option<bool> {
-    RAW_SOCKETS
-        .lock()
-        .get(&real_fd)
-        .map(|socket| !socket.recv_queue.is_empty())
-}
+/// The socket layer's raw ICMP protocol.
+pub(crate) struct RawIcmp;
+pub(crate) static RAW_ICMP: RawIcmp = RawIcmp;
 
-extern "C" fn raw_read(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
-    // Same story as udp::udp_read -- real programs read a raw socket via recvfrom (it needs the
-    // source address), not plain read().
-    -ENOTSOCK
-}
-
-extern "C" fn raw_write(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
-    -EDESTADDRREQ
-}
-
-extern "C" fn raw_close(real_fd: u64) -> i64 {
-    RAW_SOCKETS.lock().remove(&real_fd);
-    0
-}
-
-/// Called from `udp::oxidebsd_sys_socket`'s `SOCK_RAW`/`IPPROTO_ICMP` case -- socket dispatch for
-/// every protocol lives there, not per-module, same as `tcp::create_socket`.
-pub fn create_socket() -> u64 {
-    let fd = crate::fs::fd::oxidebsd_alloc_fd();
-    RAW_SOCKETS.lock().insert(
-        fd,
-        RawSocket {
-            recv_queue: VecDeque::new(),
-        },
-    );
-    let user_fd = crate::fs::fd::oxidebsd_register_fd_ops(fd, raw_read, raw_write, raw_close);
-    crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Socket(fd));
-    user_fd
-}
-
-/// `None` if `real_fd` isn't a raw ICMP socket (caller keeps looking in its own table); `Some`
-/// otherwise. A raw socket has no port to bind -- accepted and ignored, same as `setsockopt`
-/// below (real `ping` never actually calls this outside `-I`, but accepting it costs nothing and
-/// matches every other socket type's own not-mine-vs-mine fallback convention).
-pub fn bind(real_fd: u64, addr_ptr: u64) -> Option<i64> {
-    if !RAW_SOCKETS.lock().contains_key(&real_fd) {
-        return None;
+impl Protocol for RawIcmp {
+    fn attach(&self, so: u64) -> Result<(), i64> {
+        RAW_SOCKETS.lock().insert(so, RawSocket { recv_queue: VecDeque::new() });
+        Ok(())
     }
-    if super::udp::read_sockaddr(addr_ptr).is_none() {
-        return Some(-(EINVAL as i64));
+
+    fn detach(&self, so: u64) {
+        RAW_SOCKETS.lock().remove(&so);
     }
-    Some(0)
-}
 
-/// Same not-mine-vs-mine convention as `bind` above. Ignores `level`/`optname` -- real `ping`
-/// sets `SO_BROADCAST`/`SO_RCVBUF`/`IP_TTL`, none of which this stack's single-gateway,
-/// no-fragmentation network model needs to actually honor.
-pub fn setsockopt(real_fd: u64) -> Option<i64> {
-    RAW_SOCKETS.lock().contains_key(&real_fd).then_some(0)
-}
-
-/// Sends `buf` (a complete, caller-built ICMP message -- type/code/checksum/id/seq/payload, see
-/// `ping.c`'s own `pkt->icmp_cksum = inet_cksum(...)`) as-is, wrapped in an IPv4/ICMP envelope.
-/// Unlike `udp::oxidebsd_sys_sendto`, nothing here builds a protocol header -- a raw socket's
-/// whole point is that the caller already did.
-pub fn sendto(real_fd: u64, buf_ptr: u64, buf_len: u64, dest_ip: Ipv4Addr) -> Option<i64> {
-    if !RAW_SOCKETS.lock().contains_key(&real_fd) {
-        return None;
+    /// A raw socket has no port: the address is checked and otherwise ignored (real `ping`
+    /// binds only with `-I`).
+    fn bind(&self, _so: u64, addr: &[u8]) -> Result<(), i64> {
+        super::parse_sockaddr_in(addr).map(|_| ()).ok_or(EINVAL as i64)
     }
-    if buf_ptr == 0 && buf_len > 0 {
-        return Some(-(EINVAL as i64));
-    }
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len as usize) };
-    Some(match ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, data) {
-        Some(()) => data.len() as i64,
-        None => -EHOSTUNREACH,
-    })
-}
 
-/// Pops the oldest queued packet (full IP header + ICMP), if any -- non-blocking, same convention
-/// `udp::oxidebsd_sys_recvfrom` established (its caller already called `net::poll()` before
-/// falling back here, so there's no need to do it again).
-pub fn recvfrom(real_fd: u64, buf_ptr: u64, buf_len: u64, addr_out_ptr: u64) -> Option<i64> {
-    let mut sockets = RAW_SOCKETS.lock();
-    let socket = sockets.get_mut(&real_fd)?;
-    let Some((src_ip, data)) = socket.recv_queue.pop_front() else {
-        return Some(0);
-    };
-    drop(sockets);
-
-    let n = data.len().min(buf_len as usize);
-    if buf_ptr != 0 && n > 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr as *mut u8, n);
+    /// Sends `data` (a complete ICMP message, header and checksum built by the caller, as
+    /// `ping.c` does) in an IPv4 envelope.
+    fn send(&self, _so: u64, data: &[u8], to: Option<&[u8]>) -> Result<usize, i64> {
+        let (dest_ip, _) = to.and_then(super::parse_sockaddr_in).ok_or(EDESTADDRREQ)?;
+        match ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, data) {
+            Some(()) => Ok(data.len()),
+            None => Err(EHOSTUNREACH),
         }
     }
-    // ICMP has no port -- 0 is the only sensible filler for write_sockaddr's port field.
-    super::udp::write_sockaddr(addr_out_ptr, src_ip, 0);
-    Some(n as i64)
+
+    /// Pops the oldest queued packet, IP header included (see this module's doc comment).
+    /// Never blocks, like `udp::Udp::recv`.
+    fn recv(&self, so: u64, buf: &mut [u8]) -> Result<(usize, Option<SockAddr>), i64> {
+        crate::net::poll();
+        let mut sockets = RAW_SOCKETS.lock();
+        let socket = sockets.get_mut(&so).ok_or(EBADF as i64)?;
+        let Some((src_ip, data)) = socket.recv_queue.pop_front() else {
+            return Ok((0, None));
+        };
+        drop(sockets);
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        // ICMP has no port.
+        Ok((n, Some(super::sockaddr_in(src_ip, 0))))
+    }
+
+    fn sockname(&self, _so: u64) -> Result<SockAddr, i64> {
+        Ok(super::sockaddr_in(ipv4::GUEST_IP, 0))
+    }
+
+    fn readiness(&self, so: u64) -> Readiness {
+        let readable = RAW_SOCKETS.lock().get(&so).is_some_and(|s| !s.recv_queue.is_empty());
+        Readiness { readable, writable: true, ..Default::default() }
+    }
+
+    fn addr_len(&self) -> usize {
+        super::SOCKADDR_IN_LEN
+    }
+
+    fn pulled(&self) -> bool {
+        true
+    }
 }
 
 fn build_packet(icmp_type: u8, identifier: u16, sequence: u16, data: &[u8]) -> Vec<u8> {

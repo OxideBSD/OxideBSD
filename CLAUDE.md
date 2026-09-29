@@ -1161,8 +1161,12 @@ wrappers around it.
 ## Real networking (`sys/drivers/{pci,rtl8139}.rs`, `sys/net/*`, `sys/netinet/*`, `sys/modules/socket/`)
 
 BSD layout: interfaces/Ethernet in `sys/net`, IPv4/ARP/ICMP/UDP/TCP in `sys/netinet`, the NIC
-driver in `sys/drivers`; the socket layer and `AF_UNIX` go in `sys/kern/uipc_*` (OxideBSD-doc
-`UNIX.md`).
+driver in `sys/drivers`, the socket layer in `sys/kern/uipc_socket.rs` (OxideBSD-doc `UNIX.md`).
+**Socket layer**: `SOCKETS` maps a socket's `real_fd` to its `&'static dyn Protocol` (UDP, TCP,
+raw ICMP; BSD `protosw`); each protocol keeps its own state keyed by the same `real_fd`. Every
+socket syscall (incl. `socketpair`/`shutdown`, now in `sys/modules/socket`, not `posix_compat` --
+a test using them must load the socket module) resolves and dispatches there; addresses cross as
+`sockaddr` bytes. `socketpair` is still the pipe pair in `sys/fs/pipe.rs` until `AF_UNIX` lands.
 
 Real, phased stack: PCI enumeration, IRQ-driven rtl8139 driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP
 sockets, raw ICMP sockets, `poll(2)`, and real hostname resolution via musl's own stub resolver.

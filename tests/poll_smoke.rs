@@ -14,7 +14,7 @@ use core::panic::PanicInfo;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::net::oxidebsd_sys_poll;
-use oxidebsd::netinet::udp::{oxidebsd_sys_bind, oxidebsd_sys_socket};
+use oxidebsd::kern::uipc_socket::{oxidebsd_sys_bind, oxidebsd_sys_socket};
 use oxidebsd::net::ethernet;
 use oxidebsd::netinet::ipv4;
 use oxidebsd::drivers::rtl8139;

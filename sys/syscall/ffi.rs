@@ -10,7 +10,7 @@ use x86_64::VirtAddr;
 
 use crate::serial_println;
 
-use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, EPROTONOSUPPORT, ffi_result_to_result};
+use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, ffi_result_to_result};
 use crate::process::SIGPIPE;
 
 /// Reads up to `len` bytes into `ptr` from `fd` — a pure lookup into `crate::fs::fd`'s registry now,
@@ -276,33 +276,6 @@ pub(crate) fn sys_dup(oldfd: u64) -> Result<u64, u64> {
     crate::fs::fd::dup(oldfd).map_err(|_| EBADF)
 }
 
-/// `SYS_SOCKETPAIR` (`149`) — real `socketpair(2)`'s exact `(domain, type, protocol, sv_ptr)`
-/// wire format, already only 4 arguments so (unlike `open`/`execve`) nothing needed inventing
-/// (see `external/mit/musl`'s own `arch/x86_64/bits/syscall.h.in` comment on `__NR_socketpair`).
-/// `AF_UNIX`/`SOCK_STREAM` only — the one shape BusyBox's `wget` needs (see CLAUDE.md's "Real
-/// networking" known-gaps entry on `spawn_ssl_client`); anything else is `EPROTONOSUPPORT`, same
-/// masking convention `netinet::udp::oxidebsd_sys_socket` already uses for `SOCK_CLOEXEC`/
-/// `SOCK_NONBLOCK`. Delegates to `crate::fs::pipe::do_socketpair` for the real logic — not a real
-/// `AF_UNIX` abstraction, just the same blocking pipe-buffer machinery `sys_pipe` already uses,
-/// cross-wired into a full-duplex pair (see that module's own doc comment).
-const AF_UNIX: u64 = 1;
-const SOCK_STREAM: u64 = 1;
-const SOCK_CLOEXEC: u64 = 0o2000000;
-const SOCK_NONBLOCK: u64 = 0o4000;
-
-pub(crate) fn sys_socketpair(
-    domain: u64,
-    ty: u64,
-    _protocol: u64,
-    fds_ptr: u64,
-) -> Result<u64, u64> {
-    let base_ty = ty & !(SOCK_CLOEXEC | SOCK_NONBLOCK);
-    if domain != AF_UNIX || base_ty != SOCK_STREAM {
-        return Err(EPROTONOSUPPORT);
-    }
-    crate::fs::pipe::do_socketpair(fds_ptr)
-}
-
 /// `SYS_SET_TID_ADDRESS` (`150`) — real `set_tid_address(2)`'s exact single-pointer wire format.
 /// Called unconditionally by every musl-linked program at startup (`external/mit/musl/src/env/
 /// __init_tls.c`, storing the result as the main thread's own `tid`) and again after every real
@@ -404,19 +377,6 @@ pub(crate) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
         }
         _ => Err(EINVAL),
     }
-}
-
-/// `SYS_SHUTDOWN` (`152`) — real `shutdown(2)`'s exact `(fd, how)` shape. Resolves the caller's
-/// `fd` to its own `real_fd` first (same pattern `oxfs_fstat` already established for a handler
-/// that isn't routed through `crate::fs::fd::read`/`write`'s own automatic resolution) and
-/// delegates to `crate::fs::pipe::do_shutdown` — real half-close semantics for an `AF_UNIX`/
-/// `SOCK_STREAM` socketpair endpoint only (`ENOTSOCK` for anything else); see that function's own
-/// doc comment.
-pub(crate) fn sys_shutdown(fd: u64, how: u64) -> Result<u64, u64> {
-    let Some(real_fd) = crate::fs::fd::real_fd_of(fd) else {
-        return Err(EBADF);
-    };
-    crate::fs::pipe::do_shutdown(real_fd, how)
 }
 
 /// `SYS_SET_FS_BASE` (`103`) — OxideBSD's own invention, not modeled on any real OS's syscall (see
@@ -1655,15 +1615,6 @@ pub(crate) extern "C" fn oxidebsd_sys_dup2(oldfd: u64, newfd: u64) -> i64 {
 
 // `pub`, not `pub(crate)` -- same "kept public for test use" precedent `oxidebsd_sys_read`/
 // `oxidebsd_sys_write` already have; `tests/socketpair_smoke.rs` calls this directly.
-pub extern "C" fn oxidebsd_sys_socketpair(
-    domain: u64,
-    ty: u64,
-    protocol: u64,
-    fds_ptr: u64,
-) -> i64 {
-    result_to_ffi(sys_socketpair(domain, ty, protocol, fds_ptr))
-}
-
 // `pub`, not `pub(crate)` -- same "kept public for test use" precedent above.
 pub extern "C" fn oxidebsd_sys_set_tid_address(tidptr: u64) -> i64 {
     result_to_ffi(sys_set_tid_address(tidptr))
@@ -1674,10 +1625,6 @@ pub extern "C" fn oxidebsd_sys_set_tid_address(tidptr: u64) -> i64 {
 // read/write/socketpair.
 pub extern "C" fn oxidebsd_sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     result_to_ffi(sys_fcntl(fd, cmd, arg))
-}
-
-pub extern "C" fn oxidebsd_sys_shutdown(fd: u64, how: u64) -> i64 {
-    result_to_ffi(sys_shutdown(fd, how))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_dup(oldfd: u64) -> i64 {

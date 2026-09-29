@@ -895,13 +895,13 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_uname" => Some(crate::syscall::oxidebsd_sys_uname as *const () as u64),
         "oxidebsd_sys_sethostname" => Some(crate::syscall::oxidebsd_sys_sethostname as *const () as u64),
         "oxidebsd_sys_socketpair" => {
-            Some(crate::syscall::oxidebsd_sys_socketpair as *const () as u64)
+            Some(crate::kern::uipc_socket::oxidebsd_sys_socketpair as *const () as u64)
         }
         "oxidebsd_sys_set_tid_address" => {
             Some(crate::syscall::oxidebsd_sys_set_tid_address as *const () as u64)
         }
         "oxidebsd_sys_fcntl" => Some(crate::syscall::oxidebsd_sys_fcntl as *const () as u64),
-        "oxidebsd_sys_shutdown" => Some(crate::syscall::oxidebsd_sys_shutdown as *const () as u64),
+        "oxidebsd_sys_shutdown" => Some(crate::kern::uipc_socket::oxidebsd_sys_shutdown as *const () as u64),
         "oxidebsd_random_bytes" => Some(crate::random::oxidebsd_random_bytes as *const () as u64),
         "oxidebsd_fb_geometry" => {
             Some(crate::drivers::fbdev::oxidebsd_fb_geometry as *const () as u64)
@@ -948,18 +948,18 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_proc_modules" => Some(oxidebsd_proc_modules as *const () as u64),
         "oxidebsd_fd_at" => Some(crate::fs::fd::oxidebsd_fd_at as *const () as u64),
-        "oxidebsd_sys_socket" => Some(crate::netinet::udp::oxidebsd_sys_socket as *const () as u64),
-        "oxidebsd_sys_bind" => Some(crate::netinet::udp::oxidebsd_sys_bind as *const () as u64),
-        "oxidebsd_sys_sendto" => Some(crate::netinet::udp::oxidebsd_sys_sendto as *const () as u64),
-        "oxidebsd_sys_recvfrom" => Some(crate::netinet::udp::oxidebsd_sys_recvfrom as *const () as u64),
+        "oxidebsd_sys_socket" => Some(crate::kern::uipc_socket::oxidebsd_sys_socket as *const () as u64),
+        "oxidebsd_sys_bind" => Some(crate::kern::uipc_socket::oxidebsd_sys_bind as *const () as u64),
+        "oxidebsd_sys_sendto" => Some(crate::kern::uipc_socket::oxidebsd_sys_sendto as *const () as u64),
+        "oxidebsd_sys_recvfrom" => Some(crate::kern::uipc_socket::oxidebsd_sys_recvfrom as *const () as u64),
         "oxidebsd_sys_setsockopt" => {
-            Some(crate::netinet::udp::oxidebsd_sys_setsockopt as *const () as u64)
+            Some(crate::kern::uipc_socket::oxidebsd_sys_setsockopt as *const () as u64)
         }
-        "oxidebsd_sys_connect" => Some(crate::netinet::tcp::oxidebsd_sys_connect as *const () as u64),
-        "oxidebsd_sys_listen" => Some(crate::netinet::tcp::oxidebsd_sys_listen as *const () as u64),
-        "oxidebsd_sys_accept" => Some(crate::netinet::tcp::oxidebsd_sys_accept as *const () as u64),
+        "oxidebsd_sys_connect" => Some(crate::kern::uipc_socket::oxidebsd_sys_connect as *const () as u64),
+        "oxidebsd_sys_listen" => Some(crate::kern::uipc_socket::oxidebsd_sys_listen as *const () as u64),
+        "oxidebsd_sys_accept" => Some(crate::kern::uipc_socket::oxidebsd_sys_accept as *const () as u64),
         "oxidebsd_sys_getsockname" => {
-            Some(crate::netinet::udp::oxidebsd_sys_getsockname as *const () as u64)
+            Some(crate::kern::uipc_socket::oxidebsd_sys_getsockname as *const () as u64)
         }
         "oxidebsd_sys_poll" => Some(crate::net::oxidebsd_sys_poll as *const () as u64),
         "oxidebsd_sys_ppoll" => Some(crate::net::oxidebsd_sys_ppoll as *const () as u64),
