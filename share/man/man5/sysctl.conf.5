@@ -1,0 +1,53 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SYSCTL.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm sysctl.conf
+.Nd kernel variables set at boot
+.Sh DESCRIPTION
+The
+.Nm
+file lists kernel variables that
+.Pa /etc/rc.d/sysctl
+sets with
+.Xr sysctl 8
+early in boot, before any other service starts.
+Each line has the form
+.Pp
+.Dl Ar name Ns = Ns Ar value
+.Pp
+as
+.Xr sysctl 8
+takes it on its command line.
+A value may be enclosed in double or single quotes.
+A
+.Ql #
+starts a comment that runs to the end of the line, and blank lines are
+ignored.
+.Pp
+An unknown name, or a value that can't be set, is reported on the console;
+the remaining lines are still applied.
+Settings local to a machine may go in
+.Pa /etc/sysctl.conf.local ,
+applied after
+.Nm .
+.Pp
+Tunables, which are fixed when the kernel starts, can't be set here; they go
+on the kernel command line as
+.Ar name Ns = Ns Ar value .
+.Sh FILES
+.Bl -tag -width /etc/sysctl.conf.local -compact
+.It Pa /etc/sysctl.conf
+.It Pa /etc/sysctl.conf.local
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# The host name, until /etc/rc.conf's hostname sets it
+kern.hostname=builder
+.Ed
+.Sh SEE ALSO
+.Xr sysctl 3 ,
+.Xr rc.conf 5 ,
+.Xr rc 8 ,
+.Xr sysctl 8

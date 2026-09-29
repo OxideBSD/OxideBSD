@@ -74,7 +74,9 @@ unsafe extern "C" {
         read: extern "C" fn(u64, u64, u64) -> i64,
         write: extern "C" fn(u64, u64, u64) -> i64,
         close: extern "C" fn(u64) -> i64,
-    ) -> u64;
+    ) -> i64;
+    /// `0` if `n` more open files fit under `kern.maxfiles`, else `-ENFILE`.
+    fn oxidebsd_fd_check_room(n: u64) -> i64;
     /// Same as `oxidebsd_register_fd_ops`, plus a `content_id` callback — see
     /// `crate::fs::fd::FdContentId`'s own doc comment (kernel tree) for why this exists: real
     /// fd-backed `MAP_SHARED` mmap (`crate::process::mm::do_mmap`) needs a live "what real inode
@@ -88,7 +90,7 @@ unsafe extern "C" {
         write: extern "C" fn(u64, u64, u64) -> i64,
         close: extern "C" fn(u64) -> i64,
         content_id: extern "C" fn(u64) -> i64,
-    ) -> u64;
+    ) -> i64;
     /// See `crate::fs::fd::ContentRead`/`ContentWrite`/`ContentSize`'s own doc comment (kernel
     /// tree) for why real fd-backed `MAP_SHARED` mmap needs this instead of the plain per-fd
     /// read/write callbacks. Called once, from this module's own `module_init`.
@@ -2818,6 +2820,11 @@ enum ProcDirKind {
 }
 
 fn register_open_file(open_file: OpenFile) -> i64 {
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let room = unsafe { oxidebsd_fd_check_room(1) };
+    if room < 0 {
+        return room;
+    }
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
     let Some(slot) = slots.iter_mut().find(|s| s.is_none()) else {
         return -EMFILE;
@@ -2846,7 +2853,7 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         oxidebsd_set_fd_fb_geometry(real_fd, oxfs_fb_geometry);
         fd
     };
-    fd as i64
+    fd
 }
 
 /// `access_mode` callback for `oxidebsd_set_fd_access_mode` -- see
@@ -7549,7 +7556,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"base32", include_bytes!(env!("OXFS_BASE32_ELF_PATH")));
     ok &= seed_file(usr_bin, b"base64", include_bytes!(env!("OXFS_BASE64_ELF_PATH")));
     ok &= seed_file(usr_bin, b"arch", include_bytes!(env!("OXFS_ARCH_ELF_PATH")));
-    ok &= seed_file(sbin, b"sysctl", include_bytes!(env!("OXFS_SYSCTL_ELF_PATH")));
+    // OxideBSD's own sysctl(8) and dmesg(8) (sbin/), not BusyBox's, which read Linux's /proc.
+    ok &= seed_file(sbin, b"sysctl", include_bytes!(env!("OXFS_SBIN_SYSCTL_ELF_PATH")));
     ok &= seed_file(usr_bin, b"bc", include_bytes!(env!("OXFS_BC_ELF_PATH")));
     ok &= seed_file(
         usr_bin,
@@ -7592,7 +7600,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"dd", include_bytes!(env!("OXFS_DD_ELF_PATH")));
     ok &= seed_file(bin, b"df", include_bytes!(env!("OXFS_DF_ELF_PATH")));
     ok &= seed_file(usr_bin, b"diff", include_bytes!(env!("OXFS_DIFF_ELF_PATH")));
-    ok &= seed_file(sbin, b"dmesg", include_bytes!(env!("OXFS_DMESG_ELF_PATH")));
+    ok &= seed_file(sbin, b"dmesg", include_bytes!(env!("OXFS_SBIN_DMESG_ELF_PATH")));
     ok &= seed_file(
         usr_bin,
         b"dnsdomainname",
@@ -7926,6 +7934,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"cleanvar", include_bytes!("../../../../etc/rc.d/cleanvar"));
     ok &= seed_file(rc_d, b"hostname", include_bytes!("../../../../etc/rc.d/hostname"));
     ok &= seed_file(rc_d, b"tmp", include_bytes!("../../../../etc/rc.d/tmp"));
+    ok &= seed_file(rc_d, b"sysctl", include_bytes!("../../../../etc/rc.d/sysctl"));
+    ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
     // /etc/passwd + /etc/group -- musl's own getpwnam/getpwuid/getgrnam/getgrgid
     // (external/mit/musl/src/passwd/*.c) parse these directly via plain fopen/fgets, no syscall of
     // their own beyond the open/read/readv this filesystem already supports -- same "port libc's
@@ -8094,6 +8104,10 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(man_man1, b"more.1", b"less.1");
     ok &= seed_file(man_man1, b"oxdoc.1", include_bytes!("../../../../share/man/man1/oxdoc.1"));
     ok &= seed_file(man_man1, b"passwd.1", include_bytes!("../../../../share/man/man1/passwd.1"));
+    let man_man3 = ensure_dir(usr_share_man, b"man3");
+    ok &= seed_file(man_man3, b"sysctl.3", include_bytes!("../../../../share/man/man3/sysctl.3"));
+    ok &= seed_hardlink(man_man3, b"sysctlbyname.3", b"sysctl.3");
+    ok &= seed_hardlink(man_man3, b"sysctlnametomib.3", b"sysctl.3");
     let man_man5 = ensure_dir(usr_share_man, b"man5");
     ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
     ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
@@ -8101,6 +8115,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man5, b"passwd.5", include_bytes!("../../../../share/man/man5/passwd.5"));
     ok &= seed_hardlink(man_man5, b"master.passwd.5", b"passwd.5");
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
+    ok &= seed_file(man_man5, b"sysctl.conf.5", include_bytes!("../../../../share/man/man5/sysctl.conf.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
     let man_man7 = ensure_dir(usr_share_man, b"man7");
     ok &= seed_file(man_man7, b"eqn.7", include_bytes!("../../../../share/man/man7/eqn.7"));
@@ -8110,6 +8125,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man7, b"tbl.7", include_bytes!("../../../../share/man/man7/tbl.7"));
     let man_man8 = ensure_dir(usr_share_man, b"man8");
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
+    ok &= seed_file(man_man8, b"dmesg.8", include_bytes!("../../../../share/man/man8/dmesg.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
@@ -8117,6 +8133,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
     ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));
     ok &= seed_file(man_man8, b"reboot.8", include_bytes!("../../../../share/man/man8/reboot.8"));
+    ok &= seed_file(man_man8, b"sysctl.8", include_bytes!("../../../../share/man/man8/sysctl.8"));
     ok &= seed_hardlink(man_man8, b"halt.8", b"reboot.8");
     ok &= seed_hardlink(man_man8, b"poweroff.8", b"reboot.8");
     ok &= seed_file(man_man8, b"shutdown.8", include_bytes!("../../../../share/man/man8/shutdown.8"));

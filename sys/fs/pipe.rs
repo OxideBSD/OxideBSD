@@ -223,12 +223,14 @@ fn close_direction(pipe_id: u64, dir: End) {
 /// format (a pointer to `int pipefd[2]`), since nothing about this call's shape needed inventing
 /// the way `open`/`execve` did (see `sys/syscall.rs`'s own doc comment on `sys_pipe`).
 pub(crate) fn do_pipe(fds_ptr: u64) -> Result<u64, u64> {
+    crate::fs::fd::check_room(2).map_err(|e| e as u64)?;
     let pipe_id = new_pipe_buffer();
 
     let read_fd = crate::fs::fd::oxidebsd_alloc_fd();
     let write_fd = crate::fs::fd::oxidebsd_alloc_fd();
     PIPE_ENDS.lock().insert(read_fd, (pipe_id, End::Read));
     PIPE_ENDS.lock().insert(write_fd, (pipe_id, End::Write));
+    // Can't fail: `check_room(2)` above, and nothing opens files in between.
     let read_user_fd =
         crate::fs::fd::oxidebsd_register_fd_ops(read_fd, pipe_read, write_denied, pipe_close);
     let write_user_fd =
@@ -416,6 +418,9 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
         _ => (true, false),
     };
     let nonblock = flags & O_NONBLOCK != 0;
+    if let Err(e) = crate::fs::fd::check_room(1) {
+        return -e;
+    }
 
     let (wait_for_writer, wait_for_reader, seen) = {
         let mut fifos = FIFOS.lock();
@@ -478,8 +483,14 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
     let read_op = if read { fifo_read as FdOp } else { read_denied };
     let write_op = if write { fifo_write as FdOp } else { write_denied };
     let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, read_op, write_op, fifo_close);
+    if fd < 0 {
+        // Files were opened elsewhere while this open waited for the other end.
+        FIFO_ENDS.lock().remove(&real_fd);
+        fifo_release(key, read, write);
+        return fd;
+    }
     crate::fs::fd::set_kind(real_fd, crate::fs::fd::FdKind::Fifo(key));
-    fd as i64
+    fd
 }
 
 type FdOp = extern "C" fn(u64, u64, u64) -> i64;

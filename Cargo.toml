@@ -332,6 +332,10 @@ name = "sysctl_syscall_smoke"
 harness = false
 
 [[test]]
+name = "sysctl_tunables_smoke"
+harness = false
+
+[[test]]
 name = "ppoll_syscall_smoke"
 harness = false
 

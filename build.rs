@@ -395,6 +395,11 @@ fn main() {
         build_std_oxidebsd_userland_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
         build_std_oxidebsd_userland_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
+    // SBIN_: BusyBox's sysctl/dmesg still build (until the roster cut) under the plain names.
+    let sysctl_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/sysctl", "OXFS_SBIN_SYSCTL_ELF_PATH", &musl_sysroot);
+    let dmesg_elf_path =
+        build_std_oxidebsd_userland_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
     let emergency_elf_path =
         build_std_oxidebsd_userland_crate("sbin/emergency", "OXFS_EMERGENCY_ELF_PATH", &musl_sysroot);
@@ -633,6 +638,8 @@ fn main() {
         ("OXFS_RCORDER_ELF_PATH", rcorder_elf_path.to_str().unwrap()),
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
+        ("OXFS_SBIN_SYSCTL_ELF_PATH", sysctl_elf_path.to_str().unwrap()),
+        ("OXFS_SBIN_DMESG_ELF_PATH", dmesg_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),

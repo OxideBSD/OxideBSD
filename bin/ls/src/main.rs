@@ -170,11 +170,16 @@ fn id_name(db: &[u8], id: u32, out: &mut [u8; NAME_CAP]) -> usize {
 
 fn mode_string(st: &Stat) -> [u8; 10] {
     let mut s = *b"----------";
-    if st.is_dir() {
-        s[0] = b'd';
-    } else if st.is_symlink() {
-        s[0] = b'l';
-    }
+    // The file type's letter, as the BSDs' strmode(3) gives it.
+    s[0] = match st.mode & 0o170000 {
+        0o040000 => b'd',
+        0o120000 => b'l',
+        0o020000 => b'c',
+        0o060000 => b'b',
+        0o010000 => b'p',
+        0o140000 => b's',
+        _ => b'-',
+    };
     let bits = b"rwxrwxrwx";
     for i in 0..9 {
         if st.mode & (0o400 >> i) != 0 {

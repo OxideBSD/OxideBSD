@@ -1,0 +1,139 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SYSCTL 3
+.Os OxideBSD
+.Sh NAME
+.Nm sysctl ,
+.Nm sysctlbyname ,
+.Nm sysctlnametomib
+.Nd get or set kernel state
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/sysctl.h
+.Ft int
+.Fo sysctl
+.Fa "const int *name"
+.Fa "unsigned int namelen"
+.Fa "void *oldp"
+.Fa "size_t *oldlenp"
+.Fa "const void *newp"
+.Fa "size_t newlen"
+.Fc
+.Ft int
+.Fo sysctlbyname
+.Fa "const char *name"
+.Fa "void *oldp"
+.Fa "size_t *oldlenp"
+.Fa "const void *newp"
+.Fa "size_t newlen"
+.Fc
+.Ft int
+.Fn sysctlnametomib "const char *name" "int *mibp" "size_t *sizep"
+.Sh DESCRIPTION
+The kernel keeps a tree of named, typed variables, its management
+information base.
+Every variable has a numeric name, an array of integers such as
+.Brq Dv CTL_KERN , KERN_OSTYPE ,
+and a dotted text name such as
+.Va kern.ostype .
+.Pp
+The
+.Fn sysctl
+function reads the variable named by the
+.Fa namelen
+integers at
+.Fa name ,
+of which there are at least 2 and at most
+.Dv CTL_MAXNAME .
+If
+.Fa oldp
+is not
+.Dv NULL ,
+the value is copied there and
+.Fa *oldlenp ,
+which gave the room available, is set to the number of bytes copied.
+If
+.Fa oldp
+is
+.Dv NULL
+and
+.Fa oldlenp
+is not, only the size of the value is stored at
+.Fa *oldlenp .
+If
+.Fa newp
+is not
+.Dv NULL ,
+the variable is then set to the
+.Fa newlen
+bytes there.
+.Pp
+The
+.Fn sysctlbyname
+function does the same for a variable given by its text name, and
+.Fn sysctlnametomib
+converts a text name to a numeric one, storing at most
+.Fa *sizep
+integers at
+.Fa mibp
+and their number at
+.Fa *sizep .
+.Pp
+Numbers below 256 are fixed, and the
+.Dv CTL_* ,
+.Dv KERN_* ,
+.Dv VM_*
+and
+.Dv HW_*
+constants in
+.In sys/sysctl.h
+name them; other variables are numbered when the kernel registers them, and
+programs must look them up by text name.
+.Pp
+The node numbered 0 describes the tree.
+.Brq 0 , 1 , Ar oid
+returns the text name of
+.Ar oid ;
+.Brq 0 , 2 , Ar oid
+returns the numeric name of the variable after it, in depth-first order;
+.Brq 0 , 3
+converts the text name given as new data to a numeric name;
+.Brq 0 , 4 , Ar oid
+returns its type and flags as an
+.Vt unsigned int ,
+followed by its format string; and
+.Brq 0 , 5 , Ar oid
+returns its description.
+.Sh RETURN VALUES
+.Rv -std
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Fa namelen
+is less than 2 or more than
+.Dv CTL_MAXNAME ,
+or a new value has the wrong size.
+.It Bq Er EISDIR
+The name is a node, not a variable.
+.It Bq Er ENOENT
+Nothing has that name.
+.It Bq Er ENOMEM
+The value is longer than
+.Fa *oldlenp ;
+as much as fits has been copied.
+.It Bq Er EPERM
+A new value was given by a user other than the superuser, or for a variable
+that is read-only or a tunable.
+.El
+.Sh SEE ALSO
+.Xr sysctl.conf 5 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Fn sysctl
+function first appeared in
+.Bx 4.4 .
+OxideBSD's follows the interface of
+.Fx ,
+whose numbering it uses.

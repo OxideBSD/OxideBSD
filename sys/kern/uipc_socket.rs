@@ -306,10 +306,11 @@ fn copy_addr_out(ptr: u64, len_ptr: u64, addr: &[u8]) {
 
 /// Gives the calling process a descriptor for the socket `so`, served by `proto`, with
 /// `SOCK_CLOEXEC`/`SOCK_NONBLOCK` from `flags`.
+/// Callers have made room first (`fd::check_room`), so the registration can't fail.
 fn install(so: u64, domain: i64, ty: i64, protocol: i64, proto: &'static dyn Protocol, flags: i64) -> u64 {
     let socket = Socket { domain, ty, protocol, proto, opts: Options::new(), listening: false };
     SOCKETS.lock().insert(so, socket);
-    let user_fd = fd::oxidebsd_register_fd_ops(so, so_read, so_write, so_close);
+    let user_fd = fd::oxidebsd_register_fd_ops(so, so_read, so_write, so_close) as u64;
     fd::set_kind(so, FdKind::Socket(so));
     if flags & SOCK_NONBLOCK != 0 {
         fd::set_nonblocking(so, true);
@@ -483,6 +484,9 @@ pub extern "C" fn oxidebsd_sys_socket(domain: u64, ty: u64, protocol: u64) -> i6
         Ok(p) => p,
         Err(e) => return -e,
     };
+    if let Err(e) = fd::check_room(1) {
+        return -e;
+    }
     let so = fd::oxidebsd_alloc_fd();
     if let Err(e) = proto.attach(so) {
         return -e;
@@ -536,6 +540,9 @@ fn accept(fd: u64, addr_ptr: u64, len_ptr: u64, flags: i64) -> Result<u64, i64> 
     let h = lookup(fd)?;
     let deadline = deadline_for(h.opts.rcvtimeo_ms);
     loop {
+        // Room for the new socket before taking a connection off the queue, as FreeBSD's
+        // accept(2) allocates its file first: a refusal leaves the connection queued.
+        fd::check_room(1)?;
         match h.proto.accept(h.so) {
             Ok((conn, peer)) => {
                 let (domain, ty, protocol) = identity(h.so).ok_or(EBADF as i64)?;
@@ -834,6 +841,9 @@ pub extern "C" fn oxidebsd_sys_socketpair(domain: u64, ty: u64, protocol: u64, f
     };
     if fds_ptr == 0 {
         return -(EINVAL as i64);
+    }
+    if let Err(e) = fd::check_room(2) {
+        return -e;
     }
     let (a, b) = (fd::oxidebsd_alloc_fd(), fd::oxidebsd_alloc_fd());
     for so in [a, b] {

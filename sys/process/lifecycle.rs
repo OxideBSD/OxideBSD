@@ -377,10 +377,24 @@ pub fn do_vfork_clone(new_user_rsp: u64) -> Result<u64, u64> {
     fork_impl(Some(new_user_rsp))
 }
 
+/// `kern.maxproc` (SYSCTL.md §§5-6), as FreeBSD's `fork1` applies it: processes (thread groups,
+/// zombies included) at the limit refuse everyone with `EAGAIN`, and the last ten slots are
+/// root's, so root can still log in and clean up.
+fn check_maxproc() -> Result<(), u64> {
+    let max = *crate::kern::kern_sysctl::MAXPROC.lock() as usize;
+    let nprocs = PROCESS_TABLE.lock().values().filter(|p| p.pid == p.tgid).count();
+    let root = crate::process::identity::oxidebsd_current_uid() == 0;
+    if nprocs >= max || (!root && nprocs + 10 >= max) {
+        return Err(crate::syscall::EAGAIN);
+    }
+    Ok(())
+}
+
 fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
     let caller_pid = scheduler::current_pid();
     let parent_frame = syscall::current_frame() as *const SyscallFrame;
     let phys_offset = memory::phys_mem_offset();
+    check_maxproc()?;
 
     let child_pid = alloc_pid();
     let (

@@ -358,13 +358,38 @@ pub(crate) extern "C" fn oxidebsd_alloc_fd() -> u64 {
     real_fd
 }
 
-/// Gives the calling process an fd for `real_fd` (the lowest free number) and returns it.
+/// `ENFILE` (musl's value): the system-wide open-file limit, `kern.maxfiles`, is reached.
+const ENFILE: i64 = 23;
+
+/// Whether `n` more open-file descriptions fit under `kern.maxfiles` (SYSCTL.md §§5-6), which
+/// counts descriptions, as FreeBSD's counts `struct file`s: `dup` and `fork` share one and don't
+/// count. Every creator of descriptions checks before building its own state, so a refusal leaves
+/// nothing to undo; `register` refuses too, as a backstop.
+pub(crate) fn check_room(n: usize) -> Result<(), i64> {
+    let max = *crate::kern::kern_sysctl::MAXFILES.lock() as usize;
+    if DESCRIPTIONS.lock().len() + n > max {
+        Err(ENFILE)
+    } else {
+        Ok(())
+    }
+}
+
+/// `check_room` for modules: `0`, or `-ENFILE`.
+pub(crate) extern "C" fn oxidebsd_fd_check_room(n: u64) -> i64 {
+    match check_room(n as usize) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// Gives the calling process an fd for `real_fd` (the lowest free number) and returns it, or
+/// `-ENFILE`.
 pub(crate) extern "C" fn oxidebsd_register_fd_ops(
     real_fd: u64,
     read: FdReadWrite,
     write: FdReadWrite,
     close: FdClose,
-) -> u64 {
+) -> i64 {
     register(
         scheduler::current_tgid(),
         real_fd,
@@ -385,7 +410,7 @@ pub(crate) extern "C" fn oxidebsd_register_fd_ops_with_content_id(
     write: FdReadWrite,
     close: FdClose,
     content_id: FdContentId,
-) -> u64 {
+) -> i64 {
     register(
         scheduler::current_tgid(),
         real_fd,
@@ -398,7 +423,7 @@ pub(crate) extern "C" fn oxidebsd_register_fd_ops_with_content_id(
 
 /// The non-`extern "C"` body every registration entry point (`oxidebsd_register_fd_ops`,
 /// `oxidebsd_register_fd_ops_with_content_id`) shares. Returns the
-/// new fd.
+/// new fd, or `-ENFILE` for a new description past `kern.maxfiles`.
 fn register(
     pid: u64,
     real_fd: u64,
@@ -406,7 +431,7 @@ fn register(
     write: FdReadWrite,
     close: FdClose,
     content_id: FdContentId,
-) -> u64 {
+) -> i64 {
     let ops = FdOps {
         read,
         write,
@@ -419,15 +444,23 @@ fn register(
         pwrite: no_pread_pwrite,
         kind: FdKind::Module,
     };
-    DESCRIPTIONS
-        .lock()
-        .entry(real_fd)
-        .and_modify(|d| d.ops = ops)
-        .or_insert(Description { ops, refs: 0 });
+    {
+        let mut descriptions = DESCRIPTIONS.lock();
+        match descriptions.get_mut(&real_fd) {
+            Some(d) => d.ops = ops,
+            None => {
+                let max = *crate::kern::kern_sysctl::MAXFILES.lock() as usize;
+                if descriptions.len() >= max {
+                    return -ENFILE;
+                }
+                descriptions.insert(real_fd, Description { ops, refs: 0 });
+            }
+        }
+    }
     let mut table = TABLE.lock();
     let fd = lowest_free(&table, pid, 0);
     install(&mut table, pid, fd, real_fd);
-    fd
+    fd as i64
 }
 
 /// Overrides `real_fd`'s `access_mode` callback after the fact -- same "separate post-hoc setter,

@@ -1167,6 +1167,9 @@ pub(crate) extern "C" fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -
         O_RDWR => (true, true),
         _ => (true, false),
     };
+    if let Err(e) = crate::fs::fd::check_room(1) {
+        return -e;
+    }
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     bind_with(real_fd, id, readable, writable);
     if flags & O_NONBLOCK != 0 {
@@ -1174,5 +1177,5 @@ pub(crate) extern "C" fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -
     }
     let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, fd_read, fd_write, fd_close);
     crate::fs::fd::oxidebsd_set_fd_access_mode(real_fd, fd_access_mode);
-    fd as i64
+    fd
 }

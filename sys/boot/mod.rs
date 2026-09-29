@@ -250,9 +250,10 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
     flags
 }
 
-/// Records the kernel command line's flags. Called once per boot path: `read_boot_info` (Limine)
-/// or `multiboot2::parse_mmap` (the Multiboot2 command-line tag).
-pub(crate) fn apply_cmdline(cmdline: &str) {
+/// Records the kernel command line's flags and tunables. Called once per boot path:
+/// `read_boot_info` (Limine) or `multiboot2::parse_mmap` (the Multiboot2 command-line tag); a
+/// test kernel may call it again with its own tokens before `oxidebsd::init`.
+pub fn apply_cmdline(cmdline: &str) {
     let flags = parse_cmdline(cmdline);
     ATA_DISABLED.store(flags.no_ata, Ordering::Relaxed);
     SINGLE_USER.store(flags.single_user, Ordering::Relaxed);
@@ -263,6 +264,14 @@ pub(crate) fn apply_cmdline(cmdline: &str) {
         !flags.serial_console || flags.dual_console,
         flags.serial_console || flags.dual_console,
     );
+    for token in cmdline.split_whitespace() {
+        if let Some((name, value)) = token.split_once('=')
+            && name.contains('.')
+            && name != "console.underline"
+        {
+            crate::kern::kern_sysctl::set_tunable(name, value);
+        }
+    }
 }
 
 /// Path pid 1 is started from.

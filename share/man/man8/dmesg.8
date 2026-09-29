@@ -1,0 +1,51 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt DMESG 8
+.Os OxideBSD
+.Sh NAME
+.Nm dmesg
+.Nd display the kernel message buffer
+.Sh SYNOPSIS
+.Nm
+.Op Fl ac
+.Sh DESCRIPTION
+The
+.Nm
+utility prints the kernel message buffer: every message the kernel has
+printed, oldest first, as far back as the buffer reaches.
+Its size is the
+.Va kern.msgbufsize
+tunable.
+Reading it through
+.Nm
+leaves it unchanged;
+.Xr syslogd 8
+reads the same messages once, through
+.Pa /dev/klog .
+.Pp
+A line that carries a
+.Sm off
+.Ql < Ar priority Ql >
+.Sm on
+prefix is shown only if its facility is the kernel's, and without the prefix.
+If the buffer has wrapped, its first line is incomplete and is left out.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl a
+Show the buffer exactly as stored, prefixes and all.
+.It Fl c
+Empty the buffer after printing it.
+Only the superuser may.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr sysctl 8 ,
+.Xr syslogd 8
+.Sh HISTORY
+A
+.Nm
+utility first appeared in
+.Bx 3.0 .
+This one is OxideBSD's own, written in Rust.

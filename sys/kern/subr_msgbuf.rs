@@ -144,6 +144,9 @@ const O_NONBLOCK: u64 = 0o4000;
 /// Opens `/dev/klog` (oxfs hands its device node here, having checked its permissions): the new
 /// descriptor, or `-EBUSY` if it's already open.
 pub(crate) extern "C" fn oxidebsd_klog_open(flags: u64) -> i64 {
+    if let Err(e) = crate::fs::fd::check_room(1) {
+        return -e;
+    }
     if KLOG_OPEN.swap(true, Ordering::AcqRel) {
         return -EBUSY;
     }
@@ -153,7 +156,7 @@ pub(crate) extern "C" fn oxidebsd_klog_open(flags: u64) -> i64 {
     if flags & O_NONBLOCK != 0 {
         crate::fs::fd::set_nonblocking(real_fd, true);
     }
-    fd as i64
+    fd
 }
 
 /// Reads what the buffer holds past the reader's position, advancing it; waits when there's

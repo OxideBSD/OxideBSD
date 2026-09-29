@@ -285,7 +285,7 @@ static char *msgbuf(void)
 	return b;
 }
 
-/* Makes the kernel print a line naming `n`: it logs unknown system calls. */
+/* Makes the kernel print a line naming `n`: it logs an unknown system call, the first time. */
 static void kernel_says(long n)
 {
 	syscall(n);
@@ -477,9 +477,88 @@ static void load_average(void)
 		"getloadavg(3) agrees");
 }
 
+/* Booted by tests/sysctl_tunables_smoke.rs with kern.msgbufsize=131072 kern.maxproc=40
+ * kern.maxfiles=100 kern.bogus=1 kern.maxfiles=5 (SYSCTL.md §6, §11.3). */
+static void tunables(void)
+{
+	char *m = msgbuf();
+	CHECK(strstr(m, "unknown tunable kern.bogus") != 0, "an unknown tunable is logged");
+	CHECK(strstr(m, "kern.maxfiles=5 out of range") != 0, "an out-of-range tunable is logged");
+	free(m);
+	CHECK(num("kern.maxproc") == 40 && num("kern.maxfiles") == 100, "kern.maxproc and kern.maxfiles are set");
+
+	/* The buffer really is 128 KiB: fill it well past 64 KiB (the kernel logs each unknown number
+	 * once, so these must differ). */
+	for (int i = 0; i < 4000; i++) kernel_says(20000 + i);
+	size_t len = 0;
+	sysctlbyname("kern.msgbuf", 0, &len, 0, 0);
+	printf("     kern.msgbuf holds %zu bytes\n", len);
+	CHECK(len > 120000 && len <= 131073, "kern.msgbuf holds up to kern.msgbufsize bytes");
+
+	/* kern.maxfiles: new open files fail with ENFILE; pipe needs two. */
+	int fds[200], n = 0;
+	errno = 0;
+	while (n < 200 && (fds[n] = open("/dev/null", O_RDONLY)) >= 0) n++;
+	int err = errno;
+	printf("     opened %d files before %s\n", n, strerror(err));
+	CHECK(err == ENFILE && n > 50 && n < 100, "open past kern.maxfiles is ENFILE");
+	CHECK(dup(0) >= 0, "dup still works at the limit (it shares a description)");
+	close(fds[--n]);
+	int p[2];
+	CHECK_ERR(pipe(p), ENFILE, "pipe with room for one file is ENFILE");
+	int f = open("/dev/null", O_RDONLY);
+	CHECK(f >= 0, "... and the room is still there afterwards");
+	close(f);
+	while (n > 0) close(fds[--n]);
+	CHECK(pipe(p) == 0, "files open again once others close");
+
+	/* kern.maxproc: root may use the last ten slots, nobody gets past it. */
+	pid_t kids[64];
+	int k = 0;
+	for (; k < 64; k++) {
+		kids[k] = fork();
+		if (kids[k] == 0) { pause(); _exit(0); }
+		if (kids[k] < 0) break;
+	}
+	err = errno;
+	printf("     forked %d children before %s\n", k, strerror(err));
+	CHECK(kids[k] < 0 && err == EAGAIN && k >= 30 && k < 40, "fork past kern.maxproc is EAGAIN");
+	for (int i = 0; i < k; i++) kill(kids[i], SIGKILL);
+	for (int i = 0; i < k; i++) waitpid(kids[i], 0, 0);
+	int rp[2];
+	pipe(rp);
+	pid_t pid = fork();
+	if (pid == 0) {
+		/* A group of its own, so the kill below reaches only it and its children. */
+		setpgid(0, 0);
+		if (setuid(1000) < 0) _exit(10);
+		int got = 0;
+		for (; got < 64; got++) {
+			pid_t c = fork();
+			if (c == 0) { pause(); _exit(0); }
+			if (c < 0) break;
+		}
+		int report[2] = { got, errno };
+		write(rp[1], report, sizeof report);
+		kill(0, SIGKILL);
+		_exit(0);
+	}
+	int report[2] = { -1, 0 };
+	read(rp[0], report, sizeof report);
+	waitpid(pid, 0, 0);
+	printf("     another user forked %d before %s\n", report[0], strerror(report[1]));
+	CHECK(report[1] == EAGAIN && report[0] >= 20 && report[0] < k - 5,
+		"another user is refused ten processes sooner");
+}
+
 int main(void)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
+	if (num("kern.msgbufsize") == 131072) {
+		tunables();
+		printf("sysctl-smoke: %d failure(s)\n", failures);
+		return failures;
+	}
 	variables();
 	names();
 	walk();

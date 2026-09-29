@@ -264,6 +264,7 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
     }
     let creat = flags & O_CREAT != 0;
     let excl = flags & O_EXCL != 0;
+    crate::fs::fd::check_room(1).map_err(|e| e as u64)?;
 
     let mut names = NAMES.lock();
     let mq_id = if let Some(&id) = names.get(&name) {
@@ -322,7 +323,7 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
         },
     );
     let user_fd =
-        crate::fs::fd::oxidebsd_register_fd_ops(fd, mq_read_denied, mq_write_denied, mq_close);
+        crate::fs::fd::oxidebsd_register_fd_ops(fd, mq_read_denied, mq_write_denied, mq_close) as u64;
     crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Mqueue);
     if flags & (O_NONBLOCK as u64) != 0 {
         crate::fs::fd::set_nonblocking(fd, true);

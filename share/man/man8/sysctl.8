@@ -1,0 +1,105 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SYSCTL 8
+.Os OxideBSD
+.Sh NAME
+.Nm sysctl
+.Nd get or set kernel state
+.Sh SYNOPSIS
+.Nm
+.Op Fl bdehiNnoqtx
+.Op Fl f Ar filename
+.Ar name Ns Op = Ns Ar value Ns Op , Ns Ar value
+.Ar ...
+.Nm
+.Op Fl bdehNnoqtx
+.Fl a
+.Sh DESCRIPTION
+The
+.Nm
+utility reads and sets the kernel's variables, the management information
+base described in
+.Xr sysctl 3 .
+Each variable has a dotted name, such as
+.Va kern.ostype ;
+naming a node, such as
+.Va kern ,
+shows every variable under it.
+A
+.Ar name Ns = Ns Ar value
+argument sets the variable, printing its old and new values.
+Only the superuser may set variables, and only those that are writable;
+tunables are fixed when the kernel starts and are set on the kernel command
+line instead.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl a
+Show every variable.
+.It Fl b
+Write values as raw binary, with no names.
+.It Fl d
+Show each variable's description instead of its value.
+.It Fl e
+Separate names from values with
+.Ql =
+rather than
+.Ql :\& .
+.It Fl f Ar filename
+Set the variables listed in
+.Ar filename ,
+in the format of
+.Xr sysctl.conf 5 .
+.It Fl h
+Print numbers with thousands separators.
+.It Fl i
+Ignore unknown names silently.
+.It Fl N
+Show names only.
+.It Fl n
+Show values only.
+.It Fl o
+Show opaque values of an unknown structure, in hexadecimal.
+.It Fl q
+Report nothing but errors.
+.It Fl t
+Show each variable's type instead of its value.
+.It Fl x
+Show every value except strings in hexadecimal.
+.El
+.Pp
+Structures are shown the way their fields read:
+.Va kern.boottime
+as seconds, microseconds and a date,
+.Va kern.clockrate
+as its rates,
+.Va vm.loadavg
+as the three averages, and
+.Va vm.vmtotal
+as a table of totals.
+.Sh FILES
+.Bl -tag -width /etc/sysctl.conf -compact
+.It Pa /etc/sysctl.conf
+variables set at boot
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Show the load average and the number of free pages:
+.Pp
+.Dl sysctl vm.loadavg vm.stats.vm.v_free_count
+.Pp
+Set the host name:
+.Pp
+.Dl sysctl kern.hostname=example
+.Sh SEE ALSO
+.Xr sysctl 3 ,
+.Xr sysctl.conf 5 ,
+.Xr dmesg 8
+.Sh HISTORY
+A
+.Nm
+utility first appeared in
+.Bx 4.4 .
+This one is OxideBSD's own, written in Rust after the one in
+.Fx .

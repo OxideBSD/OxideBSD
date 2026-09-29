@@ -203,10 +203,34 @@ const HW_MACHINE_ARCH: i32 = 11;
 pub(crate) const MACHINE: &str = "amd64";
 pub(crate) const MACHINE_ARCH: &str = "amd64";
 
-/// `kern.maxproc` and `kern.maxfiles`. Boot tunables (`SYSCTL.md` §6), enforced once the tunables
-/// land; nothing caps processes or open files before that.
+/// `kern.maxproc` and `kern.maxfiles`: boot tunables (`SYSCTL.md` §6). `fork` refuses past the
+/// first (`process::lifecycle::check_maxproc`), creating an open file past the second
+/// (`fs::fd::check_room`).
 pub(crate) static MAXPROC: Mutex<i32> = Mutex::new(4096);
 pub(crate) static MAXFILES: Mutex<i32> = Mutex::new(8192);
+
+/// Sets boot tunable `name` from the kernel command line's `name=value` (`SYSCTL.md` §6): before
+/// the heap exists, so no allocation. An unknown name or a value out of range is logged and
+/// ignored.
+pub(crate) fn set_tunable(name: &str, value: &str) {
+    let parsed: Option<u64> = value.parse().ok();
+    let ok = match name {
+        "kern.msgbufsize" => parsed
+            .filter(|v| (4096..=16 * 1024 * 1024).contains(v))
+            .map(|v| crate::kern::subr_msgbuf::SIZE.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
+        "kern.maxproc" => parsed.filter(|v| (32..=1_000_000).contains(v)).map(|v| *MAXPROC.lock() = v as i32),
+        "kern.maxfiles" => parsed.filter(|v| (64..=1_000_000).contains(v)).map(|v| *MAXFILES.lock() = v as i32),
+        _ => {
+            crate::serial_println!("[boot] unknown tunable {}, ignored", name);
+            return;
+        }
+    };
+    if ok.is_none() {
+        crate::serial_println!("[boot] tunable {}={} out of range, ignored", name, value);
+    } else {
+        crate::serial_println!("[boot] tunable {}={}", name, value);
+    }
+}
 
 /// The processor's brand string (`CPUID` leaves `0x8000_0002..=4`).
 fn cpu_model() -> Vec<u8> {

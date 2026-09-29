@@ -1,0 +1,26 @@
+#!/sbin/init_sh
+#
+# PROVIDE: sysctl
+# BEFORE: tmp
+#
+# Runs first: the settings in /etc/sysctl.conf may matter to everything after (SYSCTL.md §8.2).
+
+. /etc/rc.subr
+
+name="sysctl"
+desc="Set kernel variables from /etc/sysctl.conf and /etc/sysctl.conf.local"
+command="/sbin/sysctl"
+start_cmd="sysctl_start"
+stop_cmd=":"
+
+# An unknown name or a failed write is reported on the console; the rest are still applied.
+sysctl_start()
+{
+	for _f in /etc/sysctl.conf /etc/sysctl.conf.local; do
+		[ -r "$_f" ] && $command -f "$_f" > /dev/null
+	done
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"
