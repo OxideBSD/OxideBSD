@@ -7,16 +7,10 @@
 //! options we don't use, just not misreading their length as payload). See this repo's
 //! networking plan for the full list of what's deferred.
 //!
-//! `connect()`/`listen()`/`accept()` are dedicated syscalls (state transitions, not data flow);
-//! once a connection reaches `Established`, its `read`/`write` fd-ops callbacks genuinely are
-//! plain-byte-stream-shaped (an implicit peer, no address argument needed) -- the one place in
-//! this whole design where existing `SYS_READ`/`SYS_WRITE` machinery carries socket data, exactly
-//! mirroring how `fat32`/`oxfs` register file read/write today.
-//!
-//! `connect`/`accept` are non-blocking-with-self-poll, same convention `udp.rs`'s `recvfrom`
-//! already established (matches this kernel's own `sys_read`-on-stdin precedent) rather than
-//! real scheduler blocking -- a well-justified follow-up once real interactive use (a program
-//! that wants to sit in `accept()` indefinitely) actually needs it, not built speculatively now.
+//! It is the socket layer's TCP protocol (`TCP`, `crate::kern::uipc_socket`): `connect` sends a
+//! SYN and reports `EINPROGRESS`, `accept`/`recv` report `EAGAIN` when nothing is ready, and the
+//! socket layer does the waiting. A connection torn down under its socket (refused, timed out,
+//! reset) leaves the reason in `TcpState::errors` for `SO_ERROR` or the next call.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -24,7 +18,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::ipv4::{self, Ipv4Addr};
-use crate::kern::uipc_socket::{EOPNOTSUPP, Protocol, SockAddr};
+use crate::kern::uipc_socket::{EINPROGRESS, EOPNOTSUPP, Protocol, Received, SockAddr};
 use crate::syscall::{EBADF, EINVAL};
 
 pub const PROTO_TCP: u8 = 6;
@@ -41,7 +35,6 @@ const MAX_RECV_BUF: usize = 65536;
 const EPHEMERAL_PORT_START: u16 = 49152;
 const RETRANSMIT_TICKS: u64 = 100; // ~1s at 100 Hz
 const MAX_RETRANSMITS: u32 = 5;
-const CONNECT_TIMEOUT_TICKS: u64 = 500; // ~5s
 const ACCEPT_BACKLOG_MIN: usize = 1;
 const ACCEPT_BACKLOG_MAX: usize = 128;
 
@@ -51,6 +44,8 @@ const EAGAIN: i64 = 11;
 const EISCONN: i64 = 106;
 const ENOTCONN: i64 = 107;
 const ECONNREFUSED: i64 = 111;
+const ECONNRESET: i64 = 104;
+const EPIPE: i64 = 32;
 const ETIMEDOUT: i64 = 110;
 const EADDRINUSE: i64 = 98;
 const EHOSTUNREACH: i64 = 113;
@@ -82,6 +77,8 @@ struct Connection {
     unacked_segment: Option<Vec<u8>>,
     retransmit_deadline: Option<u64>,
     retransmit_count: u32,
+    /// `shutdown(SHUT_RD)`: receives report end-of-file.
+    rd_shut: bool,
 }
 
 struct Listener {
@@ -112,6 +109,9 @@ struct TcpState {
     /// (local port, remote ip, remote port) -> that connection's `real_fd`, for demuxing every
     /// other inbound segment.
     connections: BTreeMap<(u16, Ipv4Addr, u16), u64>,
+    /// Why a connection was torn down under its socket (a refused or timed-out connect, a reset):
+    /// reported once, by `SO_ERROR` or the next call on the socket.
+    errors: BTreeMap<u64, i64>,
     next_ephemeral: u16,
 }
 
@@ -121,6 +121,7 @@ impl TcpState {
             sockets: BTreeMap::new(),
             listeners: BTreeMap::new(),
             connections: BTreeMap::new(),
+            errors: BTreeMap::new(),
             next_ephemeral: EPHEMERAL_PORT_START,
         }
     }
@@ -389,6 +390,7 @@ fn retransmit_or_give_up(real_fd: u64) {
         None => {
             let mut state = STATE.lock();
             teardown(&mut state, real_fd);
+            state.errors.insert(real_fd, ETIMEDOUT);
         }
         Some((Some(segment), remote_ip)) => {
             let _ = ipv4::send_packet(remote_ip, PROTO_TCP, &segment);
@@ -486,6 +488,7 @@ fn handle_new_syn(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16, their_
         unacked_segment: None,
         retransmit_deadline: None,
         retransmit_count: 0,
+        rd_shut: false,
     };
     {
         let mut state = STATE.lock();
@@ -506,7 +509,12 @@ fn handle_new_syn(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16, their_
 fn handle_for_connection(real_fd: u64, seq: u32, ack: u32, flags: u8, data: &[u8]) {
     if flags & FLAG_RST != 0 {
         let mut state = STATE.lock();
+        let refused = matches!(
+            state.sockets.get(&real_fd),
+            Some(TcpSocket::Connection(Connection { state: ConnState::SynSent, .. }))
+        );
         teardown(&mut state, real_fd);
+        state.errors.insert(real_fd, if refused { ECONNREFUSED } else { ECONNRESET });
         return;
     }
 
@@ -670,7 +678,8 @@ pub fn debug_send_next(real_fd: u64) -> Option<u32> {
 /// `poll`/`select` readiness, Linux-shaped.
 fn readiness_of(so: u64) -> crate::fs::Readiness {
     let mut r = crate::fs::Readiness::default();
-    match STATE.lock().sockets.get(&so) {
+    let state = STATE.lock();
+    match state.sockets.get(&so) {
         Some(TcpSocket::Connection(conn)) => {
             let peer_finished =
                 matches!(conn.state, ConnState::CloseWait | ConnState::LastAck | ConnState::Closed);
@@ -682,7 +691,13 @@ fn readiness_of(so: u64) -> crate::fs::Readiness {
         }
         Some(TcpSocket::Listener(l)) => r.readable = !l.pending.is_empty(),
         // Linux reports an unconnected TCP socket as hung up.
-        Some(TcpSocket::Unbound { .. }) | None => r.hangup = true,
+        Some(TcpSocket::Unbound { .. }) => r.hangup = true,
+        // Torn down: the next call reports why.
+        None => {
+            r.hangup = true;
+            r.readable = true;
+            r.error = state.errors.contains_key(&so);
+        }
     }
     r
 }
@@ -698,7 +713,9 @@ impl Protocol for Tcp {
     }
 
     fn detach(&self, so: u64) {
+        super::forget_options(so);
         let mut state = STATE.lock();
+        state.errors.remove(&so);
         let conn_state = match state.sockets.get(&so) {
             Some(TcpSocket::Connection(conn)) => Some(conn.state),
             _ => None,
@@ -765,6 +782,7 @@ impl Protocol for Tcp {
             unacked_segment: None,
             retransmit_deadline: None,
             retransmit_count: 0,
+            rd_shut: false,
         };
         {
             let mut state = STATE.lock();
@@ -779,43 +797,22 @@ impl Protocol for Tcp {
             teardown(&mut state, real_fd);
             return Err(EHOSTUNREACH);
         }
+        // The socket layer waits (`connect_result`); a lost SYN is retransmitted and, after
+        // `MAX_RETRANSMITS`, the attempt ends with `ETIMEDOUT` (`retransmit_or_give_up`).
+        Err(EINPROGRESS)
+    }
 
-        // `crate::tsc`, not `crate::cpu::interrupts::ticks()`: `ticks()` is driven entirely by the timer
-        // IRQ, which can't fire while this syscall has interrupts masked (`sys/syscall.rs`'s SFMASK
-        // setup) -- a tick-based deadline here would be frozen at whatever value it had when the
-        // syscall began and could never actually elapse, turning "give up after N ticks" into "never
-        // gives up" for a peer that never completes the handshake. Confirmed live by the identical
-        // bug in `net::oxidebsd_sys_poll` (see `crate::tsc`'s own doc comment) -- fixed here for the
-        // same reason. `CONNECT_TIMEOUT_TICKS` is still the budget, just converted to `tsc` cycles.
-        let deadline =
-            crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(CONNECT_TIMEOUT_TICKS * 10);
-        loop {
-            crate::net::poll();
-            let outcome = {
-                let state = STATE.lock();
-                match state.sockets.get(&real_fd) {
-                    Some(TcpSocket::Connection(conn)) => match conn.state {
-                        ConnState::Established => Some(Ok(())),
-                        ConnState::Closed => Some(Err(ECONNREFUSED)),
-                        _ => None,
-                    },
-                    _ => Some(Err(ECONNREFUSED)),
-                }
-            };
-            if let Some(result) = outcome {
-                return result;
-            }
-            if crate::cpu::tsc::now() >= deadline {
-                let mut state = STATE.lock();
-                teardown(&mut state, real_fd);
-                return Err(ETIMEDOUT);
-            }
-            // `hint::spin_loop()`, not `hlt()` -- this is a real syscall handler (`connect()`), and
-            // interrupts stay masked for a syscall's entire duration (`sys/syscall.rs`'s SFMASK
-            // setup), not just its entry. `hlt()` here would freeze the CPU permanently the moment
-            // the handshake hadn't already completed before this loop started, since nothing can
-            // wake it. See `ipv4::resolve_with_retry`'s own doc comment for the fuller explanation.
-            core::hint::spin_loop();
+    fn connect_result(&self, so: u64) -> Option<Result<(), i64>> {
+        crate::net::poll();
+        let mut state = STATE.lock();
+        match state.sockets.get(&so) {
+            Some(TcpSocket::Connection(conn)) => match conn.state {
+                ConnState::SynSent => None,
+                ConnState::Closed => Some(Err(ECONNREFUSED)),
+                _ => Some(Ok(())),
+            },
+            Some(_) => Some(Err(ECONNREFUSED)),
+            None => Some(Err(state.errors.remove(&so).unwrap_or(ECONNREFUSED))),
         }
     }
 
@@ -858,14 +855,19 @@ impl Protocol for Tcp {
         }
     }
 
-    fn send(&self, so: u64, data: &[u8], _to: Option<&[u8]>) -> Result<usize, i64> {
+    fn send(&self, so: u64, data: &[u8], _to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
         {
             let mut state = STATE.lock();
-            let Some(TcpSocket::Connection(conn)) = state.sockets.get_mut(&so) else {
-                return Err(ENOTCONN);
+            let conn = match state.sockets.get_mut(&so) {
+                Some(TcpSocket::Connection(conn)) => conn,
+                Some(_) => return Err(ENOTCONN),
+                None => return Err(state.errors.remove(&so).unwrap_or(EPIPE)),
             };
-            if !matches!(conn.state, ConnState::Established | ConnState::CloseWait) {
-                return Err(ENOTCONN);
+            match conn.state {
+                ConnState::Established | ConnState::CloseWait => {}
+                ConnState::SynSent | ConnState::SynReceived => return Err(ENOTCONN),
+                // Our side has sent its FIN (`close` or `shutdown(SHUT_WR)`).
+                _ => return Err(EPIPE),
             }
             conn.send_buf.extend(data);
         }
@@ -873,61 +875,77 @@ impl Protocol for Tcp {
         Ok(data.len())
     }
 
-    /// Genuinely blocks (unless `O_NONBLOCK` is set -- `crate::fs::fd::is_nonblocking`, `syscall::
-    /// sys_fcntl`) while the connection is still open and simply has nothing buffered *yet* -- only
-    /// returns `0` (real EOF) once the peer has actually signaled closure (`CloseWait`/`FinWait2`/
-    /// `Closed`, reached via a real FIN, not just an empty buffer). Previously returned `0` the
-    /// instant `recv_buf` was momentarily empty regardless of connection state -- indistinguishable
-    /// from real EOF to a caller, which is exactly what killed BusyBox's own TLS handshake read
-    /// (`tls_xread_record` in `networking/tls.c`, which correctly-by-its-own-logic treated that early
-    /// `0` as "abrupt EOF, no TLS shutdown" and gave up, even though the real server's ServerHello
-    /// just hadn't arrived yet) -- see CLAUDE.md's own "Real networking" known-gaps entry for the full
-    /// trace that found this. Plain HTTP happened not to trigger it in practice (by the time `wget`'s
-    /// own body-reading loop gets there, there's usually already been enough round-trip latency for
-    /// data to be sitting in the buffer), but it was always a real, latent race.
-    ///
-    /// **Spins (`core::hint::spin_loop()`), does *not* use `process::BlockReason`/
-    /// `scheduler::schedule()` the way `crate::pipe`'s own blocking reads do** -- a deliberate,
-    /// load-bearing difference, not an oversight: incoming-packet processing on this kernel is
-    /// pull-based, driven entirely by whichever process happens to call `crate::net::poll()` (the rtl8139
-    /// IRQ handler itself does no heap allocation and touches no protocol state, just sets a flag --
-    /// see `sys/drivers/rtl8139.rs`'s own doc comment). If this yielded to the scheduler the way a pipe
-    /// read does, nothing would ever call `poll()` again on this connection's behalf once the only
-    /// process that cares about it (the one blocked right here) stops running -- a real hang, worse
-    /// than the false-EOF bug this replaces. Same reasoning already established for `oxidebsd_sys_
-    /// connect`'s own handshake wait and `ipv4::resolve_with_retry`'s ARP wait (see CLAUDE.md's own
-    /// "Real networking" section on the `hlt()`-in-syscall freeze those two were fixed for) -- ordinary
-    /// interrupts (timer, keyboard) still fire throughout, only a voluntary yield to another
-    /// *schedulable* process doesn't happen. No timeout: unlike connection *establishment* (which
-    /// reasonably needs an upper bound before giving up), blocking indefinitely for more data on an
-    /// already-open connection is correct, ordinary blocking-`read()` behavior -- the same accepted
-    /// "spins for the syscall's whole duration against a genuinely unresponsive peer" tradeoff
-    /// CLAUDE.md's own `hlt()` fix already documents for this same class of wait.
-    fn recv(&self, so: u64, buf: &mut [u8]) -> Result<(usize, Option<SockAddr>), i64> {
-        loop {
-            crate::net::poll();
-            {
-                let mut state = STATE.lock();
-                let Some(TcpSocket::Connection(conn)) = state.sockets.get_mut(&so) else {
-                    return Err(ENOTCONN);
-                };
-                let n = conn.recv_buf.len().min(buf.len());
-                if n > 0 {
-                    for (dst, src) in buf.iter_mut().zip(conn.recv_buf.drain(..n)) {
-                        *dst = src;
-                    }
-                    return Ok((n, None));
-                } else if matches!(
-                    conn.state,
-                    ConnState::CloseWait | ConnState::FinWait2 | ConnState::Closed
-                ) {
-                    return Ok((0, None)); // real EOF: the peer has actually signaled closure
-                } else if crate::fs::fd::is_nonblocking(so) {
-                    return Err(EAGAIN);
-                }
-            }
-            core::hint::spin_loop();
+    /// End-of-file (`n == 0`) only once the peer has really closed (a FIN), `EAGAIN` while the
+    /// connection is open and nothing has arrived: an early 0 used to read as EOF and end
+    /// BusyBox's TLS handshake before the server's reply came (`networking/tls.c`). The socket
+    /// layer waits, blocking between polls of the interface (`net::wait_for_change`).
+    fn recv(&self, so: u64, buf: &mut [u8], peek: bool) -> Result<Received, i64> {
+        crate::net::poll();
+        let mut state = STATE.lock();
+        let conn = match state.sockets.get_mut(&so) {
+            Some(TcpSocket::Connection(conn)) => conn,
+            Some(_) => return Err(ENOTCONN),
+            None => return state.errors.remove(&so).map_or(Ok(Received::bytes(0)), Err),
+        };
+        if conn.rd_shut {
+            return Ok(Received::bytes(0));
         }
+        let n = conn.recv_buf.len().min(buf.len());
+        if n > 0 {
+            for (dst, src) in buf.iter_mut().zip(conn.recv_buf.iter()) {
+                *dst = *src;
+            }
+            if !peek {
+                conn.recv_buf.drain(..n);
+            }
+            return Ok(Received::bytes(n));
+        }
+        if matches!(conn.state, ConnState::CloseWait | ConnState::FinWait2 | ConnState::Closed) {
+            return Ok(Received::bytes(0)); // real EOF: the peer has actually signaled closure
+        }
+        Err(EAGAIN)
+    }
+
+    fn shutdown(&self, so: u64, how: i64) -> Result<(), i64> {
+        let conn_state = {
+            let mut state = STATE.lock();
+            let Some(TcpSocket::Connection(conn)) = state.sockets.get_mut(&so) else {
+                return Err(ENOTCONN);
+            };
+            if how != 1 {
+                conn.rd_shut = true; // SHUT_RD or SHUT_RDWR
+            }
+            conn.state
+        };
+        if how != 0 {
+            match conn_state {
+                ConnState::Established => send_fin_and_transition(so, ConnState::FinWait1),
+                ConnState::CloseWait => send_fin_and_transition(so, ConnState::LastAck),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn peername(&self, so: u64) -> Result<SockAddr, i64> {
+        match STATE.lock().sockets.get(&so) {
+            Some(TcpSocket::Connection(conn)) if conn.state != ConnState::SynSent => {
+                Ok(super::sockaddr_in(conn.remote_ip, conn.remote_port))
+            }
+            _ => Err(ENOTCONN),
+        }
+    }
+
+    fn setopt(&self, so: u64, level: i64, name: i64, val: &[u8]) -> Result<(), i64> {
+        super::set_option(so, level, name, val, true)
+    }
+
+    fn getopt(&self, so: u64, level: i64, name: i64) -> Result<Vec<u8>, i64> {
+        super::get_option(so, level, name, true)
+    }
+
+    fn take_error(&self, so: u64) -> i64 {
+        STATE.lock().errors.remove(&so).unwrap_or(0)
     }
 
     /// Real `getsockname(2)` semantics -- succeeds even on a never-`bind`-ed socket, reporting
@@ -952,10 +970,6 @@ impl Protocol for Tcp {
 
     fn readiness(&self, so: u64) -> crate::fs::Readiness {
         readiness_of(so)
-    }
-
-    fn addr_len(&self) -> usize {
-        super::SOCKADDR_IN_LEN
     }
 
     fn pulled(&self) -> bool {

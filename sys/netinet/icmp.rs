@@ -20,8 +20,8 @@ use spin::Mutex;
 
 use super::ipv4::{self, Ipv4Addr};
 use crate::fs::Readiness;
-use crate::kern::uipc_socket::{Protocol, SockAddr};
-use crate::syscall::{EBADF, EINVAL};
+use crate::kern::uipc_socket::{Protocol, Received, SockAddr};
+use crate::syscall::{EAGAIN, EBADF, EINVAL};
 
 const TYPE_ECHO_REPLY: u8 = 0;
 const TYPE_ECHO_REQUEST: u8 = 8;
@@ -101,6 +101,7 @@ impl Protocol for RawIcmp {
 
     fn detach(&self, so: u64) {
         RAW_SOCKETS.lock().remove(&so);
+        super::forget_options(so);
     }
 
     /// A raw socket has no port: the address is checked and otherwise ignored (real `ping`
@@ -111,7 +112,7 @@ impl Protocol for RawIcmp {
 
     /// Sends `data` (a complete ICMP message, header and checksum built by the caller, as
     /// `ping.c` does) in an IPv4 envelope.
-    fn send(&self, _so: u64, data: &[u8], to: Option<&[u8]>) -> Result<usize, i64> {
+    fn send(&self, _so: u64, data: &[u8], to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
         let (dest_ip, _) = to.and_then(super::parse_sockaddr_in).ok_or(EDESTADDRREQ)?;
         match ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, data) {
             Some(()) => Ok(data.len()),
@@ -119,20 +120,32 @@ impl Protocol for RawIcmp {
         }
     }
 
-    /// Pops the oldest queued packet, IP header included (see this module's doc comment).
-    /// Never blocks, like `udp::Udp::recv`.
-    fn recv(&self, so: u64, buf: &mut [u8]) -> Result<(usize, Option<SockAddr>), i64> {
+    /// The oldest queued packet, IP header included (see this module's doc comment); `EAGAIN`
+    /// with none.
+    fn recv(&self, so: u64, buf: &mut [u8], peek: bool) -> Result<Received, i64> {
         crate::net::poll();
         let mut sockets = RAW_SOCKETS.lock();
         let socket = sockets.get_mut(&so).ok_or(EBADF as i64)?;
-        let Some((src_ip, data)) = socket.recv_queue.pop_front() else {
-            return Ok((0, None));
+        let Some((src_ip, data)) = socket.recv_queue.front() else {
+            return Err(EAGAIN as i64);
         };
-        drop(sockets);
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
         // ICMP has no port.
-        Ok((n, Some(super::sockaddr_in(src_ip, 0))))
+        let received =
+            Received { n, full: data.len(), from: Some(super::sockaddr_in(*src_ip, 0)), eor: false };
+        if !peek {
+            socket.recv_queue.pop_front();
+        }
+        Ok(received)
+    }
+
+    fn setopt(&self, so: u64, level: i64, name: i64, val: &[u8]) -> Result<(), i64> {
+        super::set_option(so, level, name, val, false)
+    }
+
+    fn getopt(&self, so: u64, level: i64, name: i64) -> Result<Vec<u8>, i64> {
+        super::get_option(so, level, name, false)
     }
 
     fn sockname(&self, _so: u64) -> Result<SockAddr, i64> {
@@ -142,10 +155,6 @@ impl Protocol for RawIcmp {
     fn readiness(&self, so: u64) -> Readiness {
         let readable = RAW_SOCKETS.lock().get(&so).is_some_and(|s| !s.recv_queue.is_empty());
         Readiness { readable, writable: true, ..Default::default() }
-    }
-
-    fn addr_len(&self) -> usize {
-        super::SOCKADDR_IN_LEN
     }
 
     fn pulled(&self) -> bool {

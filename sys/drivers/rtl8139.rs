@@ -77,8 +77,8 @@ pub fn irq_fired() -> bool {
 }
 
 /// Registered via `interrupts::register_irq_handler`. Deliberately does no heap allocation and
-/// doesn't lock `nic::NIC` -- just acks the hardware cause and sets a flag; the real ring-reading
-/// work happens later, out of interrupt context, in `Rtl8139::poll_recv`.
+/// doesn't lock `nic::NIC` -- just acks the hardware cause, sets a flag and wakes socket waiters;
+/// the real ring-reading work happens later, out of interrupt context, in `Rtl8139::poll_recv`.
 fn rtl8139_irq_handler() {
     let io_base = IO_BASE.load(Ordering::Relaxed);
     if io_base == 0 {
@@ -98,6 +98,11 @@ fn rtl8139_irq_handler() {
     // heap allocation, matching this handler's own existing constraint.
     crate::random::mix_entropy(isr as u64);
     RX_IRQ_FIRED.store(true, Ordering::Relaxed);
+    // Whoever waits on a socket drives the receive path; wake them. A contended table lock
+    // (interrupt context can't wait for it) only delays that to their periodic wakeup.
+    if let Some(mut table) = crate::process::table().try_lock() {
+        crate::process::wake_pollers(&mut table);
+    }
 }
 
 pub struct Rtl8139 {
@@ -202,6 +207,15 @@ fn probe_and_init(
     for slot in tx_slots.iter_mut() {
         let phys = frame_allocator.allocate_frame()?.start_address();
         *slot = (phys_mem_offset + phys.as_u64(), phys);
+    }
+    // The card's buffer addresses are 32 bits (RBSTART, TSAD). Memory above 4 GiB would be
+    // truncated into some other physical page and DMA'd over it -- found through a test that
+    // brought the card up after oxfs had allocated its ~1.25 GiB pools: it simply never received
+    // anything. Refuse instead; `init` must run before large allocations (it does, at boot).
+    let rx_end = rx_ring_phys.as_u64() + RX_RING_FRAMES as u64 * 4096;
+    if rx_end > 1 << 32 || tx_slots.iter().any(|(_, phys)| phys.as_u64() + 4096 > 1 << 32) {
+        serial_println!("[net] rtl8139: buffers above 4 GiB, beyond the card's DMA reach -- giving up");
+        return None;
     }
 
     unsafe {

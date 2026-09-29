@@ -511,6 +511,10 @@ name = "socket"
 version = "0.1.0"
 
 [[package]]
+name = "socket-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "socketpair-syscall-smoke"
 version = "0.1.0"
 

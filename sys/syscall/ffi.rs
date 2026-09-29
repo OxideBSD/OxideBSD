@@ -31,14 +31,16 @@ pub(crate) fn sys_read(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
 /// if `fd` isn't registered at all.
 ///
 /// A write that fails `EPIPE` (a pipe, FIFO, socketpair or TCP connection with no reader left)
-/// also raises `SIGPIPE` at the caller, as POSIX requires; `EPIPE` is still returned for a caller
+/// also raises `SIGPIPE` at the caller, as POSIX requires (not on a socket with `SO_NOSIGPIPE`); `EPIPE` is still returned for a caller
 /// that ignores, blocks or catches it. Skipped for pid 0 (kernel context), where `kill`'s target
 /// `0` would mean a process group.
 pub(crate) fn sys_write(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
     match crate::fs::fd::write(fd, ptr, len) {
         Some(raw) if raw == -(EPIPE as i64) => {
             let pid = crate::process::scheduler::current_pid();
-            if pid != 0 {
+            let quiet = crate::fs::fd::real_fd_of(fd)
+                .is_some_and(crate::kern::uipc_socket::suppresses_sigpipe);
+            if pid != 0 && !quiet {
                 let _ = crate::process::signals::do_kill(pid, pid as i64, SIGPIPE as i64);
             }
             Err(EPIPE)

@@ -31,7 +31,7 @@ pub const DNS_SERVER_IP: Ipv4Addr = [10, 0, 2, 3];
 pub const PROTO_ICMP: u8 = 1;
 
 const VERSION_IHL: u8 = 0x45; // version 4, IHL 5 (20-byte header, no options)
-const DEFAULT_TTL: u8 = 64;
+pub(crate) const DEFAULT_TTL: u8 = 64;
 /// `pub(super)`, not private -- `icmp::handle_packet` needs it to strip the IP header back off the
 /// full packet it's handed for raw-socket delivery (see `icmp.rs`'s own doc comment on why a raw
 /// `SOCK_RAW`/`IPPROTO_ICMP` socket needs the IP header included, unlike UDP/TCP's payload-only

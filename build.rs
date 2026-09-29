@@ -291,6 +291,7 @@ fn main() {
     build_userland_crate("clone-syscall-smoke", "CLONE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("socket-syscall-smoke", "SOCKET_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
@@ -451,6 +452,7 @@ fn main() {
     // doc comment.
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
+    let socket_smoke_elf_path = build_socket_smoke(&musl_sysroot);
     let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
     let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
     let tty_smoke_elf_path = build_tty_smoke(&musl_sysroot);
@@ -648,6 +650,7 @@ fn main() {
             pthread_smoke_elf_path.to_str().unwrap(),
         ),
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_SOCKET_SMOKE_ELF_PATH", socket_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
         ("OXFS_TTY_SMOKE_ELF_PATH", tty_smoke_elf_path.to_str().unwrap()),
@@ -1274,6 +1277,25 @@ fn build_std_oxidebsd_userland_crate_with_env(
     let rust_sysroot = build_oxidebsd_rust_sysroot();
     let wrapper = write_oxidebsd_rustc_wrapper(&rust_sysroot);
 
+    // The program links musl's libc.a, but only through the `-C linker=` flag below, which cargo
+    // doesn't track: after a musl change it would keep the executable linked against the old
+    // libc (after the socket-ABI change, calling retired syscalls). For an executable older than
+    // libc.a, the crate's own fingerprints (`build/<crate>/<hash>/fingerprint`) are removed, so
+    // cargo compiles and links just that crate again. Removing the executable alone isn't enough:
+    // it's a hard link to `build/<crate>/<hash>/out/<crate>`, which cargo re-links when fresh.
+    let release_dir = target_dir.join("x86_64-unknown-oxidebsd/release");
+    let elf_path = release_dir.join(crate_name);
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let (Some(exe), Some(libc)) = (mtime(&elf_path), mtime(&musl_sysroot.join("lib/libc.a")))
+        && exe < libc
+    {
+        let _ = std::fs::remove_file(&elf_path);
+        let units = std::fs::read_dir(release_dir.join("build").join(crate_name));
+        for unit in units.into_iter().flatten().flatten() {
+            let _ = std::fs::remove_dir_all(unit.path().join("fingerprint"));
+        }
+    }
+
     let cargo = cargo_bin();
     let status = Command::new(&cargo)
         .current_dir(manifest_dir)
@@ -1316,9 +1338,6 @@ fn build_std_oxidebsd_userland_crate_with_env(
         panic!("building the {crate_name} oxidebsd-target binary failed: {status}");
     }
 
-    let elf_path = target_dir
-        .join("x86_64-unknown-oxidebsd/release")
-        .join(crate_name);
     assert!(
         elf_path.exists(),
         "{crate_name} (oxidebsd target) build reported success but {} doesn't exist",
@@ -1599,6 +1618,29 @@ fn build_at_smoke(sysroot: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for at-smoke: {e}"));
     if !status.success() {
         panic!("building at-smoke failed: {status}");
+    }
+    out
+}
+
+/// The socket layer through musl's API -- see `regress/socket-smoke/main.c`. Same recipe as
+/// `build_at_smoke`, at `0x8340000`.
+fn build_socket_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/socket-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/socket-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/socket-smoke");
+    let out = target_dir.join("socket-smoke");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8340000", "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for socket-smoke: {e}"));
+    if !status.success() {
+        panic!("building socket-smoke failed: {status}");
     }
     out
 }
@@ -4816,6 +4858,21 @@ fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)
     for (key, value) in extra_env {
         command.env(key, value);
     }
+    // A module embeds files by path (`include_bytes!(env!(...))`), and the nested cargo didn't
+    // reliably rebuild it when one of those files changed but its path didn't: oxfs kept serving
+    // a `std` program linked against the previous musl. A stamp over the embedded files' mtimes,
+    // read by the module with `env!` (which rustc tracks), makes any such change a rebuild.
+    let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
+    for (_, value) in extra_env {
+        if let Ok(modified) = std::fs::metadata(value).and_then(|m| m.modified())
+            && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            for byte in value.bytes().chain(since.as_nanos().to_le_bytes()) {
+                stamp = (stamp ^ byte as u64).wrapping_mul(0x100_0000_01b3); // FNV-1a
+            }
+        }
+    }
+    command.env("OXIDEBSD_EMBED_STAMP", format!("{stamp:016x}"));
     let output = command
         .output()
         .unwrap_or_else(|e| panic!("failed to run cargo rustc for module {crate_name}: {e}"));

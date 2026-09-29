@@ -10,14 +10,15 @@ use spin::Mutex;
 
 use super::ipv4::{self, Ipv4Addr};
 use crate::fs::Readiness;
-use crate::kern::uipc_socket::{Protocol, SockAddr};
-use crate::syscall::{EBADF, EINVAL};
+use crate::kern::uipc_socket::{ENOTCONN, Protocol, Received, SockAddr, is_unspec};
+use crate::syscall::{EAGAIN, EBADF, EINVAL, EMSGSIZE};
 
 pub const PROTO_UDP: u8 = 17;
 
 /// errno values are musl's (`bits/errno.h`): they become userland's `errno` unchanged.
 const EDESTADDRREQ: i64 = 89;
 const EADDRINUSE: i64 = 98;
+const EISCONN: i64 = 106;
 const EHOSTUNREACH: i64 = 113;
 
 const HEADER_LEN: usize = 8;
@@ -30,6 +31,9 @@ const MAX_QUEUED_DATAGRAMS: usize = 32;
 
 struct UdpSocket {
     local_port: Option<u16>,
+    /// The default destination set by `connect(2)`; while set, only its datagrams are received,
+    /// as in the BSDs.
+    peer: Option<(Ipv4Addr, u16)>,
     recv_queue: VecDeque<(Ipv4Addr, u16, Vec<u8>)>,
 }
 
@@ -37,6 +41,7 @@ impl UdpSocket {
     const fn new() -> Self {
         UdpSocket {
             local_port: None,
+            peer: None,
             recv_queue: VecDeque::new(),
         }
     }
@@ -114,6 +119,9 @@ pub fn handle_packet(payload: &[u8], src_ip: Ipv4Addr) {
     let Some(socket) = state.sockets.get_mut(&real_fd) else {
         return;
     };
+    if socket.peer.is_some_and(|peer| peer != (src_ip, src_port)) {
+        return;
+    }
     if socket.recv_queue.len() >= MAX_QUEUED_DATAGRAMS {
         socket.recv_queue.pop_front(); // drop oldest -- simple backpressure, no flow control
     }
@@ -139,11 +147,15 @@ impl Protocol for Udp {
         {
             state.ports.remove(&port);
         }
+        super::forget_options(so);
     }
 
     fn bind(&self, so: u64, addr: &[u8]) -> Result<(), i64> {
         let (_local_addr, port) = super::parse_sockaddr_in(addr).ok_or(EINVAL as i64)?;
         let mut state = STATE.lock();
+        if state.sockets.get(&so).ok_or(EBADF as i64)?.local_port.is_some() {
+            return Err(EINVAL as i64);
+        }
         let port = if port == 0 {
             state.alloc_ephemeral_port().ok_or(EADDRINUSE)?
         } else if state.ports.contains_key(&port) {
@@ -156,9 +168,32 @@ impl Protocol for Udp {
         Ok(())
     }
 
-    fn send(&self, so: u64, data: &[u8], to: Option<&[u8]>) -> Result<usize, i64> {
-        // No connect() for UDP yet, so every datagram needs its destination.
-        let (dest_ip, dest_port) = to.and_then(super::parse_sockaddr_in).ok_or(EDESTADDRREQ)?;
+    /// Sets (or, with `AF_UNSPEC`, clears) the default destination, binding first if needed.
+    fn connect(&self, so: u64, addr: &[u8]) -> Result<(), i64> {
+        let mut state = STATE.lock();
+        if is_unspec(addr) {
+            state.sockets.get_mut(&so).ok_or(EBADF as i64)?.peer = None;
+            return Ok(());
+        }
+        let peer = super::parse_sockaddr_in(addr).ok_or(EINVAL as i64)?;
+        state.ensure_bound(so).ok_or(EADDRINUSE)?;
+        let socket = state.sockets.get_mut(&so).ok_or(EBADF as i64)?;
+        socket.peer = Some(peer);
+        // Datagrams already queued from anyone else are no longer this socket's to receive.
+        socket.recv_queue.retain(|&(ip, port, _)| (ip, port) == peer);
+        Ok(())
+    }
+
+    fn send(&self, so: u64, data: &[u8], to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
+        let peer = STATE.lock().sockets.get(&so).ok_or(EBADF as i64)?.peer;
+        let (dest_ip, dest_port) = match to {
+            Some(_) if peer.is_some() => return Err(EISCONN),
+            Some(to) => super::parse_sockaddr_in(to).ok_or(EINVAL as i64)?,
+            None => peer.ok_or(EDESTADDRREQ)?,
+        };
+        if HEADER_LEN + data.len() > u16::MAX as usize {
+            return Err(EMSGSIZE as i64);
+        }
         let local_port = STATE.lock().ensure_bound(so).ok_or(EADDRINUSE)?;
 
         let mut packet = Vec::with_capacity(HEADER_LEN + data.len());
@@ -174,19 +209,27 @@ impl Protocol for Udp {
         }
     }
 
-    /// Never blocks: with nothing queued it returns 0 bytes and no address. Drives the network
-    /// interface first, since nothing else will (`crate::net::poll`).
-    fn recv(&self, so: u64, buf: &mut [u8]) -> Result<(usize, Option<SockAddr>), i64> {
+    /// `EAGAIN` with nothing queued. Drives the network interface first, since nothing else
+    /// will (`crate::net::poll`).
+    fn recv(&self, so: u64, buf: &mut [u8], peek: bool) -> Result<Received, i64> {
         crate::net::poll();
         let mut state = STATE.lock();
         let socket = state.sockets.get_mut(&so).ok_or(EBADF as i64)?;
-        let Some((src_ip, src_port, data)) = socket.recv_queue.pop_front() else {
-            return Ok((0, None));
+        let Some((src_ip, src_port, data)) = socket.recv_queue.front() else {
+            return Err(EAGAIN as i64);
         };
-        drop(state);
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
-        Ok((n, Some(super::sockaddr_in(src_ip, src_port))))
+        let received = Received {
+            n,
+            full: data.len(),
+            from: Some(super::sockaddr_in(*src_ip, *src_port)),
+            eor: false,
+        };
+        if !peek {
+            socket.recv_queue.pop_front();
+        }
+        Ok(received)
     }
 
     fn sockname(&self, so: u64) -> Result<SockAddr, i64> {
@@ -194,13 +237,22 @@ impl Protocol for Udp {
         Ok(super::sockaddr_in(ipv4::GUEST_IP, port.unwrap_or(0)))
     }
 
+    fn peername(&self, so: u64) -> Result<SockAddr, i64> {
+        let peer = STATE.lock().sockets.get(&so).ok_or(EBADF as i64)?.peer;
+        peer.map(|(ip, port)| super::sockaddr_in(ip, port)).ok_or(ENOTCONN)
+    }
+
+    fn setopt(&self, so: u64, level: i64, name: i64, val: &[u8]) -> Result<(), i64> {
+        super::set_option(so, level, name, val, false)
+    }
+
+    fn getopt(&self, so: u64, level: i64, name: i64) -> Result<Vec<u8>, i64> {
+        super::get_option(so, level, name, false)
+    }
+
     fn readiness(&self, so: u64) -> Readiness {
         let readable = STATE.lock().sockets.get(&so).is_some_and(|s| !s.recv_queue.is_empty());
         Readiness { readable, writable: true, ..Default::default() }
-    }
-
-    fn addr_len(&self) -> usize {
-        super::SOCKADDR_IN_LEN
     }
 
     fn pulled(&self) -> bool {

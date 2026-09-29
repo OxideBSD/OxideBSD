@@ -950,8 +950,15 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_fd_at" => Some(crate::fs::fd::oxidebsd_fd_at as *const () as u64),
         "oxidebsd_sys_socket" => Some(crate::kern::uipc_socket::oxidebsd_sys_socket as *const () as u64),
         "oxidebsd_sys_bind" => Some(crate::kern::uipc_socket::oxidebsd_sys_bind as *const () as u64),
-        "oxidebsd_sys_sendto" => Some(crate::kern::uipc_socket::oxidebsd_sys_sendto as *const () as u64),
-        "oxidebsd_sys_recvfrom" => Some(crate::kern::uipc_socket::oxidebsd_sys_recvfrom as *const () as u64),
+        "oxidebsd_sys_sendmsg" => Some(crate::kern::uipc_socket::oxidebsd_sys_sendmsg as *const () as u64),
+        "oxidebsd_sys_recvmsg" => Some(crate::kern::uipc_socket::oxidebsd_sys_recvmsg as *const () as u64),
+        "oxidebsd_sys_getsockopt" => {
+            Some(crate::kern::uipc_socket::oxidebsd_sys_getsockopt as *const () as u64)
+        }
+        "oxidebsd_sys_getpeername" => {
+            Some(crate::kern::uipc_socket::oxidebsd_sys_getpeername as *const () as u64)
+        }
+        "oxidebsd_sys_accept4" => Some(crate::kern::uipc_socket::oxidebsd_sys_accept4 as *const () as u64),
         "oxidebsd_sys_setsockopt" => {
             Some(crate::kern::uipc_socket::oxidebsd_sys_setsockopt as *const () as u64)
         }

@@ -24,7 +24,7 @@ use core::panic::PanicInfo;
 use oxidebsd::boot::BootInfo;
 use oxidebsd::limine_entry_point;
 use oxidebsd::kern::uipc_socket::{
-    oxidebsd_sys_bind, oxidebsd_sys_recvfrom, oxidebsd_sys_sendto, oxidebsd_sys_setsockopt,
+    oxidebsd_sys_bind, oxidebsd_sys_recvmsg, oxidebsd_sys_sendmsg, oxidebsd_sys_setsockopt,
     oxidebsd_sys_socket,
 };
 use oxidebsd::net::ethernet;
@@ -32,6 +32,59 @@ use oxidebsd::netinet::ipv4;
 use oxidebsd::drivers::rtl8139;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
+
+/// `sendto`/`recvfrom` as musl builds them, over the kernel's `sendmsg`/`recvmsg` (the layout of
+/// musl's x86_64 `struct msghdr` and `struct iovec`, duplicated from `sys/kern/uipc_socket.rs`).
+#[repr(C)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+#[repr(C)]
+struct MsgHdr {
+    name: u64,
+    namelen: u32,
+    _pad0: u32,
+    iov: u64,
+    iovlen: i32,
+    _pad1: i32,
+    control: u64,
+    controllen: u32,
+    _pad2: u32,
+    flags: i32,
+    _pad3: i32,
+}
+
+fn msghdr(name: u64, iov: &IoVec) -> MsgHdr {
+    MsgHdr {
+        name,
+        namelen: 16,
+        _pad0: 0,
+        iov: iov as *const IoVec as u64,
+        iovlen: 1,
+        _pad1: 0,
+        control: 0,
+        controllen: 0,
+        _pad2: 0,
+        flags: 0,
+        _pad3: 0,
+    }
+}
+
+fn sendto(fd: u64, buf: &[u8], addr: &[u8; 16]) -> i64 {
+    let iov = IoVec { base: buf.as_ptr() as u64, len: buf.len() as u64 };
+    let msg = msghdr(addr.as_ptr() as u64, &iov);
+    oxidebsd_sys_sendmsg(fd, &msg as *const MsgHdr as u64, 0)
+}
+
+/// Doesn't wait (`MSG_DONTWAIT`): `-EAGAIN` with nothing queued.
+fn recvfrom(fd: u64, buf: &mut [u8], addr: &mut [u8; 16]) -> i64 {
+    const MSG_DONTWAIT: u64 = 0x40;
+    let iov = IoVec { base: buf.as_mut_ptr() as u64, len: buf.len() as u64 };
+    let mut msg = msghdr(addr.as_mut_ptr() as u64, &iov);
+    oxidebsd_sys_recvmsg(fd, &mut msg as *mut MsgHdr as u64, MSG_DONTWAIT)
+}
 
 limine_entry_point!(main);
 
@@ -113,18 +166,16 @@ fn main(boot_info: &'static BootInfo) -> ! {
     assert_eq!(rc, 0, "bind() failed: {rc}");
     serial_println!("udp_smoke: bind() -> port {}", LOCAL_PORT);
 
-    let rc = oxidebsd_sys_setsockopt(fd, 1, 2);
+    // setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &1, 4), in the kernel's (fd, args) form.
+    let one: i32 = 1;
+    let args: [u64; 4] = [1, 2, (&raw const one) as u64, 4];
+    let rc = oxidebsd_sys_setsockopt(fd, args.as_ptr() as u64);
     assert_eq!(rc, 0, "setsockopt() failed: {rc}");
 
     // Real send, over the actual wire -- proves the TX path (ARP resolve, IPv4 checksum, UDP
     // header, NIC send) still works with the new socket code on top of it.
     let dest_addr = build_sockaddr(ipv4::GATEWAY_IP, SEND_DEST_PORT);
-    let rc = oxidebsd_sys_sendto(
-        fd,
-        PING_PAYLOAD.as_ptr() as u64,
-        PING_PAYLOAD.len() as u64,
-        dest_addr.as_ptr() as u64,
-    );
+    let rc = sendto(fd, &PING_PAYLOAD, &dest_addr);
     assert_eq!(
         rc,
         PING_PAYLOAD.len() as i64,
@@ -153,12 +204,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     let mut recv_buf = [0u8; 64];
     let mut src_addr = [0u8; 16];
-    let rc = oxidebsd_sys_recvfrom(
-        fd,
-        recv_buf.as_mut_ptr() as u64,
-        recv_buf.len() as u64,
-        src_addr.as_mut_ptr() as u64,
-    );
+    let rc = recvfrom(fd, &mut recv_buf, &mut src_addr);
     assert_eq!(
         rc,
         PONG_PAYLOAD.len() as i64,

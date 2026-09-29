@@ -197,6 +197,10 @@ unsafe extern "C" {
     fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
 }
 
+/// Changes whenever a file this module embeds changes (`build.rs`'s `build_module_crate`); reading
+/// it makes rustc rebuild the module then, which the embedded paths alone didn't reliably do.
+const _EMBED_STAMP: &str = env!("OXIDEBSD_EMBED_STAMP");
+
 const SYS_OPEN: u64 = 5;
 const SYS_CLOSE: u64 = 6;
 /// Real x86_64 Linux's own `__NR_lseek` value -- confirmed against
@@ -8159,6 +8163,12 @@ fn format_fresh_filesystem() -> bool {
         root,
         b"at-smoke.elf",
         include_bytes!(env!("OXFS_AT_SMOKE_ELF_PATH")),
+    );
+    // The socket layer, run by `tests/socket_syscall_smoke.rs` -- see `regress/socket-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"socket-smoke.elf",
+        include_bytes!(env!("OXFS_SOCKET_SMOKE_ELF_PATH")),
     );
     // `ppoll(2)` coverage, run by `tests/ppoll_syscall_smoke.rs` -- see `regress/ppoll-smoke/main.c`.
     ok &= seed_file(

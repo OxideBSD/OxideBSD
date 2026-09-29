@@ -407,7 +407,8 @@ readlink/symlink/setitimer/getitimer/uid-gid family/chmod/chown), then `SYS_FSYN
 `SYS_MKNOD=489`, `SYS_CHROOT=490`, `SYS_GETRUSAGE=491`, `SYS_MPROTECT=492`, `SYS_SIGTIMEDWAIT=495`,
 `SYS_SIGQUEUE=496`, `SYS_SCHED_SETPARAM=507`, the pre-reserved `526`-`553` POSIX/SysV batch (see
 that section), `SYS_FAULT_PUMP=554`, `SYS_CLONE=555`, `SYS_EXIT_GROUP=556`,
-`SYS_FUTEX_REQUEUE=557`; plus real Linux numbers reused directly where confirmed dead in this musl
+`SYS_FUTEX_REQUEUE=557`, the socket calls `SYS_SENDMSG=577`...`SYS_ACCEPT4=582` (OxideBSD-doc
+`UNIX.md` §4; 142-144 retired, `ENOSYS`); plus real Linux numbers reused directly where confirmed dead in this musl
 fork (`fchmod=91`, `sched_getaffinity=204`, `futex=202`). **Check `sys/syscall/` and module
 sources for the current highest number before assigning a new one.**
 
@@ -1167,15 +1168,23 @@ raw ICMP; BSD `protosw`); each protocol keeps its own state keyed by the same `r
 socket syscall (incl. `socketpair`/`shutdown`, now in `sys/modules/socket`, not `posix_compat` --
 a test using them must load the socket module) resolves and dispatches there; addresses cross as
 `sockaddr` bytes. `socketpair` is still the pipe pair in `sys/fs/pipe.rs` until `AF_UNIX` lands.
+All data goes through `sendmsg`/`recvmsg` (577/578, a real `struct msghdr`); musl's `sendto`/
+`recvfrom` are built on them, and `get/setsockopt` (579/580) take `{level, name, val, len}` by
+pointer (`musl src/internal/oxidebsd_sockopt.h`). A protocol never blocks: it returns `EAGAIN`
+and the layer waits (`O_NONBLOCK`/`MSG_DONTWAIT`/`SO_RCVTIMEO`, `ERESTART` for `SA_RESTART`) via
+`net::wait_for_change`, which *blocks* (interrupts on) -- network waiters wake on an rtl8139
+IRQ (`wake_pollers`) or every 50 ms to drive the NIC. `regress/socket-smoke` +
+`tests/socket_syscall_smoke.rs` cover the layer. **rtl8139's DMA addresses are 32-bit**:
+`rtl8139::init` must run before big allocations (oxfs's pools), else it refuses (logged) --
+found when a test brought it up after the modules and it silently received nothing.
 
 Real, phased stack: PCI enumeration, IRQ-driven rtl8139 driver, Ethernet/ARP/IPv4/ICMP, UDP/TCP
 sockets, raw ICMP sockets, `poll(2)`, and real hostname resolution via musl's own stub resolver.
 
 - **`sys/drivers/rtl8139.rs`**: brought up unconditionally at boot, absence logged not fatal.
 - **`ipv4::next_hop`** is the *only* routing rule (anything outside `GUEST_IP`'s `/24` → gateway).
-- **`sys/netinet/udp.rs`/`tcp.rs`**: real sockets behind `SYS_SOCKET=140`/`SYS_BIND=141`/
-  `SYS_SENDTO=142`/`SYS_RECVFROM=143`/`SYS_SETSOCKOPT=144` (UDP) and `SYS_CONNECT=145`/
-  `SYS_LISTEN=146`/`SYS_ACCEPT=147` (TCP; once `Established`, plain read/write). TCP is
+- **`sys/netinet/udp.rs`/`tcp.rs`**: UDP (with `connect`) and TCP (non-blocking `connect`,
+  `shutdown`, `TcpState::errors` for `SO_ERROR`) as socket-layer protocols. TCP is
   stop-and-wait (one segment in flight, fixed 536-byte MSS, no window/congestion control).
 - **`sys/netinet/icmp.rs`** raw sockets: not port-addressed, every inbound ICMP fans out to every open
   raw socket.
@@ -1197,10 +1206,9 @@ sockets, raw ICMP sockets, `poll(2)`, and real hostname resolution via musl's ow
    `ipv4::resolve_with_retry`, `tcp::oxidebsd_sys_connect`, `net::oxidebsd_sys_poll`. **Invisible
    to any test calling kernel handlers as plain Rust functions instead of through a real
    `SYSCALL`.**
-3. **`tcp_read` blocks on spin-loop, deliberately not the `pipe`-style `BlockReason` pattern** —
-   incoming-packet processing is pull-based; yielding here would mean nothing services the
-   connection once the only interested process stops running. Real EOF (`0`) only once the peer
-   has actually FIN'd.
+3. **Superseded (2026-09-28)**: socket waits used to spin (so no timer or `alarm` fired during
+   them); they now block with periodic/IRQ wakeups (the socket-layer note above). Real EOF (`0`)
+   only once the peer has actually FIN'd.
 
 Real-`SYSCALL` smoke tests exist for every scenario (`tests/{udp,poll,ping,socketpair,
 tcp}_syscall_smoke.rs`), using test-only syscalls (`SYS_TEST_EXIT=9999`,
@@ -2197,26 +2205,15 @@ build-std=std,core,alloc,panic_abort,panic_unwind` recompile every build (~20-40
 a brand-new custom target), linked via a `musl-gcc` `RUSTC_WRAPPER` against the same
 `target/musl-sysroot` every other userland ELF uses.
 
-- **A real, repeatedly-hit build-caching gotcha, distinct from the BusyBox one above**: neither
-  the outer `cargo test`/`cargo build` nor the nested `-Z build-std` cargo invocation tracks
-  `target/musl-sysroot`'s `libc.a` as a dependency — it's referenced only via a raw `-C
-  linker=.../musl-gcc` flag, invisible to cargo's fingerprinting. Editing `external/mit/musl` and
-  rebuilding it does **not** force a relink of an already-built `regress/std/*` crate, even
-  though `build.rs` itself correctly reruns and rebuilds musl fresh — the *nested* cargo build for
-  that one regress/std crate silently reuses its own stale cached executable. Confirmed via
-  direct `objdump` inspection: `target/musl-sysroot/lib/libc.a` had the fix, the linked
-  `regress/std` ELF didn't, until the crate's built binary was deleted by hand (`target/std-oxidebsd/x86_64-unknown-oxidebsd/release/<crate>`; one shared target dir for every std program since 2026-09-27, so std is built once).
-  **A second, compounding layer of the same bug**: `sys/modules/oxfs`'s own `build_module_crate`
-  invocation (a fresh `cargo rustc` subprocess every time `build.rs` runs at all) can *also* skip
-  re-embedding a regress/std ELF via its own `include_bytes!(env!(...))` if its own nested
-  cargo's fingerprint doesn't notice the referenced file's content changed — even right after a
-  genuinely fresh relink of that ELF. **The only fix found reliable**: delete both
-  `target/std-oxidebsd` and `target/modules` outright, or (cheaper) `touch
-  sys/modules/oxfs/sys/lib.rs` to force *that* crate's own next `cargo rustc` invocation to actually
-  recompile (a real, cargo-tracked source-file change) rather than trusting either layer's
-  incremental cache after a musl/`external/mit/rust` edit. **Do not `touch build.rs` itself** to
-  force this — its own `rerun-if-changed` self-watch would also trip BusyBox's mtime-based
-  staleness check (see "BusyBox port" above), triggering an unwanted ~30min rebuild.
+- **Two build-caching layers hid musl changes from `std` programs; both fixed in `build.rs`
+  (2026-09-28)**: (1) cargo doesn't track `libc.a` (it's behind `-C linker=musl-gcc`), so
+  `build_std_oxidebsd_userland_crate` removes an executable older than `libc.a` *and* its
+  `build/<crate>/<hash>/fingerprint` -- the executable is a hard link to
+  `build/<crate>/<hash>/out/<crate>`, which cargo re-links when the fingerprint is fresh, so
+  deleting it alone does nothing. (2) oxfs didn't reliably re-embed a changed file behind
+  `include_bytes!(env!(...))`; `build_module_crate` now passes `OXIDEBSD_EMBED_STAMP` (a hash of
+  the embedded files' mtimes) and oxfs reads it with `env!`, which rustc tracks. Check with
+  `objdump -d` on the executable if in doubt. Never `touch build.rs` to force rebuilds.
 - **Real consumer proofs, each a `#![no_std]` fork+execve+wait4 wrapper spawning a real `std`
   binary embedded at `/bin/<name>`** (same pattern as `clang-syscall-smoke`/`std-hello-syscall-
   smoke`): `std-hello-oxidebsd` (target identity only — `println!`/`process::exit`);

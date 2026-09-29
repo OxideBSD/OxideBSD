@@ -61,3 +61,8 @@ pub fn init() {
 pub fn ms_to_cycles(ms: u64) -> u64 {
     CYCLES_PER_MS.load(Ordering::Relaxed).saturating_mul(ms)
 }
+
+/// The inverse of `ms_to_cycles`, rounded up.
+pub fn cycles_to_ms(cycles: u64) -> u64 {
+    cycles.div_ceil(CYCLES_PER_MS.load(Ordering::Relaxed).max(1))
+}

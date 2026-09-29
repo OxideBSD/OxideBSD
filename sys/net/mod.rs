@@ -59,7 +59,7 @@ enum Source {
     /// console): the waiter can genuinely block (`BlockReason::Polling`) and be woken.
     Wakeable,
     /// A network socket. Incoming packets are only processed when someone calls `poll()` (the NIC
-    /// is pull-based), so the waiter must keep running, yielding between passes.
+    /// is pull-based), so the waiter wakes periodically to do it (`wait_for_change`).
     Pulled,
 }
 
@@ -102,15 +102,21 @@ fn poll_revents(r: crate::fs::Readiness, events: i16) -> i16 {
     revents
 }
 
-/// Shared waiting step of `poll`/`select` once nothing is ready: `Err(EINTR)` for a deliverable
-/// signal, otherwise waits for something to change and returns so the caller re-checks every fd.
-/// `deadline_tick` is `u64::MAX` for no timeout.
+/// How often a waiter on a network socket wakes to drive the interface itself (`poll`, and
+/// TCP's retransmission timer in it), in timer ticks: 50 ms. A received frame wakes it sooner.
+const PULL_INTERVAL_TICKS: u64 = 5;
+
+/// Shared waiting step of `poll`/`select` and the socket layer once nothing is ready:
+/// `Err(-EINTR)` for a deliverable signal, otherwise blocks until something may have changed and
+/// returns so the caller re-checks. `deadline_tick` is `u64::MAX` for no timeout.
 ///
-/// Waits on sockets yield without blocking: the NIC is pull-based, so a blocked poller would
-/// never see a packet arrive. Every other wait blocks as `BlockReason::Polling`, woken by pipe
-/// activity, a keystroke, a signal, or the deadline. The syscall runs with interrupts masked, so
-/// a blocking wait is also the only way a keystroke can ever arrive during one.
-fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
+/// The wait blocks as `BlockReason::Polling`, woken by pipe and socket activity, a keystroke, a
+/// received frame (`rtl8139`'s interrupt), a signal, or the deadline. Blocking is what lets
+/// interrupts in at all: the syscall itself runs with them masked, so a spinning waiter would see
+/// no keystroke, no frame and no timer (`alarm(2)` included). A wait involving a network socket
+/// (`any_pulled`) also wakes every `PULL_INTERVAL_TICKS`, since the interface is serviced only
+/// by its waiters.
+pub(crate) fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
     let pid = crate::process::scheduler::current_pid();
     {
         let mut table = crate::process::table().lock();
@@ -123,11 +129,12 @@ fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
         if crate::process::signals::has_interrupting_signal(proc) {
             return Err(-(EINTR as i64));
         }
-        if !any_pulled {
-            proc.state = crate::process::ProcState::Blocked(
-                crate::process::BlockReason::Polling(deadline_tick),
-            );
-        }
+        let wake = if any_pulled {
+            deadline_tick.min(crate::cpu::interrupts::ticks() + PULL_INTERVAL_TICKS)
+        } else {
+            deadline_tick
+        };
+        proc.state = crate::process::ProcState::Blocked(crate::process::BlockReason::Polling(wake));
     } // table lock dropped before schedule() -- see process::table()'s own doc comment
     crate::process::scheduler::schedule();
     Ok(())
@@ -135,7 +142,7 @@ fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
 
 /// Converts a millisecond timeout into an absolute timer-tick deadline for `wait_for_change`,
 /// rounded up so the tick deadline never fires before the TSC one. Negative means none.
-fn deadline_tick_for(timeout_ms: i64) -> u64 {
+pub(crate) fn deadline_tick_for(timeout_ms: i64) -> u64 {
     if timeout_ms < 0 {
         return u64::MAX;
     }

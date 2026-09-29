@@ -29,8 +29,9 @@ use core::panic::PanicInfo;
 const SYS_WRITE: u64 = 4;
 const SYS_SOCKET: u64 = 140;
 const SYS_BIND: u64 = 141;
-const SYS_SENDTO: u64 = 142;
-const SYS_RECVFROM: u64 = 143;
+const SYS_SENDMSG: u64 = 577;
+const SYS_RECVMSG: u64 = 578;
+const MSG_DONTWAIT: u64 = 0x40;
 /// Test-only -- see this file's own module doc comment.
 const SYS_TEST_INJECT_UDP_FRAME: u64 = 9998;
 /// Not a real syscall number anything else in this codebase registers -- `tests/
@@ -86,6 +87,59 @@ unsafe fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> R
     if failed != 0 { Err(ret) } else { Ok(ret) }
 }
 
+/// musl's `struct iovec` and x86_64 `struct msghdr`, as the kernel reads them
+/// (`sys/kern/uipc_socket.rs`'s `MsgHdr`) -- duplicated here, there's no shared crate.
+#[repr(C)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+#[repr(C)]
+struct MsgHdr {
+    name: u64,
+    namelen: u32,
+    _pad0: u32,
+    iov: u64,
+    iovlen: i32,
+    _pad1: i32,
+    control: u64,
+    controllen: u32,
+    _pad2: u32,
+    flags: i32,
+    _pad3: i32,
+}
+
+fn msghdr(name: u64, namelen: u32, iov: &IoVec) -> MsgHdr {
+    MsgHdr {
+        name,
+        namelen,
+        _pad0: 0,
+        iov: iov as *const IoVec as u64,
+        iovlen: 1,
+        _pad1: 0,
+        control: 0,
+        controllen: 0,
+        _pad2: 0,
+        flags: 0,
+        _pad3: 0,
+    }
+}
+
+/// `sendto(fd, buf, len, 0, addr, 16)`, as musl builds it: `sendmsg(2)` with one iovec.
+fn sendto(fd: u64, buf: &[u8], addr: &[u8; 16]) -> Result<u64, u64> {
+    let iov = IoVec { base: buf.as_ptr() as u64, len: buf.len() as u64 };
+    let msg = msghdr(addr.as_ptr() as u64, 16, &iov);
+    unsafe { syscall(SYS_SENDMSG, fd, &msg as *const MsgHdr as u64, 0) }
+}
+
+/// `recvfrom(fd, buf, len, MSG_DONTWAIT, addr, &16)` over `recvmsg(2)`.
+fn recvfrom(fd: u64, buf: &mut [u8], addr: &mut [u8; 16]) -> Result<u64, u64> {
+    let iov = IoVec { base: buf.as_mut_ptr() as u64, len: buf.len() as u64 };
+    let mut msg = msghdr(addr.as_mut_ptr() as u64, 16, &iov);
+    unsafe { syscall(SYS_RECVMSG, fd, &mut msg as *mut MsgHdr as u64, MSG_DONTWAIT) }
+}
+
 fn write_bytes(s: &[u8]) {
     unsafe {
         let _ = syscall(SYS_WRITE, STDOUT, s.as_ptr() as u64, s.len() as u64);
@@ -127,15 +181,7 @@ pub extern "C" fn _start() -> ! {
     write_bytes(b"udp-syscall-smoke: socket()+bind() ok\n");
 
     let dest_addr = build_sockaddr(GATEWAY_IP, GATEWAY_SEND_PORT);
-    let rc = unsafe {
-        syscall4(
-            SYS_SENDTO,
-            fd,
-            PING_PAYLOAD.as_ptr() as u64,
-            PING_PAYLOAD.len() as u64,
-            dest_addr.as_ptr() as u64,
-        )
-    };
+    let rc = sendto(fd, PING_PAYLOAD, &dest_addr);
     if rc != Ok(PING_PAYLOAD.len() as u64) {
         write_bytes(b"udp-syscall-smoke: sendto() didn't report the full packet sent\n");
         test_exit(false);
@@ -150,15 +196,7 @@ pub extern "C" fn _start() -> ! {
     let mut recv_buf = [0u8; 128];
     let mut src_addr = [0u8; 16];
     for _ in 0..MAX_RECV_ATTEMPTS {
-        let rc = unsafe {
-            syscall4(
-                SYS_RECVFROM,
-                fd,
-                recv_buf.as_mut_ptr() as u64,
-                recv_buf.len() as u64,
-                src_addr.as_mut_ptr() as u64,
-            )
-        };
+        let rc = recvfrom(fd, &mut recv_buf, &mut src_addr);
         if let Ok(n) = rc
             && n > 0
         {
