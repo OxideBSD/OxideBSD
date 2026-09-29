@@ -1001,8 +1001,48 @@ struct RawUtsname {
 /// `/etc/rc.d/hostname` sets one.
 static HOSTNAME: spin::Mutex<[u8; 65]> = spin::Mutex::new(utsname_field("oxidebsd"));
 
+/// The NIS domain name (`kern.domainname`, `uname`'s `domainname`); empty until set.
+static DOMAINNAME: spin::Mutex<[u8; 65]> = spin::Mutex::new([0; 65]);
+
+/// `uname -v` and, with a newline, `kern.version`.
+pub(crate) const UNAME_VERSION: &str = concat!("OxideBSD ", env!("CARGO_PKG_VERSION"), " GENERIC");
+
+fn field_bytes(field: &[u8; 65]) -> alloc::vec::Vec<u8> {
+    let end = field.iter().position(|&b| b == 0).unwrap_or(64);
+    field[..end].to_vec()
+}
+
+/// Stores `name` in a `utsname`-sized field: at most 64 bytes, as Linux and the BSDs'
+/// `MAXHOSTNAMELEN - 1` allow.
+fn set_field(field: &spin::Mutex<[u8; 65]>, name: &[u8]) -> Result<(), u64> {
+    if name.len() > 64 {
+        return Err(EINVAL);
+    }
+    let mut new = [0u8; 65];
+    new[..name.len()].copy_from_slice(name);
+    *field.lock() = new;
+    Ok(())
+}
+
+/// The host name, shared by `sethostname(2)`, `uname(2)` and `kern.hostname`.
+pub(crate) fn hostname() -> alloc::vec::Vec<u8> {
+    field_bytes(&HOSTNAME.lock())
+}
+
+pub(crate) fn set_hostname(name: &[u8]) -> Result<(), u64> {
+    set_field(&HOSTNAME, name)
+}
+
+pub(crate) fn domainname() -> alloc::vec::Vec<u8> {
+    field_bytes(&DOMAINNAME.lock())
+}
+
+pub(crate) fn set_domainname(name: &[u8]) -> Result<(), u64> {
+    set_field(&DOMAINNAME, name)
+}
+
 /// `SYS_SETHOSTNAME` (576, registered by `sys/modules/posix_compat`): `sethostname(name, len)`.
-/// Root only; at most 64 bytes, as Linux and the BSDs' `MAXHOSTNAMELEN - 1` allow.
+/// Root only.
 pub(crate) fn sys_sethostname(name_ptr: u64, len: u64) -> Result<u64, u64> {
     if crate::process::identity::oxidebsd_current_uid() != 0 {
         return Err(EPERM);
@@ -1010,11 +1050,9 @@ pub(crate) fn sys_sethostname(name_ptr: u64, len: u64) -> Result<u64, u64> {
     if len > 64 {
         return Err(EINVAL);
     }
-    let mut field = [0u8; 65];
     // SAFETY: the same unvalidated-user-pointer gap every other copy in this file has.
     let name = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len as usize) };
-    field[..name.len()].copy_from_slice(name);
-    *HOSTNAME.lock() = field;
+    set_hostname(name)?;
     Ok(0)
 }
 
@@ -1046,9 +1084,9 @@ pub(crate) fn sys_uname(uts_ptr: u64) -> Result<u64, u64> {
         sysname: utsname_field("OxideBSD"),
         nodename: *HOSTNAME.lock(),
         release: utsname_field(env!("CARGO_PKG_VERSION")),
-        version: utsname_field(concat!("OxideBSD ", env!("CARGO_PKG_VERSION"), " GENERIC")),
-        machine: utsname_field("x86_64"),
-        domainname: utsname_field("(none)"),
+        version: utsname_field(UNAME_VERSION),
+        machine: utsname_field(crate::kern::kern_sysctl::MACHINE),
+        domainname: *DOMAINNAME.lock(),
     };
     // SAFETY: same known pointer-validation gap every other user-memory write in this file
     // already has -- uts_ptr isn't checked against the caller's actual mappings first.

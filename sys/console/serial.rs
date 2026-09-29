@@ -108,6 +108,7 @@ pub fn write_bytes(bytes: &[u8]) {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    crate::kern::subr_msgbuf::log(args);
     interrupts::without_interrupts(|| {
         SERIAL1
             .lock()

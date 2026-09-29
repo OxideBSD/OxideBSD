@@ -199,6 +199,19 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
+    // Registers sysctl(2) (SYSCTL.md); the tree is kern::kern_sysctl.
+    const SYSCTL_MOD: &[u8] = include_bytes!(env!("SYSCTL_MOD_PATH"));
+    const SYSCTL_PANIC_SYMBOL: &str = env!("SYSCTL_MOD_PANIC_SYMBOL");
+    crate::module::load(
+        "sysctl",
+        SYSCTL_MOD,
+        SYSCTL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
+
     // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local
     // values from here on -- hand them over to memory's global state (moving frame_allocator by
     // value, not cloning it: BootInfoFrameAllocator's own bump-allocation state must stay singular,

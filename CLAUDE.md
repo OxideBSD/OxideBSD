@@ -600,6 +600,16 @@ checks with a `PASS`/`FAIL` tally — the tool that found several bugs below.
   doesn't vendor, 25 need a companion Kconfig option a single-symbol flip didn't resolve, 3 were
   docs/example files mismatched by candidate-extraction, 1 (`lzopcat`) is a genuine link error.
 
+## sysctl and the message buffer (`sys/kern/{kern_sysctl,subr_msgbuf}.rs`, `sys/modules/sysctl`)
+
+FreeBSD's MIB (OxideBSD-doc `SYSCTL.md`): `sysctl(2)` = 583, one pointer to its six args; musl has
+`<sys/sysctl.h>`/`sysctl(3)`/`sysctlbyname(3)`/`sysctlnametomib(3)`. The tree is one `BTreeMap`
+keyed by OID (its order is `{0,2}`'s depth-first walk); leaves are getter/setter fns, FreeBSD
+numbers where FreeBSD has one, else auto from 256. `uname -m` is `amd64` (`hw.machine`). Every
+kernel print (`console::serial::_print`) also goes to the message buffer (early static buffer until
+the heap, then `kern.msgbufsize`); `kern.msgbuf` reads it, `/dev/klog` (7,0) consumes it, exclusive.
+A test using `poll` must load the `socket` module. `tests/sysctl_syscall_smoke.rs`.
+
 ## Terminals (`sys/tty/`; spec + status: OxideBSD-doc `TTY.md` §10)
 
 `sys/console/stdin.rs` is gone. Each terminal is a `sys/tty::Tty` with its own queues, termios

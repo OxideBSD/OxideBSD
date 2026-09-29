@@ -292,6 +292,7 @@ fn main() {
     build_userland_crate("pthread-syscall-smoke", "PTHREAD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("socket-syscall-smoke", "SOCKET_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("sysctl-syscall-smoke", "SYSCTL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
@@ -324,6 +325,7 @@ fn main() {
     build_module_crate("signal", "SIGNAL", &[]);
     build_module_crate("clock", "CLOCK", &[]);
     build_module_crate("socket", "SOCKET", &[]);
+    build_module_crate("sysctl", "SYSCTL", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.
@@ -453,6 +455,7 @@ fn main() {
     let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
     let socket_smoke_elf_path = build_socket_smoke(&musl_sysroot);
+    let sysctl_smoke_elf_path = build_c_smoke(&musl_sysroot, "sysctl-smoke", "0x8380000");
     let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
     let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
     let tty_smoke_elf_path = build_tty_smoke(&musl_sysroot);
@@ -651,6 +654,7 @@ fn main() {
         ),
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
         ("OXFS_SOCKET_SMOKE_ELF_PATH", socket_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_SYSCTL_SMOKE_ELF_PATH", sysctl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
         ("OXFS_TTY_SMOKE_ELF_PATH", tty_smoke_elf_path.to_str().unwrap()),
@@ -1641,6 +1645,27 @@ fn build_socket_smoke(sysroot: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for socket-smoke: {e}"));
     if !status.success() {
         panic!("building socket-smoke failed: {status}");
+    }
+    out
+}
+
+/// A one-file musl C fixture, `regress/<name>/main.c`, built static at load address `base` into
+/// `target/<name>/<name>` -- the recipe every `build_*_smoke` above repeats.
+fn build_c_smoke(sysroot: &Path, name: &str, base: &str) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join(format!("regress/{name}/main.c"));
+    let target_dir = Path::new(manifest_dir).join(format!("target/{name}"));
+    std::fs::create_dir_all(&target_dir).unwrap_or_else(|e| panic!("creating target/{name}: {e}"));
+    let out = target_dir.join(name);
+    println!("cargo:rerun-if-changed={}", src.display());
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-static", "-no-pie", &format!("-Wl,-Ttext-segment={base}"), "-O2", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for {name}: {e}"));
+    if !status.success() {
+        panic!("building {name} failed: {status}");
     }
     out
 }

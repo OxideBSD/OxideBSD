@@ -544,6 +544,14 @@ name = "std-thread-net-signal-oxidebsd-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "sysctl"
+version = "0.1.0"
+
+[[package]]
+name = "sysctl-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "sysinfo-syscall-smoke"
 version = "0.1.0"
 

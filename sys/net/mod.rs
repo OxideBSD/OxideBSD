@@ -75,6 +75,10 @@ fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
     if let Some(r) = crate::fs::pipe::readiness(real_fd) {
         return (r, Source::Wakeable);
     }
+    if let Some(r) = crate::kern::subr_msgbuf::readiness(real_fd) {
+        // Kernel prints can't wake anyone, so its readers look again every 50 ms.
+        return (r, Source::Pulled);
+    }
     if let Some((r, pulled)) = crate::kern::uipc_socket::readiness(real_fd) {
         return (r, if pulled { Source::Pulled } else { Source::Wakeable });
     }

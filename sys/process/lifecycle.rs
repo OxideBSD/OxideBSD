@@ -920,7 +920,7 @@ const MAX_PTR_LEN_ENTRIES: usize = 256;
 /// `fexecve` patch did exactly that) went straight into an allocation and panicked the kernel
 /// (`memory allocation of 4923351820889817167 bytes failed`) -- any process could take the whole
 /// VM down with one bad `execve`.
-const MAX_EXEC_ARG_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_EXEC_ARG_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Reads the `RawArgvEntry` array `ptr` describes, if any -- shared by `argv_ptr` (argv[1..]) and
 /// `envp_ptr` (envp[]), which use the exact same wire format (see `RawArgvEntry`'s own doc

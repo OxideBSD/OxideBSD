@@ -65,6 +65,7 @@ pub fn init(
     let heap_size = memory::allocator::compute_heap_size(memory::usable_ram_bytes());
     memory::allocator::init_heap(&mut mapper, &mut frame_allocator, heap_size)
         .expect("heap initialization failed");
+    kern::subr_msgbuf::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
 
     serial_println!("[boot] kernel initialization complete");

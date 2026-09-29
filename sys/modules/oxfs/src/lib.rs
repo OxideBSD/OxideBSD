@@ -136,6 +136,9 @@ unsafe extern "C" {
     /// Opens terminal `major:minor` (TTY.md §2.6) with `open(2)`'s `flags`; returns the new fd or
     /// `-errno` (`-ENXIO` for no such terminal, or `/dev/tty` without a controlling terminal).
     fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -> i64;
+    /// Opens `/dev/klog`, the kernel message buffer (SYSLOG.md §4), with `open(2)`'s `flags`;
+    /// returns the new fd, or `-EBUSY` while another descriptor has it open.
+    fn oxidebsd_klog_open(flags: u64) -> i64;
     /// Hands the kernel's local sockets (UNIX.md §5.2) the two functions that create and look up
     /// socket files; see `oxfs_create_socket_node`. Called once, from `module_init`.
     fn oxidebsd_register_socket_nodes(
@@ -3413,6 +3416,9 @@ fn is_tty_major(major: u32) -> bool {
     matches!(major, 4..=6)
 }
 
+/// `/dev/klog`'s major (minor 0): the kernel message buffer, served by the kernel.
+const KLOG_MAJOR: u32 = 7;
+
 /// A `/proc` path's first component: a pid, or `self`, the caller's own.
 fn parse_proc_pid(bytes: &[u8]) -> Option<u32> {
     if bytes == b"self" {
@@ -3924,6 +3930,9 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                             // SAFETY: FFI call to a kernel-exported function, matching its
                             // declared signature.
                             unsafe { oxidebsd_tty_open(major as u64, minor as u64, flags) }
+                        } else if inode.device_char && major == KLOG_MAJOR && minor == 0 {
+                            // SAFETY: as above.
+                            unsafe { oxidebsd_klog_open(flags) }
                         } else {
                             -ENXIO
                         }
@@ -8031,11 +8040,13 @@ fn format_fresh_filesystem() -> bool {
 
     // The terminals (TTY.md §2.6), owned and moded as the BSDs' devfs creates them: the console
     // terminal root's until login(1) takes it for a user, /dev/tty open to all (it only ever
-    // reaches the opener's own controlling terminal), /dev/console root's.
+    // reaches the opener's own controlling terminal), /dev/console root's. Then /dev/klog, root's.
     for (name, major, minor, gid, mode) in [
         (&b"ttyv0"[..], 4u32, 0u32, TTY_GID, 0o600u16),
         (b"tty", 5, 0, 0, 0o666),
         (b"console", 5, 1, 0, 0o600),
+        // Not a terminal: the kernel message buffer (SYSLOG.md §4), for syslogd.
+        (b"klog", KLOG_MAJOR, 0, 0, 0o600),
     ] {
         let node = alloc_inode().expect("oxfs: failed to allocate a terminal node");
         let mut inode = Inode::new(InodeKind::Device);
@@ -8229,6 +8240,12 @@ fn format_fresh_filesystem() -> bool {
         root,
         b"socket-smoke.elf",
         include_bytes!(env!("OXFS_SOCKET_SMOKE_ELF_PATH")),
+    );
+    // sysctl(2), run by `tests/sysctl_syscall_smoke.rs` -- see `regress/sysctl-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"sysctl-smoke.elf",
+        include_bytes!(env!("OXFS_SYSCTL_SMOKE_ELF_PATH")),
     );
     // `ppoll(2)` coverage, run by `tests/ppoll_syscall_smoke.rs` -- see `regress/ppoll-smoke/main.c`.
     ok &= seed_file(

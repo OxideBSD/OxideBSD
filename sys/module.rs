@@ -930,6 +930,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_real_fd_of" => Some(crate::fs::fd::oxidebsd_real_fd_of as *const () as u64),
         "oxidebsd_fifo_open" => Some(crate::fs::pipe::oxidebsd_fifo_open as *const () as u64),
         "oxidebsd_tty_open" => Some(crate::tty::oxidebsd_tty_open as *const () as u64),
+        "oxidebsd_klog_open" => Some(crate::kern::subr_msgbuf::oxidebsd_klog_open as *const () as u64),
+        "oxidebsd_sys_sysctl" => Some(crate::kern::kern_sysctl::oxidebsd_sys_sysctl as *const () as u64),
         "oxidebsd_register_socket_nodes" => {
             Some(crate::kern::uipc_usrreq::oxidebsd_register_socket_nodes as *const () as u64)
         }

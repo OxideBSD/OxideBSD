@@ -169,6 +169,14 @@ fn realtime_base_ticks() -> i64 {
 /// point avoids that by construction, at the honest cost of the RTC's own already-documented
 /// "doesn't wait out an in-progress update" off-by-one-second risk applying once, at calibration
 /// time, rather than on every read (a real improvement, not just a wash).
+/// The time of boot (`ticks() == 0`) as `(seconds, microseconds)` since the epoch:
+/// `kern.boottime`. Moves with `set_unix_epoch`, as the BSDs' boot time moves with the clock.
+pub fn boot_time() -> (i64, i64) {
+    let hz = crate::cpu::pit::TIMER_HZ as i64;
+    let base = realtime_base_ticks();
+    (base.div_euclid(hz), base.rem_euclid(hz) * 1_000_000 / hz)
+}
+
 pub fn unix_epoch_now_precise() -> (i64, i64) {
     let hz = crate::cpu::pit::TIMER_HZ as i64;
     let base = realtime_base_ticks();
