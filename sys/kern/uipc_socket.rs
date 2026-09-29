@@ -63,6 +63,8 @@ const RECV_FLAGS: i64 = MSG_PEEK | MSG_WAITALL | MSG_DONTWAIT | MSG_TRUNC | MSG_
 /// `SOL_SOCKET` and its options (musl's `<sys/socket.h>`, x86_64). `SO_NOSIGPIPE` is FreeBSD's
 /// option at FreeBSD's value, added to OxideBSD's musl.
 const SOL_SOCKET: i64 = 1;
+/// `SOL_SOCKET`, for protocols that answer some `SOL_SOCKET` options themselves.
+pub(crate) const SOL_SOCKET_LEVEL: i64 = SOL_SOCKET;
 const SO_REUSEADDR: i64 = 2;
 const SO_TYPE: i64 = 3;
 const SO_ERROR: i64 = 4;
@@ -78,6 +80,17 @@ const SO_ACCEPTCONN: i64 = 30;
 const SO_PROTOCOL: i64 = 38;
 const SO_DOMAIN: i64 = 39;
 const SO_NOSIGPIPE: i64 = 0x0800;
+/// Credential options only local sockets have (`UNIX.md` §9): passed to the protocol.
+pub(crate) const SO_PASSCRED: i64 = 16;
+pub(crate) const SO_PEERCRED: i64 = 17;
+/// OxideBSD's `SOL_LOCAL`: FreeBSD's is 0, musl's `SOL_IP` (`UNIX.md` §9.6).
+pub(crate) const SOL_LOCAL: i64 = 0x200;
+
+/// Whether an option belongs to the protocol's family alone; asked of another family, it's
+/// `EINVAL` (`UNIX.md` §9.2).
+fn local_only(level: i64, name: i64) -> bool {
+    level == SOL_LOCAL || (level == SOL_SOCKET && (name == SO_PASSCRED || name == SO_PEERCRED))
+}
 
 /// Socket buffer sizes (`UNIX.md` §6.3): the default, and the range `SO_RCVBUF`/`SO_SNDBUF` accept.
 pub(crate) const DEFAULT_BUF: usize = 64 * 1024;
@@ -106,6 +119,27 @@ impl Received {
     pub(crate) fn bytes(n: usize) -> Self {
         Received { n, full: n, from: None, eor: false }
     }
+}
+
+/// How a receive may return control data (`recv_msg`).
+#[derive(Clone, Copy)]
+pub(crate) struct RecvCtl {
+    /// Room in the caller's control buffer.
+    pub room: usize,
+    /// `MSG_CMSG_CLOEXEC`: received descriptors get `FD_CLOEXEC`.
+    pub cloexec: bool,
+    /// A later pass of a `MSG_WAITALL` stream receive: data that came with control data isn't
+    /// taken into it (`UNIX.md` §6.4).
+    pub continuing: bool,
+}
+
+/// What `recv_msg` produced: the data, the control data built for the caller, whether some of it
+/// didn't fit (`MSG_CTRUNC`), and whether a continuing receive stopped at control data.
+pub(crate) struct RecvMsg {
+    pub r: Received,
+    pub control: Vec<u8>,
+    pub ctrunc: bool,
+    pub stopped: bool,
 }
 
 /// What a protocol implements. Errors are positive errno values; `EAGAIN` means "not now", and
@@ -137,6 +171,18 @@ pub(crate) trait Protocol: Sync {
     /// Receives into `buf`; with `peek`, leaves the data queued. `Ok` with `n == 0` on a
     /// connection is end-of-file.
     fn recv(&self, so: u64, buf: &mut [u8], peek: bool) -> Result<Received, i64>;
+    /// `send` with control data (`struct cmsghdr`s, as the caller laid them out). Only local
+    /// sockets take any.
+    fn send_msg(&self, so: u64, data: &[u8], to: Option<&[u8]>, flags: i64, control: &[u8]) -> Result<usize, i64> {
+        if !control.is_empty() {
+            return Err(EOPNOTSUPP);
+        }
+        self.send(so, data, to, flags)
+    }
+    /// `recv`, building control data for the caller.
+    fn recv_msg(&self, so: u64, buf: &mut [u8], peek: bool, _ctl: RecvCtl) -> Result<RecvMsg, i64> {
+        self.recv(so, buf, peek).map(|r| RecvMsg { r, control: Vec::new(), ctrunc: false, stopped: false })
+    }
     fn shutdown(&self, _so: u64, _how: i64) -> Result<(), i64> {
         Err(EOPNOTSUPP)
     }
@@ -352,7 +398,7 @@ fn nonblocking(h: &Handle, flags: i64) -> bool {
 
 /// Sends one message: all of `data` as one datagram or record, or as much of a stream as goes
 /// before the socket would block. `SIGPIPE` for `EPIPE` unless suppressed (§3.3.6).
-fn send(h: &Handle, data: &[u8], to: Option<&[u8]>, flags: i64) -> Result<usize, i64> {
+fn send(h: &Handle, data: &[u8], to: Option<&[u8]>, flags: i64, control: &[u8]) -> Result<usize, i64> {
     if flags & !SEND_FLAGS != 0 || flags & MSG_OOB != 0 {
         return Err(EOPNOTSUPP);
     }
@@ -362,7 +408,13 @@ fn send(h: &Handle, data: &[u8], to: Option<&[u8]>, flags: i64) -> Result<usize,
     let deadline = deadline_for(h.opts.sndtimeo_ms);
     let mut sent = 0;
     loop {
-        match h.proto.send(h.so, &data[sent..], to, flags) {
+        // Control data goes with the first bytes sent, once.
+        let result = if sent == 0 {
+            h.proto.send_msg(h.so, data, to, flags, control)
+        } else {
+            h.proto.send(h.so, &data[sent..], to, flags)
+        };
+        match result {
             Ok(n) => {
                 sent += n;
                 if sent == data.len() || h.ty != SOCK_STREAM {
@@ -395,21 +447,36 @@ fn raise_sigpipe() {
 }
 
 /// Receives one message into `buf`. With `MSG_WAITALL` on a stream, keeps receiving until `buf`
-/// is full, end-of-file, an error or a signal. Returns the length to report (the whole record's
-/// with `MSG_TRUNC`), the sender, and the `msg_flags` to report.
-fn recv(h: &Handle, buf: &mut [u8], flags: i64) -> Result<(usize, Option<SockAddr>, i64), i64> {
+/// is full, end-of-file, an error, a signal, or bytes that came with control data. Returns the
+/// length to report (the whole record's with `MSG_TRUNC`), the sender, the `msg_flags` to report,
+/// and the control data built for a control buffer of `ctl_room` bytes.
+fn recv(h: &Handle, buf: &mut [u8], flags: i64, ctl_room: usize) -> Result<(usize, Option<SockAddr>, i64, Vec<u8>), i64> {
     if flags & !RECV_FLAGS != 0 || flags & MSG_OOB != 0 {
         return Err(EOPNOTSUPP);
     }
     let peek = flags & MSG_PEEK != 0;
     let waitall = flags & MSG_WAITALL != 0 && h.ty == SOCK_STREAM && !peek;
     let deadline = deadline_for(h.opts.rcvtimeo_ms);
+    let cloexec = flags & MSG_CMSG_CLOEXEC != 0;
     let mut got = 0;
+    let mut control = Vec::new();
+    let mut ctl_flags = 0;
     loop {
-        match h.proto.recv(h.so, &mut buf[got..], peek) {
-            Ok(r) => {
+        let ctl = RecvCtl { room: ctl_room, cloexec, continuing: got > 0 };
+        match h.proto.recv_msg(h.so, &mut buf[got..], peek, ctl) {
+            Ok(m) => {
+                if m.stopped {
+                    return Ok((got, None, ctl_flags, control));
+                }
+                if !m.control.is_empty() || m.ctrunc {
+                    control = m.control;
+                    if m.ctrunc {
+                        ctl_flags |= MSG_CTRUNC;
+                    }
+                }
+                let r = m.r;
                 if h.ty != SOCK_STREAM {
-                    let mut out_flags = 0;
+                    let mut out_flags = ctl_flags;
                     if r.full > r.n {
                         out_flags |= MSG_TRUNC;
                     }
@@ -417,36 +484,36 @@ fn recv(h: &Handle, buf: &mut [u8], flags: i64) -> Result<(usize, Option<SockAdd
                         out_flags |= MSG_EOR;
                     }
                     let len = if flags & MSG_TRUNC != 0 { r.full } else { r.n };
-                    return Ok((len, r.from, out_flags));
+                    return Ok((len, r.from, out_flags, control));
                 }
                 got += r.n;
                 if r.n == 0 || !waitall || got == buf.len() {
-                    return Ok((got, r.from, 0));
+                    return Ok((got, r.from, ctl_flags, control));
                 }
             }
             Err(e) if e == EAGAIN as i64 => {}
-            Err(e) => return if got > 0 { Ok((got, None, 0)) } else { Err(e) },
+            Err(e) => return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(e) },
         }
         if nonblocking(h, flags) {
-            return if got > 0 { Ok((got, None, 0)) } else { Err(EAGAIN as i64) };
+            return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(EAGAIN as i64) };
         }
         if let Err(e) = wait(h, deadline) {
-            return if got > 0 { Ok((got, None, 0)) } else { Err(e) };
+            return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(e) };
         }
     }
 }
 
 extern "C" fn so_read(so: u64, ptr: u64, len: u64) -> i64 {
     let Some(h) = handle_of(so) else { return -(EBADF as i64) };
-    let result = user_slice_mut(ptr, len).and_then(|buf| recv(&h, buf, 0));
-    ffi(result.map(|(n, _, _)| n as u64))
+    let result = user_slice_mut(ptr, len).and_then(|buf| recv(&h, buf, 0, 0));
+    ffi(result.map(|(n, _, _, _)| n as u64))
 }
 
 /// `write(2)` on a socket. `sys_write` raises `SIGPIPE` for `EPIPE` itself, unless
 /// `suppresses_sigpipe`, so it isn't raised here too.
 extern "C" fn so_write(so: u64, ptr: u64, len: u64) -> i64 {
     let Some(h) = handle_of(so) else { return -(EBADF as i64) };
-    let result = user_slice(ptr, len).and_then(|data| send(&h, data, None, MSG_NOSIGNAL));
+    let result = user_slice(ptr, len).and_then(|data| send(&h, data, None, MSG_NOSIGNAL, &[]));
     ffi(result.map(|n| n as u64))
 }
 
@@ -637,17 +704,13 @@ impl MsgHdr {
 pub extern "C" fn oxidebsd_sys_sendmsg(fd: u64, msg_ptr: u64, flags: u64) -> i64 {
     let result = lookup(fd).and_then(|h| {
         let msg = MsgHdr::read(msg_ptr)?;
-        if msg.controllen != 0 {
-            // No protocol takes control data yet (descriptor and credential passing: UNIX.md
-            // §§8-9).
-            return Err(EOPNOTSUPP);
-        }
+        let control = if msg.controllen == 0 { &[][..] } else { user_slice(msg.control, msg.controllen as u64)? };
         let mut data = Vec::with_capacity(msg.total());
         for &(base, len) in &msg.iovs {
             data.extend_from_slice(user_slice(base, len)?);
         }
         let to = if msg.name == 0 { None } else { Some(user_slice(msg.name, msg.namelen as u64)?) };
-        send(&h, &data, to, flags as i64).map(|n| n as u64)
+        send(&h, &data, to, flags as i64, control).map(|n| n as u64)
     });
     ffi(result)
 }
@@ -658,7 +721,8 @@ pub extern "C" fn oxidebsd_sys_recvmsg(fd: u64, msg_ptr: u64, flags: u64) -> i64
         let msg = MsgHdr::read(msg_ptr)?;
         // Capped: a datagram is never bigger, and a stream receive may be short.
         let mut buf = vec![0u8; msg.total().min(MAX_BUF)];
-        let (len, from, mut out_flags) = recv(&h, &mut buf, flags as i64)?;
+        let room = if msg.control == 0 { 0 } else { msg.controllen as usize };
+        let (len, from, mut out_flags, control) = recv(&h, &mut buf, flags as i64, room)?;
         let mut left = &buf[..len.min(buf.len())];
         for &(base, iov_len) in &msg.iovs {
             if left.is_empty() {
@@ -676,10 +740,13 @@ pub extern "C" fn oxidebsd_sys_recvmsg(fd: u64, msg_ptr: u64, flags: u64) -> i64
             }
             _ => write_u32(msg.ptr + 8, 0),
         }
+        if !control.is_empty() {
+            user_slice_mut(msg.control, control.len() as u64)?.copy_from_slice(&control);
+        }
         if msg.controllen != 0 && msg.control == 0 {
             out_flags |= MSG_CTRUNC;
         }
-        write_u32(msg.ptr + 40, 0); // no control data yet
+        write_u32(msg.ptr + 40, control.len() as u32);
         write_u32(msg.ptr + 48, out_flags as u32);
         Ok(len as u64)
     });
@@ -741,7 +808,10 @@ pub extern "C" fn oxidebsd_sys_setsockopt(fd: u64, args_ptr: u64) -> i64 {
     let result = lookup(fd).and_then(|h| {
         let a = SockoptArgs::read(args_ptr)?;
         let val = user_slice(a.val, a.len)?;
-        if a.level != SOL_SOCKET {
+        if local_only(a.level, a.name) && identity(h.so).map(|i| i.0) != Some(AF_UNIX) {
+            return Err(EINVAL as i64);
+        }
+        if a.level != SOL_SOCKET || a.name == SO_PASSCRED {
             return h.proto.setopt(h.so, a.level, a.name, val);
         }
         let mut sockets = SOCKETS.lock();
@@ -779,7 +849,10 @@ pub extern "C" fn oxidebsd_sys_getsockopt(fd: u64, args_ptr: u64) -> i64 {
         if a.len == 0 {
             return Err(EINVAL as i64);
         }
-        let value = if a.level != SOL_SOCKET {
+        if local_only(a.level, a.name) && identity(h.so).map(|i| i.0) != Some(AF_UNIX) {
+            return Err(EINVAL as i64);
+        }
+        let value = if a.level != SOL_SOCKET || a.name == SO_PASSCRED || a.name == SO_PEERCRED {
             h.proto.getopt(h.so, a.level, a.name)?
         } else {
             let sockets = SOCKETS.lock();

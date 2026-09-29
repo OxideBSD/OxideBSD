@@ -1,8 +1,9 @@
-/* The socket layer through musl's own API (OxideBSD-doc UNIX.md §§3-7, 10-11), seeded at
+/* The socket layer through musl's own API (OxideBSD-doc UNIX.md §§3-11), seeded at
  * /socket-smoke.elf and run by regress/socket-syscall-smoke via
  * tests/socket_syscall_smoke.rs. Internet sockets: what needs no peer (there is no loopback
  * interface), plus a connection refused by QEMU's gateway. Local sockets: naming, permissions,
- * each type's semantics, shutdown and close, with forked children as the other side.
+ * each type's semantics, shutdown and close, descriptor passing and its garbage collection, and
+ * every credential interface (UNIX.md §§8-9), with forked children as the other side.
  *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
@@ -21,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/ucred.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -668,6 +670,411 @@ static void local_socketpair(void)
 	close(sv[1]);
 }
 
+/* ---- Descriptor and credential passing (UNIX.md §§8-9) ---- */
+
+/* Sends `n` descriptors and `len` bytes of `data` in one message. */
+static int send_fds(int s, const int *fds, int n, const void *data, size_t len)
+{
+	char cbuf[CMSG_SPACE(sizeof(int) * 64)];
+	struct iovec iov = { (void *)data, len };
+	struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1 };
+	if (n > 0) {
+		memset(cbuf, 0, sizeof cbuf);
+		m.msg_control = cbuf;
+		m.msg_controllen = CMSG_SPACE(sizeof(int) * n);
+		struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+		c->cmsg_level = SOL_SOCKET;
+		c->cmsg_type = SCM_RIGHTS;
+		c->cmsg_len = CMSG_LEN(sizeof(int) * n);
+		memcpy(CMSG_DATA(c), fds, sizeof(int) * n);
+	}
+	return sendmsg(s, &m, 0);
+}
+
+/* Receives into `buf`, collecting up to `max` descriptors (the control buffer has room for
+ * `room` of them). Returns the byte count; *nfds and *mflags report the rest. */
+static long recv_fds(int s, void *buf, size_t len, int *fds, int max, int room, int flags, int *nfds, int *mflags)
+{
+	char cbuf[CMSG_SPACE(sizeof(int) * 64)];
+	struct iovec iov = { buf, len };
+	struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf,
+		.msg_controllen = room ? CMSG_SPACE(sizeof(int) * room) : 0 };
+	if (!room) m.msg_control = 0;
+	long r = recvmsg(s, &m, flags);
+	*nfds = 0;
+	*mflags = m.msg_flags;
+	if (r < 0) return r;
+	for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
+		if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+			int k = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+			for (int i = 0; i < k && *nfds < max; i++)
+				memcpy(&fds[(*nfds)++], CMSG_DATA(c) + i * sizeof(int), sizeof(int));
+		}
+	}
+	return r;
+}
+
+/* True if the pipe whose read end is `rd` has lost every writer (read gives EOF). */
+static int writers_gone(int rd)
+{
+	int fl = fcntl(rd, F_GETFL);
+	fcntl(rd, F_SETFL, fl | O_NONBLOCK);
+	char c;
+	long r = read(rd, &c, 1);
+	fcntl(rd, F_SETFL, fl);
+	return r == 0;
+}
+
+static void rights(void)
+{
+	int sv[2], got[8], n, fl;
+	char buf[16];
+	socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+	int f = open("/ut/passed", O_CREAT | O_RDWR | O_TRUNC, 0644);
+	write(f, "abc", 3);
+	lseek(f, 0, SEEK_SET);
+	CHECK(send_fds(sv[0], &f, 1, "x", 1) == 1, "SCM_RIGHTS: send a descriptor");
+	close(f); /* the message holds the description */
+	CHECK(recv_fds(sv[1], buf, sizeof buf, got, 8, 8, 0, &n, &fl) == 1 && n == 1, "SCM_RIGHTS: receive it");
+	CHECK(n == 1 && read(got[0], buf, 3) == 3 && memcmp(buf, "abc", 3) == 0,
+		"SCM_RIGHTS: it's the same open file, offset and all");
+	CHECK(n == 1 && !(fcntl(got[0], F_GETFD) & FD_CLOEXEC), "SCM_RIGHTS: no FD_CLOEXEC by default");
+	send_fds(sv[0], &got[0], 1, "y", 1);
+	recv_fds(sv[1], buf, sizeof buf, got + 1, 7, 8, MSG_CMSG_CLOEXEC, &n, &fl);
+	CHECK(n == 1 && (fcntl(got[1], F_GETFD) & FD_CLOEXEC), "MSG_CMSG_CLOEXEC sets FD_CLOEXEC");
+	close(got[0]);
+	close(got[1]);
+
+	/* Several in one message; a short control buffer truncates. */
+	int three[3] = { 0, 1, 2 };
+	send_fds(sv[0], three, 3, "z", 1);
+	recv_fds(sv[1], buf, sizeof buf, got, 8, 8, 0, &n, &fl);
+	CHECK(n == 3 && !(fl & MSG_CTRUNC), "SCM_RIGHTS: three at once");
+	for (int i = 0; i < n; i++) close(got[i]);
+	send_fds(sv[0], three, 3, "z", 1);
+	/* CMSG_SPACE(sizeof(int)) is 24 bytes: a header and room for two descriptors. */
+	recv_fds(sv[1], buf, sizeof buf, got, 8, 1, 0, &n, &fl);
+	CHECK(n == 2 && (fl & MSG_CTRUNC), "SCM_RIGHTS: a short buffer gets what fits, MSG_CTRUNC");
+	for (int i = 0; i < n; i++) close(got[i]);
+
+	int bad = 999;
+	errno = 0;
+	CHECK(send_fds(sv[0], &bad, 1, "q", 1) < 0 && errno == EBADF, "SCM_RIGHTS: a closed descriptor is EBADF");
+	CHECK_ERR(recv(sv[1], buf, 1, MSG_DONTWAIT), EAGAIN, "SCM_RIGHTS: ... and nothing was sent");
+
+	/* A stream doesn't run bytes sent with descriptors into earlier ones (§6.4). */
+	write(sv[0], "ab", 2);
+	send_fds(sv[0], &three[0], 1, "cd", 2);
+	CHECK(recv_fds(sv[1], buf, sizeof buf, got, 8, 8, 0, &n, &fl) == 2 && n == 0 && memcmp(buf, "ab", 2) == 0,
+		"stream: a read stops before bytes that came with control data");
+	CHECK(recv_fds(sv[1], buf, sizeof buf, got, 8, 8, 0, &n, &fl) == 2 && n == 1 && memcmp(buf, "cd", 2) == 0,
+		"stream: the next read gets them and their descriptor");
+	close(got[0]);
+	write(sv[0], "ef", 2);
+	send_fds(sv[0], &three[0], 1, "gh", 2);
+	CHECK(recv(sv[1], buf, 4, MSG_WAITALL) == 2, "stream: MSG_WAITALL stops there too");
+	recv_fds(sv[1], buf, sizeof buf, got, 8, 8, 0, &n, &fl);
+	close(got[0]);
+
+	/* read(2) has nowhere to put descriptors: they're closed. */
+	int p[2];
+	pipe(p);
+	send_fds(sv[0], &p[1], 1, "r", 1);
+	close(p[1]);
+	CHECK(read(sv[1], buf, 1) == 1 && writers_gone(p[0]), "read(2) closes descriptors it can't return");
+	close(p[0]);
+
+	/* A message discarded unread releases what it held (§8.3). */
+	pipe(p);
+	send_fds(sv[0], &p[1], 1, "d", 1);
+	close(p[1]);
+	CHECK(!writers_gone(p[0]), "in flight, the pipe's write end is still open");
+	close(sv[1]);
+	CHECK(writers_gone(p[0]), "closing the receiver releases descriptors in its queue");
+	close(p[0]);
+	close(sv[0]);
+
+	/* Datagrams, by name. */
+	struct sockaddr_un a;
+	socklen_t al = un_path(&a, "/ut/rdg");
+	int d = bound(SOCK_DGRAM, "/ut/rdg");
+	int c = socket(AF_UNIX, SOCK_DGRAM, 0);
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct iovec iov = { "dg", 2 };
+	struct msghdr m = { .msg_name = &a, .msg_namelen = al, .msg_iov = &iov, .msg_iovlen = 1,
+		.msg_control = cbuf, .msg_controllen = sizeof cbuf };
+	struct cmsghdr *cm = CMSG_FIRSTHDR(&m);
+	cm->cmsg_level = SOL_SOCKET;
+	cm->cmsg_type = SCM_RIGHTS;
+	cm->cmsg_len = CMSG_LEN(sizeof(int));
+	int one = 1;
+	memcpy(CMSG_DATA(cm), &one, sizeof one);
+	CHECK(sendmsg(c, &m, 0) == 2, "SCM_RIGHTS over a datagram socket");
+	CHECK(recv_fds(d, buf, sizeof buf, got, 8, 8, 0, &n, &fl) == 2 && n == 1, "... received with the datagram");
+	close(got[0]);
+	close(c);
+	close(d);
+	int in = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK_ERR(send_fds(in, &one, 1, "x", 1), EOPNOTSUPP, "SCM_RIGHTS on an Internet socket is EOPNOTSUPP");
+	close(in);
+}
+
+static void collection(void)
+{
+	/* A socket sent over itself: once its own descriptor is closed only its own message holds
+	 * it, and nobody can ever read that message (its peer can only send to it). The pipe riding
+	 * along shows whether the message was released (§8.4). */
+	int sv[2], p[2];
+	socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+	pipe(p);
+	int both[2] = { sv[1], p[1] };
+	send_fds(sv[0], both, 2, "g", 1); /* into sv[1]'s own queue */
+	close(p[1]);
+	close(sv[0]);
+	CHECK(!writers_gone(p[0]), "gc: nothing is collected while it could still be read");
+	close(sv[1]);
+	CHECK(writers_gone(p[0]), "gc: a socket sent over itself is collected once unreachable");
+	close(p[0]);
+
+	/* A cycle of two. */
+	int x[2], y[2];
+	socketpair(AF_UNIX, SOCK_DGRAM, 0, x);
+	socketpair(AF_UNIX, SOCK_DGRAM, 0, y);
+	pipe(p);
+	int xs[2] = { y[1], p[1] };
+	send_fds(x[0], xs, 2, "1", 1); /* y[1] rides in x[1]'s queue */
+	send_fds(y[0], &x[1], 1, "2", 1); /* x[1] rides in y[1]'s queue */
+	close(p[1]);
+	close(x[0]);
+	close(y[0]);
+	close(x[1]);
+	CHECK(!writers_gone(p[0]), "gc: a cycle stays while one of its sockets is open (y[1] can read x[1])");
+	close(y[1]);
+	CHECK(writers_gone(p[0]), "gc: an unreachable cycle is collected");
+	close(p[0]);
+}
+
+static void limits(void)
+{
+	/* 1024 in flight per user, 4096 in all; root has only the second (§8.5). Zero-byte
+	 * datagrams, so only the descriptor count limits. */
+	pid_t pid = fork();
+	if (pid == 0) {
+		if (setuid(1000) < 0) _exit(100);
+		int s[2], k = 0;
+		socketpair(AF_UNIX, SOCK_DGRAM, 0, s);
+		while (k < 2000 && send_fds(s[0], &s[0], 1, "", 0) == 0) k++;
+		_exit(k == 1024 && errno == ETOOMANYREFS ? 0 : 1);
+	}
+	int st;
+	CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+		"another user may have 1024 descriptors in flight, then ETOOMANYREFS");
+	int s[2], k = 0;
+	socketpair(AF_UNIX, SOCK_DGRAM, 0, s);
+	while (k < 5000 && send_fds(s[0], &s[0], 1, "", 0) == 0) k++;
+	printf("     root sent %d before %s\n", k, strerror(errno));
+	CHECK(k == 4096 && errno == ETOOMANYREFS, "root is held to the system-wide 4096");
+	close(s[0]);
+	close(s[1]);
+	CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, s) == 0 && send_fds(s[0], &s[0], 1, "", 0) == 0,
+		"closing releases them: sending works again");
+	close(s[0]);
+	close(s[1]);
+}
+
+/* The control message of `type` in `m`, or 0. */
+static struct cmsghdr *find_cmsg(struct msghdr *m, int type)
+{
+	for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c; c = CMSG_NXTHDR(m, c))
+		if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == type) return c;
+	return 0;
+}
+
+static int count_cmsg(struct msghdr *m, int type)
+{
+	int n = 0;
+	for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c; c = CMSG_NXTHDR(m, c))
+		if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == type) n++;
+	return n;
+}
+
+/* Receives one message from `s` into `m` (control buffer `cbuf`). */
+static long recv_ctl(int s, struct msghdr *m, char *cbuf, size_t clen, char *buf, size_t len)
+{
+	static struct iovec iov;
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	memset(m, 0, sizeof *m);
+	m->msg_iov = &iov;
+	m->msg_iovlen = 1;
+	m->msg_control = cbuf;
+	m->msg_controllen = clen;
+	return recvmsg(s, m, 0);
+}
+
+/* Sends one byte with one control message of `type` carrying `len` bytes of `data`. */
+static long send_ctl(int s, int type, const void *data, size_t len)
+{
+	char sc[CMSG_SPACE(128)];
+	memset(sc, 0, sizeof sc);
+	struct iovec iov = { "c", 1 };
+	struct msghdr sm = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = sc, .msg_controllen = CMSG_SPACE(len) };
+	struct cmsghdr *h = CMSG_FIRSTHDR(&sm);
+	h->cmsg_level = SOL_SOCKET;
+	h->cmsg_type = type;
+	h->cmsg_len = CMSG_LEN(len);
+	memcpy(CMSG_DATA(h), data, len);
+	return sendmsg(s, &sm, 0);
+}
+
+static void credentials(void)
+{
+	int sv[2], st;
+	uid_t eu;
+	gid_t eg;
+	socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+	CHECK(getpeereid(sv[0], &eu, &eg) == 0 && eu == getuid() && eg == getgid(), "getpeereid on a socket pair");
+	struct xucred xu;
+	socklen_t len = sizeof xu;
+	CHECK(getsockopt(sv[0], SOL_LOCAL, LOCAL_PEERCRED, &xu, &len) == 0 && len == sizeof xu &&
+		xu.cr_version == XUCRED_VERSION && xu.cr_uid == getuid() && xu.cr_ngroups == 1 &&
+		xu.cr_groups[0] == getgid() && xu.cr_pid == getpid(), "LOCAL_PEERCRED: struct xucred");
+	struct ucred uc;
+	len = sizeof uc;
+	CHECK(getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &uc, &len) == 0 && len == sizeof uc &&
+		uc.pid == getpid() && uc.uid == getuid() && uc.gid == getgid(), "SO_PEERCRED: struct ucred");
+	int lone = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK_ERR(getpeereid(lone, &eu, &eg), ENOTCONN, "getpeereid unconnected is ENOTCONN");
+	close(lone);
+	int inet = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK_ERR(getpeereid(inet, &eu, &eg), EINVAL, "getpeereid on an Internet socket is EINVAL");
+	len = sizeof uc;
+	CHECK_ERR(getsockopt(inet, SOL_SOCKET, SO_PEERCRED, &uc, &len), EINVAL, "SO_PEERCRED on one is EINVAL");
+	close(inet);
+
+	/* Connection credentials: as of listen(2) and connect(2), across users. */
+	int l = bound(SOCK_STREAM, "/ut/cred");
+	chmod("/ut/cred", 0777);
+	listen(l, 4);
+	int rp[2];
+	pipe(rp);
+	pid_t pid = fork();
+	if (pid == 0) {
+		if (setuid(1000) < 0) _exit(100);
+		int c = connected(SOCK_STREAM, "/ut/cred");
+		uid_t u;
+		gid_t g;
+		int ok = c >= 0 && getpeereid(c, &u, &g) == 0 && u == 0; /* the listener is root's */
+		write(rp[1], &ok, sizeof ok);
+		pause();
+		_exit(0);
+	}
+	int ok = 0;
+	read(rp[0], &ok, sizeof ok);
+	int s = accept(l, 0, 0);
+	CHECK(ok, "the connecting side sees the listener's credentials");
+	CHECK(getpeereid(s, &eu, &eg) == 0 && eu == 1000 && eg == 0, "the accepting side sees the connector's");
+	len = sizeof uc;
+	CHECK(getsockopt(s, SOL_SOCKET, SO_PEERCRED, &uc, &len) == 0 && uc.pid == pid, "... and its pid");
+	kill(pid, SIGKILL);
+	waitpid(pid, 0, 0);
+	close(s);
+	close(l);
+	close(rp[0]);
+	close(rp[1]);
+
+	char buf[16], cbuf[512];
+	struct msghdr m;
+	struct cmsghdr *c;
+
+	/* SCM_CREDS from the sender: the kernel fills it in, whatever was written (§9.3). */
+	struct cmsgcred forged_cc;
+	memset(&forged_cc, 0xee, sizeof forged_cc);
+	CHECK(send_ctl(sv[0], SCM_CREDS, &forged_cc, sizeof forged_cc) == 1, "SCM_CREDS: send with a forged struct cmsgcred");
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	c = find_cmsg(&m, SCM_CREDS);
+	struct cmsgcred cc;
+	if (c) memcpy(&cc, CMSG_DATA(c), sizeof cc);
+	CHECK(c && c->cmsg_len == CMSG_LEN(sizeof cc) && cc.cmcred_pid == getpid() && cc.cmcred_uid == getuid() &&
+		cc.cmcred_euid == geteuid() && cc.cmcred_gid == getgid() && cc.cmcred_ngroups == 1,
+		"SCM_CREDS: the receiver gets the kernel's, not the forgery");
+
+	/* LOCAL_CREDS: a stream gives struct sockcred with the first receive only. */
+	int on = 1;
+	CHECK(setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS, &on, sizeof on) == 0, "LOCAL_CREDS: set");
+	CHECK_ERR(setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on, sizeof on), EINVAL,
+		"LOCAL_CREDS and LOCAL_CREDS_PERSISTENT are exclusive");
+	write(sv[0], "1", 1);
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	c = find_cmsg(&m, SCM_CREDS);
+	struct sockcred sk;
+	if (c) memcpy(&sk, CMSG_DATA(c), sizeof sk);
+	CHECK(c && c->cmsg_len == CMSG_LEN(SOCKCREDSIZE(1)) && sk.sc_uid == getuid() && sk.sc_ngroups == 1,
+		"LOCAL_CREDS: struct sockcred with the first receive");
+	write(sv[0], "2", 1);
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	CHECK(!find_cmsg(&m, SCM_CREDS), "LOCAL_CREDS on a stream: not with later ones");
+	on = 0;
+	setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS, &on, sizeof on);
+
+	/* LOCAL_CREDS_PERSISTENT: struct sockcred2 with every message; a sender's SCM_CREDS is
+	 * dropped, so only the kernel's credentials arrive (§9.5). */
+	on = 1;
+	setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on, sizeof on);
+	for (int i = 0; i < 2; i++) {
+		send_ctl(sv[0], SCM_CREDS, &forged_cc, sizeof forged_cc);
+		recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+		c = find_cmsg(&m, SCM_CREDS2);
+		struct sockcred2 s2;
+		if (c) memcpy(&s2, CMSG_DATA(c), sizeof s2);
+		CHECK(c && s2.sc_version == 0 && s2.sc_pid == getpid() && s2.sc_uid == getuid() && !find_cmsg(&m, SCM_CREDS),
+			i ? "LOCAL_CREDS_PERSISTENT: ... and the next" : "LOCAL_CREDS_PERSISTENT: struct sockcred2, the sender's SCM_CREDS dropped");
+	}
+	on = 0;
+	setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on, sizeof on);
+	close(sv[0]);
+	close(sv[1]);
+
+	/* LOCAL_CREDS on datagrams: with every one. */
+	socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
+	on = 1;
+	setsockopt(sv[1], SOL_LOCAL, LOCAL_CREDS, &on, sizeof on);
+	send(sv[0], "a", 1, 0);
+	send(sv[0], "b", 1, 0);
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	int first = count_cmsg(&m, SCM_CREDS);
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	CHECK(first == 1 && count_cmsg(&m, SCM_CREDS) == 1, "LOCAL_CREDS on datagrams: every message");
+	close(sv[0]);
+	close(sv[1]);
+
+	/* SO_PASSCRED: SCM_CREDENTIALS with every message; a sender may supply its own, but only
+	 * root someone else's (§9.4). */
+	socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
+	on = 1;
+	CHECK(setsockopt(sv[1], SOL_SOCKET, SO_PASSCRED, &on, sizeof on) == 0, "SO_PASSCRED: set");
+	send(sv[0], "a", 1, 0);
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	c = find_cmsg(&m, SCM_CREDENTIALS);
+	if (c) memcpy(&uc, CMSG_DATA(c), sizeof uc);
+	CHECK(c && uc.pid == getpid() && uc.uid == getuid(), "SO_PASSCRED: SCM_CREDENTIALS with a message");
+	struct ucred forged = { 4242, 77, 77 };
+	CHECK(send_ctl(sv[0], SCM_CREDENTIALS, &forged, sizeof forged) == 1, "SCM_CREDENTIALS: root may send any");
+	recv_ctl(sv[1], &m, cbuf, sizeof cbuf, buf, sizeof buf);
+	c = find_cmsg(&m, SCM_CREDENTIALS);
+	if (c) memcpy(&uc, CMSG_DATA(c), sizeof uc);
+	CHECK(c && uc.pid == 4242 && uc.uid == 77, "... and the receiver gets them");
+	pid = fork();
+	if (pid == 0) {
+		if (setuid(1000) < 0) _exit(100);
+		_exit(send_ctl(sv[0], SCM_CREDENTIALS, &forged, sizeof forged) < 0 && errno == EPERM ? 0 : 1);
+	}
+	CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+		"SCM_CREDENTIALS: another user's forgery is EPERM");
+	close(sv[0]);
+	close(sv[1]);
+}
+
 int main(void)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
@@ -681,6 +1088,10 @@ int main(void)
 	local_dgram();
 	local_seqpacket();
 	local_socketpair();
+	rights();
+	collection();
+	limits();
+	credentials();
 	printf("socket-smoke: %d failure(s)\n", failures);
 	return failures;
 }

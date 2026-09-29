@@ -249,6 +249,49 @@ fn lowest_free(table: &BTreeMap<(u64, u64), u64>, pid: u64, min: u64) -> u64 {
     candidate
 }
 
+/// Takes a reference to `real_fd`'s description that no descriptor slot holds: a message in
+/// flight holding it (`SCM_RIGHTS`, `UNIX.md` §8.1). The description stays open until `release`.
+pub(crate) fn hold(real_fd: u64) {
+    if let Some(d) = DESCRIPTIONS.lock().get_mut(&real_fd) {
+        d.refs += 1;
+    }
+}
+
+/// Gives up a reference `hold` took; the last one closes the description.
+pub(crate) fn release(real_fd: u64) {
+    let mut descriptions = DESCRIPTIONS.lock();
+    let Some(d) = descriptions.get_mut(&real_fd) else { return };
+    d.refs -= 1;
+    if d.refs == 0 {
+        let close = d.ops.close;
+        descriptions.remove(&real_fd);
+        drop(descriptions); // don't hold the lock across the callback
+        NONBLOCKING.lock().remove(&real_fd);
+        close(real_fd);
+    }
+}
+
+/// Every reference to `real_fd`'s description: descriptor slots and messages in flight.
+pub(crate) fn refs(real_fd: u64) -> u32 {
+    DESCRIPTIONS.lock().get(&real_fd).map_or(0, |d| d.refs)
+}
+
+/// Turns a reference `hold` took into a descriptor of the calling process, at the lowest free
+/// number, with `FD_CLOEXEC` if `cloexec` (a received `SCM_RIGHTS`, `UNIX.md` §8.2).
+pub(crate) fn install_held(real_fd: u64, cloexec: bool) -> u64 {
+    let tgid = scheduler::current_tgid();
+    let fd = {
+        let mut table = TABLE.lock();
+        let fd = lowest_free(&table, tgid, 0);
+        table.insert((tgid, fd), real_fd);
+        fd
+    };
+    if cloexec {
+        set_cloexec(tgid, fd, true);
+    }
+    fd
+}
+
 /// Points `(pid, fd)` at `real_fd`, which must already have a description, and counts the
 /// reference. The caller has already closed whatever `(pid, fd)` held before.
 fn install(table: &mut BTreeMap<(u64, u64), u64>, pid: u64, fd: u64, real_fd: u64) {
@@ -542,6 +585,10 @@ fn close_one(pid: u64, fd: u64) -> bool {
         drop(descriptions); // don't hold the lock across the callback
         NONBLOCKING.lock().remove(&real_fd);
         close(real_fd);
+    } else {
+        drop(descriptions);
+        // What's left may be only messages in flight: a socket sent over itself (UNIX.md §8.4).
+        crate::kern::uipc_usrreq::descriptor_closed(real_fd);
     }
     true
 }

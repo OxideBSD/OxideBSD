@@ -1180,7 +1180,10 @@ a test using them must load the socket module) resolves and dispatches there; ad
 `sockaddr` bytes. **Local sockets** (`AF_UNIX` stream/dgram/seqpacket, `sys/kern/uipc_usrreq.rs`):
 path names are oxfs `InodeKind::Socket` inodes made/looked up through callbacks oxfs registers
 (`oxidebsd_register_socket_nodes`), mapped inode -> socket kernel-side; abstract names and autobind
-too; `socketpair` is built on them (the pipe-backed pair is gone).
+too; `socketpair` is built on them (the pipe-backed pair is gone). Descriptor passing: a message holds
+its `SCM_RIGHTS` descriptions (`fs::fd::hold`/`release`/`install_held`), a mark-and-sweep `gc` runs
+when an in-flight description loses a descriptor; credentials via `LOCAL_PEERCRED`/`SO_PEERCRED`/
+`getpeereid`/`SCM_CREDS`/`LOCAL_CREDS[_PERSISTENT]`/`SO_PASSCRED` (`SOL_LOCAL` = 0x200, not FreeBSD's 0).
 All data goes through `sendmsg`/`recvmsg` (577/578, a real `struct msghdr`); musl's `sendto`/
 `recvfrom` are built on them, and `get/setsockopt` (579/580) take `{level, name, val, len}` by
 pointer (`musl src/internal/oxidebsd_sockopt.h`). A protocol never blocks: it returns `EAGAIN`
