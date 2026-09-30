@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 libc = "0.2"
 syslog = { path = "../../lib/libsyslog" }
+# TCP and TLS transport (SYSLOG.md §8.3-8.4): the system OpenSSL, linked shared.
+openssl = "0.10"
 
 # The libc fork OxideBSD's std is built with (target_os = "oxidebsd"); a [patch] only applies
 # from the workspace root, so each binary repeats lib/libsh's.

@@ -443,8 +443,6 @@ fn main() {
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libsyslog/src").display()
     );
-    let syslogd_elf_path =
-        build_std_oxidebsd_userland_crate("usr.sbin/syslogd", "OXFS_SYSLOGD_ELF_PATH", &musl_sysroot);
     let newsyslog_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/newsyslog", "OXFS_NEWSYSLOG_ELF_PATH", &musl_sysroot);
     let logger_elf_path =
@@ -582,6 +580,15 @@ fn main() {
     let openssl_rs_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "regress/std/openssl-rs-smoke",
         "OXFS_OPENSSL_RS_SMOKE_ELF_PATH",
+        &musl_sysroot,
+        &[("OPENSSL_DIR", &openssl_usr), ("CC_x86_64_unknown_oxidebsd", &musl_gcc)],
+        StdLink::Dynamic,
+    );
+    // syslogd links OpenSSL for TCP and TLS (SYSLOG.md §8.3-8.4), so it's built after it, found as
+    // openssl-rs-smoke finds it.
+    let syslogd_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "usr.sbin/syslogd",
+        "OXFS_SYSLOGD_ELF_PATH",
         &musl_sysroot,
         &[("OPENSSL_DIR", &openssl_usr), ("CC_x86_64_unknown_oxidebsd", &musl_gcc)],
         StdLink::Dynamic,

@@ -123,6 +123,42 @@ Its standard output and error go to
 Send to
 .Xr syslogd 8
 on another host, over UDP, port 514 by default.
+.It Li @@ Ns Ar host Ns Op : Ns Ar port
+Send over TCP, port 514 by default, each message preceded by its length
+(RFC 6587 octet counting).
+.It Li @[ Ns Ar host Ns Li \&] Ns Oo : Ns Ar port Oc Ns Op Li \&( Ns Ar options Ns Li \&)
+Send over TLS, port 6514 by default, framed as over TCP, in RFC 5424 form.
+The server's certificate must be vouched for by a trusted authority
+.Pq Va tls_ca , Va tls_cadir , No or else the system's, see Xr certctl 8
+and name
+.Ar host ,
+unless
+.Ar options ,
+a comma-separated list of
+.Ar name Ns Li = Ns Qq Ar value ,
+say otherwise:
+.Bl -tag -width indent
+.It Li subject= Ns Qq Ar name
+The certificate's common name or a
+.Li subjectAltName
+must be
+.Ar name
+instead of
+.Ar host .
+.It Li fingerprint= Ns Qq Li SHA-256: Ns Ar hex
+Accept exactly the certificate whose SHA-256 fingerprint this is, whoever
+vouches for it.
+.It Li cert= Ns Ar file
+Accept exactly the certificate in
+.Ar file .
+.It Li verify= Ns Qq Li off
+Accept any certificate.
+.El
+.Pp
+While a TCP or TLS connection is down its messages are queued, up to 1024 or
+1 MiB, the oldest dropped first and the number dropped logged, and
+.Xr syslogd 8
+connects again after 10 seconds, the delay doubling up to 10 minutes.
 .It Ar user Ns Op , Ns Ar user ...
 Write to every terminal where one of these users is logged in.
 .It Li *
@@ -195,14 +231,51 @@ A path that does not exist is ignored.
 A global option, in
 .Nx Ns 's
 form.
-The options of TCP and TLS transport
-.Po
-.Va tcp_server ,
-.Va tcp_bindhost ,
-.Va tcp_bindport ,
-.Va tls_*
-.Pc
-are recognized and reported as not supported yet; no other option exists.
+The options are those of TCP and TLS; another is reported as unknown.
+A boolean is
+.Li on
+or
+.Li off .
+.Bl -tag -width tls_allow_fingerprints
+.It Va tcp_server
+Receive over TCP, octet-counted or newline-terminated messages.
+Default off.
+.It Va tcp_bindhost , Va tcp_bindport
+The address and port to listen on: all addresses and 514 by default.
+.It Va tls_server
+Receive over TLS.
+Default off; needs
+.Va tls_keyfile
+and
+.Va tls_certfile .
+.It Va tls_bindhost , Va tls_bindport
+All addresses and 6514 by default.
+.It Va tls_keyfile , Va tls_certfile
+This host's private key and certificate, in PEM form: presented as a server,
+and as a client when sending over TLS.
+.It Va tls_gen_cert
+Make a key and a self-signed certificate at those paths if either is
+missing, logging its fingerprint.
+Default off.
+.It Va tls_ca , Va tls_cadir
+A file of trusted authorities, and a directory of them as
+.Xr certctl 8
+lays one out.
+With neither, the system's
+.Pq Pa /etc/ssl/cert.pem , Pa /etc/ssl/certs .
+.It Va tls_verify
+Whether a client must present a certificate a trusted authority vouches for,
+or one of those allowed below.
+Default on.
+.It Va tls_allow_fingerprints
+Comma-separated
+.Li SHA-256: Ns Ar hex
+fingerprints of client certificates accepted besides.
+.It Va tls_allow_clientcerts
+Comma-separated files of client certificates accepted besides.
+.El
+.Pp
+TLS 1.2 is the least version used.
 .El
 .Sh FILES
 .Bl -tag -width /usr/local/etc/syslog.d -compact
@@ -247,6 +320,7 @@ Messages from this host mentioning a failure, in any case, to a script:
 .Xr logger 1 ,
 .Xr syslog 3 ,
 .Xr newsyslog.conf 5 ,
+.Xr certctl 8 ,
 .Xr syslogd 8
 .Sh HISTORY
 The
@@ -259,12 +333,6 @@ with
 .Nx Ns 's
 global options.
 .Sh BUGS
-The
-.Li @@ Ns Ar host
-(TCP) and
-.Li @[ Ns Ar host Ns Li ]: Ns Ar port
-(TLS) actions are not supported yet: such a rule is reported and left out.
-.Pp
 Unlike
 .Fx ,
 .Ql #-

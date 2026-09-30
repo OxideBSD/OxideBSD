@@ -6,9 +6,11 @@
 //! ```
 //!
 //! One `poll(2)` loop reads the local socket `/dev/log` (and any `-l` sockets), the kernel's
-//! `/dev/klog`, and UDP port 514 unless `-s`, and hands each message to the rules of
-//! `syslog.conf(5)` (`conf`), which write it out (`action`). Signals arrive through a pipe the
-//! loop also polls: `SIGHUP` reloads, `SIGTERM`/`SIGINT` end it, `SIGCHLD` reaps pipe commands.
+//! `/dev/klog`, UDP port 514 unless `-s`, and TCP and TLS connections when `syslog.conf` asks
+//! (`tcp_server`, `tls_server`), and hands each message to the rules of `syslog.conf(5)`
+//! (`conf`), which write it out (`action`); TCP and TLS actions' connections live in the same
+//! loop (`net`). Signals arrive through a pipe the loop also polls: `SIGHUP` reloads,
+//! `SIGTERM`/`SIGINT` end it, `SIGCHLD` reaps pipe commands.
 //!
 //! Messages from this host, the local socket's and the kernel's, are stamped when they arrive:
 //! the sender's stamp is local time from the same clock, a moment earlier, and musl's
@@ -16,6 +18,7 @@
 
 mod action;
 mod conf;
+mod net;
 
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -301,6 +304,10 @@ struct Daemon {
     actions: Vec<Action>,
     net_out: Option<UdpSocket>,
     names: std::collections::HashMap<IpAddr, String>,
+    /// The configuration's TCP and TLS options, as the listeners were set up from them.
+    net: Option<conf::NetOptions>,
+    listeners: Vec<net::Listener>,
+    inbound: Vec<net::Inbound>,
 }
 
 impl Daemon {
@@ -322,14 +329,79 @@ impl Daemon {
         if config.rules.is_empty() && !problems.is_empty() && !self.opts.config.exists() {
             config = conf::fallback();
         }
+        let (net_opts, errors) = conf::NetOptions::from(&config.options);
+        problems.extend(errors);
+        let mut notes = Vec::new();
+        match net::generate_identity(&net_opts, &self.host) {
+            Ok(Some(note)) => notes.push(note),
+            Ok(None) => {}
+            Err(e) => problems.push(format!("tls_gen_cert: {e}")),
+        }
         for rule in config.rules {
-            let (action, failure) = Action::new(rule, self.opts.create, now);
+            let (action, failure) = Action::new(rule, self.opts.create, now, &net_opts);
             problems.extend(failure);
             self.actions.push(action);
+        }
+        if self.net.as_ref() != Some(&net_opts) {
+            self.listeners = self.listen(&net_opts, &mut problems);
+            self.net = Some(net_opts);
+        }
+        for n in notes {
+            self.internal(Level::NOTICE, &n);
         }
         for p in problems {
             self.internal(Level::ERR, &p);
         }
+        // Stream actions connect now rather than with their first message.
+        self.pump_streams(0);
+    }
+
+    /// The `tcp_server` and `tls_server` listeners, unless network input is off (`-s`, `-N`).
+    fn listen(&self, o: &conf::NetOptions, problems: &mut Vec<String>) -> Vec<net::Listener> {
+        let mut out = Vec::new();
+        if self.opts.no_network || self.opts.secure > 0 {
+            return out;
+        }
+        if o.tcp_server {
+            match net::Listener::bind(o.tcp_bindhost.as_deref(), o.tcp_bindport, None) {
+                Ok(l) => out.push(l),
+                Err(e) => problems.push(format!("tcp_server: bind port {}: {e}", o.tcp_bindport)),
+            }
+        }
+        if o.tls_server {
+            match net::acceptor(o) {
+                Ok(a) => match net::Listener::bind(o.tls_bindhost.as_deref(), o.tls_bindport, Some(a)) {
+                    Ok(l) => out.push(l),
+                    Err(e) => problems.push(format!("tls_server: bind port {}: {e}", o.tls_bindport)),
+                },
+                Err(e) => problems.push(format!("tls_server: {e}")),
+            }
+        }
+        out
+    }
+
+    /// Advances every stream action: after `poll` (`revents` per action, by index) or for its
+    /// reconnection timer (`revents` empty).
+    fn pump_streams_with(&mut self, revents: &[(usize, i16)], due_only: bool) {
+        let now = syslog::time::epoch();
+        let mut log = Vec::new();
+        for (i, a) in self.actions.iter_mut().enumerate() {
+            let ev = revents.iter().find(|(j, _)| *j == i).map(|(_, e)| *e);
+            let run = match ev {
+                Some(_) => true,
+                None => !due_only || a.stream_due().is_some_and(|d| d <= now),
+            };
+            if run {
+                log.extend(a.stream_pump(now, ev.unwrap_or(0)));
+            }
+        }
+        for l in log {
+            self.internal(Level::ERR, &l);
+        }
+    }
+
+    fn pump_streams(&mut self, _revents: i16) {
+        self.pump_streams_with(&[], false);
     }
 
     /// Logs one of syslogd's own messages, as `syslogd: text`.
@@ -446,9 +518,13 @@ impl Daemon {
         for f in failures {
             self.internal(Level::ERR, &f);
         }
+        self.pump_streams_with(&[], true);
         let mut next = if interval > 0 { *next_mark } else { now + 3600 };
         for a in &self.actions {
             if let Some(due) = a.repeat_due() {
+                next = next.min(due);
+            }
+            if let Some(due) = a.stream_due() {
                 next = next.min(due);
             }
         }
@@ -632,7 +708,16 @@ fn main() -> ExitCode {
     };
 
     let mark_minutes = opts.mark_minutes;
-    let mut d = Daemon { opts, host: hostname(), actions: Vec::new(), net_out, names: Default::default() };
+    let mut d = Daemon {
+        opts,
+        host: hostname(),
+        actions: Vec::new(),
+        net_out,
+        names: Default::default(),
+        net: None,
+        listeners: Vec::new(),
+        inbound: Vec::new(),
+    };
     d.load();
     d.internal(Level::INFO, "restart");
     for e in early {
@@ -656,6 +741,23 @@ fn main() -> ExitCode {
         let net_index = fds.len();
         for s in &net_in {
             fds.push(libc::pollfd { fd: s.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        }
+        let listen_index = fds.len();
+        for l in &d.listeners {
+            fds.push(libc::pollfd { fd: l.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        }
+        let inbound_index = fds.len();
+        for c in &d.inbound {
+            let (fd, events) = c.interest();
+            fds.push(libc::pollfd { fd, events, revents: 0 });
+        }
+        // Stream actions: (action index, position in fds).
+        let mut streams = Vec::new();
+        for (i, a) in d.actions.iter().enumerate() {
+            if let Some((fd, events)) = a.stream_interest() {
+                streams.push((i, fds.len()));
+                fds.push(libc::pollfd { fd, events, revents: 0 });
+            }
         }
         // SAFETY: `fds` is valid for its length.
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, (timeout * 1000) as i32) };
@@ -759,6 +861,67 @@ fn main() -> ExitCode {
             }
             let bytes = buf[..len].to_vec();
             d.receive(&bytes, Source::Remote(from));
+        }
+
+        // New TCP and TLS connections, checked against -a as UDP senders are (§8.2).
+        let mut accepted = Vec::new();
+        for (i, l) in d.listeners.iter().enumerate() {
+            if fds[listen_index + i].revents & libc::POLLIN != 0 {
+                for (stream, peer) in l.accept() {
+                    accepted.push((stream, peer, l.tls.clone()));
+                }
+            }
+        }
+        for (stream, peer, tls) in accepted {
+            if !d.opts.allowed.is_empty() {
+                let name = if d.opts.no_lookups { None } else { Some(d.remote_name(&peer)) };
+                if !d.opts.allowed.iter().any(|p| p.allows(&peer, name.as_deref())) {
+                    if d.opts.debug {
+                        eprintln!("syslogd: rejected connection from {peer}");
+                    }
+                    continue;
+                }
+            }
+            match net::Inbound::new(stream, peer, tls.as_deref()) {
+                Ok(c) => d.inbound.push(c),
+                Err(e) => d.internal(Level::ERR, &e),
+            }
+        }
+
+        // Messages from them. Connections accepted in this pass have no entry in `fds` yet.
+        let polled = fds.len().saturating_sub(inbound_index).min(d.inbound.len());
+        let mut i = 0;
+        let mut index = 0;
+        while index < polled {
+            let revents = fds[inbound_index + index].revents;
+            index += 1;
+            if revents == 0 {
+                i += 1;
+                continue;
+            }
+            match d.inbound[i].ready(MAXLINE) {
+                net::Inflow::Messages(msgs, open) => {
+                    let peer = d.inbound[i].peer;
+                    if open {
+                        i += 1;
+                    } else {
+                        d.inbound.remove(i);
+                    }
+                    for m in msgs {
+                        d.receive(&m, Source::Remote(peer));
+                    }
+                }
+                net::Inflow::Failed(e) => {
+                    d.inbound.remove(i);
+                    d.internal(Level::ERR, &e);
+                }
+            }
+        }
+
+        let ready: Vec<(usize, i16)> =
+            streams.iter().filter(|&&(_, f)| fds[f].revents != 0).map(|&(a, f)| (a, fds[f].revents)).collect();
+        if !ready.is_empty() {
+            d.pump_streams_with(&ready, true);
         }
     }
 }

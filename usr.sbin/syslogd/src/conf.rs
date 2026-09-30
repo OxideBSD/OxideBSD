@@ -27,10 +27,137 @@ pub enum Target {
     Pipe(String),
     /// `@host[:port]`, over UDP.
     Forward { host: String, port: u16 },
+    /// `@@host[:port]`, over TCP (`SYSLOG.md` §8.3).
+    Tcp { host: String, port: u16 },
+    /// `@[host]:port(options)`, over TLS (`SYSLOG.md` §8.4).
+    Tls { host: String, port: u16, peer: PeerCheck },
     /// `user1,user2`.
     Users(Vec<String>),
     /// `*`.
     Wall,
+}
+
+/// How a TLS action checks the server's certificate: the options of `@[host]:port(...)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerCheck {
+    /// `subject="..."`: the name the certificate's subject (common name) or `subjectAltName`
+    /// must have, instead of the host name.
+    pub subject: Option<String>,
+    /// `fingerprint="SHA-256:..."`: the certificate itself, by the SHA-256 of its DER encoding
+    /// (32 bytes); accepted whatever vouches for it.
+    pub fingerprint: Option<Vec<u8>>,
+    /// `cert=file`: the certificate itself, pinned by the file holding it.
+    pub cert: Option<PathBuf>,
+    /// `verify="off"`: accept any certificate.
+    pub no_verify: bool,
+}
+
+/// The global options of TCP and TLS (`SYSLOG.md` §8.3-8.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetOptions {
+    pub tcp_server: bool,
+    pub tcp_bindhost: Option<String>,
+    pub tcp_bindport: u16,
+    pub tls_server: bool,
+    pub tls_bindhost: Option<String>,
+    pub tls_bindport: u16,
+    pub tls_keyfile: Option<PathBuf>,
+    pub tls_certfile: Option<PathBuf>,
+    pub tls_ca: Option<PathBuf>,
+    pub tls_cadir: Option<PathBuf>,
+    pub tls_verify: bool,
+    /// SHA-256 fingerprints of peers accepted besides those the authorities vouch for.
+    pub tls_allow_fingerprints: Vec<Vec<u8>>,
+    /// Certificate files of peers accepted besides those the authorities vouch for.
+    pub tls_allow_clientcerts: Vec<PathBuf>,
+    pub tls_gen_cert: bool,
+}
+
+impl Default for NetOptions {
+    fn default() -> NetOptions {
+        NetOptions {
+            tcp_server: false,
+            tcp_bindhost: None,
+            tcp_bindport: syslog::SYSLOG_PORT,
+            tls_server: false,
+            tls_bindhost: None,
+            tls_bindport: TLS_PORT,
+            tls_keyfile: None,
+            tls_certfile: None,
+            tls_ca: None,
+            tls_cadir: None,
+            tls_verify: true,
+            tls_allow_fingerprints: Vec::new(),
+            tls_allow_clientcerts: Vec::new(),
+            tls_gen_cert: false,
+        }
+    }
+}
+
+/// syslog over TLS's port (RFC 5425).
+pub const TLS_PORT: u16 = 6514;
+
+/// `SHA-256:AB:CD:...` (or `SHA256:`, colons optional, any case): the 32 bytes.
+pub fn parse_fingerprint(s: &str) -> Option<Vec<u8>> {
+    let hex = s.strip_prefix("SHA-256:").or_else(|| s.strip_prefix("SHA256:"))?;
+    let digits: String = hex.chars().filter(|&c| c != ':').collect();
+    if digits.len() != 64 {
+        return None;
+    }
+    (0..32).map(|i| u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).ok()).collect()
+}
+
+impl NetOptions {
+    /// The options from a configuration's `name=value` lines; problems in the second value.
+    pub fn from(options: &[(String, String)]) -> (NetOptions, Vec<String>) {
+        let mut o = NetOptions::default();
+        let mut errors = Vec::new();
+        let flag = |v: &str, errors: &mut Vec<String>, key: &str| match v {
+            "on" | "yes" | "true" | "1" => true,
+            "off" | "no" | "false" | "0" => false,
+            _ => {
+                errors.push(format!("{key}={v}: not on or off"));
+                false
+            }
+        };
+        let list = |v: &str| v.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        for (key, v) in options {
+            let v = v.as_str();
+            let port = |errors: &mut Vec<String>| match v.parse::<u16>() {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    errors.push(format!("{key}={v}: bad port"));
+                    None
+                }
+            };
+            let text = || (!v.is_empty()).then(|| v.to_string());
+            match key.as_str() {
+                "tcp_server" => o.tcp_server = flag(v, &mut errors, key),
+                "tcp_bindhost" => o.tcp_bindhost = text(),
+                "tcp_bindport" => o.tcp_bindport = port(&mut errors).unwrap_or(o.tcp_bindport),
+                "tls_server" => o.tls_server = flag(v, &mut errors, key),
+                "tls_bindhost" => o.tls_bindhost = text(),
+                "tls_bindport" => o.tls_bindport = port(&mut errors).unwrap_or(o.tls_bindport),
+                "tls_keyfile" => o.tls_keyfile = text().map(PathBuf::from),
+                "tls_certfile" => o.tls_certfile = text().map(PathBuf::from),
+                "tls_ca" => o.tls_ca = text().map(PathBuf::from),
+                "tls_cadir" => o.tls_cadir = text().map(PathBuf::from),
+                "tls_verify" => o.tls_verify = flag(v, &mut errors, key),
+                "tls_allow_fingerprints" => {
+                    for f in list(v) {
+                        match parse_fingerprint(&f) {
+                            Some(fp) => o.tls_allow_fingerprints.push(fp),
+                            None => errors.push(format!("{key}: bad fingerprint {f}")),
+                        }
+                    }
+                }
+                "tls_allow_clientcerts" => o.tls_allow_clientcerts.extend(list(v).into_iter().map(PathBuf::from)),
+                "tls_gen_cert" => o.tls_gen_cert = flag(v, &mut errors, key),
+                _ => {}
+            }
+        }
+        (o, errors)
+    }
 }
 
 /// A `!prog` / `+host` block's condition: names, and whether a match excludes (`!-prog`).
@@ -99,9 +226,9 @@ pub struct Config {
     pub errors: Vec<String>,
 }
 
-/// Options this syslogd knows. Those of TCP and TLS (`SYSLOG.md` §8.3-8.4) are accepted and
-/// reported as not supported yet, not as unknown.
-const LATER_OPTIONS: &[&str] = &[
+/// The `name=value` options this syslogd knows: TCP's and TLS's (`SYSLOG.md` §8.3-8.4), read by
+/// `NetOptions::from`.
+const KNOWN_OPTIONS: &[&str] = &[
     "tcp_server",
     "tcp_bindhost",
     "tcp_bindport",
@@ -199,10 +326,8 @@ fn parse_str(config: &mut Config, text: &str, name: &str, blocks: &mut Blocks, d
             continue;
         }
         if let Some((key, value)) = option_line(line) {
-            if !LATER_OPTIONS.contains(&key) {
+            if !KNOWN_OPTIONS.contains(&key) {
                 err(config, &format!("unknown option {key}"));
-            } else {
-                err(config, &format!("option {key} is not supported yet"));
             }
             config.options.push((key.to_string(), value.to_string()));
             continue;
@@ -431,8 +556,18 @@ fn parse_action(action: &str) -> Result<Target, String> {
     if action.starts_with('/') {
         return Ok(Target::File { path: PathBuf::from(action), sync: true });
     }
-    if action.starts_with("@@") || action.starts_with("@[") {
-        return Err(format!("{action}: TCP and TLS forwarding are not supported yet"));
+    if let Some(dest) = action.strip_prefix("@@") {
+        let (host, port) = match dest.rsplit_once(':') {
+            Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("bad port in {action}"))?),
+            None => (dest, syslog::SYSLOG_PORT),
+        };
+        if host.is_empty() {
+            return Err(format!("no host in {action}"));
+        }
+        return Ok(Target::Tcp { host: host.to_string(), port });
+    }
+    if let Some(dest) = action.strip_prefix("@[") {
+        return parse_tls_action(action, dest);
     }
     if let Some(dest) = action.strip_prefix('@') {
         let (host, port) = match dest.rsplit_once(':') {
@@ -452,6 +587,90 @@ fn parse_action(action: &str) -> Result<Target, String> {
         return Err(format!("bad action {action}"));
     }
     Ok(Target::Users(users))
+}
+
+/// `@[host]:port(options)` without its `@[`: `host]`, then `:port` (default 6514) and an
+/// optional `(key="value", ...)` list.
+fn parse_tls_action(action: &str, dest: &str) -> Result<Target, String> {
+    let (host, rest) = dest.split_once(']').ok_or_else(|| format!("no ] in {action}"))?;
+    if host.is_empty() {
+        return Err(format!("no host in {action}"));
+    }
+    let (port, opts) = match rest.strip_prefix(':') {
+        Some(r) => {
+            let end = r.find('(').unwrap_or(r.len());
+            (r[..end].trim().parse::<u16>().map_err(|_| format!("bad port in {action}"))?, &r[end..])
+        }
+        None => (TLS_PORT, rest),
+    };
+    let opts = opts.trim();
+    let mut peer = PeerCheck::default();
+    if !opts.is_empty() {
+        let inner = opts.strip_prefix('(').and_then(|o| o.strip_suffix(')')).ok_or_else(|| format!("bad options in {action}"))?;
+        for (key, value) in split_options(inner).map_err(|e| format!("{action}: {e}"))? {
+            match key.as_str() {
+                "subject" => peer.subject = Some(value),
+                "fingerprint" => {
+                    peer.fingerprint = Some(parse_fingerprint(&value).ok_or_else(|| format!("{action}: bad fingerprint {value}"))?)
+                }
+                "cert" => peer.cert = Some(PathBuf::from(value)),
+                "verify" => match value.as_str() {
+                    "off" | "no" | "false" => peer.no_verify = true,
+                    "on" | "yes" | "true" => peer.no_verify = false,
+                    _ => return Err(format!("{action}: verify={value}: not on or off")),
+                },
+                _ => return Err(format!("{action}: unknown option {key}")),
+            }
+        }
+    }
+    Ok(Target::Tls { host: host.to_string(), port, peer })
+}
+
+/// `key="value", key=value, ...`: a quoted value may hold commas (a subject does) and `\"`.
+fn split_options(s: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    let mut chars = s.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace() || *c == ',') {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            return Ok(out);
+        }
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '=' {
+                break;
+            }
+            key.push(c);
+            chars.next();
+        }
+        if chars.next() != Some('=') {
+            return Err(format!("option {} has no value", key.trim()));
+        }
+        let mut value = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next() {
+                    Some('\\') => value.extend(chars.next()),
+                    Some('"') => break,
+                    Some(c) => value.push(c),
+                    None => return Err("unterminated quote".into()),
+                }
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c == ',' {
+                    break;
+                }
+                value.push(c);
+                chars.next();
+            }
+            value = value.trim().to_string();
+        }
+        out.push((key.trim().to_string(), value));
+    }
 }
 
 #[cfg(test)]
@@ -509,8 +728,26 @@ mod tests {
         assert_eq!(parse_action("@loghost").unwrap(), Target::Forward { host: "loghost".into(), port: 514 });
         assert_eq!(parse_action("@10.0.2.2:5140").unwrap(), Target::Forward { host: "10.0.2.2".into(), port: 5140 });
         assert_eq!(parse_action("root,operator").unwrap(), Target::Users(vec!["root".into(), "operator".into()]));
-        assert!(parse_action("@@loghost").is_err());
-        assert!(parse_action("@[loghost]:6514").is_err());
+        assert_eq!(parse_action("@@loghost").unwrap(), Target::Tcp { host: "loghost".into(), port: 514 });
+        assert_eq!(parse_action("@@127.0.0.1:1514").unwrap(), Target::Tcp { host: "127.0.0.1".into(), port: 1514 });
+        assert_eq!(
+            parse_action("@[loghost]").unwrap(),
+            Target::Tls { host: "loghost".into(), port: 6514, peer: PeerCheck::default() }
+        );
+        let fp = "SHA-256:".to_string() + &["AB"; 32].join(":");
+        let t = parse_action(&format!(
+            "@[10.0.2.2]:6515(subject=\"CN=log, O=Example \\\"x\\\"\", fingerprint=\"{fp}\", cert=/etc/ssl/l.pem, verify=\"off\")"
+        ))
+        .unwrap();
+        let Target::Tls { host, port, peer } = t else { panic!() };
+        assert_eq!((host.as_str(), port), ("10.0.2.2", 6515));
+        assert_eq!(peer.subject.as_deref(), Some("CN=log, O=Example \"x\""));
+        assert_eq!(peer.fingerprint, Some(vec![0xab; 32]));
+        assert_eq!(peer.cert, Some(PathBuf::from("/etc/ssl/l.pem")));
+        assert!(peer.no_verify);
+        assert!(parse_action("@[]:6514").is_err());
+        assert!(parse_action("@[h]:6514(fingerprint=\"SHA-256:12\")").is_err());
+        assert!(parse_action("@[h]:6514(colour=red)").is_err());
     }
 
     #[test]
@@ -537,11 +774,25 @@ mod tests {
     fn options_and_errors() {
         let c = parse("tcp_server=on\nfoo=bar\n*.=info\t/x\nkern.bogus /y\n*.* \n*.*\t@@h\n");
         assert_eq!(c.options, vec![("tcp_server".into(), "on".into()), ("foo".into(), "bar".into())]);
-        assert_eq!(c.rules.len(), 1);
+        assert_eq!(c.rules.len(), 2);
         assert_eq!(c.rules[0].masks[fac("user")], 1 << 6);
-        assert_eq!(c.errors.len(), 5, "{:?}", c.errors);
-        assert!(c.errors[0].contains("not supported yet"));
-        assert!(c.errors[1].contains("unknown option foo"));
+        assert_eq!(c.errors.len(), 3, "{:?}", c.errors);
+        assert!(c.errors[0].contains("unknown option foo"));
+        let (o, e) = NetOptions::from(&c.options);
+        assert!(e.is_empty() && o.tcp_server && o.tcp_bindport == 514 && o.tls_verify);
+        let fp = "SHA256:".to_string() + &"0c".repeat(32);
+        let (o, e) = NetOptions::from(&[
+            ("tls_server".into(), "yes".into()),
+            ("tls_bindport".into(), "7000".into()),
+            ("tls_verify".into(), "off".into()),
+            ("tls_allow_fingerprints".into(), format!("{fp}, SHA-256:bad")),
+            ("tls_allow_clientcerts".into(), "/a.pem,/b.pem".into()),
+            ("tcp_bindport".into(), "x".into()),
+        ]);
+        assert!(o.tls_server && o.tls_bindport == 7000 && !o.tls_verify);
+        assert_eq!(o.tls_allow_fingerprints, vec![vec![0x0c; 32]]);
+        assert_eq!(o.tls_allow_clientcerts.len(), 2);
+        assert_eq!(e.len(), 2, "{e:?}");
     }
 
     #[test]

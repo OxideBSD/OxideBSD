@@ -49,12 +49,19 @@ which holds the kernel's messages from boot on until
 .Nm
 reads them;
 .It
-UDP port 514, unless
+UDP port 514, and TCP and TLS connections when
+.Xr syslog.conf 5
+turns them on
+.Pq Va tcp_server , Va tls_server ,
+unless
 .Fl s ,
 .Fl ss
 or
 .Fl N
 is given.
+A TCP or TLS connection is refused when its sender isn't an
+.Fl a
+allowed peer, as a UDP message is ignored.
 .El
 .Pp
 The local sockets are created before
@@ -325,6 +332,23 @@ The kernel message buffer.
 .%R RFC 5424
 .%D March 2009
 .Re
+.Pp
+.Rs
+.%A F. Miao
+.%A Y. Ma
+.%A J. Salowey
+.%T Transport Layer Security (TLS) Transport Mapping for Syslog
+.%R RFC 5425
+.%D March 2009
+.Re
+.Pp
+.Rs
+.%A R. Gerhards
+.%A C. Lonvick
+.%T Transmission of Syslog Messages over TCP
+.%R RFC 6587
+.%D April 2012
+.Re
 .Sh HISTORY
 The
 .Nm
@@ -333,13 +357,4 @@ daemon first appeared in
 This one is OxideBSD's own, written in Rust, with the options of
 .Fx .
 .Sh BUGS
-Messages are sent and received over UDP only: the TCP and TLS actions
-.Pq Li @@ Ns Ar host , Li @[ Ns Ar host Ns Li ]: Ns Ar port
-and the
-.Va tcp_*
-and
-.Va tls_*
-options of
-.Xr syslog.conf 5
-are not supported yet.
 There is no IPv6.

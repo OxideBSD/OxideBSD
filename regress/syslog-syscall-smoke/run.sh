@@ -128,5 +128,50 @@ kill "$pid"
 check "SIGTERM stops syslogd" eventually not running "$pid"
 check "syslogd removes its pid file" [ ! -e /tmp/sl/pid ]
 
+# --- TCP and TLS between two syslogds, over lo0 (SYSLOG.md §8.3-8.5) --------------------------
+# The receiver takes TCP on 127.0.0.1:1514 and TLS on 6514 with a certificate it makes itself;
+# the sender, started second, takes /dev/log over, and forwards local6 over TCP and local7 over
+# TLS, the receiver's certificate pinned by its fingerprint.
+mkdir -p /tmp/net
+: > /tmp/net/received
+cat > /tmp/net/rx.conf << 'EOF'
+tcp_server=on
+tcp_bindhost=127.0.0.1
+tcp_bindport=1514
+tls_server=on
+tls_bindhost=127.0.0.1
+tls_bindport=6514
+tls_keyfile=/tmp/net/rx.key
+tls_certfile=/tmp/net/rx.pem
+tls_gen_cert=on
+tls_verify=off
+*.*					/tmp/net/received
+EOF
+syslogd -m 0 -b 127.0.0.1:0 -f /tmp/net/rx.conf -P /tmp/net/rx.pid -l /tmp/net/rx.sock
+rxpid=$(cat /tmp/net/rx.pid 2>/dev/null)
+check "a receiving syslogd starts" running "$rxpid"
+check "tls_gen_cert makes a key and certificate" [ -s /tmp/net/rx.pem -a -s /tmp/net/rx.key ]
+fp=$(openssl x509 -noout -fingerprint -sha256 -in /tmp/net/rx.pem | sed 's/.*=//')
+# The same length, every hex digit changed: some other certificate's.
+other=$(echo "$fp" | tr '0-9A-F' '1-9A-F0')
+cat > /tmp/net/tx.conf << EOF
+local6.*				@@127.0.0.1:1514
+local7.*				@[127.0.0.1]:6514(fingerprint="SHA-256:$fp")
+local5.*				@[127.0.0.1]:6514(fingerprint="SHA-256:$other")
+EOF
+syslogd -m 0 -b 127.0.0.1:0 -f /tmp/net/tx.conf -P /tmp/net/tx.pid
+txpid=$(cat /tmp/net/tx.pid 2>/dev/null)
+check "a sending syslogd starts" running "$txpid"
+logger -p local6.info -t overtcp "sent over tcp"
+logger -p local7.info -t overtls "sent over tls"
+check "a message crosses TCP over lo0" eventually has /tmp/net/received "overtcp: sent over tcp"
+check "a message crosses TLS over lo0, the certificate pinned" eventually has /tmp/net/received "overtls: sent over tls"
+logger -p local5.info -t wrongpin "must not arrive"
+logger -p local6.info -t overtcp "barrier"
+check "and a second TCP message on the same connection" eventually has /tmp/net/received "overtcp: barrier"
+check "a certificate that isn't the pinned one is refused" not has /tmp/net/received "wrongpin"
+kill "$txpid" "$rxpid"
+check "both stop" eventually not running "$txpid"
+
 echo "syslog-smoke: $fail failed"
 [ $fail -eq 0 ]

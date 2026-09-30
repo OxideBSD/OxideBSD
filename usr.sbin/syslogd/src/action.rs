@@ -10,7 +10,8 @@ use std::process::{Child, Command, Stdio};
 use syslog::msg::{Format, Message, Stamp};
 use syslog::pri::Facility;
 
-use crate::conf::{Operator, PropFilter, Property, Rule, Target};
+use crate::conf::{NetOptions, Operator, PropFilter, Property, Rule, Target};
+use crate::net::{self, Sender};
 
 /// Seconds before a repeated message is reported, then again for continued repeats (the BSDs'
 /// `repeatinterval`).
@@ -49,6 +50,11 @@ enum Sink {
     File { file: Option<File>, tty: bool },
     Pipe(Option<Child>),
     Forward { addr: Option<SocketAddr>, last_lookup: i64 },
+    /// `@@host` or `@[host]`: a connection and its queue (`net`).
+    Stream(Sender),
+    /// An action that couldn't be set up (a TLS action whose certificates don't load): broken
+    /// until the next reload.
+    Unusable,
     Users,
     Wall,
 }
@@ -68,8 +74,9 @@ pub struct Action {
 pub type Failure = String;
 
 impl Action {
-    /// Prepares `rule`: opens its file (creating it with `create`), resolves its host.
-    pub fn new(rule: Rule, create: bool, now: i64) -> (Action, Option<Failure>) {
+    /// Prepares `rule`: opens its file (creating it with `create`), resolves its host, sets up its
+    /// TLS context from `net`.
+    pub fn new(rule: Rule, create: bool, now: i64, net: &NetOptions) -> (Action, Option<Failure>) {
         let mut failure = None;
         let sink = match &rule.target {
             Target::File { path, .. } => match open_log(path, create) {
@@ -87,6 +94,20 @@ impl Action {
                 }
                 Sink::Forward { addr, last_lookup: now }
             }
+            Target::Tcp { host, port } => match Sender::new(host, *port, None) {
+                Ok(s) => Sink::Stream(s),
+                Err(e) => {
+                    failure = Some(format!("@@{host}:{port}: {e}"));
+                    Sink::Unusable
+                }
+            },
+            Target::Tls { host, port, peer } => match Sender::new(host, *port, Some((peer, net))) {
+                Ok(s) => Sink::Stream(s),
+                Err(e) => {
+                    failure = Some(format!("@[{host}]:{port}: {e}"));
+                    Sink::Unusable
+                }
+            },
             Target::Users(_) => Sink::Users,
             Target::Wall => Sink::Wall,
         };
@@ -102,9 +123,10 @@ impl Action {
             }
             _ => None,
         };
-        // A file that couldn't be opened is broken until the next reload; a host not found yet
-        // is retried.
-        let broken = matches!((&sink, &failure), (Sink::File { .. }, Some(_)));
+        // A file that couldn't be opened, or a TLS action that couldn't be set up, is broken
+        // until the next reload; a host not found yet is retried.
+        let broken = matches!((&sink, &failure), (Sink::File { .. }, Some(_)))
+            || (matches!(rule.target, Target::Tcp { .. } | Target::Tls { .. }) && failure.is_some());
         (Action { rule, sink, prev: None, broken, last_write: now, regex }, failure)
     }
 
@@ -209,6 +231,31 @@ impl Action {
         self.prev.as_ref().filter(|p| p.count > 0).map(|p| p.time + REPEAT_INTERVALS[p.backoff])
     }
 
+    /// A stream action's descriptor and the `poll` events it waits for.
+    pub fn stream_interest(&self) -> Option<(std::os::fd::RawFd, i16)> {
+        match &self.sink {
+            Sink::Stream(s) if !self.broken => s.interest(),
+            _ => None,
+        }
+    }
+
+    /// Advances a stream action's connection (after `poll`, or for its reconnection timer).
+    /// Returns what to log.
+    pub fn stream_pump(&mut self, now: i64, revents: i16) -> Vec<Failure> {
+        match &mut self.sink {
+            Sink::Stream(s) if !self.broken => s.pump(now, revents),
+            _ => Vec::new(),
+        }
+    }
+
+    /// When a stream action's reconnection is due.
+    pub fn stream_due(&self) -> Option<i64> {
+        match &self.sink {
+            Sink::Stream(s) if !self.broken => s.due(),
+            _ => None,
+        }
+    }
+
     pub fn is_file(&self) -> bool {
         matches!(self.sink, Sink::File { tty: false, .. })
     }
@@ -305,6 +352,19 @@ impl Action {
                 let _ = sock.send_to(packet.as_bytes(), addr);
                 None
             }
+            Sink::Stream(sender) => {
+                if !style.forward {
+                    return None;
+                }
+                // TLS carries RFC 5424 messages (RFC 5425); TCP what -O says, as UDP does.
+                let message = match (&self.rule.target, style.format) {
+                    (Target::Tls { .. }, _) | (_, Format::Rfc5424) => out.msg.rfc5424_line(&out.stamp, out.host),
+                    (_, Format::Rfc3164) => out.msg.rfc3164_packet(&out.stamp, out.host),
+                };
+                let log = sender.send(net::frame(&message), now);
+                (!log.is_empty()).then(|| log.join("; "))
+            }
+            Sink::Unusable => None,
             Sink::Users => {
                 let Target::Users(users) = &self.rule.target else { return None };
                 let text = wall_text(out, &line);
@@ -330,6 +390,8 @@ impl Action {
             Target::File { path, .. } => path.display().to_string(),
             Target::Pipe(c) => format!("|{c}"),
             Target::Forward { host, port } => format!("@{host}:{port}"),
+            Target::Tcp { host, port } => format!("@@{host}:{port}"),
+            Target::Tls { host, port, .. } => format!("@[{host}]:{port}"),
             Target::Users(u) => u.join(","),
             Target::Wall => "*".into(),
         }
@@ -475,11 +537,11 @@ mod tests {
         ));
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         // Must exist without -C.
-        let (a, f) = Action::new(c.rules[0].clone(), false, 0);
+        let (a, f) = Action::new(c.rules[0].clone(), false, 0, &NetOptions::default());
         assert!(f.is_some() && a.broken);
-        let (mut a, f) = Action::new(c.rules[0].clone(), true, 0);
+        let (mut a, f) = Action::new(c.rules[0].clone(), true, 0, &NetOptions::default());
         assert!(f.is_none(), "{f:?}");
-        let (b, f) = Action::new(c.rules[1].clone(), false, 0);
+        let (b, f) = Action::new(c.rules[1].clone(), false, 0, &NetOptions::default());
         assert!(f.is_none(), "{f:?}");
 
         let m = Message::parse(b"<78>cron[1]: tick", false);
@@ -521,7 +583,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let out_path = dir.join("out");
         let c = conf::parse(&format!("*.*\t|cat >> {}\n", out_path.display()));
-        let (mut a, _) = Action::new(c.rules[0].clone(), false, 0);
+        let (mut a, _) = Action::new(c.rules[0].clone(), false, 0, &NetOptions::default());
         let m = Message::parse(b"<14>t: one", false);
         a.take(&Outgoing { msg: &m, stamp: stamp(), host: "h", source: "h" }, style(), None, 0);
         a.close();
