@@ -1,0 +1,11 @@
+[package]
+name = "cron"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# crontab(5) tables and cron's schedule (CRON.md §§3-4), shared by cron(8) and crontab(1). No
+# dependencies, so the scheduler is tested on the host against an injected clock. Its own
+# workspace, testable on the host (.cargo/config.toml), like lib/libsh.
+[workspace]
