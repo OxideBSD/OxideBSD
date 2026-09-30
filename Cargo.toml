@@ -65,6 +65,7 @@ members = [
   "regress/rc-syscall-smoke",
   "regress/syslog-syscall-smoke",
   "regress/tz-syscall-smoke",
+  "regress/openssl-syscall-smoke",
   "regress/devfs-syscall-smoke",
   "regress/sem-open-syscall-smoke",
   "regress/pthread-cancel-crash-smoke",
@@ -376,6 +377,10 @@ harness = false
 
 [[test]]
 name = "tz_syscall_smoke"
+harness = false
+
+[[test]]
+name = "openssl_syscall_smoke"
 harness = false
 
 [[test]]

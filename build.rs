@@ -313,6 +313,7 @@ fn main() {
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("devfs-syscall-smoke", "DEVFS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
@@ -543,6 +544,11 @@ fn main() {
     let tzsetup_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/tzsetup", "OXFS_TZSETUP_ELF_PATH", &musl_sysroot);
 
+    // OpenSSL (`external/apache2/openssl`): libcrypto/libssl, the legacy provider module, and
+    // /usr/bin/openssl, all dynamically linked, plus /etc/ssl/openssl.cnf.
+    let openssl = build_openssl(&musl_sysroot);
+    let openssl_smoke_elf_path = build_openssl_smoke(&musl_sysroot, &openssl);
+
     // OpenVi (`/bin/vi`) and GNU nano (`/usr/bin/nano`) -- OxideBSD's two real editors, see
     // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
     let vi_elf_path = build_nvi(&musl_sysroot, &ncurses_sysroot);
@@ -725,6 +731,8 @@ fn main() {
             ncurses_terminfo_manifest_path.to_str().unwrap(),
         ),
         ("TZ_ZONEINFO_MANIFEST_PATH", tz.manifest.to_str().unwrap()),
+        ("OPENSSL_MANIFEST_PATH", openssl.manifest.to_str().unwrap()),
+        ("OXFS_OPENSSL_SMOKE_ELF_PATH", openssl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_ZIC_ELF_PATH", tz.zic.to_str().unwrap()),
         ("OXFS_ZDUMP_ELF_PATH", tz.zdump.to_str().unwrap()),
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
@@ -803,6 +811,7 @@ fn main() {
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
         "regress/tz-syscall-smoke/run.sh",
+        "regress/openssl-syscall-smoke/run.sh",
         "regress/devfs-syscall-smoke/run.sh",
     ] {
         println!(
@@ -2921,6 +2930,158 @@ fn build_tz(musl_sysroot: &Path) -> TzBuild {
 
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, src_out).unwrap();
+    out
+}
+
+/// What `build_openssl` produces.
+struct OpensslBuild {
+    /// The install's `DESTDIR`: `usr/include/openssl`, `usr/lib` (shared and static libraries,
+    /// `ossl-modules`, `engines-3`, `pkgconfig`), `usr/bin/openssl`, `etc/ssl`. Also what a host-side
+    /// consumer building against OpenSSL for OxideBSD points at.
+    root: PathBuf,
+    /// The generated `OPENSSL_FILES`/`OPENSSL_SYMLINKS` oxfs seeds from `/`.
+    manifest: PathBuf,
+}
+
+/// OpenSSL 3.5 LTS (`external/apache2/openssl`, unpatched) for OxideBSD: `Configure` with our own
+/// `oxidebsd-x86_64` target (`secure/lib/libcrypto/oxidebsd.conf`, which says why each setting is
+/// what it is) against the musl sysroot, built out of tree in `target/openssl/build` and installed
+/// with `DESTDIR` into `target/openssl/root`.
+///
+/// Dynamically linked: `libcrypto.so.3`, `libssl.so.3`, the legacy provider as a `dlopen`ed module,
+/// and a PIE `openssl`; the static archives are installed as well. `OPENSSLDIR` is `/etc/ssl`, as on
+/// FreeBSD. Not seeded: `c_rehash` and `etc/ssl/misc` (Perl scripts; there's no Perl on OxideBSD,
+/// and `certctl(8)` does `c_rehash`'s job) and the `*.dist` copies of the config files.
+///
+/// Configure reruns, in a fresh build directory, when its arguments or the target file change
+/// (the stamp holds both); otherwise OpenSSL's own `make` rebuilds incrementally. The whole step is
+/// skipped while the manifest is newer than the source tree, the target file and musl's libraries.
+fn build_openssl(musl_sysroot: &Path) -> OpensslBuild {
+    const CONFIGURE_ARGS: &[&str] = &[
+        "--prefix=/usr",
+        "--openssldir=/etc/ssl",
+        "--libdir=lib",
+        // AF_ALG sockets and kernel TLS are Linux kernel interfaces; musl-gcc defines __linux__,
+        // so OpenSSL would otherwise try to build them.
+        "no-afalgeng",
+        "no-ktls",
+        "no-tests",
+        "no-docs",
+    ];
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest_dir.join("external/apache2/openssl");
+    let target_conf = manifest_dir.join("secure/lib/libcrypto/oxidebsd.conf");
+    let work = manifest_dir.join("target/openssl");
+    let build = work.join("build");
+    let root = work.join("root");
+    let manifest = manifest_dir.join("target/generated/openssl_manifest.rs");
+    let out = OpensslBuild { root: root.clone(), manifest: manifest.clone() };
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", target_conf.display());
+
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let newest_input = [
+        Some(latest_mtime(&src)),
+        mtime(&target_conf),
+        mtime(&musl_sysroot.join("lib/libc.a")),
+        mtime(&musl_sysroot.join("lib/libc.so")),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    if mtime(&manifest).is_some() && mtime(&manifest) >= newest_input {
+        return out;
+    }
+
+    let stamp_contents = format!(
+        "{}\n{}",
+        CONFIGURE_ARGS.join(" "),
+        std::fs::read_to_string(&target_conf).expect("reading secure/lib/libcrypto/oxidebsd.conf")
+    );
+    let stamp = build.join("oxidebsd-configure.stamp");
+    if std::fs::read_to_string(&stamp).ok().as_deref() != Some(stamp_contents.as_str()) {
+        let _ = std::fs::remove_dir_all(&build);
+        std::fs::create_dir_all(&build).expect("failed to create target/openssl/build");
+        let status = Command::new("perl")
+            .current_dir(&build)
+            .arg(src.join("Configure"))
+            .arg("oxidebsd-x86_64")
+            .arg(format!("--config={}", target_conf.display()))
+            .args(CONFIGURE_ARGS)
+            .env("CC", compiler_invocation(&musl_sysroot.join("bin/musl-gcc")).join(" "))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run OpenSSL's Configure (is perl installed?): {e}"));
+        assert!(status.success(), "OpenSSL Configure failed: {status}");
+        std::fs::write(&stamp, &stamp_contents).expect("writing the OpenSSL configure stamp");
+    }
+
+    let status = Command::new("make")
+        .current_dir(&build)
+        .args(["-j", &build_jobs().to_string()])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make for OpenSSL: {e}"));
+    assert!(status.success(), "OpenSSL build failed: {status}");
+
+    let _ = std::fs::remove_dir_all(&root);
+    let status = Command::new("make")
+        .current_dir(&build)
+        .args(["install_sw", "install_ssldirs"])
+        .arg(format!("DESTDIR={}", root.display()))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run make install for OpenSSL: {e}"));
+    assert!(status.success(), "OpenSSL install failed: {status}");
+
+    // The manifest: regular files by content, symlinks (`libcrypto.so -> libcrypto.so.3`) as
+    // symlinks rather than a second copy.
+    let mut files = String::from("pub static OPENSSL_FILES: &[(&str, &[u8])] = &[\n");
+    let mut symlinks = String::from("pub static OPENSSL_SYMLINKS: &[(&str, &str)] = &[\n");
+    let mut entries = collect_dir_files(&root);
+    entries.sort();
+    for (rel, abs) in &entries {
+        if rel == "usr/bin/c_rehash" || rel.starts_with("etc/ssl/misc/") || rel.ends_with(".dist") {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(abs).unwrap();
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(abs).unwrap();
+            symlinks.push_str(&format!("    ({rel:?}, {:?}),\n", target.display().to_string()));
+        } else {
+            files.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", abs.display()));
+        }
+    }
+    files.push_str("];\n");
+    symlinks.push_str("];\n");
+    files.push_str(&symlinks);
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, files).unwrap();
+    out
+}
+
+/// Cross-builds `regress/openssl-smoke/main.c` as a dynamically linked PIE against the OpenSSL
+/// install (`build_openssl`), for `/usr/tests/openssl/openssl-smoke`.
+fn build_openssl_smoke(musl_sysroot: &Path, openssl: &OpensslBuild) -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest_dir.join("regress/openssl-smoke/main.c");
+    let out = manifest_dir.join("target/openssl/openssl-smoke");
+    println!("cargo:rerun-if-changed={}", src.display());
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if mtime(&out).is_some() && mtime(&out) >= mtime(&src).max(mtime(&openssl.manifest)) {
+        return out;
+    }
+    let status = Command::new(musl_sysroot.join("bin/musl-gcc"))
+        .args(["-fPIE", "-pie", "-O2", "-Wall"])
+        .arg(format!("-I{}", openssl.root.join("usr/include").display()))
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .arg(format!("-L{}", openssl.root.join("usr/lib").display()))
+        .args(["-lssl", "-lcrypto"])
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for openssl-smoke: {e}"));
+    assert!(status.success(), "building openssl-smoke failed: {status}");
     out
 }
 
