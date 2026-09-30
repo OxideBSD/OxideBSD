@@ -208,13 +208,6 @@ The kernel's lines are tagged
 A kernel line without a priority is
 .Cm kern.notice .
 .Pp
-On a local socket
-.Nm
-asks the kernel for each sender's credentials
-.Pq Dv LOCAL_CREDS_PERSISTENT , see Xr unix 4 .
-A message that has a tag but names no process ID is given the sender's
-process ID, which the sender cannot forge.
-.Pp
 A message identical to the last one an action wrote, from the same host, is
 not written again but counted.
 The count is written as

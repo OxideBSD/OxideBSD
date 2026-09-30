@@ -45,7 +45,7 @@ check "rc.d/syslogd starts syslogd" running "$pid"
 check "/dev/log is a socket" [ -S /dev/log ]
 check "/dev/klog refuses a second open" klog_busy
 logger -p auth.info -t smoke "auth message"
-check "auth.info from logger lands in /var/log/auth.log" eventually has /var/log/auth.log "smoke\[[0-9]*\]: auth message"
+check "auth.info from logger lands in /var/log/auth.log" eventually has /var/log/auth.log "smoke: auth message"
 check "kernel messages land in /var/log/messages" eventually has /var/log/messages " kernel: "
 check "dmesg shows boot messages" dmesg_has "oxfs"
 /etc/rc.d/syslogd onestop > /dev/null
@@ -88,23 +88,23 @@ logger -t credtest "no pid given"
 logger -i -t withpid "pid given"
 printf 'same\nsame\nsame\ndifferent\n' | logger -t rep
 logger -t barrier "last one"
-check "messages arrive in order" eventually has /tmp/sl/all "barrier\[[0-9]*\]: last one"
+check "messages arrive in order" eventually has /tmp/sl/all "barrier: last one"
 
-check "local3.!info takes local3.debug" has /tmp/sl/neg "neg\[[0-9]*\]: debug here"
+check "local3.!info takes local3.debug" has /tmp/sl/neg "neg: debug here"
 check "local3.!info refuses local3.err" not has /tmp/sl/neg "err here"
-check "local3.none keeps local3 out of a *.info rule" not has /tmp/sl/all "neg\["
-check "a !prog block takes its program" has /tmp/sl/prog "blocked\[[0-9]*\]: blocked message"
+check "local3.none keeps local3 out of a *.info rule" not has /tmp/sl/all " neg: "
+check "a !prog block takes its program" has /tmp/sl/prog "blocked: blocked message"
 check "a !prog block refuses other programs" not has /tmp/sl/prog "other message"
-check "a pipe action gets its lines" eventually has /tmp/sl/pipe "piped\[[0-9]*\]: through the pipe"
+check "a pipe action gets its lines" eventually has /tmp/sl/pipe "piped: through the pipe"
 check "a missing log file is not created without -C" [ ! -e /tmp/sl/missing ]
 check "a property filter takes a match" has /tmp/sl/prop "a needle in here"
 check "a property filter refuses the rest" not has /tmp/sl/prop "only hay"
 check "kern from user space becomes user" not has /tmp/sl/kern "claims to be the kernel"
-check "it is still logged, as user" has /tmp/sl/all "fake\[[0-9]*\]: claims to be the kernel"
-check "a message without a pid gets the sender's" has /tmp/sl/all "credtest\[[0-9][0-9]*\]: no pid given"
+check "it is still logged, as user" has /tmp/sl/all "fake: claims to be the kernel"
+check "a message is logged as sent: no pid added" has /tmp/sl/all " credtest: no pid given"
 check "logger -i gives its pid" has /tmp/sl/all "withpid\[[0-9][0-9]*\]: pid given"
 check "repeats are counted" has /tmp/sl/all "last message repeated 2 times"
-check "and the next message is written" has /tmp/sl/all "rep\[[0-9]*\]: different"
+check "and the next message is written" has /tmp/sl/all "rep: different"
 
 # SIGHUP reopens the files: a file moved away stops growing.
 mv /tmp/sl/all /tmp/sl/all.moved
@@ -112,7 +112,7 @@ mv /tmp/sl/all /tmp/sl/all.moved
 kill -HUP "$pid"
 sleep 1
 logger -t hup "after the reload"
-check "SIGHUP reopens a moved file" eventually has /tmp/sl/all "hup\[[0-9]*\]: after the reload"
+check "SIGHUP reopens a moved file" eventually has /tmp/sl/all "hup: after the reload"
 check "the moved file stops growing" not has /tmp/sl/all.moved "after the reload"
 
 # newsyslog rotates, and tells syslogd through its pid file.
@@ -121,7 +121,7 @@ newsyslog -F -f /tmp/sl/newsyslog.conf
 check "newsyslog -F rotates to all.0" has /tmp/sl/all.0 "after the reload"
 check "newsyslog writes the turn-over message" has /tmp/sl/all "logfile turned over"
 logger -t rotated "into the new file"
-check "syslogd writes to the new file after rotation" eventually has /tmp/sl/all "rotated\[[0-9]*\]: into the new file"
+check "syslogd writes to the new file after rotation" eventually has /tmp/sl/all "rotated: into the new file"
 check "the new file is mode 600" mode_is -rw------- /tmp/sl/all
 
 kill "$pid"

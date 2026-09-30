@@ -284,95 +284,13 @@ fn open_log_socket(path: &std::path::Path, mode: u32) -> std::io::Result<UnixDat
     }
     let sock = UnixDatagram::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    request_credentials(&sock);
+    sock.set_nonblocking(true)?;
     Ok(sock)
-}
-
-/// `LOCAL_CREDS_PERSISTENT` (`UNIX.md` §9.5): every datagram arrives with its sender's
-/// `struct sockcred2`, whose process ID the kernel vouches for.
-#[cfg(target_os = "oxidebsd")]
-mod creds {
-    pub const SOL_LOCAL: libc::c_int = 0x200;
-    pub const LOCAL_CREDS_PERSISTENT: libc::c_int = 0x1003;
-    pub const SCM_CREDS2: libc::c_int = 0x08;
-
-    /// `struct sockcred2`, up to the groups.
-    #[repr(C)]
-    pub struct SockCred2 {
-        pub sc_version: libc::c_int,
-        pub sc_pid: libc::pid_t,
-        pub sc_uid: libc::uid_t,
-        pub sc_euid: libc::uid_t,
-        pub sc_gid: libc::gid_t,
-        pub sc_egid: libc::gid_t,
-        pub sc_ngroups: libc::c_int,
-    }
-}
-
-#[cfg(target_os = "oxidebsd")]
-fn request_credentials(sock: &UnixDatagram) {
-    let on: libc::c_int = 1;
-    // SAFETY: an int option.
-    unsafe {
-        libc::setsockopt(
-            sock.as_raw_fd(),
-            creds::SOL_LOCAL,
-            creds::LOCAL_CREDS_PERSISTENT,
-            (&on as *const libc::c_int).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-}
-
-#[cfg(not(target_os = "oxidebsd"))]
-fn request_credentials(_sock: &UnixDatagram) {}
-
-/// Receives one datagram from a local socket: its length and the sender's process ID when the
-/// kernel supplied it.
-fn recv_local(fd: RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Option<i32>)> {
-    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
-    let mut control = [0u64; 64];
-    // SAFETY: an all-zero msghdr is valid.
-    let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
-    mh.msg_iov = &mut iov;
-    mh.msg_iovlen = 1;
-    mh.msg_control = control.as_mut_ptr().cast();
-    mh.msg_controllen = size_of_val(&control) as _;
-    // SAFETY: every pointer in `mh` is valid for its length.
-    let n = unsafe { libc::recvmsg(fd, &mut mh, libc::MSG_DONTWAIT) };
-    if n < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok((n as usize, sender_pid(&mh)))
-}
-
-#[cfg(target_os = "oxidebsd")]
-fn sender_pid(mh: &libc::msghdr) -> Option<i32> {
-    // SAFETY: walking the control data recvmsg filled in, with the CMSG macros' bounds.
-    unsafe {
-        let mut c = libc::CMSG_FIRSTHDR(mh);
-        while !c.is_null() {
-            if (*c).cmsg_level == libc::SOL_SOCKET
-                && (*c).cmsg_type == creds::SCM_CREDS2
-                && (*c).cmsg_len as usize >= libc::CMSG_LEN(size_of::<creds::SockCred2>() as u32) as usize
-            {
-                let cred = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<creds::SockCred2>());
-                return Some(cred.sc_pid);
-            }
-            c = libc::CMSG_NXTHDR(mh, c);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "oxidebsd"))]
-fn sender_pid(_mh: &libc::msghdr) -> Option<i32> {
-    None
 }
 
 /// Where a message came from.
 enum Source {
-    Local { pid: Option<i32> },
+    Local,
     Kernel,
     Remote(SocketAddr),
 }
@@ -466,12 +384,6 @@ impl Daemon {
                 if msg.priority.facility == Facility::KERN && !self.opts.keep_kern {
                     msg.priority.facility = Facility::USER;
                 }
-            }
-        }
-        if let Source::Local { pid: Some(pid) } = source {
-            // A tagged message that names no process gets the one the kernel vouches for.
-            if msg.app.is_some() && msg.procid.is_none() {
-                msg.procid = Some(pid.to_string());
             }
         }
         let now_stamp = syslog::time::now();
@@ -798,8 +710,8 @@ fn main() -> ExitCode {
             }
             // Drain what's queued, so a burst doesn't wait on poll for each message.
             for _ in 0..64 {
-                match recv_local(s.as_raw_fd(), &mut buf[..MAXLINE]) {
-                    Ok((len, pid)) => d.receive(&buf[..len], Source::Local { pid }),
+                match s.recv(&mut buf[..MAXLINE]) {
+                    Ok(len) => d.receive(&buf[..len], Source::Local),
                     Err(_) => break,
                 }
             }
