@@ -219,6 +219,33 @@ pub extern "C" fn _start() -> ! {
         b"flock LOCK_EX on fd2 didn't succeed after fd1's lock was released by close()"
     );
     close(lfd2);
+    // A freshly created file, nothing written yet (a pid file): its descriptor has no committed
+    // inode until the lock forces one.
+    let lf = b"/nsflockw";
+    let wlfd = unsafe { syscall(SYS_OPEN, lf.as_ptr() as u64, lf.len() as u64, O_CREAT | O_WRONLY) };
+    check!(wlfd.is_ok(), b"create /nsflockw failed");
+    let wlfd = wlfd.unwrap();
+    check!(
+        unsafe { syscall(SYS_FLOCK, wlfd, LOCK_EX | LOCK_NB, 0) }.is_ok(),
+        b"flock LOCK_EX on a fresh write fd failed"
+    );
+    let rlfd = open_ro(lf).expect("open /nsflockw for reading");
+    check!(
+        unsafe { syscall(SYS_FLOCK, rlfd, LOCK_EX | LOCK_NB, 0) } == Err(EAGAIN),
+        b"a fresh write fd's lock didn't exclude a second open"
+    );
+    close(rlfd);
+    // /nsflockw now exists: a write to it through a descriptor that stays open (a pid file's
+    // life) is visible to a separate open straight away, without close or fsync.
+    unsafe {
+        let _ = syscall(SYS_WRITE, wlfd, b"42\n".as_ptr() as u64, 3);
+    }
+    let vfd = open_ro(lf).expect("open /nsflockw to read it back");
+    let mut vb = [0u8; 8];
+    let vn = unsafe { syscall(SYS_READ, vfd, vb.as_mut_ptr() as u64, 8) };
+    check!(vn == Ok(3) && &vb[..3] == b"42\n", b"a held-open write fd's data wasn't visible to another open");
+    close(vfd);
+    close(wlfd);
     write_bytes(b"needs-syscall-smoke: flock OK\n");
 
     // --- ftruncate/fallocate: real shrink then real zero-extend, on a plain read-mode fd (no

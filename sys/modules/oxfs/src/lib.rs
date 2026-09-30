@@ -2103,6 +2103,7 @@ fn resolve_path_impl(
         // regardless), and the `(parent, name)` match this scans for is exact either way.
         force_commit_pending_create(current, component);
         let next = dir_lookup(current, component).ok_or(OxfsError::NotFound)?;
+        force_commit_pending_writes(next);
         // A mounted directory shadows whatever real inode was already there -- applies to every
         // component, not just the last, matching real Unix (`stat`ing a mountpoint itself reports
         // the mounted fs's root). See MountEntry's own doc comment for `..`'s behavior from inside
@@ -3785,6 +3786,24 @@ fn force_commit_pending_create(parent: u32, name: &[u8]) {
     }
 }
 
+/// Commits every other descriptor's buffered writes to existing inode `inode`, so a lookup or read
+/// through another descriptor sees them: POSIX makes a completed `write(2)` visible to every later
+/// read of the file, not only once the writer closes. (`force_commit_pending_create` does the same
+/// for a file not created yet.) A daemon's pid file, written once and held open for life, is the
+/// case that found it: `cat /var/run/syslog.pid` read an empty file.
+fn force_commit_pending_writes(inode: u32) {
+    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
+    for slot in slots.iter_mut().flatten() {
+        let is_match = matches!(
+            &slot.1,
+            OpenFile::Write { existing_inode: Some(i), len, .. } if *i == inode && *len > 0
+        );
+        if is_match {
+            commit_write_buffer(&mut slot.1);
+        }
+    }
+}
+
 /// Registered for `SYS_OPEN`. `/proc/...` (absolute only -- a *relative* path reached while cwd is
 /// already inside `/proc` is `proc_relative_open`'s job, below) is intercepted before any of the
 /// real, cwd-relative special-casing below, since it isn't backed by a real inode at all -- see
@@ -3870,6 +3889,7 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
 
     let result = match dir_lookup(parent, leaf) {
         Some(inode_num) => {
+            force_commit_pending_writes(inode_num);
             // Real `O_EXCL` (only meaningful combined with `O_CREAT`, per real POSIX): the target
             // already exists -- regardless of what it resolves to (symlink, directory, device,
             // ...) -- so `open()` must fail here rather than transparently opening it. Checked
@@ -4099,6 +4119,10 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
             touch_atime(inode);
         }
         return n as i64;
+    }
+    // Another descriptor's buffered writes to this file, first (`force_commit_pending_writes`).
+    if let Some(inode) = inode_of_open_file(fd) {
+        force_commit_pending_writes(inode);
     }
     let Some(file) = find_open_file(fd) else {
         return -EBADF;
@@ -4594,7 +4618,9 @@ extern "C" fn oxfs_flock(fd: u64, op: u64, _a2: u64, _a3: u64) -> i64 {
         return -EBADF;
     }
     let real_fd = real_fd as u64;
-    let Some(inode_num) = inode_of_open_file(real_fd) else {
+    // A descriptor open for writing has an inode only once something is committed; lock files
+    // (pid files) are usually opened O_RDWR|O_CREAT and locked before anything is written.
+    let Some(inode_num) = resolve_write_fd_inode(real_fd) else {
         return -EBADF;
     };
 
