@@ -518,7 +518,7 @@ pub extern "C" fn _start() -> ! {
             &b"seeded ELF executable is 0755"[..],
         ),
         (
-            b"/usr/lib/libc.so",
+            b"/lib/libc.so",
             b"-rwxr-xr-x",
             b"seeded shared object is 0755",
         ),

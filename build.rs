@@ -347,6 +347,15 @@ fn main() {
     // process/scheduler section. Also embedded into oxfs below.
     let musl_sysroot = build_musl_sysroot();
 
+    // The host cross compiler and the target's C++ runtime and libunwind (see the Clang/LLVM
+    // comment further down), early: /lib/libgcc_s.so.1, which every dynamically linked Rust
+    // program needs, is built from that libunwind.
+    vendor_linux_uapi_headers(&musl_sysroot);
+    let llvm_host_build = build_llvm_host_toolchain();
+    build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
+    let libgcc_s_path = build_libgcc_s(&musl_sysroot, &llvm_host_build);
+    let libc_so_path = musl_sysroot.join("lib/libc.so");
+
     // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section.
     // Also embedded into oxfs below.
     let musl_smoke_elf_path = build_c_pie(&musl_sysroot, "musl-smoke");
@@ -377,11 +386,14 @@ fn main() {
 
     // Extends the real std consumer proof into std::thread, signals, and std::net -- see
     // regress/std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
-    // The kernel's supervision of pid 1 -- see tests/init_respawn_smoke.rs.
-    build_std_oxidebsd_userland_crate(
+    // The kernel's supervision of pid 1 -- see tests/init_respawn_smoke.rs. Spawned by the kernel
+    // as pid 1, so a static PIE like /bin/sh.
+    build_std_oxidebsd_userland_crate_with_env(
         "regress/std/init-respawn-smoke",
         "INIT_RESPAWN_SMOKE_ELF_PATH",
         &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
     );
 
     let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
@@ -401,7 +413,15 @@ fn main() {
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libsh/Cargo.toml").display()
     );
-    let sh_elf_path = build_std_oxidebsd_userland_crate("bin/sh", "OXFS_SH_ELF_PATH", &musl_sysroot);
+    // /bin/sh is pid 1 (sys/kernel_main.rs embeds it), so it's a static PIE: it has to start
+    // even with a broken dynamic linker or libc.so.
+    let sh_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "bin/sh",
+        "OXFS_SH_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
     let init_sh_elf_path =
         build_std_oxidebsd_userland_crate("sbin/init_sh", "OXFS_INIT_SH_ELF_PATH", &musl_sysroot);
     // /sbin/rcorder links libsh too, for service blocks (INIT_SH.md §6).
@@ -429,8 +449,14 @@ fn main() {
     let logger_elf_path =
         build_std_oxidebsd_userland_crate("usr.bin/logger", "OXFS_LOGGER_ELF_PATH", &musl_sysroot);
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
-    let emergency_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/emergency", "OXFS_EMERGENCY_ELF_PATH", &musl_sysroot);
+    // What the kernel runs as pid 1 when init keeps dying: static for the same reason as /bin/sh.
+    let emergency_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "sbin/emergency",
+        "OXFS_EMERGENCY_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
 
     // Getty, login and the account tools (LOGIN.md in OxideBSD-doc). They replace BusyBox's, and
     // keep their env var names, so oxfs seeds them at the same paths. login and passwd link
@@ -451,12 +477,14 @@ fn main() {
         "OXFS_LOGIN_ELF_PATH",
         &musl_sysroot,
         pam_env,
+        StdLink::Dynamic,
     );
     let passwd_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "usr.bin/passwd",
         "OXFS_PASSWD_ELF_PATH",
         &musl_sysroot,
         pam_env,
+        StdLink::Dynamic,
     );
     let pwd_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
@@ -518,9 +546,6 @@ fn main() {
     // (`build_llvm_target_runtimes`) and then the real, on-target-executable clang+lld
     // (`build_llvm_target_toolchain`) using that same cross compiler. Genuinely slow on a clean
     // checkout (multi-hour).
-    vendor_linux_uapi_headers(&musl_sysroot);
-    let llvm_host_build = build_llvm_host_toolchain();
-    build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
     let llvm_target_build = build_llvm_target_toolchain(&llvm_host_build, &musl_sysroot);
     let clang_elf_path = llvm_target_build.join("bin/clang-23");
     let lld_elf_path = llvm_target_build.join("bin/lld");
@@ -768,6 +793,8 @@ fn main() {
             "POSIX_TEST_MANIFEST_PATH",
             posix_test_manifest_path.to_str().unwrap(),
         ),
+        ("OXFS_LIBC_SO_PATH", libc_so_path.to_str().unwrap()),
+        ("OXFS_LIBGCC_S_PATH", libgcc_s_path.to_str().unwrap()),
         (
             "OXFS_DYNLINK_SMOKE_ELF_PATH",
             dynlink_smoke_elf_path.to_str().unwrap(),
@@ -1011,6 +1038,42 @@ fn build_musl_sysroot() -> PathBuf {
 /// collision story already established. Unlike every other `userland/*` crate this isn't a Rust
 /// crate at all -- musl-smoke exists specifically to
 /// exercise a real musl static binary, so it's built with `musl-gcc` directly, no cargo involved.
+/// `/lib/libgcc_s.so.1`: the shared unwinder, as on FreeBSD built from LLVM's libunwind (ours,
+/// from `build_llvm_target_runtimes`) under the name GCC's runtime has, since that's what a
+/// dynamically linked Rust program (std's `unwind` crate: `-lgcc_s` without `crt-static`) and GCC-
+/// style C++ link against. Only the unwinder: compiler-rt's builtins are hidden-visibility, and
+/// every program links its own. Also installed into the musl sysroot as `libgcc_s.so`, so a link
+/// finds it before the host compiler's own (glibc) `libgcc_s`. Rebuilt when libunwind or musl's
+/// `libc.so` is newer.
+fn build_libgcc_s(musl_sysroot: &Path, llvm_host_build: &Path) -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let libunwind = llvm_host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libunwind.a"));
+    let out = manifest_dir.join("target/libgcc_s/libgcc_s.so.1");
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    // musl-gcc.specs too: it holds link flags (--eh-frame-hdr) that end up in the library.
+    let newest_input = [&libunwind, &musl_sysroot.join("lib/libc.so"), &musl_sysroot.join("lib/musl-gcc.specs")]
+        .into_iter()
+        .filter_map(|p| mtime(p))
+        .max();
+    if mtime(&out).is_none() || mtime(&out) < newest_input {
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let status = Command::new(musl_sysroot.join("bin/musl-gcc"))
+            .args(["-shared", "-Wl,-soname,libgcc_s.so.1", "-Wl,-z,defs", "-Wl,--whole-archive"])
+            .arg(&libunwind)
+            .arg("-Wl,--no-whole-archive")
+            .arg("-o")
+            .arg(&out)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run musl-gcc for libgcc_s.so.1: {e}"));
+        assert!(status.success(), "linking libgcc_s.so.1 failed: {status}");
+    }
+    let installed = musl_sysroot.join("lib/libgcc_s.so");
+    if std::fs::read(&installed).ok() != std::fs::read(&out).ok() {
+        std::fs::copy(&out, &installed).expect("installing libgcc_s.so into the musl sysroot");
+    }
+    out
+}
+
 /// Ensures `libunwind.a` exists in *our own* musl sysroot, copied from the pinned nightly's own
 /// bundled self-contained object set for `x86_64-unknown-linux-musl`. musl itself has no unwind
 /// library; `std`'s prebuilt `.rlib`s for this target hard-depend on `-lunwind` regardless of
@@ -1290,7 +1353,17 @@ fn build_std_oxidebsd_userland_crate(
     env_var: &str,
     musl_sysroot: &Path,
 ) -> PathBuf {
-    build_std_oxidebsd_userland_crate_with_env(crate_path, env_var, musl_sysroot, &[])
+    build_std_oxidebsd_userland_crate_with_env(crate_path, env_var, musl_sysroot, &[], StdLink::Dynamic)
+}
+
+/// How a std program for OxideBSD is linked.
+#[derive(Clone, Copy, PartialEq)]
+enum StdLink {
+    /// A dynamically linked PIE on `/lib/libc.so` and `/lib/libgcc_s.so.1`: every program but pid 1.
+    Dynamic,
+    /// A static PIE (`crt-static`), for pid 1, which has to start even if the dynamic linker or a
+    /// shared library is broken (as FreeBSD links `init` with `NO_SHARED`).
+    StaticPie,
 }
 
 /// [`build_std_oxidebsd_userland_crate`], with extra environment variables for the nested cargo:
@@ -1301,6 +1374,7 @@ fn build_std_oxidebsd_userland_crate_with_env(
     env_var: &str,
     musl_sysroot: &Path,
     extra_env: &[(&str, &Path)],
+    link: StdLink,
 ) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crate_dir = Path::new(manifest_dir).join(crate_path);
@@ -1313,7 +1387,12 @@ fn build_std_oxidebsd_userland_crate_with_env(
     // (~30 s apiece). Each crate is its own workspace, but cargo shares units across workspaces
     // in one target dir whenever their fingerprints match, as std's do: same target, profile and
     // RUSTFLAGS for all of them. Binary names must stay unique (they're the crate dir's name).
-    let target_dir = Path::new(manifest_dir).join("target/std-oxidebsd");
+    // Static programs get a target dir of their own: `crt-static` is a target feature, so std is
+    // compiled differently for them.
+    let target_dir = Path::new(manifest_dir).join(match link {
+        StdLink::Dynamic => "target/std-oxidebsd",
+        StdLink::StaticPie => "target/std-oxidebsd-static",
+    });
 
     println!("cargo:rerun-if-changed={}", crate_dir.join("src").display());
     println!(
@@ -1357,16 +1436,21 @@ fn build_std_oxidebsd_userland_crate_with_env(
     let rust_sysroot = build_oxidebsd_rust_sysroot();
     let wrapper = write_oxidebsd_rustc_wrapper(&rust_sysroot);
 
-    // The program links musl's libc.a, but only through the `-C linker=` flag below, which cargo
-    // doesn't track: after a musl change it would keep the executable linked against the old
-    // libc (after the socket-ABI change, calling retired syscalls). For an executable older than
-    // libc.a, the crate's own fingerprints (`build/<crate>/<hash>/fingerprint`) are removed, so
-    // cargo compiles and links just that crate again. Removing the executable alone isn't enough:
-    // it's a hard link to `build/<crate>/<hash>/out/<crate>`, which cargo re-links when fresh.
+    // The program links musl's libc (libc.a, or libc.so and libgcc_s.so), but only through the
+    // `-C linker=` flag below, which cargo doesn't track: after a musl change it would keep the
+    // executable linked against the old libc (after the socket-ABI change, calling retired
+    // syscalls). For an executable older than any of them, the crate's own fingerprints
+    // (`build/<crate>/<hash>/fingerprint`) are removed, so cargo compiles and links just that crate
+    // again. Removing the executable alone isn't enough: it's a hard link to
+    // `build/<crate>/<hash>/out/<crate>`, which cargo re-links when fresh.
     let release_dir = target_dir.join("x86_64-unknown-oxidebsd/release");
     let elf_path = release_dir.join(crate_name);
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    if let (Some(exe), Some(libc)) = (mtime(&elf_path), mtime(&musl_sysroot.join("lib/libc.a")))
+    let newest_lib = ["lib/libc.a", "lib/libc.so", "lib/libgcc_s.so", "lib/musl-gcc.specs"]
+        .iter()
+        .filter_map(|l| mtime(&musl_sysroot.join(l)))
+        .max();
+    if let (Some(exe), Some(libc)) = (mtime(&elf_path), newest_lib)
         && exe < libc
     {
         let _ = std::fs::remove_file(&elf_path);
@@ -1406,9 +1490,11 @@ fn build_std_oxidebsd_userland_crate_with_env(
         .env("RUSTC_WRAPPER", &wrapper)
         .env(
             "RUSTFLAGS",
+            // A PIE either way (the target spec); `crt-static` makes it a static one.
             format!(
-                "-C link-self-contained=no -C linker={}/bin/musl-gcc -C link-arg=-no-pie -C link-arg=-Wl,-Ttext-segment=0x16000000",
-                musl_sysroot.display()
+                "-C link-self-contained=no -C linker={}/bin/musl-gcc{}",
+                musl_sysroot.display(),
+                if link == StdLink::StaticPie { " -C target-feature=+crt-static" } else { "" }
             ),
         )
         .status()
@@ -1777,13 +1863,19 @@ fn write_musl_runtime_manifest(musl_sysroot: &Path) -> PathBuf {
     headers.sort();
     write_array(&mut src, "MUSL_INCLUDE_FILES", &headers);
 
-    // /usr/lib -- crt objects (PIE and static-PIE ones included), every musl-produced `.a` (libc.a
-    // plus its small stub archives, for `-lm`/`-lpthread` link-line compatibility even though musl
-    // merges everything into libc.a), and `libc.so`. Skipped: `ld-musl-x86_64.so.1`, which oxfs
-    // makes a `/lib` symlink to `libc.so` instead, and `musl-gcc.specs`, a host build tool file.
+    // /usr/lib -- crt objects (PIE and static-PIE ones included) and every musl-produced `.a`
+    // (libc.a plus its small stub archives, for `-lm`/`-lpthread` link-line compatibility even
+    // though musl merges everything into libc.a). Skipped: the shared libraries `libc.so` (with its
+    // `ld-musl-x86_64.so.1` link) and `libgcc_s.so`, which oxfs puts in `/lib` with `/usr/lib`
+    // symlinks to them, and `musl-gcc.specs`, a host build tool file.
     let mut lib_files: Vec<(String, PathBuf)> = collect_dir_files(&musl_sysroot.join("lib"))
         .into_iter()
-        .filter(|(rel, _)| !matches!(rel.as_str(), "ld-musl-x86_64.so.1" | "musl-gcc.specs"))
+        .filter(|(rel, _)| {
+            !matches!(
+                rel.as_str(),
+                "libc.so" | "ld-musl-x86_64.so.1" | "libgcc_s.so" | "musl-gcc.specs"
+            )
+        })
         .collect();
     lib_files.sort();
     write_array(&mut src, "MUSL_LIB_FILES", &lib_files);
@@ -2959,8 +3051,8 @@ struct OpensslBuild {
 /// FreeBSD. Not seeded: `c_rehash` and `etc/ssl/misc` (Perl scripts; there's no Perl on OxideBSD,
 /// and `certctl(8)` does `c_rehash`'s job) and the `*.dist` copies of the config files.
 ///
-/// Configure reruns, in a fresh build directory, when its arguments or the target file change
-/// (the stamp holds both); otherwise OpenSSL's own `make` rebuilds incrementally. The whole step is
+/// Configure reruns, in a fresh build directory, when its arguments, the target file or musl-gcc's
+/// specs change (the stamp holds all three); otherwise OpenSSL's own `make` rebuilds incrementally. The whole step is
 /// skipped while the manifest is newer than the source tree, the target file and musl's libraries.
 fn build_openssl(musl_sysroot: &Path) -> OpensslBuild {
     const CONFIGURE_ARGS: &[&str] = &[
@@ -2991,6 +3083,7 @@ fn build_openssl(musl_sysroot: &Path) -> OpensslBuild {
         mtime(&target_conf),
         mtime(&musl_sysroot.join("lib/libc.a")),
         mtime(&musl_sysroot.join("lib/libc.so")),
+        mtime(&musl_sysroot.join("lib/musl-gcc.specs")),
     ]
     .into_iter()
     .flatten()
@@ -2999,10 +3092,13 @@ fn build_openssl(musl_sysroot: &Path) -> OpensslBuild {
         return out;
     }
 
+    // The link flags musl-gcc adds (its specs) are part of the toolchain too: OpenSSL's make
+    // wouldn't relink for a change in them.
     let stamp_contents = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         CONFIGURE_ARGS.join(" "),
-        std::fs::read_to_string(&target_conf).expect("reading secure/lib/libcrypto/oxidebsd.conf")
+        std::fs::read_to_string(&target_conf).expect("reading secure/lib/libcrypto/oxidebsd.conf"),
+        std::fs::read_to_string(musl_sysroot.join("lib/musl-gcc.specs")).unwrap_or_default()
     );
     let stamp = build.join("oxidebsd-configure.stamp");
     if std::fs::read_to_string(&stamp).ok().as_deref() != Some(stamp_contents.as_str()) {

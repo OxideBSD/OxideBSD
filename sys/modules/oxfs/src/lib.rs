@@ -8845,11 +8845,16 @@ fn format_fresh_filesystem() -> bool {
     // `POSIX_TEST_EXTRA_FILES`'s own generation comment in build.rs), seeded straight off root.
     ok &= seed_tree(root, POSIX_TEST_EXTRA_FILES);
 
-    // Dynamic linking. musl has no separate `ld.so`: its `make install` symlinks the interpreter
-    // path to `libc.so` (seeded into `/usr/lib` with `MUSL_LIB_FILES` above), so `/lib` is a real
-    // directory holding just that symlink, as on a musl system, not a `/lib -> /usr/lib` alias.
+    // Shared libraries the programs in /bin and /sbin need live in /lib, as on the BSDs: musl's
+    // libc.so, which is also its dynamic linker (musl's `make install` makes the interpreter path
+    // a symlink to it), and libgcc_s.so.1, the unwinder (LLVM libunwind, build.rs's
+    // build_libgcc_s). /usr/lib has symlinks to them under the names a link looks for.
     let lib = ensure_dir(root, b"lib");
-    ok &= seed_symlink(lib, b"ld-musl-x86_64.so.1", b"/usr/lib/libc.so");
+    ok &= seed_file(lib, b"libc.so", include_bytes!(env!("OXFS_LIBC_SO_PATH")));
+    ok &= seed_symlink(lib, b"ld-musl-x86_64.so.1", b"libc.so");
+    ok &= seed_file(lib, b"libgcc_s.so.1", include_bytes!(env!("OXFS_LIBGCC_S_PATH")));
+    ok &= seed_symlink(usr_lib, b"libc.so", b"/lib/libc.so");
+    ok &= seed_symlink(usr_lib, b"libgcc_s.so", b"/lib/libgcc_s.so.1");
 
     // Clang's own resource-dir tree (intrinsic headers, compiler-rt's builtins archive) -- see
     // CLAUDE.md's Clang/LLVM port section. `/usr/lib/clang/23` is clang's own binary-relative

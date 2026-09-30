@@ -147,13 +147,17 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 - **The kernel image must end below `module::MODULE_VA_BASE` (`0xffff_ffff_a000_0000`).** Module
   data pools live at `MODULE_DATA_BASE` (L4 384).
 - **New C programs and fixtures are static PIE** (`build_c_pie`, `musl-gcc -static-pie`; musl is
-  built `-fPIE`). Fixed-address binaries (BusyBox, bmake, vi, nano, ninja, doom, the POSIX corpus,
-  the Rust std programs) need a load base above the kernel's low reservations and below
-  `0x2000_0000` (the module region); the floor moves as the image grows and fails as
-  `MappingFailed`/`PageAlreadyMapped` at exec: `readelf -l target/x86_64-oxidebsd/debug/oxidebsd`.
+  built `-fPIE`). Fixed-address binaries (BusyBox, bmake, vi, nano, ninja, doom, the POSIX corpus)
+  need a load base above the kernel's low reservations and below `0x2000_0000` (the module
+  region); the floor moves as the image grows and fails as `MappingFailed`/`PageAlreadyMapped` at
+  exec: `readelf -l target/x86_64-oxidebsd/debug/oxidebsd`.
 - **One musl build makes `libc.a` and `libc.so`**: `musl-gcc` without `-static`/`-static-pie`
   links dynamically (`PT_INTERP` `/lib/ld-musl-x86_64.so.1`). Every `ET_DYN` main binary gets an
-  ASLR bias, `PT_INTERP` or not.
+  ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
+  `PT_INTERP` image: it loads no dynamic linker).
+- **Rust std programs are dynamic PIEs** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
+  libunwind, `build_libgcc_s`). Exceptions (`StdLink::StaticPie`): `/bin/sh` and `/sbin/emergency`,
+  which the kernel embeds and spawns as pid 1.
 - User stacks grow on demand inside an 8 MiB reserve (`mm::try_grow_user_stack`, both rings).
 - `AddressSpace` is `Arc`-refcounted; frames are reclaimed at exit. `SHARED_LEAF` PTEs (SysV shm,
   `MAP_SHARED`) are never freed by teardown.
