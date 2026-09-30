@@ -1,10 +1,10 @@
-//! Real per-`execve()` load-bias randomization for a no-`PT_INTERP` PIE main executable — genuine
-//! ASLR, extending `elf::load`'s already-generic `bias` mechanism (previously used only for a
-//! `PT_INTERP` interpreter's own fixed `INTERP_LOAD_BASE`) to a second, distinct case. See
-//! `do_execve` for where this gets called, and `elf.rs`'s own module doc comment for why zero
-//! in-kernel relocation processing is needed for this to be correct (a disciplined, build-time-
-//! verified "never store an address as data" coding style — `build.rs`'s
-//! `assert_zero_relocations`).
+//! Real per-`execve()` load-bias randomization for a PIE (`ET_DYN`) main executable, static or
+//! dynamically linked — genuine ASLR, extending `elf::load`'s already-generic `bias` mechanism
+//! (previously used only for a `PT_INTERP` interpreter's own fixed `INTERP_LOAD_BASE`) to a second,
+//! distinct case. See `do_execve` for where this gets called. The kernel never processes
+//! relocations: a dynamically linked PIE is relocated by its `ld.so`, a static PIE by musl's
+//! `rcrt1.o`, and the native PIE utilities have none at all (`elf.rs`'s module doc comment;
+//! `build.rs`'s `assert_zero_relocations`).
 //!
 //! **Fork never re-randomizes.** A forked child inherits its parent's exact, already-mapped,
 //! already-biased address space unchanged — `do_fork_from_current` contains no `elf::load` call
@@ -52,7 +52,7 @@ pub const PIE_ASLR_CEILING: u64 = 0x_4000_0000_0000 - PIE_ASLR_HEADROOM;
 
 const PAGE_SIZE: u64 = 4096;
 
-/// Picks a real, page-aligned, randomized load bias for a no-`PT_INTERP` PIE main binary,
+/// Picks a real, page-aligned, randomized load bias for a PIE (`ET_DYN`) main binary,
 /// somewhere in `[PIE_ASLR_BASE, PIE_ASLR_CEILING)`. Called once per `execve()` of such a binary
 /// — never on `fork()` (see this module's own doc comment).
 pub fn pick_bias() -> u64 {

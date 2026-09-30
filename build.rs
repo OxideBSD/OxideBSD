@@ -582,6 +582,7 @@ fn main() {
     let dynlink_musl_sysroot = build_musl_sysroot_shared();
     let dynlink_libc_so_path = dynlink_musl_sysroot.join("lib/libc.so");
     let dynlink_smoke_elf_path = build_dynlink_smoke(&dynlink_musl_sysroot, dynlink_fixture_base);
+    let dynlink_pie_smoke_elf_path = build_dynlink_pie_smoke(&dynlink_musl_sysroot);
 
     // A real, no-`PT_INTERP` PIE main binary proving the PIE/ASLR loading model -- see
     // `sys/process/aslr.rs`'s own doc comment and `regress/pie-aslr-smoke/src/main.rs`'s module
@@ -767,6 +768,10 @@ fn main() {
         (
             "OXFS_DYNLINK_SMOKE_ELF_PATH",
             dynlink_smoke_elf_path.to_str().unwrap(),
+        ),
+        (
+            "OXFS_DYNLINK_PIE_SMOKE_ELF_PATH",
+            dynlink_pie_smoke_elf_path.to_str().unwrap(),
         ),
         (
             "OXFS_PIE_ASLR_PROBE_ELF_PATH",
@@ -1736,6 +1741,29 @@ fn build_dynlink_smoke(sysroot: &Path, fixture_base: u64) -> PathBuf {
     if !status.success() {
         panic!("building dynlink-smoke failed: {status}");
     }
+    out
+}
+
+/// Cross-builds `regress/dynlink-pie-smoke/main.c` against the shared musl `sysroot` as a
+/// dynamically linked PIE: `ET_DYN` with a `PT_INTERP`, linked at 0, so the kernel has to pick
+/// its load bias (`do_execve`) while `ld.so` relocates it.
+fn build_dynlink_pie_smoke(sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("regress/dynlink-pie-smoke/main.c");
+    let target_dir = Path::new(manifest_dir).join("target/dynlink-pie-smoke");
+    std::fs::create_dir_all(&target_dir).expect("failed to create target/dynlink-pie-smoke");
+    let out = target_dir.join("dynlink-pie-smoke");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let status = Command::new(sysroot.join("bin/musl-gcc"))
+        .args(["-fPIE", "-pie", "-O2"])
+        .arg("-Wl,--dynamic-linker=/lib/ld-musl-x86_64.so.1")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run musl-gcc for dynlink-pie-smoke: {e}"));
+    assert!(status.success(), "building dynlink-pie-smoke failed: {status}");
     out
 }
 

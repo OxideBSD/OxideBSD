@@ -1261,11 +1261,11 @@ fn exec_image(
     // interpreter-loading branch reuse the same parse instead of scanning PT_INTERP twice.
     let interp_path = elf.interpreter().map_err(|_| ENOEXEC)?;
 
-    // A real PIE main binary: ET_DYN, but with no PT_INTERP of its own (that combination is the
-    // no-`ld.so`, kernel-loaded-directly case -- see `process::aslr`'s own doc comment). Everyone
-    // else (a fixed-address ET_EXEC, or an ET_DYN binary that *does* carry a PT_INTERP, i.e. a
-    // real musl-linked dynamic executable) keeps bias `0` for the main image exactly as before.
-    let main_bias: u64 = if elf.is_dynamic() && interp_path.is_none() {
+    // Any ET_DYN main binary gets a randomized bias (`process::aslr`): a static PIE, which the
+    // kernel loads alone, and a dynamically linked PIE, where `ld.so` finds the bias through
+    // `AT_PHDR` (`user_stack::build` adds it) and relocates the image itself. Linked at 0, an
+    // unbiased PIE would map over the null page. A fixed-address ET_EXEC keeps bias 0.
+    let main_bias: u64 = if elf.is_dynamic() {
         crate::process::aslr::pick_bias()
     } else {
         0

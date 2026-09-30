@@ -8813,6 +8813,13 @@ fn format_fresh_filesystem() -> bool {
         b"dynlink-smoke.elf",
         include_bytes!(env!("OXFS_DYNLINK_SMOKE_ELF_PATH")),
     );
+    // Its PIE sibling (`regress/dynlink-pie-smoke/`): ET_DYN with a PT_INTERP, the ordinary
+    // dynamically linked program shape.
+    ok &= seed_file(
+        root,
+        b"dynlink-pie-smoke.elf",
+        include_bytes!(env!("OXFS_DYNLINK_PIE_SMOKE_ELF_PATH")),
+    );
 
     // A real, no-`PT_INTERP` PIE main binary (`regress/pie-aslr-smoke/`) proving the PIE/ASLR
     // loading model (see `sys/process/aslr.rs`'s own doc comment) -- real `fork`+`execve` of this

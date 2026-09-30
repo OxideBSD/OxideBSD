@@ -245,7 +245,7 @@ impl<'a> Elf<'a> {
 /// `0` for every fixed-address `ET_EXEC` main binary (its own `p_vaddr`s already *are* its real,
 /// fixed runtime addresses, matching its own `linker.ld`); a real, kernel-chosen nonzero value for
 /// a `PT_INTERP` interpreter (`lifecycle.rs`'s `do_execve`, fixed `INTERP_LOAD_BASE`); and a real,
-/// per-`execve()`-randomized nonzero value for a no-`PT_INTERP` PIE main binary (same `do_execve`,
+/// per-`execve()`-randomized nonzero value for a PIE main binary (same `do_execve`,
 /// `process::aslr::pick_bias()` — note that whoever builds this binary's own initial stack, i.e.
 /// `user_stack::build`, must also add this same bias to `AT_PHDR`/`AT_ENTRY`, since `Elf::
 /// phdr_vaddr()`/`entry_point()` report unbiased file-relative values). **Found the hard way, via

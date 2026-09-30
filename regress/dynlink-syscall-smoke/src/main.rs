@@ -167,6 +167,9 @@ pub extern "C" fn _start() -> ! {
     let ok = run_and_wait(b"/dynlink-smoke.elf", &[b"dynlink-smoke.elf"]);
     check!(ok, b"running /dynlink-smoke.elf via a real PT_INTERP exec failed");
 
+    let ok = run_and_wait(b"/dynlink-pie-smoke.elf", &[b"dynlink-pie-smoke.elf"]);
+    check!(ok, b"running the dynamically linked PIE /dynlink-pie-smoke.elf failed");
+
     write_bytes(b"dynlink-syscall-smoke: PASS\n");
     test_exit(true);
 }
