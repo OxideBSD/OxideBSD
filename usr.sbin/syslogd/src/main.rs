@@ -308,10 +308,8 @@ impl Daemon {
         Style { format: self.opts.format, verbose: self.opts.verbose, forward: self.opts.secure < 2 && !self.opts.no_network }
     }
 
-    /// Reads the configuration and the local time zone, and prepares the actions, closing the
-    /// old ones.
+    /// Reads the configuration and prepares its actions, closing the old ones.
     fn load(&mut self) {
-        syslog::time::reload_zone();
         let now = syslog::time::epoch();
         let style = self.style();
         for a in &mut self.actions {

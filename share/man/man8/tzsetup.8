@@ -56,14 +56,11 @@ link and create the link again, checking the zone's file anew.
 Useful after the database has been updated.
 .El
 .Pp
-Programs read the local time zone when they start, and running programs keep
-the zone they started with.
-.Xr syslogd 8
-and
-.Xr cron 8
-read it again when they receive
-.Dv SIGHUP ;
-other long-running programs must be restarted.
+Running programs follow the change within a second: the C library checks
+.Pa /etc/localtime
+again at most once a second when converting local time, as long as
+.Ev TZ
+is unset.
 Without
 .Pa /etc/localtime ,
 local time is UTC.
@@ -97,7 +94,6 @@ Refresh the link after installing a newer database:
 .Sh SEE ALSO
 .Xr date 1 ,
 .Xr tzfile 5 ,
-.Xr cron 8 ,
 .Xr syslogd 8 ,
 .Xr zdump 8 ,
 .Xr zic 8

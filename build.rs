@@ -347,7 +347,7 @@ fn main() {
 
     // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section.
     // Also embedded into oxfs below.
-    let musl_smoke_elf_path = build_musl_smoke(&musl_sysroot);
+    let musl_smoke_elf_path = build_c_pie(&musl_sysroot, "musl-smoke");
 
     // Real Rust `std` target proof of concept -- see `regress/std/std-hello/src/main.rs`'s own
     // doc comment. Also embedded into oxfs below.
@@ -479,30 +479,30 @@ fn main() {
 
     // Derisk check for the fbdoom/doomgeneric port -- see regress/float-smoke/main.c's own doc
     // comment.
-    let float_smoke_elf_path = build_float_smoke(&musl_sysroot);
+    let float_smoke_elf_path = build_c_pie(&musl_sysroot, "float-smoke");
 
     // "Real threading" phases 1-5's own finish line -- see regress/pthread-smoke/main.c's own
     // doc comment.
-    let pthread_smoke_elf_path = build_pthread_smoke(&musl_sysroot);
-    let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
-    let socket_smoke_elf_path = build_socket_smoke(&musl_sysroot);
-    let sysctl_smoke_elf_path = build_c_smoke(&musl_sysroot, "sysctl-smoke", "0x8380000");
-    let tz_smoke_elf_path = build_c_smoke(&musl_sysroot, "tz-smoke", "0x83c0000");
-    let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
-    let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
-    let tty_smoke_elf_path = build_tty_smoke(&musl_sysroot);
+    let pthread_smoke_elf_path = build_c_pie(&musl_sysroot, "pthread-smoke");
+    let at_smoke_elf_path = build_c_pie(&musl_sysroot, "at-smoke");
+    let socket_smoke_elf_path = build_c_pie(&musl_sysroot, "socket-smoke");
+    let sysctl_smoke_elf_path = build_c_pie(&musl_sysroot, "sysctl-smoke");
+    let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
+    let ppoll_smoke_elf_path = build_c_pie(&musl_sysroot, "ppoll-smoke");
+    let fd_smoke_elf_path = build_c_pie(&musl_sysroot, "fd-smoke");
+    let tty_smoke_elf_path = build_c_pie(&musl_sysroot, "tty-smoke");
 
     // Real cross-process named-semaphore coordination -- see regress/sem-open-smoke/main.c's own
     // doc comment.
-    let sem_open_smoke_elf_path = build_sem_open_smoke(&musl_sysroot);
+    let sem_open_smoke_elf_path = build_c_pie(&musl_sysroot, "sem-open-smoke");
 
     // Isolated pthread_cancel/5-1.c crash-then-wedge repro -- see regress/pthread-cancel-crash/
     // main.c's own doc comment.
-    let pthread_cancel_crash_elf_path = build_pthread_cancel_crash(&musl_sysroot);
+    let pthread_cancel_crash_elf_path = build_c_pie(&musl_sysroot, "pthread-cancel-crash");
 
     // Isolated pthread_cond_broadcast/1-2.c real-cross-process-stall repro -- see
     // regress/pshared-cond-crash/main.c's own doc comment.
-    let pshared_cond_crash_elf_path = build_pshared_cond_crash(&musl_sysroot);
+    let pshared_cond_crash_elf_path = build_c_pie(&musl_sysroot, "pshared-cond-crash");
 
     // Real, on-target `/usr/include`+`/usr/lib` musl runtime tree -- what Clang/LLVM's own
     // on-target `clang`/`ld.lld` links a user's C file against.
@@ -903,8 +903,26 @@ fn build_musl_sysroot() -> PathBuf {
         musl_dir.join("arch/x86_64").display()
     );
     println!("cargo:rerun-if-changed={}", musl_dir.join("src").display());
+    // musl-gcc.specs is generated from tools/musl-gcc.specs.sh.
+    println!("cargo:rerun-if-changed={}", musl_dir.join("tools").display());
 
-    if !musl_dir.join("config.mak").exists() {
+    // configure runs again, with a clean build after it, whenever its arguments here change (a
+    // changed CFLAGS used to be ignored for as long as the old config.mak existed).
+    let configure_args = [
+        "--disable-shared".to_string(),
+        format!("--prefix={}", sysroot.display()),
+        // Position-independent, so C programs can be static PIE (`-static-pie`, which the fork's
+        // musl-gcc specs understand): ASLR, and no fixed load address to pick. Explicit rather
+        // than the host compiler's default. (Until 2026-09-30 this was `-fno-pie -fno-PIC`, for
+        // TinyCC's linker, which couldn't relax the GOT-relative relocations PIC code has; GNU
+        // ld and lld both do.)
+        "CFLAGS=-fPIE".to_string(),
+    ];
+    let configure_key = configure_args.join(" ");
+    let configure_stamp = Path::new(manifest_dir).join("target/musl-configure.stamp");
+    let configured = musl_dir.join("config.mak").exists()
+        && std::fs::read_to_string(&configure_stamp).ok().as_deref() == Some(configure_key.as_str());
+    if !configured {
         // Run via its own path (not `sh configure`, and not a bare relative "configure"): the
         // script derives its own source directory from `${0%/configure}` (build.rs:201 in
         // musl's own configure) -- given anything that doesn't literally end in "/configure",
@@ -913,47 +931,21 @@ fn build_musl_sysroot() -> PathBuf {
         // is the one invocation shape that satisfies its own self-location logic.
         let status = Command::new("./configure")
             .current_dir(&musl_dir)
-            .args([
-                "--disable-shared",
-                &format!("--prefix={}", sysroot.display()),
-                // Found live, via TinyCC (this project's first on-target C compiler, since
-                // removed once Clang/LLVM superseded it): this project's dev
-                // host's own real gcc defaults to PIE (confirmed directly: `echo | gcc -E -dM -`
-                // defines `__PIC__`/`__PIE__` with *no* flags at all -- a real, common modern
-                // distro default, not something this project's own toolchain chose). musl's own
-                // `configure` (`trycppif __PIC__ ...`, this file's own line ~578) auto-detects
-                // that and lets PIE-style GOT-indirect codegen leak into every musl object it
-                // builds, including plain `crt1.o` -- confirmed directly: `readelf -r crt1.o`
-                // showed real `R_X86_64_REX_GOTPCRELX` relocations referencing `main`/`_init`/
-                // `_fini` from `_start_c`. Every *other* consumer of this sysroot links via
-                // `musl-gcc` -> real GNU ld, which silently performs the standard GOTPCRELX
-                // link-time relaxation (rewriting the GOT-indirect load into a direct `lea` once
-                // it knows the final static address) -- hiding this completely. TinyCC's own
-                // linker doesn't implement that relaxation: it reserves a real GOT slot and is
-                // *supposed* to fill it with the resolved address (traced through
-                // `third_party/tinycc/tccelf.c`'s `build_got_entries`/`fill_got_entry`), but the
-                // real, live symptom (a `hello.elf` tcc itself both compiled and linked with no
-                // errors at all faulted on a garbage instruction-fetch address the instant it
-                // ran) shows that path isn't reliable for this exact case. `-fno-pie -fno-PIC`
-                // forces genuinely old-style, non-GOT-indirect codegen for every musl object
-                // regardless of host default -- confirmed directly: recompiling `crt1.c` this way
-                // produces only plain `R_X86_64_32`/`PC32`/`PLT32` relocations, no GOTPCRELX at
-                // all, which is what let this project's very first BusyBox/musl-smoke binaries
-                // already work (they happened to get real relaxation from GNU ld, this makes the
-                // *input* to any linker unambiguous instead of depending on that relaxation).
-                // `obj/crt/Scrt1.o`/`obj/crt/rcrt1.o` (musl's own real PIE crt variants) still
-                // force `-fPIC` back on for themselves specifically
-                // (`external/mit/musl/Makefile`'s own `CFLAGS_ALL += -fPIC` line for those two
-                // files only) -- unaffected, and also never embedded into this project's own musl
-                // runtime manifest in the first place (see `write_musl_runtime_manifest`'s own
-                // doc comment on why those two are skipped).
-                "CFLAGS=-fno-pie -fno-PIC",
-            ])
+            .args(&configure_args)
             .status()
             .unwrap_or_else(|e| panic!("failed to run musl's configure: {e}"));
         if !status.success() {
             panic!("musl configure failed: {status}");
         }
+        let status = Command::new("make")
+            .current_dir(&musl_dir)
+            .arg("clean")
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run make clean for musl: {e}"));
+        if !status.success() {
+            panic!("musl clean failed: {status}");
+        }
+        std::fs::write(&configure_stamp, &configure_key).expect("writing target/musl-configure.stamp");
     }
 
     let jobs = build_jobs();
@@ -1065,7 +1057,7 @@ fn ensure_libunwind_in_sysroot(sysroot: &Path) {
 ///   without it, rustc still tries to pull in `libpanic_unwind`/`-lunwind` regardless (see
 ///   `ensure_libunwind_in_sysroot` above for why `-lunwind` needs to exist in *our* sysroot at all).
 /// - `-C link-arg=-no-pie -C link-arg=-Wl,-Ttext-segment=<addr>`: fixed-address `ET_EXEC`, same
-///   convention as `build_musl_smoke`'s own `-Wl,-Ttext-segment=`.
+///   convention as the other fixed-address programs (BusyBox, bmake, ...).
 fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
     ensure_libunwind_in_sysroot(sysroot);
 
@@ -1405,35 +1397,6 @@ fn build_std_oxidebsd_userland_crate_with_env(
     elf_path
 }
 
-fn build_musl_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/musl-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/musl-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/musl-smoke");
-    let out = target_dir.join("musl-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-Wl,-Ttext-segment=0x80c0000") // was 0x40c0000; +0x4000000, see module::MODULE_VA_BASE's own doc comment
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for musl-smoke: {e}"));
-    if !status.success() {
-        panic!("building musl-smoke failed: {status}");
-    }
-    out
-}
-
-/// Derisk check for the fbdoom/doomgeneric port -- see `regress/float-smoke/main.c`'s own doc
-/// comment for why. Same `build_musl_smoke` recipe, next free slot in that family
-/// (`0x8200000`, clear of `sem-open-smoke`/its neighbors' own `0x81c0000`).
 /// The real id Software Doom engine sources this build compiles, matching
 /// `external/gpl2/doomgeneric/doomgeneric/Makefile.linuxvt`'s own `SRC_DOOM` list -- the closest existing
 /// upstream Makefile to this port (no SDL/X11, real framebuffer + input) -- **minus** `i_video`/
@@ -1597,115 +1560,9 @@ fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
     out
 }
 
-fn build_float_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/float-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/float-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/float-smoke");
-    let out = target_dir.join("float-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-Wl,-Ttext-segment=0x8200000")
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for float-smoke: {e}"));
-    if !status.success() {
-        panic!("building float-smoke failed: {status}");
-    }
-    out
-}
-
-/// "Real threading" phases 1-5's own finish line -- see `regress/pthread-smoke/main.c`'s own doc
-/// comment for the scenario. Same `build_musl_smoke` recipe, one slot further along
-/// (`0x8100000`, clear of `musl-smoke`'s `0x80c0000`) -- this binary is `fork`+`execve`'d fresh by
-/// `regress/pthread-syscall-smoke/`, never co-resident with any other fixed-base image (unlike
-/// `build_dynlink_smoke`'s own interpreter-coexistence case), so it only needs to stay clear of the
-/// kernel's own image/heap/phys-mem window, not any other userland crate specifically.
-fn build_pthread_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/pthread-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/pthread-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/pthread-smoke");
-    let out = target_dir.join("pthread-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-pthread")
-        .arg("-Wl,-Ttext-segment=0x8100000") // was 0x4100000; +0x4000000, see module::MODULE_VA_BASE's own doc comment
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for pthread-smoke: {e}"));
-    if !status.success() {
-        panic!("building pthread-smoke failed: {status}");
-    }
-    out
-}
-
-/// The `*at()` family's real musl-linked coverage -- see `regress/at-smoke/main.c`. Same recipe as
-/// `build_pthread_smoke`, at the next free slot (`0x8240000`, past `0x8200000`); fork+execve'd
-/// fresh by `regress/at-syscall-smoke/`, never co-resident with another fixed-base image.
-fn build_at_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/at-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/at-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/at-smoke");
-    let out = target_dir.join("at-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8240000", "-O2", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for at-smoke: {e}"));
-    if !status.success() {
-        panic!("building at-smoke failed: {status}");
-    }
-    out
-}
-
-/// The socket layer through musl's API -- see `regress/socket-smoke/main.c`. Same recipe as
-/// `build_at_smoke`, at `0x8340000`.
-fn build_socket_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/socket-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/socket-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/socket-smoke");
-    let out = target_dir.join("socket-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8340000", "-O2", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for socket-smoke: {e}"));
-    if !status.success() {
-        panic!("building socket-smoke failed: {status}");
-    }
-    out
-}
-
-/// A one-file musl C fixture, `regress/<name>/main.c`, built static at load address `base` into
-/// `target/<name>/<name>` -- the recipe every `build_*_smoke` above repeats.
-fn build_c_smoke(sysroot: &Path, name: &str, base: &str) -> PathBuf {
+/// A one-file musl C fixture, `regress/<name>/main.c`, built as a static PIE into
+/// `target/<name>/<name>`: loaded wherever the kernel puts it, so it needs no address of its own.
+fn build_c_pie(sysroot: &Path, name: &str) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join(format!("regress/{name}/main.c"));
     let target_dir = Path::new(manifest_dir).join(format!("target/{name}"));
@@ -1713,184 +1570,13 @@ fn build_c_smoke(sysroot: &Path, name: &str, base: &str) -> PathBuf {
     let out = target_dir.join(name);
     println!("cargo:rerun-if-changed={}", src.display());
     let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", &format!("-Wl,-Ttext-segment={base}"), "-O2", "-o"])
+        .args(["-static-pie", "-pthread", "-O2", "-o"])
         .arg(&out)
         .arg(&src)
         .status()
         .unwrap_or_else(|e| panic!("failed to run musl-gcc for {name}: {e}"));
     if !status.success() {
         panic!("building {name} failed: {status}");
-    }
-    out
-}
-
-/// `ppoll(2)`'s real musl-linked coverage -- see `regress/ppoll-smoke/main.c`. Same recipe as
-/// `build_at_smoke`, next slot (`0x8280000`).
-fn build_ppoll_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/ppoll-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/ppoll-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/ppoll-smoke");
-    let out = target_dir.join("ppoll-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8280000", "-O2", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for ppoll-smoke: {e}"));
-    if !status.success() {
-        panic!("building ppoll-smoke failed: {status}");
-    }
-    out
-}
-
-/// fd numbering and FIFO coverage -- see `regress/fd-smoke/main.c`. Same recipe as
-/// `build_ppoll_smoke`, next slot (`0x82c0000`).
-fn build_fd_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/fd-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/fd-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/fd-smoke");
-    let out = target_dir.join("fd-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x82c0000", "-O2", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for fd-smoke: {e}"));
-    if !status.success() {
-        panic!("building fd-smoke failed: {status}");
-    }
-    out
-}
-
-/// Terminal device nodes and descriptors (TTY.md §6) -- see `regress/tty-smoke/main.c`. Same recipe
-/// as `build_fd_smoke`, next slot (`0x8300000`).
-fn build_tty_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/tty-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/tty-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/tty-smoke");
-    let out = target_dir.join("tty-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let status = Command::new(sysroot.join("bin/musl-gcc"))
-        .args(["-static", "-no-pie", "-Wl,-Ttext-segment=0x8300000", "-O2", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for tty-smoke: {e}"));
-    if !status.success() {
-        panic!("building tty-smoke failed: {status}");
-    }
-    out
-}
-
-/// Real cross-process named-semaphore coordination (`sem_open()`+`fork()`) -- see
-/// `regress/sem-open-smoke/main.c`'s own doc comment for the scenario, and
-/// `process::limits::futex_key`'s own doc comment (`sys/process/limits.rs`) for the real
-/// physical-address-keyed `FUTEX_WAIT`/`FUTEX_WAKE` fix this proves. Same `build_musl_smoke`
-/// recipe `build_pthread_smoke` above already establishes, one slot further along (`0x8140000`,
-/// clear of `pthread-smoke`'s own `0x8100000`) -- this binary is `fork`+`execve`'d fresh by
-/// `regress/sem-open-syscall-smoke/`, never co-resident with any other fixed-base image, so it
-/// only needs to stay clear of the kernel's own image/heap/phys-mem window.
-fn build_sem_open_smoke(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/sem-open-smoke/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/sem-open-smoke");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/sem-open-smoke");
-    let out = target_dir.join("sem-open-smoke");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-Wl,-Ttext-segment=0x8140000")
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for sem-open-smoke: {e}"));
-    if !status.success() {
-        panic!("building sem-open-smoke failed: {status}");
-    }
-    out
-}
-
-/// Reproduces the Open POSIX Test Suite's own `pthread_cancel/5-1.c` scenario in isolation -- see
-/// `regress/pthread-cancel-crash/main.c`'s own doc comment for why (a real, expected crash inside
-/// that pilot file seemed to leave the whole kernel wedged for the rest of a full-corpus boot; this
-/// isolates the crash from the ~1700-file harness to find out why). Same `build_musl_smoke` recipe
-/// `build_pthread_smoke` above already establishes (needs `-pthread` for the same reason that one
-/// does -- real `pthread_create`/`pthread_join`/`pthread_cancel`), one slot further along
-/// (`0x8180000`, clear of `sem-open-smoke`'s own `0x8140000`).
-fn build_pthread_cancel_crash(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/pthread-cancel-crash/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/pthread-cancel-crash");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/pthread-cancel-crash");
-    let out = target_dir.join("pthread-cancel-crash");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-pthread")
-        .arg("-Wl,-Ttext-segment=0x8180000")
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for pthread-cancel-crash: {e}"));
-    if !status.success() {
-        panic!("building pthread-cancel-crash failed: {status}");
-    }
-    out
-}
-
-/// Isolates the real cross-process `pthread_mutex`/`pthread_cond` (`PTHREAD_PROCESS_SHARED`)
-/// mechanism from the Open POSIX Test Suite's own `pthread_cond_broadcast/1-2.c`, which appears to
-/// genuinely stall somewhere in its real `fork==1` scenarios during a full pilot run -- see
-/// `regress/pshared-cond-crash/main.c`'s own doc comment for the exact narrower scenario this
-/// reproduces (one forked child, not up to `MAX_PROCESS_CHILDREN = 200`). Same `build_musl_smoke`
-/// recipe (needs `-pthread`), one slot further along (`0x81c0000`, clear of
-/// `pthread-cancel-crash`'s own `0x8180000`).
-fn build_pshared_cond_crash(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/pshared-cond-crash/main.c");
-    let target_dir = Path::new(manifest_dir).join("target/pshared-cond-crash");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/pshared-cond-crash");
-    let out = target_dir.join("pshared-cond-crash");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-pthread")
-        .arg("-Wl,-Ttext-segment=0x81c0000")
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run musl-gcc for pshared-cond-crash: {e}"));
-    if !status.success() {
-        panic!("building pshared-cond-crash failed: {status}");
     }
     out
 }
@@ -2017,7 +1703,7 @@ fn build_musl_sysroot_shared() -> PathBuf {
 
 /// Cross-builds `regress/dynlink-smoke/main.c` (one `write()` call) against `sysroot` (see
 /// `build_musl_sysroot_shared` above) as a real, dynamically-linked `ET_EXEC` binary: `-no-pie`
-/// (matching `build_musl_smoke`'s own reasoning -- keeps this the *main binary*, not itself an
+/// (keeps this the *main binary*, not itself an
 /// `ET_DYN` image, so only the interpreter needs `sys/process/elf.rs`'s new `ET_DYN` handling), fixed at
 /// `fixture_base` (must stay clear of `sys/process/lifecycle.rs`'s `INTERP_LOAD_BASE` -- both images load
 /// into the *same* address space for a real `PT_INTERP` exec, unlike every other fixed-base
@@ -3212,15 +2898,14 @@ struct TzBuild {
 /// The IANA time zone database (`external/public-domain/tz`, see its `VENDOR_NOTES.md`):
 /// compiles the zones with a host build of the vendored `zic` (not the host's own, so the output
 /// doesn't depend on the build machine; `TIMEZONE.md` §3.2) into `target/tz/zoneinfo`, writes the
-/// manifest oxfs seeds `/usr/share/zoneinfo` from, and builds `zic` and `zdump` for OxideBSD.
+/// manifest oxfs seeds `/usr/share/zoneinfo` from, and builds `zic` and `zdump` for OxideBSD
+/// (static PIE).
 ///
 /// Everything runs in a copy (`target/tz/src`): tzcode's Makefile rewrites the tracked `version`
 /// file and writes its generated headers next to the sources. `VERSION` is given on make's
-/// command line so the output is stamped with the release, not `-dirty`. Rebuilt only when a file
-/// in the vendored tree is newer than the manifest.
+/// command line so the output is stamped with the release, not `-dirty`. Rebuilt when a file in
+/// the vendored tree, or musl's `libc.a`, is newer than the outputs.
 fn build_tz(musl_sysroot: &Path) -> TzBuild {
-    const ZIC_LOAD_ADDR: u64 = 0x1100_0000;
-    const ZDUMP_LOAD_ADDR: u64 = 0x1200_0000;
     /// `TDATA` in tzcode's Makefile, `backward` (the aliases) included.
     const ZONE_SOURCES: &[&str] = &[
         "africa", "antarctica", "asia", "australasia", "europe", "northamerica", "southamerica",
@@ -3236,10 +2921,12 @@ fn build_tz(musl_sysroot: &Path) -> TzBuild {
     println!("cargo:rerun-if-changed={}", vendored.display());
 
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    // The vendored tree, and musl's libc.a (zic and zdump link it; cargo can't see that).
     let newest_source = std::fs::read_dir(&vendored)
         .expect("external/public-domain/tz is missing")
         .flatten()
         .filter_map(|e| mtime(&e.path()))
+        .chain(mtime(&musl_sysroot.join("lib/libc.a")))
         .max();
     let built = [&out.manifest, &out.zic, &out.zdump].iter().map(|p| mtime(p)).min().flatten();
     if built.is_some() && built >= newest_source {
@@ -3308,15 +2995,14 @@ fn build_tz(musl_sysroot: &Path) -> TzBuild {
     // tzalloc/localtime_rz, which musl lacks, so it links tzcode's own localtime as the Makefile's
     // TZDOBJS do.
     let musl_gcc = musl_sysroot.join("bin/musl-gcc");
-    let programs: [(&str, u64, &PathBuf, &[&str]); 2] = [
-        ("zic", ZIC_LOAD_ADDR, &out.zic, &["zic.c"]),
-        ("zdump", ZDUMP_LOAD_ADDR, &out.zdump, &["zdump.c", "localtime.c", "strftime.c"]),
+    let programs: [(&str, &PathBuf, &[&str]); 2] = [
+        ("zic", &out.zic, &["zic.c"]),
+        ("zdump", &out.zdump, &["zdump.c", "localtime.c", "strftime.c"]),
     ];
-    for (name, addr, out_path, sources) in programs {
+    for (name, out_path, sources) in programs {
         let status = Command::new(&musl_gcc)
             .current_dir(&src)
-            .args(["-static", "-no-pie", "-O2", "-DHAVE_GETTEXT=0", "-I."])
-            .arg(format!("-Wl,-Ttext-segment={addr:#x}"))
+            .args(["-static-pie", "-O2", "-DHAVE_GETTEXT=0", "-I."])
             .arg("-o")
             .arg(out_path)
             .args(sources)
@@ -4460,7 +4146,7 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
 /// binary's own first instruction, and -- found investigating the crash -- real stdio output was
 /// silently never reaching the console for *any* on-target-compiled pilot binary at all, tcc bug
 /// or not. Cross-compiling with the same real, already-proven `musl-gcc` toolchain
-/// `build_musl_smoke`/`build_dynlink_smoke` already use sidesteps both problems at once, at the
+/// the C fixtures and `build_dynlink_smoke` already use sidesteps both problems at once, at the
 /// cost of losing "exercises tcc" as a side benefit -- an acceptable trade for a conformance
 /// baseline whose job is testing the *kernel*, not `tcc`. (The underlying `tcc` bug itself is
 /// still real and un-fixed -- worth its own investigation later, tracked separately from this

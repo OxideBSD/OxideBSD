@@ -1,5 +1,6 @@
 //! Local time. Only this module calls the C library: `localtime_r(3)` knows the time zone (UTC
-//! until `/etc/localtime` exists, `TIMEZONE.md`), so nothing here changes when zones arrive.
+//! without `/etc/localtime`, `TIMEZONE.md`), and OxideBSD's musl notices within a second when
+//! `tzsetup(8)` changes it, so a running program follows the new zone.
 
 use crate::msg::Stamp;
 
@@ -30,28 +31,6 @@ pub fn local(secs: i64) -> Stamp {
         second: tm.tm_sec as u8,
         usec: None,
         offset: Some(tm.tm_gmtoff as i32),
-    }
-}
-
-unsafe extern "C" {
-    fn tzset();
-}
-
-/// Makes the next conversion read the local zone afresh (`TIMEZONE.md` §5.4: syslogd re-reads it
-/// on `SIGHUP`). musl only reloads when the `TZ` string changes, so a new `/etc/localtime` link
-/// goes unnoticed otherwise: `TZ` is set to something else for one `tzset(3)`, then restored.
-/// Call only while the process is single-threaded (it sets environment variables).
-pub fn reload_zone() {
-    let saved = std::env::var_os("TZ");
-    // SAFETY: the caller guarantees no other thread reads the environment.
-    unsafe {
-        std::env::set_var("TZ", "UTC0");
-        tzset();
-        match saved {
-            Some(tz) => std::env::set_var("TZ", tz),
-            None => std::env::remove_var("TZ"),
-        }
-        tzset();
     }
 }
 

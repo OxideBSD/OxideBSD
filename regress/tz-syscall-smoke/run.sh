@@ -94,7 +94,7 @@ check "... to the same zone" links_to /usr/share/zoneinfo/Europe/Berlin
 printf 'q\n' | tzsetup > /dev/null
 check "quitting the menu changes nothing" links_to /usr/share/zoneinfo/Europe/Berlin
 
-# --- syslogd re-reads the zone on SIGHUP (TIMEZONE.md §5.4) ----------------------------------
+# --- A running program follows a changed /etc/localtime (musl re-checks it every second) -----
 tzsetup UTC
 mkdir -p /tmp/tzsl
 : > /tmp/tzsl/all
@@ -103,8 +103,7 @@ syslogd -s -m 0 -f /tmp/tzsl/syslog.conf -P /tmp/tzsl/pid
 pid=$(cat /tmp/tzsl/pid)
 logger -t before "in UTC"
 tzsetup Asia/Tokyo
-kill -HUP "$pid"
-sleep 1
+sleep 2
 logger -t after "in Tokyo"
 eventually has /tmp/tzsl/all "after: in Tokyo"
 # The hour of each line: Tokyo is 9 hours ahead (10 if an hour boundary fell in between).
@@ -113,7 +112,7 @@ h2=$(grep "after: in Tokyo" /tmp/tzsl/all | cut -c8-9)
 h1=${h1#0}
 h2=${h2#0}
 d=$(( (h2 - h1 + 24) % 24 ))
-check "syslogd stamps in the new zone after SIGHUP" [ "$d" = 9 -o "$d" = 10 ]
+check "syslogd stamps in the new zone, without a restart or SIGHUP" [ "$d" = 9 -o "$d" = 10 ]
 kill "$pid"
 rm -f /etc/localtime
 
