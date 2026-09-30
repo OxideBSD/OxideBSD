@@ -36,3 +36,6 @@
 	path = usr.bin/ninja
 	url = https://github.com/OxideBSD/ninja-oxidebsd.git
 	branch = oxidebsd
+[submodule "external/apache2/openssl"]
+	path = external/apache2/openssl
+	url = https://github.com/OxideBSD/openssl-oxidebsd.git
