@@ -47,7 +47,7 @@ pub fn spawn(elf_bytes: &[u8], parent: Option<Pid>) -> Result<Pid, SpawnError> {
 /// VT100/ANSI parser); `PS1` uses the backslash escapes both `/bin/sh` and hush expand at print
 /// time, `\[ \]` marking the colour codes as taking no room.
 pub const DEFAULT_ENVP: &[&[u8]] = &[
-    // Root's PATH from OxideBSD-doc HIER.md: most of the base system lives outside /bin
+    // The PATH of hier(7) and login.conf: most of the base system lives outside /bin
     // (a missing directory here once left a seeded /usr/bin/nano unreachable by name).
     b"PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/games",
     b"TERM=linux",

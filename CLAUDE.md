@@ -34,7 +34,7 @@ OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/R
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
 - Userland: pid 1 is OxideBSD's own `/bin/sh` (`lib/libsh`); ~195 standalone BusyBox applets;
   native PIE utilities over `lib/oxlibc`; on-target Clang/LLVM, bmake, ninja, ncurses, nano, nvi;
-  a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout follows `OxideBSD-doc/HIER.md`.
+  a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout: `hier(7)` (`share/man/man7/hier.7`).
 
 **Known deliberate gaps**: no pointer validation in `sys_read`/`sys_write`, no module unload, no
 kernel-mode preemption, no COW fork, no general VFS, no IPv6, static interfaces (no ifconfig/route), no SMP,
@@ -289,8 +289,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `libc.a` mtime decide relinks.
 - ncurses (`lib/ncurses`), bmake (`usr.bin/make`) are committed trees; nano, OpenVi, ninja are
   forks on `oxidebsd` branches. Make variable precedence matters: see `build_nvi`/`build_nano`.
-- Placement: `/bin` vs `/usr/bin` per `OxideBSD-doc/HIER.md`. Root `PATH` includes
-  `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/...`.
+- Placement: `/bin` vs `/usr/bin` per `hier(7)`; per-binary inventory in `OxideBSD-doc/HIER.md`.
+  Root `PATH` includes `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/...`.
 
 ## Networking (`sys/net`, `sys/netinet`, `sys/kern/uipc_*.rs`)
 

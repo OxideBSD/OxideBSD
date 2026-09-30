@@ -8056,7 +8056,7 @@ fn format_fresh_filesystem() -> bool {
     dir_insert(bin, b"..", root).expect("oxfs: failed to seed /bin's .. entry");
     dir_insert(root, b"bin", bin).expect("oxfs: failed to insert /bin into root");
 
-    // The rest of the program hierarchy (OxideBSD-doc HIER.md): /bin and /sbin are what
+    // The rest of the program hierarchy (hier(7), share/man/man7/hier.7): /bin and /sbin are what
     // single-user repair needs, /usr/bin and /usr/sbin everything else.
     let sbin = ensure_dir(root, b"sbin");
     let usr = ensure_dir(root, b"usr");
@@ -8761,6 +8761,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
     let man_man7 = ensure_dir(usr_share_man, b"man7");
     ok &= seed_file(man_man7, b"eqn.7", include_bytes!("../../../../share/man/man7/eqn.7"));
+    ok &= seed_file(man_man7, b"hier.7", include_bytes!("../../../../share/man/man7/hier.7"));
     ok &= seed_file(man_man7, b"man.7", include_bytes!("../../../../share/man/man7/man.7"));
     ok &= seed_file(man_man7, b"mdoc.7", include_bytes!("../../../../share/man/man7/mdoc.7"));
     ok &= seed_file(man_man7, b"roff.7", include_bytes!("../../../../share/man/man7/roff.7"));

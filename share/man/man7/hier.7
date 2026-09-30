@@ -1,0 +1,261 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt HIER 7
+.Os OxideBSD
+.Sh NAME
+.Nm hier
+.Nd layout of the file system
+.Sh DESCRIPTION
+This page describes where things are kept on an OxideBSD system, and why.
+The layout follows the one the BSDs share; where OxideBSD differs, the entry
+says so.
+The source tree mirrors it: a program built from
+.Pa bin/ ,
+.Pa sbin/ ,
+.Pa usr.bin/
+or
+.Pa usr.sbin/
+is installed in the directory of the same name.
+.Ss Choosing a directory for a program
+Two questions decide where a program goes, in this order:
+.Bl -enum -offset indent
+.It
+Does repairing the system in single-user mode, with only the root file
+system, need it?
+If so, it goes in
+.Pa /bin
+or
+.Pa /sbin ;
+otherwise in
+.Pa /usr/bin
+or
+.Pa /usr/sbin .
+.It
+Is it for administering the system rather than using it?
+If so, it goes in one of the
+.Pa sbin
+directories.
+.El
+.Pp
+A library follows the programs that need it: one that a program in
+.Pa /bin
+or
+.Pa /sbin
+needs goes in
+.Pa /lib ,
+every other one in
+.Pa /usr/lib .
+Every program is dynamically linked except the two the kernel can start as
+process 1,
+.Pa /bin/sh
+and
+.Pa /sbin/emergency ,
+so a broken shared library cannot keep the system from reaching single-user
+mode.
+.Ss The directories
+.Bl -tag -width "/usr/share/"
+.It Pa /
+The root directory.
+.It Pa /bin
+Commands everyone needs, in single-user mode too.
+OxideBSD keeps more here than
+.Fx
+does:
+.Xr vi 1 ,
+.Xr grep 1 ,
+.Xr sed 1 ,
+.Xr tar 1
+and
+.Xr gzip 1
+are what a repair actually uses, so they are here, not in
+.Pa /usr/bin .
+.It Pa /dev
+Devices: a
+.Xr devfs 4
+file system, made anew at every boot from the kernel's devices and
+.Xr devfs.conf 5 .
+.Pa /dev/log
+is the local socket
+.Xr syslogd 8
+reads;
+.Pa /dev/klog
+is the kernel's message buffer,
+.Xr klog 4 .
+.It Pa /etc
+Configuration of the local system.
+.Bl -tag -width "newsyslog.conf.d/"
+.It Pa defaults/
+The defaults the files beside it override:
+.Pa rc.conf .
+Never edited.
+.It Pa pam.d/
+PAM policies, one file per service.
+.It Pa rc , rc.shutdown , rc.subr
+The boot and shutdown scripts and their shared functions;
+.Xr rc 8 ,
+.Xr rc.subr 8 .
+.It Pa rc.conf
+Which services run and how;
+.Xr rc.conf 5 .
+.It Pa rc.d/
+One script per service, ordered by
+.Xr rcorder 8 .
+.It Pa ssl/
+OpenSSL's directory:
+.Pa openssl.cnf ,
+and the trusted certificate authorities as
+.Pa cert.pem
+and as links in
+.Pa certs/ ,
+with the distrusted ones in
+.Pa untrusted/ ,
+all maintained by
+.Xr certctl 8 .
+.It Pa syslog.conf , syslog.d/
+.Xr syslog.conf 5 .
+.It Pa newsyslog.conf , newsyslog.conf.d/
+.Xr newsyslog.conf 5 .
+.It Pa localtime
+The system's time zone, a symbolic link to a file in
+.Pa /usr/share/zoneinfo ;
+see
+.Xr tzsetup 8 .
+.It Pa master.passwd , passwd , group
+Accounts and groups;
+.Xr passwd 5 ,
+.Xr pwd_mkdb 8 .
+.El
+.Pp
+Also here:
+.Xr devfs.conf 5 ,
+.Xr gettytab 5 ,
+.Xr login.conf 5 ,
+.Xr man.conf 5 ,
+.Xr sysctl.conf 5 ,
+.Xr ttys 5 ,
+.Pa hosts ,
+.Pa resolv.conf
+and
+.Pa motd .
+.It Pa /home
+Users' home directories.
+.It Pa /lib
+Shared libraries the programs in
+.Pa /bin
+and
+.Pa /sbin
+need:
+.Pa libc.so ,
+musl's C library, which is also the dynamic linker
+.Pa ld-musl-x86_64.so.1 ;
+and
+.Pa libgcc_s.so.1 ,
+the unwinder.
+.It Pa /proc
+Process information, made up by the file system when it is read.
+.It Pa /sbin
+Commands needed to boot, repair, configure and shut down the system,
+usually by the superuser.
+.It Pa /tmp
+Temporary files.
+Anyone may create files here; only their owner may remove them.
+It may be a memory file system; see
+.Va tmpmfs
+in
+.Xr rc.conf 5 .
+.It Pa /usr
+Everything not needed in single-user mode.
+.Bl -tag -width "libexec/"
+.It Pa bin/
+Every other command.
+.It Pa games/
+Games.
+.It Pa include/
+C and C++ headers: the C library's, libc++'s in
+.Pa c++/v1 ,
+and the target's own in
+.Pa x86_64-unknown-oxidebsd-musl/ .
+.It Pa lib/
+Every other library, static and shared, and links to
+.Pa /lib Ns 's
+under the names the linker looks for.
+.Pa clang/23/
+holds Clang's headers and runtime;
+.Pa ossl-modules/
+OpenSSL's loadable providers.
+.It Pa libexec/
+Programs other programs run, not users:
+.Xr getty 8 .
+.It Pa local/
+Software added to the system that is not part of it:
+.Pa bin/ , sbin/ , etc/rc.d/
+and so on, as under
+.Pa /usr .
+Nothing in the base system is installed here.
+.It Pa sbin/
+Every other administration command, and the daemons.
+.It Pa share/
+Data that does not depend on the machine:
+.Bl -tag -width "zoneinfo/"
+.It Pa certs/
+The certificate authorities the system ships, from Mozilla's list, in
+.Pa trusted/
+and
+.Pa untrusted/ .
+.It Pa man/
+Manual pages, and their index
+.Pa oxdoc.db ;
+.Xr man 1 ,
+.Xr makewhatis 8 .
+.It Pa mk/
+.Xr make 1 Ns 's
+include files.
+.It Pa terminfo/
+Terminal descriptions.
+.It Pa zoneinfo/
+Time zones.
+.El
+.It Pa src/
+Source code.
+.It Pa tests/
+Test programs; not on anyone's
+.Ev PATH .
+.El
+.It Pa /var
+Files that change while the system runs.
+.Bl -tag -width "mail/"
+.It Pa log/
+Logs, written by
+.Xr syslogd 8
+and rotated by
+.Xr newsyslog 8 .
+.It Pa mail/
+Mailboxes.
+.It Pa run/
+Process ID files and other state of running programs, emptied at boot.
+.El
+.El
+.Ss Search path
+Every login gets the same
+.Ev PATH ,
+from
+.Xr login.conf 5 :
+.Pp
+.Dl /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/games:~/bin
+.Sh SEE ALSO
+.Xr login.conf 5 ,
+.Xr rc.conf 5 ,
+.Xr rc 8
+.Sh HISTORY
+A
+.Nm
+manual page appeared in
+.At v7 .
+OxideBSD's is modelled on the BSDs'.
+.Sh CAVEATS
+The root directory also holds files for the test suites
+.Pf ( Pa /posix-tests , /sh-smoke , /ninja-demo
+and a few sources).
+They belong in
+.Pa /usr/tests
+and will move there.
