@@ -1,0 +1,16 @@
+[package]
+name = "openssl-rs-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+openssl = "0.10"
+
+# The libc fork OxideBSD's std is built with (target_os = "oxidebsd"); a [patch] only applies from
+# the workspace root, so each program repeats lib/libsh's.
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+# Opts out of the root workspace, as regress/std/std-hello/Cargo.toml.
+[workspace]

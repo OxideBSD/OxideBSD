@@ -573,6 +573,18 @@ fn main() {
     // /usr/bin/openssl, all dynamically linked, plus /etc/ssl/openssl.cnf.
     let openssl = build_openssl(&musl_sysroot);
     let openssl_smoke_elf_path = build_openssl_smoke(&musl_sysroot, &openssl);
+    // The openssl crate against it: openssl-sys finds the install through OPENSSL_DIR and probes
+    // its headers with the target's C compiler (cc-rs's CC_<target>). Both the static and the
+    // shared libraries are there, so it links the shared ones, as everything else does.
+    let openssl_usr = openssl.root.join("usr");
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+    let openssl_rs_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "regress/std/openssl-rs-smoke",
+        "OXFS_OPENSSL_RS_SMOKE_ELF_PATH",
+        &musl_sysroot,
+        &[("OPENSSL_DIR", &openssl_usr), ("CC_x86_64_unknown_oxidebsd", &musl_gcc)],
+        StdLink::Dynamic,
+    );
     // The trust store (/usr/share/certs, /etc/ssl/certs, /etc/ssl/cert.pem) and certctl(8).
     let certs_manifest_path = build_trust_store();
     let certctl_elf_path =
@@ -762,6 +774,7 @@ fn main() {
         ("TZ_ZONEINFO_MANIFEST_PATH", tz.manifest.to_str().unwrap()),
         ("OPENSSL_MANIFEST_PATH", openssl.manifest.to_str().unwrap()),
         ("OXFS_OPENSSL_SMOKE_ELF_PATH", openssl_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_OPENSSL_RS_SMOKE_ELF_PATH", openssl_rs_smoke_elf_path.to_str().unwrap()),
         ("CERTS_MANIFEST_PATH", certs_manifest_path.to_str().unwrap()),
         ("OXFS_CERTCTL_ELF_PATH", certctl_elf_path.to_str().unwrap()),
         ("OXFS_ZIC_ELF_PATH", tz.zic.to_str().unwrap()),

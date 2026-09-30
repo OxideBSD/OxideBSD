@@ -22,6 +22,8 @@ not() { ! "$@"; }
 
 # Libraries, the legacy provider module and TLS, from C.
 check "openssl-smoke" /usr/tests/openssl/openssl-smoke
+# The same from Rust: the openssl crate (openssl-sys) on the shared libraries.
+check "openssl-rs-smoke" /usr/tests/openssl/openssl-rs-smoke
 
 # The openssl program: a dynamically linked PIE on libssl.so.3 and libcrypto.so.3.
 out=$(openssl version -d)

@@ -8077,6 +8077,7 @@ fn format_fresh_filesystem() -> bool {
     let usr_tests_openssl = ensure_dir(usr_tests, b"openssl");
     ok &= seed_file(usr_tests_openssl, b"run.sh", include_bytes!("../../../../regress/openssl-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests_openssl, b"openssl-smoke", include_bytes!(env!("OXFS_OPENSSL_SMOKE_ELF_PATH")));
+    ok &= seed_file(usr_tests_openssl, b"openssl-rs-smoke", include_bytes!(env!("OXFS_OPENSSL_RS_SMOKE_ELF_PATH")));
     let usr_tests_syslog = ensure_dir(usr_tests, b"syslog");
     ok &= seed_file(usr_tests_syslog, b"run.sh", include_bytes!("../../../../regress/syslog-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));

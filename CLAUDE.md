@@ -279,6 +279,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **std target** (`external/mit/rust` + libc fork): reuses `sys::pal::unix`. A mysterious
   `ENOTTY`/`ENOSYS` from a std program is usually a hardcoded `target_os` allowlist in std missing
   `oxidebsd` (`ioctl` only handles tty requests on tty fds). No loopback interface exists.
+- **Rust crates using OpenSSL** (`openssl`/`openssl-sys`, unpatched): build with `OPENSSL_DIR` =
+  `target/openssl/root/usr` and `CC_x86_64_unknown_oxidebsd` = musl-gcc (`openssl-rs-smoke`).
 - **PIE binaries** (`lib/oxlibc`, `bin/*`, `build_pie_crate_at`) must have zero relocations
   (checked at build): `panic=immediate-abort`, `location-detail=none`, symbol addresses via
   `asm!("lea ...")`, no `core::fmt`, no tables of slices, no `-T` linker script.
