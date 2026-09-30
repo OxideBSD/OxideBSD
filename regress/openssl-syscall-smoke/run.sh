@@ -18,6 +18,7 @@ check() {
 	fi
 }
 has() { printf '%s\n' "$1" | grep -q -- "$2"; }
+not() { ! "$@"; }
 
 # Libraries, the legacy provider module and TLS, from C.
 check "openssl-smoke" /usr/tests/openssl/openssl-smoke
@@ -31,6 +32,23 @@ check "openssl dgst -sha256" has "$out" ba7816bf8f01cfea414140de5dae2223b00361a3
 out=$(openssl list -providers -provider legacy -provider default)
 check "openssl loads the legacy provider" has "$out" legacy
 check "/etc/ssl/openssl.cnf is installed" [ -r /etc/ssl/openssl.cnf ]
+
+# The trust store (certctl(8)), seeded at build time: OpenSSL's default CApath and CAfile.
+n=$(certctl list | wc -l)
+echo "openssl-run: $n trusted roots"
+check "certctl list shows the Mozilla roots" [ "$n" -gt 100 ]
+check "/etc/ssl/cert.pem is installed" [ -s /etc/ssl/cert.pem ]
+root=/usr/share/certs/trusted/ISRG_Root_X1.pem
+check "openssl verify finds a root in the default store" openssl verify "$root"
+check "... through /etc/ssl/certs alone" \
+	openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs "$root"
+check "certctl untrust" certctl untrust "$root"
+check "... it is listed as untrusted" has "$(certctl untrusted)" "ISRG Root X1"
+check "... and no longer verifies" not openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs "$root"
+check "certctl trust puts it back" certctl trust "$root"
+check "... and it verifies again" openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs "$root"
+check "certctl rehash" certctl rehash
+check "... keeps the same roots" [ "$(certctl list | wc -l)" -eq "$n" ]
 
 echo "openssl-run: $fail failed"
 [ $fail -eq 0 ]

@@ -1,0 +1,11 @@
+[package]
+name = "libcertstore"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# No dependencies: build.rs (on the host) and certctl(8) (on OxideBSD) both use it.
+
+# Its own workspace, so it builds and tests on the development host (`cargo test` here).
+[workspace]

@@ -1,0 +1,191 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt CERTCTL 8
+.Os OxideBSD
+.Sh NAME
+.Nm certctl
+.Nd manage the system's trusted TLS certificates
+.Sh SYNOPSIS
+.Nm
+.Op Fl v
+.Cm list
+.Nm
+.Op Fl v
+.Cm untrusted
+.Nm
+.Op Fl nv
+.Op Fl D Ar destdir
+.Op Fl d Ar distbase
+.Cm rehash
+.Nm
+.Op Fl nv
+.Cm untrust
+.Ar file ...
+.Nm
+.Op Fl nv
+.Cm trust
+.Ar file | name ...
+.Sh DESCRIPTION
+The
+.Nm
+utility maintains the certificate authorities that OpenSSL trusts by default:
+the directory
+.Pa /etc/ssl/certs ,
+which holds a link named
+.Ql Ar hash . Ns Ar n
+for each trusted certificate, where
+.Ar hash
+is the certificate's subject name hash as eight hexadecimal digits and
+.Ar n
+counts from 0 among certificates whose hashes are the same, and the bundle
+.Pa /etc/ssl/cert.pem ,
+which holds all of them.
+These are OpenSSL's
+.Ql CApath
+and
+.Ql CAfile .
+.Pp
+The trusted certificates are those in the directories of the trust path,
+except any also found in the directories of the untrust path or among the
+administrator's untrusted certificates in
+.Pa /etc/ssl/untrusted .
+A file there may hold several certificates, in PEM form, or one in DER form;
+its name must end in
+.Pa .pem ,
+.Pa .crt
+or
+.Pa .cer .
+The base system's roots, from Mozilla's list, are in
+.Pa /usr/share/certs/trusted ;
+roots Mozilla distrusts are in
+.Pa /usr/share/certs/untrusted .
+.Pp
+The commands are:
+.Bl -tag -width untrusted
+.It Cm list
+List the trusted certificates: each link in
+.Pa /etc/ssl/certs
+and the certificate's common name, or else its organizational unit or
+organization.
+.It Cm untrusted
+List the untrusted certificates in
+.Pa /etc/ssl/untrusted
+the same way.
+.It Cm rehash
+Rebuild the links in
+.Pa /etc/ssl/certs
+and
+.Pa /etc/ssl/untrusted ,
+and
+.Pa /etc/ssl/cert.pem ,
+from the trust and untrust paths.
+A link is a relative symbolic link to its certificate's file, or a copy of the
+certificate when the file holds more than one.
+Run it after adding or removing a file on either path.
+.It Cm untrust Ar file ...
+Add the certificates in each
+.Ar file
+to the administrator's untrusted certificates, as copies in
+.Pa /etc/ssl/untrusted ,
+then rehash.
+.It Cm trust Ar file | name ...
+Remove certificates from the administrator's untrusted certificates, given as a
+certificate
+.Ar file
+or as the
+.Ar name
+.Cm untrusted
+lists, then rehash.
+A certificate on the untrust path stays untrusted; remove its file from there
+instead.
+.El
+.Pp
+The options are:
+.Bl -tag -width "-D destdir"
+.It Fl D Ar destdir
+Prefix every path with
+.Ar destdir ,
+to manage a system installed there.
+The links stay correct once it is moved to
+.Pa / .
+.It Fl d Ar distbase
+Prefix the base system's paths, after
+.Ar destdir .
+.It Fl n
+Show what would be done, and do nothing.
+.It Fl v
+Show each change.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width UNTRUSTDESTDIR
+.It Ev DESTDIR , DISTBASE
+Defaults for
+.Fl D
+and
+.Fl d .
+.It Ev LOCALBASE
+Where local software is installed; the default is
+.Pa /usr/local .
+.It Ev TRUSTPATH
+The trust path, a colon-separated list of directories.
+The default is
+.Pa /usr/share/certs/trusted ,
+.Pa $LOCALBASE/share/certs
+and
+.Pa $LOCALBASE/etc/ssl/certs .
+.It Ev UNTRUSTPATH
+The untrust path.
+The default is
+.Pa /usr/share/certs/untrusted ,
+.Pa $LOCALBASE/etc/ssl/untrusted
+and
+.Pa $LOCALBASE/etc/ssl/blacklisted .
+.It Ev CERTDESTDIR
+Instead of
+.Pa /etc/ssl/certs .
+.It Ev UNTRUSTDESTDIR
+Instead of
+.Pa /etc/ssl/untrusted .
+.It Ev BUNDLE
+Instead of
+.Pa /etc/ssl/cert.pem .
+.El
+.Sh FILES
+.Bl -tag -width /usr/share/certs/untrusted -compact
+.It Pa /etc/ssl/certs
+links to the trusted certificates
+.It Pa /etc/ssl/cert.pem
+all trusted certificates
+.It Pa /etc/ssl/untrusted
+untrusted certificates
+.It Pa /usr/share/certs/trusted
+the base system's roots
+.It Pa /usr/share/certs/untrusted
+roots the base system distrusts
+.El
+.Sh EXIT STATUS
+.Ex -std
+It exits 64 on a usage error.
+.Sh EXAMPLES
+Stop trusting a certificate authority, and see that it is no longer listed:
+.Bd -literal -offset indent
+# certctl untrust /usr/share/certs/trusted/Example_Root_CA.pem
+# certctl list | grep Example
+.Ed
+.Sh SEE ALSO
+.Xr openssl 1
+.Sh HISTORY
+A
+.Nm
+utility first appeared in
+.Fx 12.2 .
+This implementation, in Rust, is OxideBSD's own; the build uses the same code to
+make the store the system starts with.
+Unlike FreeBSD's,
+.Cm untrust
+and
+.Cm trust
+rehash by themselves.
+.Sh CAVEATS
+Mozilla's list can distrust a root only for certificates it issues after a
+date; OpenSSL has no way to express that, so such a root is trusted.

@@ -548,6 +548,10 @@ fn main() {
     // /usr/bin/openssl, all dynamically linked, plus /etc/ssl/openssl.cnf.
     let openssl = build_openssl(&musl_sysroot);
     let openssl_smoke_elf_path = build_openssl_smoke(&musl_sysroot, &openssl);
+    // The trust store (/usr/share/certs, /etc/ssl/certs, /etc/ssl/cert.pem) and certctl(8).
+    let certs_manifest_path = build_trust_store();
+    let certctl_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/certctl", "OXFS_CERTCTL_ELF_PATH", &musl_sysroot);
 
     // OpenVi (`/bin/vi`) and GNU nano (`/usr/bin/nano`) -- OxideBSD's two real editors, see
     // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
@@ -733,6 +737,8 @@ fn main() {
         ("TZ_ZONEINFO_MANIFEST_PATH", tz.manifest.to_str().unwrap()),
         ("OPENSSL_MANIFEST_PATH", openssl.manifest.to_str().unwrap()),
         ("OXFS_OPENSSL_SMOKE_ELF_PATH", openssl_smoke_elf_path.to_str().unwrap()),
+        ("CERTS_MANIFEST_PATH", certs_manifest_path.to_str().unwrap()),
+        ("OXFS_CERTCTL_ELF_PATH", certctl_elf_path.to_str().unwrap()),
         ("OXFS_ZIC_ELF_PATH", tz.zic.to_str().unwrap()),
         ("OXFS_ZDUMP_ELF_PATH", tz.zdump.to_str().unwrap()),
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
@@ -3058,6 +3064,76 @@ fn build_openssl(musl_sysroot: &Path) -> OpensslBuild {
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, files).unwrap();
     out
+}
+
+/// The system trust store, from Mozilla's root list (`external/mpl2/nss/certdata.txt`, see its
+/// `VENDOR_NOTES.md`), laid out as FreeBSD's: each root trusted for TLS servers as a PEM file in
+/// `/usr/share/certs/trusted`, each explicitly distrusted one in `/usr/share/certs/untrusted`
+/// (roots with no TLS server trust, such as e-mail-only ones, left out), then
+/// `libcertstore::ctl::rehash` -- the same code as `certctl rehash` -- makes the `<hash>.<n>` links
+/// in `/etc/ssl/certs` and `/etc/ssl/untrusted` and the bundle `/etc/ssl/cert.pem`. Staged in
+/// `target/certs/root`; returns the generated manifest oxfs seeds from `/`.
+///
+/// Regenerated when `certdata.txt` or this build script (so libcertstore) is newer than the
+/// manifest; otherwise left alone, so oxfs doesn't re-embed an unchanged store.
+fn build_trust_store() -> PathBuf {
+    use libcertstore::certdata::{self, ServerTrust};
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let certdata_txt = manifest_dir.join("external/mpl2/nss/certdata.txt");
+    let root = manifest_dir.join("target/certs/root");
+    let manifest = manifest_dir.join("target/generated/certs_manifest.rs");
+    println!("cargo:rerun-if-changed={}", certdata_txt.display());
+
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let newest_input = mtime(&certdata_txt).max(std::env::current_exe().ok().and_then(|e| mtime(&e)));
+    if mtime(&manifest).is_some() && mtime(&manifest) >= newest_input {
+        return manifest;
+    }
+
+    let text = std::fs::read_to_string(&certdata_txt).expect("reading certdata.txt");
+    let roots = certdata::parse(&text).unwrap_or_else(|e| panic!("certdata.txt: {e}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut names = std::collections::HashSet::new();
+    for (sub, trust) in [("trusted", ServerTrust::Trusted), ("untrusted", ServerTrust::Distrusted)] {
+        let dir = root.join("usr/share/certs").join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        for r in roots.iter().filter(|r| r.server_trust == trust) {
+            let name = certdata::file_name(&r.label);
+            assert!(names.insert(name.clone()), "two roots named {name}");
+            let pem = format!(
+                "##\n##  {}\n##\n##  From Mozilla's NSS certdata.txt (external/mpl2/nss).\n##\n{}",
+                r.label,
+                libcertstore::pem::encode(&r.der)
+            );
+            std::fs::write(dir.join(name), pem).unwrap();
+        }
+    }
+    let cfg = libcertstore::ctl::Config::standard(root.to_str().unwrap(), "", "/usr/local");
+    let trusted = libcertstore::ctl::rehash(&cfg).expect("rehashing the trust store");
+    assert!(trusted > 100, "only {trusted} trusted roots");
+
+    let mut files = String::from("pub static CERTS_FILES: &[(&str, &[u8])] = &[\n");
+    let mut symlinks = String::from("pub static CERTS_SYMLINKS: &[(&str, &str)] = &[\n");
+    let mut entries = collect_dir_files(&root);
+    entries.sort();
+    for (rel, abs) in &entries {
+        if std::fs::symlink_metadata(abs).unwrap().file_type().is_symlink() {
+            let target = std::fs::read_link(abs).unwrap();
+            symlinks.push_str(&format!("    ({rel:?}, {:?}),\n", target.display().to_string()));
+        } else {
+            files.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", abs.display()));
+        }
+    }
+    files.push_str("];\n");
+    symlinks.push_str("];\n");
+    files.push_str(&symlinks);
+    // Directories that may be empty: certctl untrust writes to /etc/ssl/untrusted.
+    files.push_str(
+        "pub static CERTS_DIRS: &[&str] = &[\"usr/share/certs/untrusted\", \"etc/ssl/untrusted\"];\n",
+    );
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, files).unwrap();
+    manifest
 }
 
 /// Cross-builds `regress/openssl-smoke/main.c` as a dynamically linked PIE against the OpenSSL

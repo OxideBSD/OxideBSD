@@ -89,6 +89,8 @@ members = [
   "sys/modules/socket",
   "sys/modules/sysctl",
 ]
+# Its own workspace, for host tests; the root package uses it only as a build-dependency.
+exclude = ["lib/libcertstore"]
 
 [package]
 name = "oxidebsd"
@@ -122,6 +124,10 @@ spin = "0.9"
 x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 chacha20 = { version = "0.10", default-features = false, features = ["cipher"] }
+
+[build-dependencies]
+# The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.
+libcertstore = { path = "lib/libcertstore" }
 
 [[test]]
 name = "basic_boot"
