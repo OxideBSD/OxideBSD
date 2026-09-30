@@ -2113,6 +2113,31 @@ static BOOT_CWD: AtomicU64 = AtomicU64::new(0);
 /// track cwd per-process without the kernel needing to interpret what the value means -- see
 /// `Process::cwd`'s own doc comment. No pid crosses the module boundary; the kernel resolves
 /// `scheduler::current_pid()` itself, the same way `src/fd.rs` already does for the fd table.
+/// For oxfs, before it frees an inode nobody names or has open (its `maybe_release`): whether
+/// the kernel still refers to it, as a process's working or root directory, a file mapping's
+/// content, or a bound local socket's file. Every lock is only tried: a busy one answers "in
+/// use", and oxfs keeps the inode as an orphan to retry later, so this can't deadlock against a
+/// caller already holding one (the socket layer closes passed descriptors under its own lock).
+pub(crate) extern "C" fn oxidebsd_inode_in_use(inode: u64) -> u64 {
+    let busy = || -> Option<bool> {
+        if BOOT_CWD.load(Ordering::Relaxed) == inode || BOOT_ROOT.load(Ordering::Relaxed) == inode {
+            return Some(true);
+        }
+        if crate::process::mm::content_mapped(inode)? || crate::kern::uipc_usrreq::node_bound(inode)? {
+            return Some(true);
+        }
+        let table = table().try_lock()?;
+        for p in table.values() {
+            let shared = p.shared.try_lock()?;
+            if shared.cwd == inode || shared.root_inode == inode {
+                return Some(true);
+            }
+        }
+        Some(false)
+    };
+    busy().unwrap_or(true) as u64
+}
+
 pub(crate) extern "C" fn oxidebsd_get_cwd() -> u64 {
     let pid = scheduler::current_pid();
     if pid == 0 {

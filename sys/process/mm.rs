@@ -165,6 +165,13 @@ fn release_mmap_file_ref(content_id: u64) {
     }
 }
 
+/// Whether a live mapping refers to `content_id` (an oxfs inode number), for oxfs's
+/// `oxidebsd_inode_in_use`: the inode must outlive it, since unmapping writes back by number.
+/// `None` if the lock is busy (the caller then keeps the inode).
+pub(crate) fn content_mapped(content_id: u64) -> Option<bool> {
+    Some(MMAP_FILE_REFCOUNT.try_lock()?.contains_key(&content_id))
+}
+
 /// Real `fork()` semantics for a fd-backed `MAP_SHARED` mapping the child inherits by virtue of
 /// the whole address space being duplicated. `AddressSpace::fork`'s own `SHARED_LEAF` handling
 /// already makes the child's page table alias the exact same real frames the parent's does for

@@ -32,6 +32,9 @@ const SYS_FLOCK: u64 = 475;
 const SYS_STATFS: u64 = 476;
 const SYS_FSTATFS: u64 = 477;
 const SYS_PRLIMIT64: u64 = 478;
+const SYS_UNLINK: u64 = 109;
+const SYS_RMDIR: u64 = 110;
+const SYS_MKDIR: u64 = 136;
 const SYS_SETPRIORITY: u64 = 479;
 const SYS_GETPRIORITY: u64 = 480;
 const SYS_SCHED_SETSCHEDULER: u64 = 481;
@@ -147,6 +150,48 @@ struct MuslStatfs {
 
 fn open_ro(path: &[u8]) -> Result<u64, u64> {
     unsafe { syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, 0) }
+}
+
+/// `/`'s free blocks and inodes in use, from `statfs(2)`.
+fn root_usage() -> (u64, u64) {
+    let mut b = MuslStatfs {
+        f_type: 0,
+        f_bsize: 0,
+        f_blocks: 0,
+        f_bfree: 0,
+        f_bavail: 0,
+        f_files: 0,
+        f_ffree: 0,
+        f_fsid: [0, 0],
+        f_namelen: 0,
+        f_frsize: 0,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+    let root = b"/";
+    unsafe {
+        let _ = syscall(SYS_STATFS, root.as_ptr() as u64, root.len() as u64, &mut b as *mut MuslStatfs as u64);
+    }
+    (b.f_bfree, b.f_files - b.f_ffree)
+}
+
+fn create_with(path: &[u8], len: usize) {
+    let fd = unsafe { syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, O_CREAT | O_WRONLY) };
+    let Ok(fd) = fd else { return };
+    let chunk = [0x5au8; 4096];
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        unsafe {
+            let _ = syscall(SYS_WRITE, fd, chunk.as_ptr() as u64, n as u64);
+        }
+        left -= n;
+    }
+    close(fd);
+}
+
+fn unlink(path: &[u8]) -> bool {
+    unsafe { syscall(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0) }.is_ok()
 }
 
 fn close(fd: u64) {
@@ -335,6 +380,77 @@ pub extern "C" fn _start() -> ! {
         b"fstatfs disagreed with statfs on the same live filesystem"
     );
     write_bytes(b"needs-syscall-smoke: statfs/fstatfs OK\n");
+
+    // --- Reclamation: an unlinked file's inode and blocks come back, but not while it's open;
+    // an emptied directory's too; and churn doesn't grow the inode count. ---
+    let (free0, used0) = root_usage();
+    let rf = b"/nsreclaim";
+    create_with(rf, 64 * 1024);
+    let (free1, used1) = root_usage();
+    check!(free1 + 16 <= free0 && used1 == used0 + 1, b"a 64 KiB file didn't take blocks and an inode");
+    check!(unlink(rf), b"unlink /nsreclaim failed");
+    let (free2, used2) = root_usage();
+    check!(free2 == free0 && used2 == used0, b"unlink didn't give the file's blocks and inode back");
+
+    create_with(rf, 4096);
+    let ofd = open_ro(rf).expect("open /nsreclaim");
+    check!(unlink(rf), b"unlink of an open file failed");
+    let mut ob = [0u8; 8];
+    let on = unsafe { syscall(SYS_READ, ofd, ob.as_mut_ptr() as u64, 8) };
+    check!(on == Ok(8) && ob == [0x5a; 8], b"an unlinked open file's data wasn't readable");
+    check!(root_usage().1 == used0 + 1, b"an unlinked file was freed while still open");
+    close(ofd);
+    check!(root_usage() == (free0, used0), b"the last close of an unlinked file didn't free it");
+
+    let rd = b"/nsreclaimdir";
+    check!(
+        unsafe { syscall(SYS_MKDIR, rd.as_ptr() as u64, rd.len() as u64, 0o755) }.is_ok(),
+        b"mkdir /nsreclaimdir failed"
+    );
+    check!(
+        unsafe { syscall(SYS_RMDIR, rd.as_ptr() as u64, rd.len() as u64, 0) }.is_ok(),
+        b"rmdir /nsreclaimdir failed"
+    );
+    check!(root_usage() == (free0, used0), b"rmdir didn't free the directory");
+
+    // More creations than the old fixed table had inodes (8192), one at a time.
+    for _ in 0..9000 {
+        create_with(rf, 1);
+        unlink(rf);
+    }
+    check!(root_usage() == (free0, used0), b"create/unlink churn leaked inodes or blocks");
+
+    // 200 files at once grow the inode table by blocks of its own; removing them must give those
+    // back too (the table's tail is trimmed), or the free block count stays short. They go in a
+    // directory of their own, removed at the end: a directory doesn't shrink as entries go, so
+    // in `/` the new entries' blocks would stay.
+    let gd = b"/nsgrow";
+    check!(
+        unsafe { syscall(SYS_MKDIR, gd.as_ptr() as u64, gd.len() as u64, 0o755) }.is_ok(),
+        b"mkdir /nsgrow failed"
+    );
+    let mut name = *b"/nsgrow/f000";
+    let set = |name: &mut [u8; 12], i: usize| {
+        name[9] = b'0' + (i / 100) as u8;
+        name[10] = b'0' + (i / 10 % 10) as u8;
+        name[11] = b'0' + (i % 10) as u8;
+    };
+    for i in 0..200 {
+        set(&mut name, i);
+        create_with(&name, 1);
+    }
+    check!(root_usage().1 == used0 + 201, b"200 files and their directory didn't take 201 inodes");
+    for i in 0..200 {
+        set(&mut name, i);
+        unlink(&name);
+    }
+    check!(root_usage().1 == used0 + 1, b"unlinking 200 files didn't free their inodes");
+    check!(
+        unsafe { syscall(SYS_RMDIR, gd.as_ptr() as u64, gd.len() as u64, 0) }.is_ok(),
+        b"rmdir /nsgrow failed"
+    );
+    check!(root_usage() == (free0, used0), b"the grown inode table didn't shrink back");
+    write_bytes(b"needs-syscall-smoke: reclamation OK\n");
 
     // --- prlimit64: real read-old/write-new round trip, RLIM_INFINITY default. ---
     let mut old = RawRlimit {

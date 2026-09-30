@@ -303,6 +303,13 @@ struct State {
     inflight_total: u32,
 }
 
+/// Whether a socket is bound to socket-file inode `inode`, for oxfs's `oxidebsd_inode_in_use`:
+/// a reused inode number would connect a new socket file to this socket. `None` if the lock is
+/// busy (a descriptor being closed from inside this module, say); the caller then keeps the inode.
+pub(crate) fn node_bound(inode: u64) -> Option<bool> {
+    Some(STATE.try_lock()?.nodes.contains_key(&inode))
+}
+
 static STATE: Mutex<State> = Mutex::new(State {
     socks: BTreeMap::new(),
     abstract_names: BTreeMap::new(),

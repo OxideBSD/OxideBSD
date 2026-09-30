@@ -129,6 +129,9 @@ unsafe extern "C" {
     /// already establish).
     fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: extern "C" fn(u64, u64) -> i32);
     fn oxidebsd_get_cwd() -> u64;
+    /// Whether the kernel still refers to an inode (a working or root directory, a file mapping,
+    /// a bound socket file): see `maybe_release`.
+    fn oxidebsd_inode_in_use(inode: u64) -> u64;
     fn oxidebsd_set_cwd(inode: u64);
     fn oxidebsd_get_root() -> u64;
     fn oxidebsd_set_root(inode: u64);
@@ -1275,6 +1278,232 @@ fn alloc_indirect_block() -> Option<u32> {
 
 fn alloc_inode() -> Option<u32> {
     alloc_inode_from(false)
+}
+
+// --- Reclamation -----------------------------------------------------------------------------
+//
+// An inode is freed, with every block it addresses, once nothing refers to it: no name
+// (`nlink == 0`), no oxfs descriptor, and nothing in the kernel (`oxidebsd_inode_in_use`: a working
+// or root directory, a file mapping that writes back by inode number, a bound socket file). One
+// the kernel still holds becomes an orphan, retried after later closes and unlinks; one left
+// over at a reboot is freed by the sweep after mounting (`sweep_unnamed_inodes`). Until this
+// existed, oxfs freed nothing: every temporary file ever made kept its inode and blocks.
+
+/// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
+fn free_block(n: u32) {
+    set_block_used(n, false);
+    if n < NUM_BLOCKS as u32 {
+        // SAFETY: single-core, syscall-serialized, as `alloc_block`.
+        unsafe {
+            let cursor = &mut *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK);
+            if n < *cursor {
+                *cursor = n;
+            }
+        }
+    }
+}
+
+/// Frees index block `ib` and the data blocks it points to.
+fn free_index_block(ib: u32) {
+    for slot in 0..PTRS_PER_INDIRECT {
+        let b = read_index_ptr(ib, slot);
+        if b != NO_BLOCK {
+            free_block(b);
+        }
+    }
+    free_block(ib);
+}
+
+/// Frees every block `inode` addresses, index blocks included.
+fn free_inode_blocks(inode: &Inode) {
+    for &b in &inode.direct {
+        if b != NO_BLOCK {
+            free_block(b);
+        }
+    }
+    if inode.indirect != NO_BLOCK {
+        free_index_block(inode.indirect);
+    }
+    if inode.double_indirect != NO_BLOCK {
+        for slot in 0..PTRS_PER_INDIRECT {
+            let inner = read_index_ptr(inode.double_indirect, slot);
+            if inner != NO_BLOCK {
+                free_index_block(inner);
+            }
+        }
+        free_block(inode.double_indirect);
+    }
+}
+
+/// Whether an oxfs descriptor has inode `n` open.
+fn inode_is_open(n: u32) -> bool {
+    let slots = unsafe { &*core::ptr::addr_of!(OPEN_FILES) };
+    slots.iter().flatten().any(|(_, file)| match file {
+        OpenFile::FileRead { inode, .. } | OpenFile::DirListing { inode, .. } => *inode == n,
+        OpenFile::Write { existing_inode: Some(inode), .. } => *inode == n,
+        _ => false,
+    })
+}
+
+/// Frees inode `n` if nothing refers to it any more (see the section comment); keeps it as an
+/// orphan if only the kernel does.
+fn maybe_release(n: u32) {
+    let inode = read_inode(n);
+    if n == ROOT_INODE || inode.kind == InodeKind::Free || inode.nlink > 0 || inode_is_open(n) {
+        return;
+    }
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    if unsafe { oxidebsd_inode_in_use(n as u64) } != 0 {
+        add_orphan(n);
+        return;
+    }
+    remove_orphan(n);
+    release_inode(n, inode);
+}
+
+/// Frees inode `n` (whose record is `inode`) and its blocks. The record goes first: interrupted
+/// between the two, the disk leaks blocks rather than keeping an inode that points at blocks
+/// someone else may be given.
+fn release_inode(n: u32, inode: Inode) {
+    write_inode(n, Inode::FREE);
+    free_inode_blocks(&inode);
+    trim_inode_table(is_tmpfs_inode(n));
+}
+
+/// Unlinked inodes the kernel still referred to; `u32::MAX` is an empty slot. A full list only
+/// delays freeing until the next boot's sweep.
+const MAX_ORPHANS: usize = 256;
+static mut ORPHANS: [u32; MAX_ORPHANS] = [u32::MAX; MAX_ORPHANS];
+
+fn orphans() -> &'static mut [u32; MAX_ORPHANS] {
+    // SAFETY: single-core, syscall-serialized, as every pool here.
+    unsafe { &mut *core::ptr::addr_of_mut!(ORPHANS) }
+}
+
+fn add_orphan(n: u32) {
+    let list = orphans();
+    if list.contains(&n) {
+        return;
+    }
+    if let Some(slot) = list.iter_mut().find(|s| **s == u32::MAX) {
+        *slot = n;
+    }
+}
+
+fn remove_orphan(n: u32) {
+    for slot in orphans().iter_mut().filter(|s| **s == n) {
+        *slot = u32::MAX;
+    }
+}
+
+/// Tries each orphan again (after a close or unlink: a mapping or working directory may be gone).
+fn retry_orphans() {
+    for i in 0..MAX_ORPHANS {
+        let n = orphans()[i];
+        if n != u32::MAX {
+            orphans()[i] = u32::MAX;
+            maybe_release(n);
+        }
+    }
+}
+
+/// After mounting: frees every inode left without a name by the last boot (open, mapped or a
+/// working directory when it went down). Nothing can refer to one yet. Runs once persistence is
+/// on, so the frees and any trimming of the inode file reach the disk.
+fn sweep_unnamed_inodes() {
+    let count = inode_table(false).count;
+    let mut freed: u32 = 0;
+    for n in 1..count {
+        let inode = read_inode(n);
+        if inode.kind != InodeKind::Free && inode.nlink == 0 {
+            release_inode(n, inode);
+            freed += 1;
+        }
+    }
+    if freed > 0 {
+        let mut msg_buf = [0u8; 64];
+        let mut msg = ByteBuf { buf: &mut msg_buf, len: 0 };
+        msg.push_bytes(b"[oxfs] freed ");
+        msg.push_decimal(freed);
+        msg.push_bytes(if freed == 1 { b" unnamed inode" } else { b" unnamed inodes" });
+        msg.push_bytes(b" left by the last boot\n");
+        let len = msg.len;
+        log_bytes(&msg_buf[..len]);
+    }
+}
+
+/// Clears inode-file block `index`'s pointer in `file` and frees the block, along with any index
+/// block that pointer was the first entry of. Only the table's last block is ever unmapped, so an
+/// index block whose first entry goes has no others left.
+fn unmap_last_block(file: &mut Inode, index: usize) {
+    if index < DIRECT_BLOCKS {
+        free_block(file.direct[index]);
+        file.direct[index] = NO_BLOCK;
+        return;
+    }
+    let clear = |ib: u32, slot: usize| {
+        let mut data = read_block(ib);
+        let b = u32::from_le_bytes(data[slot * 4..slot * 4 + 4].try_into().unwrap());
+        data[slot * 4..slot * 4 + 4].copy_from_slice(&NO_BLOCK.to_le_bytes());
+        write_block(ib, &data);
+        b
+    };
+    let i = index - DIRECT_BLOCKS;
+    if i < PTRS_PER_INDIRECT {
+        free_block(clear(file.indirect, i));
+        if i == 0 {
+            free_block(file.indirect);
+            file.indirect = NO_BLOCK;
+        }
+        return;
+    }
+    let i = i - PTRS_PER_INDIRECT;
+    let (outer, inner) = (i / PTRS_PER_INDIRECT, i % PTRS_PER_INDIRECT);
+    let inner_block = read_index_ptr(file.double_indirect, outer);
+    free_block(clear(inner_block, inner));
+    if inner == 0 {
+        clear(file.double_indirect, outer);
+        free_block(inner_block);
+        if outer == 0 {
+            free_block(file.double_indirect);
+            file.double_indirect = NO_BLOCK;
+        }
+    }
+}
+
+/// Gives the table's last blocks back to the pool while they hold only free inodes (the first
+/// block, holding the root, always stays). The disk table's new shape goes to the superblock
+/// before its blocks are freed, so an interruption can only leak them.
+fn trim_inode_table(tmpfs: bool) {
+    let base = if tmpfs { TMPFS_INODE_BASE } else { 0 };
+    let per_block = INODES_PER_BLOCK as u32;
+    loop {
+        let table = *inode_table(tmpfs);
+        if table.count <= per_block {
+            return;
+        }
+        let first = table.count - per_block;
+        if (first..table.count).any(|slot| read_inode(base + slot).kind != InodeKind::Free) {
+            return;
+        }
+        let mut file = table.file;
+        file.size = first as u64 * INODE_STRIDE as u64;
+        {
+            let t = inode_table(tmpfs);
+            t.count = first;
+            t.free -= per_block;
+            t.hint = t.hint.min(first);
+            t.file.size = file.size;
+        }
+        if !tmpfs && persistence_ready() && block_device_present() {
+            write_superblock();
+        }
+        unmap_last_block(&mut file, first as usize / INODES_PER_BLOCK);
+        inode_table(tmpfs).file = file;
+        if !tmpfs && persistence_ready() && block_device_present() {
+            write_superblock();
+        }
+    }
 }
 
 /// A free inode number from the disk (`tmpfs == false`) or tmpfs table, growing the table by a
@@ -4550,6 +4779,20 @@ extern "C" fn oxfs_close(fd: u64) -> i64 {
     };
     let (_, mut file) = slot.take().expect("just matched Some above");
     let result = commit_write_buffer(&mut file);
+    // The last descriptor of an unlinked file frees it (`maybe_release`). A file created and then
+    // unlinked before its first commit got an inode just now, with no name to go with it.
+    let closed = match file {
+        OpenFile::FileRead { inode, .. } | OpenFile::DirListing { inode, .. } => Some(inode),
+        OpenFile::Write { existing_inode: Some(inode), unlinked, .. } => {
+            if unlinked {
+                let mut record = read_inode(inode);
+                record.nlink = 0;
+                write_inode(inode, record);
+            }
+            Some(inode)
+        }
+        _ => None,
+    };
     // Release this fd's own `WRITE_BUFFERS` slot back to the pool, if it ever claimed one --
     // safe only here (not in `commit_write_buffer` itself, also called by `fsync`/`sync` without
     // closing the fd): a still-open fd may see more `write()` calls after an `fsync()`, which need
@@ -4562,6 +4805,10 @@ extern "C" fn oxfs_close(fd: u64) -> i64 {
     {
         free_write_buffer(idx);
     }
+    if let Some(inode) = closed {
+        maybe_release(inode);
+    }
+    retry_orphans();
     result
 }
 
@@ -5101,17 +5348,14 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
     if let Err(e) = may_delete(parent, target, uid, gid) {
         return e;
     }
-    if matches!(
-        target_inode.kind,
-        InodeKind::File | InodeKind::Device | InodeKind::Fifo | InodeKind::Socket
-    ) {
-        target_inode.nlink = target_inode.nlink.saturating_sub(1);
-        write_inode(target, target_inode);
+    if let Err(e) = dir_remove(parent, leaf) {
+        return errno_for(e);
     }
-    match dir_remove(parent, leaf) {
-        Ok(()) => 0,
-        Err(e) => errno_for(e),
-    }
+    target_inode.nlink = target_inode.nlink.saturating_sub(1);
+    write_inode(target, target_inode);
+    maybe_release(target);
+    retry_orphans();
+    0
 }
 
 /// Registered for `SYS_LINK`. `(existing_ptr, existing_len, new_ptr, new_len)` -- same 4-register
@@ -5356,10 +5600,16 @@ extern "C" fn oxfs_rmdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
     if dir_entry_count(raw_target) > 2 {
         return -ENOTEMPTY;
     }
-    match dir_remove(parent, leaf) {
-        Ok(()) => 0,
-        Err(e) => errno_for(e),
+    if let Err(e) = dir_remove(parent, leaf) {
+        return errno_for(e);
     }
+    // A directory's link count isn't kept (`write_stat` reports its own); 0 marks it unnamed.
+    let mut dir = read_inode(raw_target);
+    dir.nlink = 0;
+    write_inode(raw_target, dir);
+    maybe_release(raw_target);
+    retry_orphans();
+    0
 }
 
 /// Registered for `SYS_RENAME`. `(old_ptr, old_len, new_ptr, new_len)` -- uses all four of this
@@ -5444,6 +5694,9 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
             _ => {}
         }
         let _ = dir_remove(new_parent, new_leaf);
+        let mut replaced = read_inode(existing);
+        replaced.nlink = if existing_is_dir { 0 } else { replaced.nlink.saturating_sub(1) };
+        write_inode(existing, replaced);
     }
     if dir_remove(old_parent, old_leaf).is_err() {
         return -EIO;
@@ -5460,6 +5713,9 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
         if let Err(e) = dir_insert(target, b"..", new_parent) {
             return errno_for(e);
         }
+    }
+    if let Some(existing) = existing {
+        maybe_release(existing);
     }
     0
 }
@@ -9297,7 +9553,8 @@ pub extern "C" fn module_init() -> i32 {
 
     let has_disk = block_device_present();
 
-    let ok = if has_disk && mount_from_disk() {
+    let mounted = has_disk && mount_from_disk();
+    let ok = if mounted {
         true
     } else {
         // A failed mount attempt can have already partially populated the real block-used
@@ -9318,6 +9575,9 @@ pub extern "C" fn module_init() -> i32 {
     // right before real syscalls become reachable, so every write a running process makes from
     // this point on is persisted immediately.
     set_persistence_ready(true);
+    if mounted {
+        sweep_unnamed_inodes();
+    }
 
     // Back to root, matching the state a booting kernel with no real process yet should leave
     // BOOT_CWD in (a real process's own cwd starts at Process::cwd's default, 0/root, regardless
