@@ -447,6 +447,15 @@ fn main() {
         build_std_oxidebsd_userland_crate("usr.sbin/newsyslog", "OXFS_NEWSYSLOG_ELF_PATH", &musl_sysroot);
     let logger_elf_path =
         build_std_oxidebsd_userland_crate("usr.bin/logger", "OXFS_LOGGER_ELF_PATH", &musl_sysroot);
+    // /sbin/init: embedded in the kernel, which runs it as pid 1 (INIT.md §9.6); static for
+    // the same reason as /bin/sh.
+    let init_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "sbin/init",
+        "OXFS_INIT_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
     // What the kernel runs as pid 1 when init keeps dying: static for the same reason as /bin/sh.
     let emergency_elf_path = build_std_oxidebsd_userland_crate_with_env(
@@ -733,6 +742,7 @@ fn main() {
         ("OXFS_NEWSYSLOG_ELF_PATH", newsyslog_elf_path.to_str().unwrap()),
         ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
+        ("OXFS_INIT_ELF_PATH", init_elf_path.to_str().unwrap()),
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
         ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),

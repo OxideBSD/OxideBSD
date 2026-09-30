@@ -224,28 +224,43 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     crate::fs::fd::init();
 
-    // pid 1 is OxideBSD's own shell, `/bin/sh` (lib/libsh), as an interactive login shell
-    // (`argv[0]` starting with `-`: it reads /etc/profile and ~/.profile). BusyBox hush, pid 1
-    // before it, is still seeded as /bin/hush.
+    // pid 1 is `/sbin/init` (INIT.md), embedded so that a damaged file system can't stop it
+    // (§9.6), started with the boot flags (§4.1) and an empty environment (§4.2), and without a
+    // controlling terminal: its children take the console. A restart after a death gets `-R`
+    // (§9.3); repeated deaths start `/sbin/emergency` (§9.4). If init can't be started at all,
+    // `/bin/sh` runs on the console instead.
+    const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
+    const INIT_RESTART_ARGV: &[&[u8]] = &[crate::boot::INIT_PATH, b"-R"];
     const SH_ELF: &[u8] = include_bytes!(env!("OXFS_SH_ELF_PATH"));
     const DEFAULT_ENVP: &[&[u8]] = crate::process::lifecycle::DEFAULT_ENVP;
     const SH_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], DEFAULT_ENVP[2], b"HOME=/"];
     const SH_ARGV: &[&[u8]] = &[b"-sh"];
     const EMERGENCY_ARGV: &[&[u8]] = &[b"/sbin/emergency"];
     const EMERGENCY_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], b"HOME=/"];
-    // What the kernel starts if pid 1 keeps dying (INIT.md §9.4).
     const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
+    let init_argv = crate::boot::init_argv();
     crate::process::init::register(
-        crate::process::init::InitProgram { elf: SH_ELF, argv: SH_ARGV, restart_argv: SH_ARGV, envp: SH_ENVP },
+        crate::process::init::InitProgram {
+            elf: INIT_ELF,
+            argv: init_argv,
+            restart_argv: INIT_RESTART_ARGV,
+            envp: &[],
+            console: false,
+        },
         crate::process::init::InitProgram {
             elf: EMERGENCY_ELF,
             argv: EMERGENCY_ARGV,
             restart_argv: EMERGENCY_ARGV,
             envp: EMERGENCY_ENVP,
+            console: true,
         },
     );
-    serial_println!("[boot] spawning /bin/sh as pid 1 ({} byte ELF)", SH_ELF.len());
-    let pid1 = crate::process::lifecycle::spawn_with(SH_ELF, None, SH_ARGV, SH_ENVP)
+    serial_println!("[boot] spawning /sbin/init as pid 1 ({} byte ELF)", INIT_ELF.len());
+    let pid1 = crate::process::lifecycle::spawn_boot(INIT_ELF, None, init_argv, &[], false)
+        .or_else(|e| {
+            serial_println!("[boot] failed to spawn /sbin/init: {:?}; running /bin/sh instead", e);
+            crate::process::lifecycle::spawn_with(SH_ELF, None, SH_ARGV, SH_ENVP)
+        })
         .unwrap_or_else(|e| panic!("failed to spawn /bin/sh: {e:?}"));
 
     crate::process::scheduler::start(pid1)

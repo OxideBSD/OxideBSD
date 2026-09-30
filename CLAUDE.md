@@ -32,7 +32,8 @@ OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/R
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
-- Userland: pid 1 is OxideBSD's own `/bin/sh` (`lib/libsh`); ~195 standalone BusyBox applets;
+- Userland: pid 1 is `/sbin/init` (a first cut: `/etc/rc`, then a console shell, OxideBSD's own
+  `/bin/sh` from `lib/libsh`); ~195 standalone BusyBox applets;
   native PIE utilities over `lib/oxlibc`; on-target Clang/LLVM, bmake, ninja, ncurses, nano, nvi;
   a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout: `hier(7)` (`share/man/man7/hier.7`).
 
@@ -156,8 +157,11 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
   `PT_INTERP` image: it loads no dynamic linker).
 - **Rust std programs are dynamic PIEs** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
-  libunwind, `build_libgcc_s`). Exceptions (`StdLink::StaticPie`): `/bin/sh` and `/sbin/emergency`,
-  which the kernel embeds and spawns as pid 1.
+  libunwind, `build_libgcc_s`). Exceptions (`StdLink::StaticPie`): `/sbin/init`, `/bin/sh` (its
+  fallback) and `/sbin/emergency`, which the kernel embeds and spawns as pid 1.
+- **`/sbin/init` has no controlling terminal** (`InitProgram::console`); each child it starts is
+  its own session and takes the console with `TIOCSCTTY`. The kernel never lets a session leader
+  drop its terminal, so pid 1 must not be given one.
 - User stacks grow on demand inside an 8 MiB reserve (`mm::try_grow_user_stack`, both rings).
 - `AddressSpace` is `Arc`-refcounted; frames are reclaimed at exit. `SHARED_LEAF` PTEs (SysV shm,
   `MAP_SHARED`) are never freed by teardown.

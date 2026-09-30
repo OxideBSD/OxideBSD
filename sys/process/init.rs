@@ -20,6 +20,10 @@ pub struct InitProgram {
     /// `argv` for a restart after a death: `/sbin/init` takes `-R` (recovery mode, §9.3).
     pub restart_argv: &'static [&'static [u8]],
     pub envp: &'static [&'static [u8]],
+    /// Whether the console becomes its controlling terminal. Not for `/sbin/init`, which runs
+    /// without one so that its children can take it (INIT.md §5); a shell or the emergency
+    /// program needs it for job control.
+    pub console: bool,
 }
 
 struct Supervisor {
@@ -94,7 +98,7 @@ pub(crate) fn note_fault(pid: Pid, ip: u64, addr: Option<u64>) {
 /// self-exit), so its entry can't be dropped here: the pid-1 entry is moved to a fresh pid and
 /// reaped later like any exited thread, which frees pid 1 for the replacement started here.
 pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
-    let (cause, elf, argv, envp, emergency) = {
+    let (cause, elf, argv, envp, console, emergency) = {
         let mut guard = SUPERVISOR.lock();
         let Some(sup) = guard.as_mut() else { return false };
         let (cause, emergency) = record_death(code, sup.in_emergency);
@@ -103,7 +107,7 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
         // Init restarts in recovery mode, even after the emergency program: services the
         // operator left running must not be started twice.
         let argv = if emergency { p.argv } else { p.restart_argv };
-        (cause, p.elf, argv, p.envp, emergency)
+        (cause, p.elf, argv, p.envp, p.console, emergency)
     };
 
     retire_old_pid1(exiting);
@@ -113,7 +117,7 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
         describe(cause),
         if emergency { "it keeps dying; starting /sbin/emergency" } else { "starting it again" }
     );
-    match lifecycle::spawn_as(INIT_PID, elf, argv, envp) {
+    match lifecycle::spawn_as(INIT_PID, elf, argv, envp, console) {
         Ok(_) => adopt_orphans(),
         Err(e) => {
             crate::serial_println!("init: could not start pid 1: {:?}; the system is idle", e);

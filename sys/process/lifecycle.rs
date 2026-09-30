@@ -57,21 +57,40 @@ pub const DEFAULT_ENVP: &[&[u8]] = &[
 /// `spawn` with an explicit `argv` and `envp` (the real boot's pid 1, `/bin/sh` as a login
 /// shell, needs `argv[0] = "-sh"` and `HOME`).
 pub fn spawn_with(elf_bytes: &[u8], parent: Option<Pid>, argv: &[&[u8]], envp: &[&[u8]]) -> Result<Pid, SpawnError> {
+    spawn_boot(elf_bytes, parent, argv, envp, true)
+}
+
+/// `spawn_with`, choosing whether the console becomes the process's controlling terminal. The
+/// real boot's `/sbin/init` starts without one, as on the BSDs, so that its children can make
+/// it theirs (INIT.md §5).
+pub fn spawn_boot(
+    elf_bytes: &[u8],
+    parent: Option<Pid>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    console: bool,
+) -> Result<Pid, SpawnError> {
     // Boot-time only: the active address space is the kernel's own, with nothing in user space.
     let phys_offset = memory::phys_mem_offset();
     let address_space = with_frame_allocator(|fa| AddressSpace::new(phys_offset, fa))
         .map_err(|()| SpawnError::OutOfMemory)?;
-    spawn_into(address_space, None, elf_bytes, parent, argv, envp)
+    spawn_into(address_space, None, elf_bytes, parent, argv, envp, console)
 }
 
 /// Starts a new parentless process with pid `pid` (which must be free) while other processes
 /// run: the kernel's restart of pid 1 (`process::init`). Unlike `spawn_with`, safe from any
 /// process's context.
-pub(crate) fn spawn_as(pid: Pid, elf_bytes: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> Result<Pid, SpawnError> {
+pub(crate) fn spawn_as(
+    pid: Pid,
+    elf_bytes: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    console: bool,
+) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     let address_space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
         .map_err(|()| SpawnError::OutOfMemory)?;
-    spawn_into(address_space, Some(pid), elf_bytes, None, argv, envp)
+    spawn_into(address_space, Some(pid), elf_bytes, None, argv, envp, console)
 }
 
 fn spawn_into(
@@ -81,6 +100,7 @@ fn spawn_into(
     parent: Option<Pid>,
     argv: &[&[u8]],
     envp: &[&[u8]],
+    console: bool,
 ) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     let loaded = load_image(&address_space, elf_bytes, argv, envp);
@@ -96,7 +116,7 @@ fn spawn_into(
         with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
         return Err(SpawnError::OutOfMemory);
     };
-    spawn_finish(address_space, kernel_stack, pid, &elf, entry, initial_rsp, parent)
+    spawn_finish(address_space, kernel_stack, pid, &elf, entry, initial_rsp, parent, argv, console)
 }
 
 /// Loads the program and builds its initial user stack in a not-yet-active address space.
@@ -146,16 +166,19 @@ fn spawn_finish(
     entry: VirtAddr,
     initial_rsp: VirtAddr,
     parent: Option<Pid>,
+    argv: &[&[u8]],
+    console: bool,
 ) -> Result<Pid, SpawnError> {
     let pid = pid.unwrap_or_else(alloc_pid);
     // No parent to inherit a process group from (spawn doesn't inherit anything else from parent
     // either -- cwd/fs_base/brk all start fresh too) -- becomes its own group leader, same
     // convention as a real init/session leader.
     let pgid = pid;
-    // pid 1 is BusyBox's `hush` today (see the `argv[0]` placeholder note above) -- more accurate
-    // for `/proc/1/stat`'s `(comm)` field than reusing that same "(init)" placeholder verbatim.
-    let comm = b"hush".to_vec();
-    let cmdline = build_cmdline(&[b"(init)"]);
+    // Named after its `argv[0]`, as exec names a process after its path (a login shell's
+    // leading `-` isn't part of the name).
+    let arg0 = argv.first().copied().unwrap_or(b"(init)");
+    let comm = basename(arg0.strip_prefix(b"-").unwrap_or(arg0)).to_vec();
+    let cmdline = build_cmdline(argv);
     let kernel_stack_top = kernel_stack.top();
     let rsp = crate::process::context_switch::seed_spawn_frame(kernel_stack_top);
 
@@ -239,10 +262,12 @@ fn spawn_finish(
         }
         table.insert(pid, Box::new(process));
     }
-    // A process the kernel starts (pid 1, and its restarts) runs on the console, which becomes
-    // its controlling terminal -- as the BSDs' init does for single-user mode -- so its job
-    // control works without it opening the console itself.
-    crate::tty::assign(crate::tty::TTYV0, pid, pid);
+    // A process the kernel starts runs on the console. Unless it's the real `/sbin/init`, the
+    // console also becomes its controlling terminal -- as the BSDs' init does for single-user
+    // mode -- so a shell or the emergency program has job control without opening it itself.
+    if console {
+        crate::tty::assign(crate::tty::TTYV0, pid, pid);
+    }
     // Bootstraps this process's own stdin/stdout/stderr from crate::fs::fd::init's own pseudo-pid
     // registration -- the same fork_inherit path a real fork() uses, see that function's own doc
     // comment.

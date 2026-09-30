@@ -8685,8 +8685,10 @@ fn format_fresh_filesystem() -> bool {
     // see `build_llvm_target_toolchain`'s own doc comment in build.rs), so no extra `--sysroot`
     // flag is needed to invoke `clang` on target. Originally built for TinyCC (this project's
     // first on-target C compiler, since removed once Clang/LLVM superseded it).
-    // /sbin: system programs. init_sh (lib/libsh with the init dialect) runs /etc/rc and rc.d.
+    // /sbin: system programs. init is pid 1 (the kernel runs its own copy); init_sh (lib/libsh
+    // with the init dialect) runs /etc/rc and rc.d.
     let sbin = ensure_dir(root, b"sbin");
+    ok &= seed_file(sbin, b"init", include_bytes!(env!("OXFS_INIT_ELF_PATH")));
     ok &= seed_file(sbin, b"init_sh", include_bytes!(env!("OXFS_INIT_SH_ELF_PATH")));
     ok &= seed_file(sbin, b"rcorder", include_bytes!(env!("OXFS_RCORDER_ELF_PATH")));
     ok &= seed_file(sbin, b"reboot", include_bytes!(env!("OXFS_REBOOT_ELF_PATH")));

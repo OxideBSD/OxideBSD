@@ -133,12 +133,14 @@ fn main(boot_info: &'static BootInfo) -> ! {
             argv: &[b"init-respawn-smoke", b"init"],
             restart_argv: &[b"init-respawn-smoke", b"init"],
             envp: ENVP,
+            console: true,
         },
         oxidebsd::process::init::InitProgram {
             elf: SMOKE_ELF,
             argv: &[b"init-respawn-smoke", b"emergency"],
             restart_argv: &[b"init-respawn-smoke", b"emergency"],
             envp: ENVP,
+            console: true,
         },
     );
     serial_println!("init_respawn_smoke: spawning init-respawn-smoke as pid 1 ({} byte ELF)", SMOKE_ELF.len());
