@@ -863,6 +863,11 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_get_cwd" => Some(crate::process::oxidebsd_get_cwd as *const () as u64),
         "oxidebsd_inode_in_use" => Some(crate::process::oxidebsd_inode_in_use as *const () as u64),
+        "oxidebsd_make_dev" => Some(crate::fs::devfs::oxidebsd_make_dev as *const () as u64),
+        "oxidebsd_destroy_dev" => Some(crate::fs::devfs::oxidebsd_destroy_dev as *const () as u64),
+        "oxidebsd_dev_open" => Some(crate::fs::devfs::oxidebsd_dev_open as *const () as u64),
+        "oxidebsd_dev_generation" => Some(crate::fs::devfs::oxidebsd_dev_generation as *const () as u64),
+        "oxidebsd_dev_entry" => Some(crate::fs::devfs::oxidebsd_dev_entry as *const () as u64),
         "oxidebsd_set_cwd" => Some(crate::process::oxidebsd_set_cwd as *const () as u64),
         "oxidebsd_get_root" => Some(crate::process::oxidebsd_get_root as *const () as u64),
         "oxidebsd_set_root" => Some(crate::process::oxidebsd_set_root as *const () as u64),

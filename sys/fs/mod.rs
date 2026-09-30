@@ -7,6 +7,7 @@
 //! share). Real filesystems themselves (`oxfs`, `fat32`) live in `modules/`, not here -- see
 //! CLAUDE.md's filesystem section.
 
+pub mod devfs;
 pub mod fd;
 pub mod mqueue;
 pub mod pipe;

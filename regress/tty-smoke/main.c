@@ -166,9 +166,11 @@ int main(void)
 	CHECK(fd >= 0 && isatty(fd), "open(\"/dev/console\") gives a terminal");
 	close(fd);
 
-	CHECK(mknod("/dev/ttyv9", S_IFCHR | 0600, makedev(4, 9)) == 0, "mknod a ttyv9 node");
-	CHECK_ERR(open("/dev/ttyv9", O_RDWR), ENXIO, "a node for a terminal that doesn't exist is ENXIO");
-	unlink("/dev/ttyv9");
+	/* devfs refuses mknod (DEVFS.md §4.4.3); a node made on disk opens through the registry. */
+	CHECK_ERR(mknod("/dev/ttyv9", S_IFCHR | 0600, makedev(4, 9)), EPERM, "mknod in /dev is EPERM");
+	CHECK(mknod("/tmp/ttyv9", S_IFCHR | 0600, makedev(4, 9)) == 0, "mknod a ttyv9 node on disk");
+	CHECK_ERR(open("/tmp/ttyv9", O_RDWR), ENXIO, "a node for a terminal that doesn't exist is ENXIO");
+	unlink("/tmp/ttyv9");
 
 	/* --- /proc/self and /proc/<pid>/stat (§6.3, §6.4) ---------------------------------- */
 	char pid[16];

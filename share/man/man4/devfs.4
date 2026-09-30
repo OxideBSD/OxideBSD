@@ -1,0 +1,135 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt DEVFS 4
+.Os OxideBSD
+.Sh NAME
+.Nm devfs
+.Nd device file system
+.Sh DESCRIPTION
+The
+.Nm
+file system provides
+.Pa /dev .
+It is mounted at boot, before any process runs, and made afresh at
+every boot; nothing in it is written to disk.
+The
+.Pa /dev
+directory on the disk is only its mountpoint, and whatever an older
+installation left there is hidden.
+.Pp
+The kernel keeps a registry of character devices: each has a name, a
+major and minor number, an owner, a group, a mode, and a driver that
+opens it.
+Drivers in the kernel and in kernel modules add their devices to the
+registry when the devices exist; there is no interface for user programs.
+.Nm
+holds a node for every registered device, with the owner, group and mode
+the registry gives it, and a directory
+.Pa shm ,
+mode 01777, where
+.Xr shm_open 3
+and
+.Xr sem_open 3
+keep POSIX shared memory objects and named semaphores.
+When a path lookup enters
+.Pa /dev
+and the registry has changed since, nodes are added for new devices and
+removed for devices no longer registered before the lookup continues.
+.Pp
+Changes to
+.Nm
+last until reboot:
+.Bl -bullet
+.It
+.Xr unlink 2
+of a device node hides it: it does not come back when the registry
+changes, only at the next boot.
+.It
+.Xr chmod 2
+and
+.Xr chown 2
+of a node last until reboot;
+.Xr devfs.conf 5
+makes such changes permanent.
+.It
+.Xr mknod 2
+of a device in
+.Nm
+fails with
+.Er EPERM :
+devices come from drivers.
+.It
+Other files can be created and last until reboot: sockets, such as the
+.Pa /dev/log
+.Xr syslogd 8
+binds, symbolic links, directories, FIFOs, and ordinary files under
+.Pa /dev/shm .
+.El
+.Pp
+Opening a device node goes through the registry by its number, wherever
+the node is:
+.Xr mknod 2
+outside
+.Pa /dev
+still makes device nodes on the disk, and they open the registered
+device with that number, or fail with
+.Er ENXIO
+if there is none.
+.Pp
+.Pa /proc/mounts
+lists
+.Nm
+as
+.Dq Li devfs /dev devfs .
+.Ss Devices
+.Bl -column "urandom" "major, minor" "root:tty" "Mode" -offset indent
+.It Sy Name Ta Sy Number Ta Sy Owner Ta Sy Mode
+.It Li null Ta 1, 3 Ta root Ta 0666
+.It Li zero Ta 1, 5 Ta root Ta 0666
+.It Li random Ta 1, 8 Ta root Ta 0666
+.It Li urandom Ta 1, 9 Ta root Ta 0666
+.It Li ttyv0 Ta 4, 0 Ta root:tty Ta 0600
+.It Li tty Ta 5, 0 Ta root Ta 0666
+.It Li console Ta 5, 1 Ta root Ta 0600
+.It Li klog Ta 7, 0 Ta root Ta 0600
+.It Li fb0 Ta 29, 0 Ta root Ta 0666
+.El
+.Pp
+.Pa /dev/fb0
+exists only when the system has a framebuffer.
+.Pa /dev/tty
+reaches only the opener's own controlling terminal.
+.Xr login 1
+gives a terminal to the user who logs in on it.
+.Sh FILES
+.Bl -tag -width /etc/devfs.conf -compact
+.It Pa /dev
+The mountpoint.
+.It Pa /etc/devfs.conf
+Owners, modes and links applied at boot.
+.El
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EPERM
+.Xr mknod 2
+of a device in
+.Nm .
+.It Bq Er ENXIO
+A device node's number has no registered device.
+.El
+.Sh SEE ALSO
+.Xr mknod 2 ,
+.Xr klog 4 ,
+.Xr devfs.conf 5 ,
+.Xr rc 8
+.Sh HISTORY
+OxideBSD's
+.Nm
+appeared in 2026, modelled on
+.Fx Ns 's .
+Before it, the nodes in
+.Pa /dev
+were files on the disk, made once when it was formatted, so a node
+removed with
+.Xr rm 1
+stayed gone across reboots.

@@ -1,0 +1,83 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt DEVFS.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm devfs.conf
+.Nd owners, modes and links for /dev
+.Sh DESCRIPTION
+.Xr devfs 4
+is made afresh at every boot, so owners, modes and links set in
+.Pa /dev
+by hand last only until reboot.
+The
+.Nm
+file makes them permanent: the
+.Pa /etc/rc.d/devfs
+script applies it at boot, early, before
+.Pa /etc/rc.d/tmp .
+.Pp
+Each line is an action, a device and an argument, separated by white
+space.
+Empty lines and lines starting with
+.Ql #
+are ignored.
+The device is a name relative to
+.Pa /dev ,
+and for
+.Cm own
+and
+.Cm perm
+may be a shell pattern, which applies the action to every node it
+matches.
+.Bl -tag -width "perm dev mode"
+.It Cm own Ar device Ar user Ns Op : Ns Ar group
+Changes the owner, and the group if given, of the matching nodes, as
+.Xr chown 8 .
+.It Cm perm Ar device Ar mode
+Changes the mode of the matching nodes to the octal
+.Ar mode ,
+as
+.Xr chmod 1 .
+.It Cm link Ar device Ar name
+Creates
+.Pa /dev/ Ns Ar name
+as a symbolic link to
+.Ar device ,
+replacing whatever is there.
+.Ar device
+is not a pattern here.
+.El
+.Pp
+A line with an unknown action, or naming a device that doesn't exist, is
+skipped with a warning; the rest of the file still applies.
+.Sh FILES
+.Bl -tag -width /etc/rc.d/devfs -compact
+.It Pa /etc/devfs.conf
+This file.
+.It Pa /etc/rc.d/devfs
+Applies it at boot.
+.El
+.Sh EXAMPLES
+Give the console terminal to group
+.Li tty
+with write permission for the group, and give it a second name:
+.Bd -literal -offset indent
+own	ttyv0	root:tty
+perm	ttyv0	0620
+link	ttyv0	vt0
+.Ed
+.Pp
+Let only group
+.Li user
+use the framebuffers:
+.Bd -literal -offset indent
+own	fb*	root:user
+perm	fb*	0660
+.Ed
+.Sh SEE ALSO
+.Xr devfs 4 ,
+.Xr rc 8
+.Sh HISTORY
+The format is
+.Fx Ns 's .

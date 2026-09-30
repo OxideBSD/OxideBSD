@@ -1,0 +1,55 @@
+#!/sbin/init_sh
+#
+# PROVIDE: devfs
+# REQUIRE: sysctl
+# BEFORE: tmp
+#
+# Applies /etc/devfs.conf to /dev (DEVFS.md §5): devfs is made afresh at every boot, so owners,
+# modes and links set by hand last only until reboot, and this makes them permanent.
+
+. /etc/rc.subr
+
+name="devfs"
+desc="Apply /etc/devfs.conf to /dev"
+start_cmd="devfs_start"
+stop_cmd=":"
+
+devfs_start()
+{
+	[ -r /etc/devfs.conf ] || return 0
+	while read -r _action _dev _arg _rest; do
+		case "$_action" in
+		''|\#*)
+			continue
+			;;
+		link)
+			if [ -e "/dev/$_dev" ]; then
+				ln -sf "$_dev" "/dev/$_arg"
+			else
+				warn "devfs.conf: no /dev/$_dev to link to"
+			fi
+			continue
+			;;
+		own|perm)
+			;;
+		*)
+			warn "devfs.conf: unknown action $_action"
+			continue
+			;;
+		esac
+		_found=
+		for _node in /dev/$_dev; do
+			[ -e "$_node" ] || continue
+			_found=1
+			case "$_action" in
+			own)	chown "$_arg" "$_node" ;;
+			perm)	chmod "$_arg" "$_node" ;;
+			esac
+		done
+		[ -n "$_found" ] || warn "devfs.conf: nothing in /dev matches $_dev"
+	done < /etc/devfs.conf
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"

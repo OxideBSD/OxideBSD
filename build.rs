@@ -313,6 +313,7 @@ fn main() {
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("devfs-syscall-smoke", "DEVFS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -808,6 +809,7 @@ fn main() {
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
         "regress/tz-syscall-smoke/run.sh",
+        "regress/devfs-syscall-smoke/run.sh",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

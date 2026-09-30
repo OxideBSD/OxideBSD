@@ -191,8 +191,18 @@ static DRIVERS: Mutex<Vec<&'static dyn Driver>> = Mutex::new(Vec::new());
 /// The framebuffer console (`/dev/ttyv0`), always terminal 0.
 pub const TTYV0: TtyId = 0;
 
-/// Registers a terminal; returns its id.
+/// The `tty` group (`/etc/group`), which owns terminals' device nodes.
+pub const TTY_GID: u32 = 4;
+
+/// Opens a terminal's device node (the registry's open function for every terminal).
+extern "C" fn dev_open(major: u64, minor: u64, flags: u64) -> i64 {
+    oxidebsd_tty_open(major, minor, flags)
+}
+
+/// Registers a terminal, and its node in `/dev` (root's, group `tty`, mode 0600, as the BSDs'
+/// devfs makes them; login(1) gives it to the user); returns its id.
 pub fn register(name: &'static str, major: u32, minor: u32, speed: u32, winsize: Winsize, driver: &'static dyn Driver) -> TtyId {
+    let _ = crate::fs::devfs::make_dev(name, major, minor, 0, TTY_GID, 0o600, dev_open);
     let mut ttys = TTYS.lock();
     ttys.push(Tty {
         name,

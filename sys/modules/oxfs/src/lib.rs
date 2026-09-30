@@ -132,6 +132,19 @@ unsafe extern "C" {
     /// Whether the kernel still refers to an inode (a working or root directory, a file mapping,
     /// a bound socket file): see `maybe_release`.
     fn oxidebsd_inode_in_use(inode: u64) -> u64;
+    /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
+    fn oxidebsd_make_dev(
+        name_ptr: u64,
+        name_len: u64,
+        major: u64,
+        minor: u64,
+        owner: u64,
+        mode: u64,
+        open: extern "C" fn(u64, u64, u64) -> i64,
+    ) -> i64;
+    fn oxidebsd_dev_open(major: u64, minor: u64, flags: u64) -> i64;
+    fn oxidebsd_dev_generation() -> u64;
+    fn oxidebsd_dev_entry(index: u64, out: *mut RawDevEntry) -> i64;
     fn oxidebsd_set_cwd(inode: u64);
     fn oxidebsd_get_root() -> u64;
     fn oxidebsd_set_root(inode: u64);
@@ -139,12 +152,6 @@ unsafe extern "C" {
     /// Opens the FIFO whose inode is `key` with `open(2)`'s `flags`; returns the new fd or
     /// `-errno`. The kernel owns the pipe buffer and the reader/writer rendezvous (`fs::pipe`).
     fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64;
-    /// Opens terminal `major:minor` (TTY.md §2.6) with `open(2)`'s `flags`; returns the new fd or
-    /// `-errno` (`-ENXIO` for no such terminal, or `/dev/tty` without a controlling terminal).
-    fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -> i64;
-    /// Opens `/dev/klog`, the kernel message buffer (SYSLOG.md §4), with `open(2)`'s `flags`;
-    /// returns the new fd, or `-EBUSY` while another descriptor has it open.
-    fn oxidebsd_klog_open(flags: u64) -> i64;
     /// Hands the kernel's local sockets (UNIX.md §5.2) the two functions that create and look up
     /// socket files; see `oxfs_create_socket_node`. Called once, from `module_init`.
     fn oxidebsd_register_socket_nodes(
@@ -420,8 +427,6 @@ const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 const S_IFIFO: u32 = 0o010000;
 const S_IFSOCK: u32 = 0o140000;
-/// The `tty` group, which owns terminals (4 in all three BSDs).
-const TTY_GID: u32 = 4;
 /// Real POSIX mask isolating the type bits above out of a raw `mode_t` -- used by `oxfs_mknod` to
 /// read the caller's requested node type back out of its own `mode` argument.
 const S_IFMT: u32 = 0o170000;
@@ -590,8 +595,9 @@ const NO_BLOCK: u32 = u32::MAX;
 
 const ROOT_INODE: u32 = 0;
 
-/// A second, purely in-memory pool reserved for tmpfs mounts (see `MountKind::Tmpfs`) -- 4 MiB,
-/// modest on purpose (scratch space, not a real persisted store). Block numbers `>= NUM_BLOCKS`
+/// A second, purely in-memory pool reserved for tmpfs mounts (see `MountKind::Tmpfs`) and devfs,
+/// whose `/dev/shm` holds POSIX shared memory -- 64 MiB (4 MiB until devfs: a 4 MiB `shm_open`
+/// object, `mmap/1-2.c`, no longer fit), not persisted. Block numbers `>= NUM_BLOCKS`
 /// and inode numbers `>= TMPFS_INODE_BASE` belong to it; `BLOCKS`/`BLOCK_USED` below are simply
 /// extended to cover it, and its inodes have their own `InodeTable`, so every accessor
 /// (`read_block`/`write_block`/`read_inode`/`write_inode`/`dir_lookup`/`dir_insert`/
@@ -601,7 +607,7 @@ const ROOT_INODE: u32 = 0;
 /// this pool. Deliberately never reclaimed when a tmpfs mount is unmounted (its
 /// inodes/blocks stay marked used forever) -- matches this module's existing "no deallocation
 /// anywhere" stance (`unlink`/`rmdir` already only clear a directory record's `used` byte).
-const TMPFS_NUM_BLOCKS: usize = 1024;
+const TMPFS_NUM_BLOCKS: usize = 16384;
 
 // --- Real disk persistence (see src/ata.rs) --------------------------------------------------
 //
@@ -855,9 +861,8 @@ struct Inode {
     /// combined total. `NO_BLOCK` until a file's own content actually reaches past the single-
     /// indirect tier -- the overwhelming majority of real files here never allocate this at all.
     double_indirect: u32,
-    /// Real per-inode permission bits (12 bits would cover setuid/setgid/sticky too, but nothing
-    /// in this port's roster sets or checks those, so only the low 9 POSIX rwxrwxrwx bits are ever
-    /// written -- `oxfs_chmod` masks its input to `0o777`). Defaults to `FIXED_PERM` (`0o755`),
+    /// Real per-inode permission bits, setuid/setgid/sticky included (creation takes the low nine,
+    /// less the umask; `chmod` sets all twelve, see `set_mode`). Defaults to `FIXED_PERM` (`0o755`),
     /// the same fixed value every inode used to report unconditionally before this field existed
     /// -- so a freshly seeded/created file behaves identically to the old hardcoded-everywhere
     /// scheme until something actually calls `chmod`.
@@ -2328,6 +2333,8 @@ const MAX_MOUNT_PATH: usize = 64;
 enum MountKind {
     Bind,
     Tmpfs,
+    /// devfs on `/dev` (`DEVFS.md` §4): a tmpfs-pool tree kept in step with the device registry.
+    Devfs,
 }
 
 #[derive(Clone, Copy)]
@@ -2374,11 +2381,12 @@ fn mounts() -> &'static mut [MountEntry; MAX_MOUNTS] {
 /// stacked on top of an already-mounted directory wins (real Unix LIFO stacking), and so
 /// `oxfs_umount2` removing the most recent one exposes whatever was mounted there before it.
 fn active_mount_for(inode: u32) -> Option<MountEntry> {
-    mounts()
-        .iter()
-        .rev()
-        .find(|m| m.used && m.mountpoint_inode == inode)
-        .copied()
+    let mount = mounts().iter().rev().find(|m| m.used && m.mountpoint_inode == inode).copied();
+    // Entering /dev: bring devfs up to date with the registry first (§4.3).
+    if mount.is_some_and(|m| m.kind == MountKind::Devfs) {
+        devfs_sync();
+    }
+    mount
 }
 
 /// `Process::root_inode` (`sys/process.rs`), decoded the same "opaque `u64`, oxfs-owned meaning"
@@ -3574,6 +3582,7 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
         match m.kind {
             MountKind::Bind => push(b" none rw,bind 0 0\n"),
             MountKind::Tmpfs => push(b" tmpfs rw 0 0\n"),
+            MountKind::Devfs => push(b" devfs rw 0 0\n"),
         }
     }
     n
@@ -3769,14 +3778,7 @@ const FD_KIND_SOCKET: i64 = 3;
 const FD_KIND_FIFO: i64 = 4;
 const FD_KIND_MQUEUE: i64 = 5;
 
-/// Terminal majors (TTY.md §2.6): `ttyv<n>` (4), `/dev/tty` and `/dev/console` (5), serial
-/// `tty0<n>` (6). Opening one opens the kernel's terminal, not an oxfs file.
-fn is_tty_major(major: u32) -> bool {
-    matches!(major, 4..=6)
-}
 
-/// `/dev/klog`'s major (minor 0): the kernel message buffer, served by the kernel.
-const KLOG_MAJOR: u32 = 7;
 
 /// A `/proc` path's first component: a pid, or `self`, the caller's own.
 fn parse_proc_pid(bytes: &[u8]) -> Option<u32> {
@@ -3787,9 +3789,15 @@ fn parse_proc_pid(bytes: &[u8]) -> Option<u32> {
     parse_pid(bytes)
 }
 
-/// `/dev`'s node for character device `rdev`: its inode and name.
+/// `/dev`'s node for character device `rdev`: its inode and name. Searches devfs, whose root a
+/// bare `dir_lookup` of `/dev` doesn't reach (it's a mount).
 fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
-    let dev = dir_lookup(ROOT_INODE, b"dev")?;
+    let dev = if devfs_root() != u32::MAX {
+        devfs_sync();
+        devfs_root()
+    } else {
+        dir_lookup(ROOT_INODE, b"dev")?
+    };
     let inode = read_inode(dev);
     let mut i = 0;
     while let Some(blk) = inode_block_at(&inode, i) {
@@ -3992,30 +4000,6 @@ fn any_path_of(inode: u32, out: &mut [u8; MAX_CWD_PATH]) -> Option<usize> {
         .map(|(dir, (name, name_len))| join_path(dir, &name[..name_len as usize], false, out))
 }
 
-/// `/dev/{random,urandom,null,zero}` -- a second special-cased path prefix alongside `/proc`
-/// (`proc_open`'s own doc comment), added specifically once BusyBox's own vendored TLS code
-/// (`networking/tls.c`'s `tls_get_random`) turned out to need real `/dev/urandom` (see
-/// CLAUDE.md's "Real networking" known-gaps entry on `wget` HTTPS) -- previously `open()` on any
-/// of these just fell through to `-ENOENT` like any other nonexistent path, since no real inode
-/// backed them and nothing intercepted the prefix.
-///
-/// Unlike `/proc`, there's no directory-listing/`stat` support here at all -- nothing in this
-/// port's roster calls `opendir("/dev")`/`stat("/dev/...")`, only plain `open()`+`read()`/
-/// `write()`+`close()`, so that's all this implements. A known, documented gap, the same
-/// incremental-rollout shape `/proc` itself went through.
-///
-/// `random` and `urandom` share one variant (`OpenFile::DevRandom`) -- this kernel has no real
-/// entropy-pool concept, so there's no meaningful difference between "blocks until enough entropy"
-/// and "doesn't" the way real Linux's two device nodes historically differed (and barely still do,
-/// post-5.6). See `sys/random.rs`'s own module doc comment for where the actual bytes come from.
-fn dev_open(suffix: &[u8]) -> i64 {
-    match suffix {
-        b"random" | b"urandom" => register_open_file(OpenFile::DevRandom),
-        b"null" => register_open_file(OpenFile::DevNull),
-        b"zero" => register_open_file(OpenFile::DevZero),
-        _ => -ENOENT,
-    }
-}
 
 /// Splits a raw `dev_t` register value into `(major, minor)` the same way musl's own
 /// `major()`/`minor()` macros do (`external/mit/musl/include/sys/sysmacros.h`) for any major <
@@ -4192,18 +4176,6 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return proc_open(&path[5..]);
     }
-    // Only the four magic device names are intercepted here -- anything else under `/dev/`
-    // (`/dev/shm/...` for POSIX named shared memory/semaphores -- see `format_fresh_filesystem`'s
-    // own `/dev/shm` seeding -- or a real `mknod`-created device node) falls through to ordinary
-    // real path resolution below instead of an unconditional `ENOENT`, now that `/dev` is seeded
-    // as a real directory rather than existing only as this prefix interception.
-    if path.starts_with(b"/dev/") {
-        let suffix = &path[5..];
-        if matches!(suffix, b"random" | b"urandom" | b"null" | b"zero") {
-            return dev_open(suffix);
-        }
-    }
-
     let cwd = match current_cwd() {
         Cwd::Real(inode) => inode,
         Cwd::Proc(kind) => {
@@ -4300,22 +4272,15 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
             match inode.kind {
                 InodeKind::Dir if want_write => -EISDIR,
                 InodeKind::Dir => open_dir_listing(resolved),
-                InodeKind::Device => match known_device(inode.rdev, inode.device_char) {
-                    Some(open_file) => register_open_file(open_file),
-                    None => {
-                        let (major, minor) = dev_major_minor(inode.rdev);
-                        if inode.device_char && is_tty_major(major) {
-                            // SAFETY: FFI call to a kernel-exported function, matching its
-                            // declared signature.
-                            unsafe { oxidebsd_tty_open(major as u64, minor as u64, flags) }
-                        } else if inode.device_char && major == KLOG_MAJOR && minor == 0 {
-                            // SAFETY: as above.
-                            unsafe { oxidebsd_klog_open(flags) }
-                        } else {
-                            -ENXIO
-                        }
-                    }
-                },
+                // Every device, in devfs or made by mknod elsewhere, opens through the kernel's
+                // registry by number (`DEVFS.md` §3.4).
+                InodeKind::Device if inode.device_char => {
+                    let (major, minor) = dev_major_minor(inode.rdev);
+                    // SAFETY: FFI call to a kernel-exported function, matching its declared
+                    // signature.
+                    unsafe { oxidebsd_dev_open(major as u64, minor as u64, flags) }
+                }
+                InodeKind::Device => -ENXIO,
                 InodeKind::Fifo => {
                     // The open can block until the other end shows up, and other processes'
                     // syscalls run meanwhile -- they must not see an `*at()` base override.
@@ -5351,6 +5316,10 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
     if let Err(e) = dir_remove(parent, leaf) {
         return errno_for(e);
     }
+    // A device node removed from devfs stays gone until reboot (`DEVFS.md` §4.4.1).
+    if target_inode.kind == InodeKind::Device && in_devfs(parent) {
+        devfs_hide(target_inode.rdev);
+    }
     target_inode.nlink = target_inode.nlink.saturating_sub(1);
     write_inode(target, target_inode);
     maybe_release(target);
@@ -5484,7 +5453,8 @@ fn make_node(path: &[u8], kind: InodeKind, perm: u16, dev: u32, device_char: boo
         return Err(-EEXIST);
     }
     let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
-    if kind == InodeKind::Device && uid != 0 {
+    // Devices come from drivers in devfs (`DEVFS.md` §4.4.3), and only root makes them elsewhere.
+    if kind == InodeKind::Device && (uid != 0 || in_devfs(parent)) {
         return Err(-EPERM);
     }
     if !check_access(&read_inode(parent), uid, gid, W_OK) {
@@ -5939,15 +5909,32 @@ extern "C" fn oxfs_symlink(
     }
 }
 
+/// `chmod(2)` of inode `inode_num`, for `oxfs_chmod` and `oxfs_fchmod`: only its owner or root may,
+/// `EPERM` otherwise. All twelve permission bits are kept, setuid, setgid and sticky included
+/// (`/tmp` and `/dev/shm` are sticky); as POSIX requires, setgid is cleared when the caller isn't
+/// root and isn't in the file's group. (This masked to `0o777` until 2026-09-30, so a `chmod 1777
+/// /tmp` silently took `/tmp`'s sticky bit away.)
+fn set_mode(inode_num: u32, mode: u64) -> i64 {
+    let mut inode = read_inode(inode_num);
+    let (caller_uid, caller_gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
+    if caller_uid != 0 && caller_uid != inode.uid as u64 {
+        return -EPERM;
+    }
+    let mut mode = (mode & 0o7777) as u16;
+    if caller_uid != 0 && caller_gid != inode.gid as u64 {
+        mode &= !0o2000;
+    }
+    inode.mode = mode;
+    write_inode(inode_num, inode);
+    0
+}
+
 /// Registered for `SYS_CHMOD`. `(path_ptr, path_len, mode)` -- real `chmod(2)`'s own `(path, mode)`
 /// shape plus the length-prefixed path convention every other path-taking syscall here uses (see
 /// `external/mit/musl/src/stat/chmod.c`'s own patch). Follows a final symlink component (real
 /// `chmod(2)` semantics -- there's no `lchmod` in POSIX at all, unlike `chown`/`lchown` below).
 /// Only the inode's own owner or root may change its permission bits (`EPERM` otherwise, matching
-/// real Unix); `mode` is masked to `0o777` -- setuid/setgid/sticky bits aren't modeled (see
-/// `Inode::mode`'s own doc comment), so a caller trying to set them just has those bits silently
-/// dropped rather than rejected, the same "don't pretend to model what isn't there" reasoning
-/// `write_stat`'s own fixed placeholders already follow.
+/// real Unix; see `set_mode`).
 extern "C" fn oxfs_chmod(path_ptr: u64, path_len: u64, mode: u64, _r10: u64) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
@@ -5959,14 +5946,7 @@ extern "C" fn oxfs_chmod(path_ptr: u64, path_len: u64, mode: u64, _r10: u64) -> 
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
-    let mut inode = read_inode(inode_num);
-    let caller_uid = unsafe { oxidebsd_current_uid() };
-    if caller_uid != 0 && caller_uid != inode.uid as u64 {
-        return -EPERM;
-    }
-    inode.mode = (mode & 0o777) as u16;
-    write_inode(inode_num, inode);
-    0
+    set_mode(inode_num, mode)
 }
 
 /// Registered for `SYS_CHOWN`. `(path_ptr, path_len, uid, gid)` -- real `chown(2)`'s own
@@ -6020,8 +6000,7 @@ extern "C" fn oxfs_chown(path_ptr: u64, path_len: u64, uid: u64, gid: u64) -> i6
 ///
 /// Uses `resolve_write_fd_inode`, not the narrower `inode_of_open_file` -- same reasoning as
 /// `oxfs_fstat`'s own doc comment: a still-open `OpenFile::Write` fd (pre-existing or freshly
-/// `O_CREAT`'d) needs to resolve to a real inode here too. Same owner-or-root permission check and
-/// `0o777` mode mask as `oxfs_chmod` above (see that function's own doc comment for why).
+/// `O_CREAT`'d) needs to resolve to a real inode here too. The change itself is `set_mode`'s.
 extern "C" fn oxfs_fchmod(fd: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let real_fd = unsafe { oxidebsd_real_fd_of(fd) };
@@ -6031,14 +6010,7 @@ extern "C" fn oxfs_fchmod(fd: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
     let Some(inode_num) = resolve_write_fd_inode(real_fd as u64) else {
         return -EBADF;
     };
-    let mut inode = read_inode(inode_num);
-    let caller_uid = unsafe { oxidebsd_current_uid() };
-    if caller_uid != 0 && caller_uid != inode.uid as u64 {
-        return -EPERM;
-    }
-    inode.mode = (mode & 0o777) as u16;
-    write_inode(inode_num, inode);
-    0
+    set_mode(inode_num, mode)
 }
 
 /// Registered for `SYS_FCHDIR` at real Linux's own `__NR_fchdir = 81` -- same "still completely
@@ -6684,6 +6656,234 @@ extern "C" fn oxfs_mount_tmpfs(target_ptr: u64, target_len: u64, _a2: u64, _a3: 
         source_len,
     };
     0
+}
+
+// --- devfs (`DEVFS.md` §4) ---------------------------------------------------------------------
+//
+// `/dev` is a tree in the tmpfs pool, mounted at boot and rebuilt every boot: a node for every
+// device in the kernel's registry (kept current by `devfs_sync`, run whenever a lookup enters
+// `/dev` and the registry has changed), and `/dev/shm`. Nodes removed with `rm` stay hidden until
+// reboot; `mknod` of a device is refused there; other files can be made and last until reboot.
+
+/// One registry entry, as `oxidebsd_dev_entry` writes it. Duplicated from `sys/fs/devfs.rs`.
+#[repr(C)]
+struct RawDevEntry {
+    name: [u8; 64],
+    name_len: u32,
+    major: u32,
+    minor: u32,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+/// devfs's root, `u32::MAX` until it's mounted.
+static mut DEVFS_ROOT: u32 = u32::MAX;
+/// The registry generation `/dev` was last brought up to.
+static mut DEVFS_GENERATION: u64 = 0;
+/// Device numbers whose nodes were removed (§4.4.1); `(u32::MAX, u32::MAX)` is an empty slot.
+const MAX_DEVFS_HIDDEN: usize = 64;
+static mut DEVFS_HIDDEN: [(u32, u32); MAX_DEVFS_HIDDEN] = [(u32::MAX, u32::MAX); MAX_DEVFS_HIDDEN];
+
+fn devfs_root() -> u32 {
+    // SAFETY: single-core, syscall-serialized, as every pool here.
+    unsafe { *core::ptr::addr_of!(DEVFS_ROOT) }
+}
+
+fn devfs_hidden() -> &'static mut [(u32, u32); MAX_DEVFS_HIDDEN] {
+    // SAFETY: as `devfs_root`.
+    unsafe { &mut *core::ptr::addr_of_mut!(DEVFS_HIDDEN) }
+}
+
+/// Whether directory `dir` is devfs's root or inside it.
+fn in_devfs(dir: u32) -> bool {
+    let root = devfs_root();
+    root != u32::MAX && is_same_or_descendant(dir, root)
+}
+
+/// Remembers that device `rdev`'s node was removed, so `devfs_sync` doesn't bring it back.
+fn devfs_hide(rdev: u32) {
+    let dev = dev_major_minor(rdev);
+    let hidden = devfs_hidden();
+    if !hidden.contains(&dev) {
+        if let Some(slot) = hidden.iter_mut().find(|s| **s == (u32::MAX, u32::MAX)) {
+            *slot = dev;
+        }
+    }
+}
+
+/// A directory named `name` in devfs directory `parent`, made if missing (from the tmpfs pool).
+fn devfs_dir(parent: u32, name: &[u8], mode: u16) -> Option<u32> {
+    if let Some(existing) = dir_lookup(parent, name) {
+        return Some(existing);
+    }
+    let dir = alloc_tmpfs_inode()?;
+    let mut inode = Inode::new(InodeKind::Dir);
+    inode.mode = mode;
+    write_inode(dir, inode);
+    dir_insert(dir, b".", dir).ok()?;
+    dir_insert(dir, b"..", parent).ok()?;
+    dir_insert(parent, name, dir).ok()?;
+    Some(dir)
+}
+
+/// Makes `/dev` match the registry (§4.3): a node for each registered device that isn't there
+/// (unless hidden), and none for devices no longer registered.
+fn devfs_sync() {
+    let root = devfs_root();
+    if root == u32::MAX {
+        return;
+    }
+    // SAFETY: FFI call to a kernel-exported function.
+    let generation = unsafe { oxidebsd_dev_generation() };
+    // SAFETY: as `devfs_root`.
+    if unsafe { *core::ptr::addr_of!(DEVFS_GENERATION) } == generation {
+        return;
+    }
+    unsafe { *core::ptr::addr_of_mut!(DEVFS_GENERATION) = generation };
+
+    let mut index = 0;
+    loop {
+        let mut e = RawDevEntry { name: [0; 64], name_len: 0, major: 0, minor: 0, uid: 0, gid: 0, mode: 0 };
+        // SAFETY: a buffer for one entry.
+        if unsafe { oxidebsd_dev_entry(index, &mut e) } != 0 {
+            break;
+        }
+        index += 1;
+        if devfs_hidden().contains(&(e.major, e.minor)) {
+            continue;
+        }
+        let name = &e.name[..e.name_len as usize];
+        let (dir_path, leaf) = match name.iter().rposition(|&b| b == b'/') {
+            Some(i) => (&name[..i], &name[i + 1..]),
+            None => (&name[..0], name),
+        };
+        let mut dir = root;
+        for component in dir_path.split(|&b| b == b'/').filter(|c| !c.is_empty()) {
+            match devfs_dir(dir, component, 0o755) {
+                Some(d) => dir = d,
+                None => break,
+            }
+        }
+        if dir_lookup(dir, leaf).is_some() {
+            continue;
+        }
+        let Some(node) = alloc_tmpfs_inode() else { break };
+        let mut inode = Inode::new(InodeKind::Device);
+        inode.mode = e.mode as u16;
+        inode.uid = e.uid;
+        inode.gid = e.gid;
+        inode.rdev = (e.major << 8) | e.minor;
+        inode.device_char = true;
+        write_inode(node, inode);
+        if dir_insert(dir, leaf, node).is_err() {
+            write_inode(node, Inode::FREE);
+        }
+    }
+    devfs_prune(root, 0);
+}
+
+/// Removes device nodes under `dir` whose device is no longer registered.
+fn devfs_prune(dir: u32, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    let mut n = 0;
+    while let Some((inode_num, name, name_len)) = dir_nth_used_record(dir, n) {
+        n += 1;
+        let name = &name[..name_len as usize];
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let inode = read_inode(inode_num);
+        match inode.kind {
+            InodeKind::Dir => devfs_prune(inode_num, depth + 1),
+            InodeKind::Device => {
+                let (major, minor) = dev_major_minor(inode.rdev);
+                if !device_registered(major, minor) && dir_remove(dir, name).is_ok() {
+                    let mut gone = inode;
+                    gone.nlink = 0;
+                    write_inode(inode_num, gone);
+                    maybe_release(inode_num);
+                    n -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn device_registered(major: u32, minor: u32) -> bool {
+    let mut index = 0;
+    loop {
+        let mut e = RawDevEntry { name: [0; 64], name_len: 0, major: 0, minor: 0, uid: 0, gid: 0, mode: 0 };
+        // SAFETY: a buffer for one entry.
+        if unsafe { oxidebsd_dev_entry(index, &mut e) } != 0 {
+            return false;
+        }
+        if (e.major, e.minor) == (major, minor) {
+            return true;
+        }
+        index += 1;
+    }
+}
+
+/// Mounts devfs on `/dev` (§4.1), making `/dev` on the disk first if it's missing.
+fn mount_devfs() -> bool {
+    let mountpoint = ensure_dir(ROOT_INODE, b"dev");
+    let Some(slot) = free_mount_slot() else { return false };
+    let Some(root) = alloc_tmpfs_inode() else { return false };
+    write_inode(root, Inode::new(InodeKind::Dir));
+    if dir_insert(root, b".", root).is_err() || dir_insert(root, b"..", ROOT_INODE).is_err() {
+        return false;
+    }
+    // POSIX shared memory and semaphores (musl's shm_open/sem_open), world-writable and sticky.
+    if devfs_dir(root, b"shm", 0o1777).is_none() {
+        return false;
+    }
+    let (path, path_len) = copy_mount_path(b"/dev");
+    let (source, source_len) = copy_mount_path(b"devfs");
+    mounts()[slot] = MountEntry {
+        used: true,
+        mountpoint_inode: mountpoint,
+        target_root_inode: root,
+        kind: MountKind::Devfs,
+        path,
+        path_len,
+        source,
+        source_len,
+    };
+    // SAFETY: as `devfs_root`.
+    unsafe { *core::ptr::addr_of_mut!(DEVFS_ROOT) = root };
+    devfs_sync();
+    true
+}
+
+/// The registry's open function for the devices oxfs implements itself.
+extern "C" fn oxfs_dev_open(major: u64, minor: u64, _flags: u64) -> i64 {
+    match known_device(((major as u32) << 8) | minor as u32, true) {
+        Some(open_file) => register_open_file(open_file),
+        None => -ENXIO,
+    }
+}
+
+/// Registers the devices oxfs implements (`DEVFS.md` §3.4-3.5): `null`, `zero`, `random`,
+/// `urandom`, and `fb0` when there is a framebuffer. Open to all, as on the BSDs.
+fn register_oxfs_devices() {
+    let fb = framebuffer_open_file().is_some();
+    let devices: [(&[u8], u64, u64, bool); 5] = [
+        (b"null", 1, 3, true),
+        (b"zero", 1, 5, true),
+        (b"random", 1, 8, true),
+        (b"urandom", 1, 9, true),
+        (b"fb0", 29, 0, fb),
+    ];
+    for (name, major, minor, present) in devices {
+        if present {
+            // SAFETY: FFI call to a kernel-exported function, with a live name buffer.
+            unsafe { oxidebsd_make_dev(name.as_ptr() as u64, name.len() as u64, major, minor, 0, 0o666, oxfs_dev_open) };
+        }
+    }
 }
 
 /// Registered for `SYS_UMOUNT2`. `(target_ptr, target_len, flags, _)` -- `flags` accepted but
@@ -7817,6 +8017,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
     let usr_tests_rc = ensure_dir(usr_tests, b"rc");
     ok &= seed_file(usr_tests_rc, b"run.sh", include_bytes!("../../../../regress/rc-syscall-smoke/run.sh"));
+    let usr_tests_devfs = ensure_dir(usr_tests, b"devfs");
+    ok &= seed_file(usr_tests_devfs, b"run.sh", include_bytes!("../../../../regress/devfs-syscall-smoke/run.sh"));
     let usr_tests_tz = ensure_dir(usr_tests, b"tz");
     ok &= seed_file(usr_tests_tz, b"run.sh", include_bytes!("../../../../regress/tz-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests_tz, b"tz-smoke", include_bytes!(env!("OXFS_TZ_SMOKE_ELF_PATH")));
@@ -8324,10 +8526,12 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"hostname", include_bytes!("../../../../etc/rc.d/hostname"));
     ok &= seed_file(rc_d, b"tmp", include_bytes!("../../../../etc/rc.d/tmp"));
     ok &= seed_file(rc_d, b"sysctl", include_bytes!("../../../../etc/rc.d/sysctl"));
+    ok &= seed_file(rc_d, b"devfs", include_bytes!("../../../../etc/rc.d/devfs"));
     ok &= seed_file(rc_d, b"newsyslog", include_bytes!("../../../../etc/rc.d/newsyslog"));
     ok &= seed_file(rc_d, b"syslogd", include_bytes!("../../../../etc/rc.d/syslogd"));
     ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
     // System logging (SYSLOG.md): routing, rotation, and their drop-in directories.
+    ok &= seed_file(etc, b"devfs.conf", include_bytes!("../../../../etc/devfs.conf"));
     ok &= seed_file(etc, b"syslog.conf", include_bytes!("../../../../etc/syslog.conf"));
     ensure_dir(etc, b"syslog.d");
     ok &= seed_file(etc, b"newsyslog.conf", include_bytes!("../../../../etc/newsyslog.conf"));
@@ -8412,57 +8616,8 @@ fn format_fresh_filesystem() -> bool {
         write_inode(tmp, inode);
     }
 
-    // /dev/shm -- POSIX named shared memory/semaphores. musl's own `shm_open()`/`sem_open()`
-    // (external/mit/musl/src/mman/shm_open.c, src/thread/sem_open.c) aren't separate syscalls at
-    // all -- both are pure userspace wrappers over a plain `open("/dev/shm/<name>", ...)` -- so
-    // this is real infra, not a stub: no new syscall needed, just a real directory for that
-    // `open()` to land in instead of the unconditional `/dev/` prefix interception's `ENOENT`
-    // (see `oxfs_open`'s own updated doc comment above). Distinct from the four magic
-    // `/dev/{random,urandom,null,zero}` paths, which stay intercepted before reaching here.
-    let dev = ensure_dir(root, b"dev");
-    let dev_shm = ensure_dir(dev, b"shm");
-    {
-        let mut inode = read_inode(dev_shm);
-        inode.mode = 0o1777;
-        write_inode(dev_shm, inode);
-    }
-
-    // /dev/fb0 -- a real character device node backing process::mm::do_mmap_fb (see
-    // known_device's own (29, 0) arm and sys/drivers/fbdev.rs's module doc comment, kernel tree).
-    // Major:minor (29, 0) matches real Linux's own standard fbdev numbering (cosmetic here -- no
-    // general device-driver framework backs the number choice, same precedent
-    // /dev/{null,zero,random,urandom}'s own real-Linux-matching numbers already set). Mode 0o666:
-    // any process may open/mmap the one real console framebuffer, matching this kernel's
-    // single-session design (no "who owns the display" permission concept exists at all).
-    {
-        let fb0 = alloc_inode().expect("oxfs: failed to allocate /dev/fb0 inode");
-        let mut inode = Inode::new(InodeKind::Device);
-        inode.mode = 0o666;
-        inode.rdev = (29u32 << 8) | 0;
-        inode.device_char = true;
-        write_inode(fb0, inode);
-        dir_insert(dev, b"fb0", fb0).expect("oxfs: failed to insert /dev/fb0 into /dev");
-    }
-
-    // The terminals (TTY.md §2.6), owned and moded as the BSDs' devfs creates them: the console
-    // terminal root's until login(1) takes it for a user, /dev/tty open to all (it only ever
-    // reaches the opener's own controlling terminal), /dev/console root's. Then /dev/klog, root's.
-    for (name, major, minor, gid, mode) in [
-        (&b"ttyv0"[..], 4u32, 0u32, TTY_GID, 0o600u16),
-        (b"tty", 5, 0, 0, 0o666),
-        (b"console", 5, 1, 0, 0o600),
-        // Not a terminal: the kernel message buffer (SYSLOG.md §4), for syslogd.
-        (b"klog", KLOG_MAJOR, 0, 0, 0o600),
-    ] {
-        let node = alloc_inode().expect("oxfs: failed to allocate a terminal node");
-        let mut inode = Inode::new(InodeKind::Device);
-        inode.mode = mode;
-        inode.gid = gid;
-        inode.rdev = (major << 8) | minor;
-        inode.device_char = true;
-        write_inode(node, inode);
-        dir_insert(dev, name, node).expect("oxfs: failed to insert a terminal node into /dev");
-    }
+    // /dev: only the mountpoint. Its contents are devfs's, made at every boot (`DEVFS.md` §4).
+    ensure_dir(root, b"dev");
 
     // The real, on-target musl runtime tree -- `/usr/include`/`/usr/lib` -- what Clang/LLVM's own
     // on-target `clang`/`ld.lld` links a user's C file against (`-DDEFAULT_SYSROOT=/usr`,
@@ -8526,9 +8681,11 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(man_man3, b"sysctlbyname.3", b"sysctl.3");
     ok &= seed_hardlink(man_man3, b"sysctlnametomib.3", b"sysctl.3");
     let man_man4 = ensure_dir(usr_share_man, b"man4");
+    ok &= seed_file(man_man4, b"devfs.4", include_bytes!("../../../../share/man/man4/devfs.4"));
     ok &= seed_file(man_man4, b"klog.4", include_bytes!("../../../../share/man/man4/klog.4"));
     ok &= seed_file(man_man4, b"unix.4", include_bytes!("../../../../share/man/man4/unix.4"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
+    ok &= seed_file(man_man5, b"devfs.conf.5", include_bytes!("../../../../share/man/man5/devfs.conf.5"));
     ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
     ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
     ok &= seed_file(man_man5, b"man.conf.5", include_bytes!("../../../../share/man/man5/man.conf.5"));
@@ -9595,6 +9752,8 @@ pub extern "C" fn module_init() -> i32 {
     if !init_pools() {
         return -1;
     }
+    // oxfs's own devices join the registry first: the format's self-check opens one.
+    register_oxfs_devices();
 
     let has_disk = block_device_present();
 
@@ -9622,6 +9781,10 @@ pub extern "C" fn module_init() -> i32 {
     set_persistence_ready(true);
     if mounted {
         sweep_unnamed_inodes();
+    }
+    // /dev (`DEVFS.md` §4.1): devfs over the disk's /dev, before any process runs.
+    if !mount_devfs() {
+        log("[oxfs] failed to mount devfs on /dev\n");
     }
 
     // Back to root, matching the state a booting kernel with no real process yet should leave

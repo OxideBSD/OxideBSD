@@ -90,7 +90,15 @@ fn with<R>(f: impl FnOnce(&mut MsgBuf) -> R) -> R {
 }
 
 /// Moves the early messages into a buffer of `kern.msgbufsize` bytes. Once, after the heap.
+/// `/dev/klog`'s device number (`DEVFS.md` §3.5).
+pub const KLOG_DEVICE: (u32, u32) = (7, 0);
+
+extern "C" fn dev_open(_major: u64, _minor: u64, flags: u64) -> i64 {
+    oxidebsd_klog_open(flags)
+}
+
 pub(crate) fn init() {
+    let _ = crate::fs::devfs::make_dev("klog", KLOG_DEVICE.0, KLOG_DEVICE.1, 0, 0, 0o600, dev_open);
     with(|m| {
         let (early, _) = m.read_from(0, EARLY_SIZE);
         m.heap = Some(vec![0; SIZE.load(Ordering::Relaxed)]);

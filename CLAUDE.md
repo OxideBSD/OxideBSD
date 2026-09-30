@@ -251,6 +251,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   persistence). Inodes are serialized by `pack_inode`/`unpack_inode`, never transmuted.
 - Mount never re-syncs seeded files; only a format does. `target/oxfs_disk.img` may be deleted to
   force a reformat (fast with virtio/DMA). Tests get a fresh `target/oxfs_test_disk.img`.
+- `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
+  (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
+  seeding a node; every device node opens through `oxidebsd_dev_open` by number.
 - New seeded files need a `seed_file` call in oxfs's `module_init`. Seed modes: `0755` only for
   ELFs and `#!` scripts.
 - The mount redirect only fires inside `resolve_path_impl`'s component loop.

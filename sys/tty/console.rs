@@ -53,6 +53,10 @@ pub fn init() {
     };
     let id: TtyId = super::register("ttyv0", 4, 0, B38400, ws, &CONSOLE);
     assert_eq!(id, TTYV0, "ttyv0 must be the first terminal");
+    // /dev/tty reaches only the opener's own controlling terminal, so it's open to all.
+    let (ctty, console) = (super::CTTY_DEVICE, super::CONSOLE_DEVICE);
+    let _ = crate::fs::devfs::make_dev("tty", ctty.0, ctty.1, 0, 0, 0o666, super::dev_open);
+    let _ = crate::fs::devfs::make_dev("console", console.0, console.1, 0, 0, 0o600, super::dev_open);
 }
 
 /// Set while a process that mapped `/dev/fb0` owns the keyboard (§7.2): keys then go only to
