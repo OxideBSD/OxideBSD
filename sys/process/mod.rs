@@ -1216,6 +1216,9 @@ pub(crate) fn wake_pollers(table: &mut BTreeMap<Pid, Box<Process>>) {
 pub enum SpawnError {
     Elf(elf::ElfError),
     OutOfMemory,
+    /// A dynamically linked program (`PT_INTERP`): the kernel's own spawn doesn't load a dynamic
+    /// linker, only `execve` does. pid 1 is linked static for this reason.
+    NeedsInterpreter,
 }
 
 pub use identity::*;

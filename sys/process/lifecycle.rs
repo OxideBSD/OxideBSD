@@ -112,7 +112,12 @@ fn load_image<'a>(
     let mut mapper = unsafe { address_space.mapper(phys_offset) };
 
     let elf = Elf::parse(elf_bytes).map_err(SpawnError::Elf)?;
-    let entry = with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, 0))
+    if !matches!(elf.interpreter(), Ok(None)) {
+        return Err(SpawnError::NeedsInterpreter);
+    }
+    // A static PIE (ET_DYN) gets a randomized bias, as in do_execve; a fixed-address ET_EXEC none.
+    let bias = if elf.is_dynamic() { crate::process::aslr::pick_bias() } else { 0 };
+    let entry = with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, bias))
         .map_err(SpawnError::Elf)?;
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
@@ -128,7 +133,7 @@ fn load_image<'a>(
         &mapped_pages,
         phys_offset,
         None,
-        0, // boot spawn always loads pid 1 at bias 0 -- see this file's own elf::load call above
+        bias,
     );
     Ok((elf, entry, initial_rsp))
 }
