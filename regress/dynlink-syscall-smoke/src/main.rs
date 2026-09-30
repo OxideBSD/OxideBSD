@@ -1,7 +1,7 @@
 //! Real-`SYSCALL` smoke test for PT_INTERP / dynamic-linking milestone 1 (see the plan this was
 //! built from, and once it exists, CLAUDE.md's own "Dynamic linking" section): confirms
 //! `/dynlink-smoke.elf`, a real dynamically-linked musl binary seeded by `sys/modules/oxfs`'s
-//! `format_fresh_filesystem` (see `build.rs`'s `build_musl_sysroot_shared`/`build_dynlink_smoke`),
+//! `format_fresh_filesystem` (see `build.rs`'s `build_musl_sysroot`/`build_dynlink_smoke`),
 //! actually runs to completion through a real `PT_INTERP` load -- not just that the kernel accepts
 //! the file.
 //!

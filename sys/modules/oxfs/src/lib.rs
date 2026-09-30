@@ -8779,19 +8779,9 @@ fn format_fresh_filesystem() -> bool {
     // `POSIX_TEST_EXTRA_FILES`'s own generation comment in build.rs), seeded straight off root.
     ok &= seed_tree(root, POSIX_TEST_EXTRA_FILES);
 
-    // Real PT_INTERP / dynamic-linking milestone 1 -- see `build.rs`'s `build_musl_sysroot_shared`
-    // for the separate, real `-fPIC`/`-shared` musl build this comes from (distinct from the
-    // static `libc.a` seeded into `/usr/lib` above). musl has no separate `ld.so` binary -- real
-    // upstream musl's own `make install` symlinks its interpreter path directly to `libc.so`
-    // itself (confirmed empirically before writing this) -- so `libc.so`'s real bytes live once,
-    // under `/usr/lib`, and `/lib/ld-musl-x86_64.so.1` is just a symlink to it. `/lib` is seeded as
-    // a real directory containing only that one symlink (not a whole-directory `/lib -> /usr/lib`
-    // alias) to match that same real upstream convention exactly, not invent a different one.
-    ok &= seed_file(
-        usr_lib,
-        b"libc.so",
-        include_bytes!(env!("OXFS_DYNLINK_LIBC_SO_PATH")),
-    );
+    // Dynamic linking. musl has no separate `ld.so`: its `make install` symlinks the interpreter
+    // path to `libc.so` (seeded into `/usr/lib` with `MUSL_LIB_FILES` above), so `/lib` is a real
+    // directory holding just that symlink, as on a musl system, not a `/lib -> /usr/lib` alias.
     let lib = ensure_dir(root, b"lib");
     ok &= seed_symlink(lib, b"ld-musl-x86_64.so.1", b"/usr/lib/libc.so");
 
