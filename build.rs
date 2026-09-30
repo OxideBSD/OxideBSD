@@ -5243,33 +5243,16 @@ const OXFS_BLOCK_SIZE: u64 = 4096;
 // double_indirect` in `sys/modules/oxfs/src/lib.rs`, see that field's own doc comment) -- see that
 // constant's own doc comment for why 1 GiB, not something bigger or smaller.
 const OXFS_NUM_BLOCKS: u64 = 262144;
-const OXFS_MAX_INODES: u64 = 8192;
-const OXFS_INODE_STRIDE: u64 = 128;
-/// 1 superblock + inode-table blocks (`OXFS_MAX_INODES` inodes at `OXFS_INODE_STRIDE` bytes each,
-/// rounded up to a whole block) + `OXFS_BITMAP_BLOCKS` block-used bitmap blocks -- computed from
-/// the same real inputs `sys/modules/oxfs/src/lib.rs`'s own `INODE_TABLE_BLOCKS`/`BITMAP_BLOCKS` are,
-/// not separately hand-picked numbers.
-/// **Found live as a real, hand-duplicated staleness bug, not just a theoretical risk this comment
-/// warns about**: this constant was left at its old value (a literal `18`, correct only for a
-/// prior `MAX_INODES = 512`) when that constant was bumped to `1024` (to fit TinyCC's own inode
-/// footprint, back when this project still had it) -- silently sizing every *newly created*
-/// `oxfs_disk.img` 16 blocks (64 KiB) too small
-/// for the real on-disk layout the kernel-side code actually uses, not just leaving a
-/// *pre-existing* stale file too small. Confirmed live against a real, already-formatted disk
-/// predating this fix: `mount_from_disk`'s own per-block data read failed partway through (the
-/// last ~16 real data blocks physically don't exist in a file sized this way), which is what first
-/// surfaced this bug — see `reset_real_pool_for_fresh_format`'s own doc comment in
-/// `sys/modules/oxfs/src/lib.rs` for the *other* real bug that same failure mode exposed.
+/// 1 superblock + `OXFS_BITMAP_BLOCKS` block-used bitmap blocks, computed from the same real inputs
+/// `sys/modules/oxfs/src/lib.rs`'s own `BITMAP_BLOCKS` is, not separately hand-picked numbers.
+/// (Inodes live in an inode file among the data blocks since oxfs `SUPERBLOCK_VERSION` 4.)
 ///
-/// **A second, real instance of this exact staleness class, found alongside the max-file-size
-/// redesign**: this hardcoded a flat `1` block for the bitmap, correct only while `OXFS_NUM_BLOCKS`
-/// fit within `OXFS_BLOCK_SIZE * 8` (32768) bits -- already silently wrong the moment
-/// `OXFS_NUM_BLOCKS` first passed that (65536, well before this pass's own further bump to
-/// 262144). Fixed the same way `sys/modules/oxfs/src/lib.rs`'s own `BITMAP_BLOCKS` was: a real,
-/// computed span, not a hand-picked one.
+/// **Found live as a real, hand-duplicated staleness bug, twice**: this was once a literal `18`,
+/// left behind when oxfs's then-fixed inode table grew, and once assumed a one-block bitmap after
+/// `OXFS_NUM_BLOCKS` had passed `OXFS_BLOCK_SIZE * 8`. Either sized every new `oxfs_disk.img` too
+/// small for the layout the kernel uses. Keep it derived.
 const OXFS_BITMAP_BLOCKS: u64 = (OXFS_NUM_BLOCKS * 8).div_ceil(OXFS_BLOCK_SIZE * 8);
-const OXFS_METADATA_BLOCKS: u64 =
-    1 + (OXFS_MAX_INODES * OXFS_INODE_STRIDE).div_ceil(OXFS_BLOCK_SIZE) + OXFS_BITMAP_BLOCKS;
+const OXFS_METADATA_BLOCKS: u64 = 1 + OXFS_BITMAP_BLOCKS;
 const OXFS_DISK_IMAGE_BYTES: u64 = (OXFS_METADATA_BLOCKS + OXFS_NUM_BLOCKS) * OXFS_BLOCK_SIZE;
 
 /// Records the size the data disk images must have (`target/oxfs_disk.bytes`) for

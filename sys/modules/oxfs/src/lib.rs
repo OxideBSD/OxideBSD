@@ -24,7 +24,8 @@
 //!
 //! **Storage**, all fixed-size `static mut` arrays (modules can't use `alloc`/`Vec`/`BTreeMap` --
 //! see CLAUDE.md's module-loading section): a flat pool of `NUM_BLOCKS` `BLOCK_SIZE`-byte blocks
-//! (`BLOCKS`/`BLOCK_USED`), and a flat table of `MAX_INODES` inodes (`INODES`). An inode addresses
+//! (`BLOCKS`/`BLOCK_USED`), and inodes packed into an inode file in that pool, which grows as
+//! needed (`InodeTable`; the disk pool and the tmpfs pool each have one). An inode addresses
 //! its data via `DIRECT_BLOCKS` direct block numbers, one single-indirect block, and one
 //! double-indirect block (see `Inode::double_indirect`'s own doc comment) -- `MAX_FILE_SIZE` (~4.1
 //! GiB) is a real architectural ceiling on any *one* file, distinct from the real pool's own total
@@ -552,23 +553,16 @@ const BLOCK_SIZE: usize = 4096;
 /// disk persistence hard enough to surface it. Fixed by spreading the bitmap across
 /// `BITMAP_BLOCKS` real blocks instead of a hardcoded one -- see that constant's own doc comment.
 const NUM_BLOCKS: usize = 262144;
-/// Raised from 64 alongside `NUM_BLOCKS` above, same reason -- ~300 applets plus root/`hello.txt`/
-/// `big.txt`/the self-check's own `/gdtest` fixtures need comfortably more than 64 inode slots.
-/// Raised again, 512 -> 1024, once TinyCC (this project's first on-target C compiler, since
-/// removed once Clang/LLVM superseded it) needed musl's entire real header tree seeded under
-/// `/usr/include` at runtime -- measured exactly against the real built `target/musl-sysroot`, not
-/// estimated: 217 header files (plus ~7 subdirectories) + ~9 `/usr/lib` crt/lib files + tcc's own
-/// `libtcc1.a` + 5 bundled headers + the `tcc` binary itself was ~250 new inodes, overflowing the
-/// ~180 that were free at 512.
-/// Raised again, 1024 -> 2048, alongside `NUM_BLOCKS` above -- the expanded POSIX pilot corpus
-/// adds several hundred new files plus one subdirectory per interface under `/posix-tests/bin/`.
-/// Raised again, 2048 -> 8192 (`NUM_BLOCKS` 16384 -> 65536 alongside it), once the pilot expanded
-/// from a 488-file curated dedup to the full ~1700-file Open POSIX Test Suite corpus (see
-/// `build.rs`'s `discover_posix_test_files`) -- both this constant and `build.rs`'s own mirrored
-/// `OXFS_MAX_INODES`/`OXFS_NUM_BLOCKS` must be bumped together, or `mount_from_disk`'s own
-/// layout-version check (see "Real disk persistence" in CLAUDE.md) forces a reformat instead of a
-/// mount against any disk image already written with the old layout.
-const MAX_INODES: usize = 8192;
+/// Inode numbers: the disk filesystem's are `0..TMPFS_INODE_BASE`, tmpfs mounts' are
+/// `TMPFS_INODE_BASE..TMPFS_INODE_LIMIT`. Neither pool has a fixed inode count: each keeps its
+/// inodes in an inode file (`InodeTable`) that grows a block at a time from its own block pool, so
+/// the practical limit is free space (a 1 GiB pool holds at most ~8.4 million 128-byte inodes).
+/// The disk pool gets nearly all of `u32`; tmpfs, scratch space, gets the top 2^24 numbers.
+/// (Until `SUPERBLOCK_VERSION` 4 the disk pool was a fixed table of 8192 inodes, raised by hand
+/// each time the seeded tree outgrew it.)
+const TMPFS_INODE_BASE: u32 = 0xFF00_0000;
+/// One past the last tmpfs inode number (`u32::MAX` itself is never handed out).
+const TMPFS_INODE_LIMIT: u32 = u32::MAX;
 const DIRECT_BLOCKS: usize = 12;
 const PTRS_PER_INDIRECT: usize = BLOCK_SIZE / 4;
 /// A double-indirect block's own fan-out: `PTRS_PER_INDIRECT` pointers to *index* blocks, each in
@@ -594,35 +588,31 @@ const NO_BLOCK: u32 = u32::MAX;
 const ROOT_INODE: u32 = 0;
 
 /// A second, purely in-memory pool reserved for tmpfs mounts (see `MountKind::Tmpfs`) -- 4 MiB,
-/// modest on purpose (scratch space, not a real persisted store). Block/inode numbers `>=
-/// NUM_BLOCKS`/`>= MAX_INODES` fall in this range; `BLOCKS`/`BLOCK_USED`/`INODES` below are simply
-/// extended to cover it, so every existing accessor (`read_block`/`write_block`/`read_inode`/
-/// `write_inode`/`dir_lookup`/`dir_insert`/`resolve_path_impl`/...) keeps working unmodified over
-/// the unified index space -- only `inode_ensure_block_at` (the sole allocation chokepoint, see its
-/// own doc comment) and the disk-persistence hooks (`persist_data_block_if_ready`/
-/// `persist_inode_block_if_ready`) need to know this range exists at all. Every whole-pool disk
-/// loop (format/mount-from-disk/the three persist hooks) already iterates `0..NUM_BLOCKS`/
-/// `0..MAX_INODES` by the named constant rather than `BLOCKS.len()`/`INODES.len()` -- verified
-/// before this was added -- so none of that code needs to change to stay correctly bounded to the
-/// real, persisted range only. Deliberately never reclaimed when a tmpfs mount is unmounted (its
+/// modest on purpose (scratch space, not a real persisted store). Block numbers `>= NUM_BLOCKS`
+/// and inode numbers `>= TMPFS_INODE_BASE` belong to it; `BLOCKS`/`BLOCK_USED` below are simply
+/// extended to cover it, and its inodes have their own `InodeTable`, so every accessor
+/// (`read_block`/`write_block`/`read_inode`/`write_inode`/`dir_lookup`/`dir_insert`/
+/// `resolve_path_impl`/...) works over the unified number space -- only the allocators
+/// (`inode_ensure_block_at`, `alloc_inode_in`) and the disk-persistence hooks need to know which
+/// pool a number is in. Every whole-pool disk loop iterates `0..NUM_BLOCKS`, so none of it touches
+/// this pool. Deliberately never reclaimed when a tmpfs mount is unmounted (its
 /// inodes/blocks stay marked used forever) -- matches this module's existing "no deallocation
 /// anywhere" stance (`unlink`/`rmdir` already only clear a directory record's `used` byte).
 const TMPFS_NUM_BLOCKS: usize = 1024;
-const TMPFS_MAX_INODES: usize = 128;
 
 // --- Real disk persistence (see src/ata.rs) --------------------------------------------------
 //
-// Physical disk block layout: block `0` is the superblock, `[INODE_TABLE_START,
-// INODE_TABLE_START + INODE_TABLE_BLOCKS)` is the packed inode table, `[BITMAP_START,
+// Physical disk block layout: block `0` is the superblock (which also holds the inode file's own
+// inode record, see `InodeTable`), `[BITMAP_START,
 // BITMAP_START + BITMAP_BLOCKS)` is the block-used bitmap, and real data starts at
 // `DATA_BLOCK_OFFSET` -- this module's own in-memory block number `i` maps to physical disk block
-// `DATA_BLOCK_OFFSET + i`. Sizing (as of `SUPERBLOCK_VERSION = 2`): `MAX_INODES` inodes at a fixed
-// 128-byte stride (real packed content is 106 bytes -- 1 tag + 8 size + 48 direct + 4 indirect + 4
+// `DATA_BLOCK_OFFSET + i`. Inodes are packed at a fixed
+// 128-byte stride, `INODES_PER_BLOCK` to a block of the inode file (real packed content is 106 bytes -- 1 tag + 8 size + 48 direct + 4 indirect + 4
 // double_indirect + 2 mode + 4 uid + 4 gid + 2 nlink + 4 rdev + 1 device_char + 8 mtime + 8 ctime +
 // 8 atime -- rounded up to a power-of-two stride that divides BLOCK_SIZE evenly, leaving headroom
 // for future fields); `BITMAP_BLOCKS` bitmap blocks, one bit per real block (`NUM_BLOCKS`, no
 // longer assumed to fit a single block -- see that constant's own doc comment for the real bug
-// this fixed). `INODE_TABLE_BLOCKS`/`BITMAP_BLOCKS`/`DATA_BLOCK_OFFSET` are all real, derived
+// this fixed). `BITMAP_BLOCKS`/`DATA_BLOCK_OFFSET` are both real, derived
 // consts, not hand-computed numbers -- see each one's own definition below.
 
 /// Marks a real, formatted oxfs disk. Absence/mismatch (an unformatted/all-zero disk, or one some
@@ -634,7 +624,7 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// doc comment), and the block-used bitmap's own on-disk span changed (`BITMAP_BLOCKS`, no longer
 /// hardcoded to one block). A disk formatted under version 1 has the wrong bytes at every offset
 /// this build now expects -- `mount_from_disk`'s own layout check (below) already treats any
-/// mismatch here exactly like a `NUM_BLOCKS`/`MAX_INODES` change: a clean, automatic reformat, not
+/// mismatch here exactly like a `NUM_BLOCKS` change: a clean, automatic reformat, not
 /// a crash or silent misread. Any content on an existing `target/oxfs_disk.img` besides the
 /// seeded-at-boot roster (BusyBox/musl/Clang/LLVM/POSIX corpus, all reseeded fresh on format) is
 /// lost.
@@ -642,9 +632,12 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// Bumped 2 -> 3 for `NAME_MAX` 40 -> 255 (see that constant's own doc comment) -- `DIR_RECORD_SIZE`
 /// changed (`6 + NAME_MAX`, 46 -> 261 bytes), so every existing directory record's on-disk stride
 /// is wrong under the old layout. Same automatic-reformat treatment as the 1 -> 2 bump.
-const SUPERBLOCK_VERSION: u32 = 3;
+///
+/// Bumped 3 -> 4 for the dynamic inode table: inodes live in an inode file in the block pool
+/// (`InodeTable`), whose own inode record is in the superblock; the fixed inode-table region after
+/// the superblock is gone, so the bitmap now starts at block 1.
+const SUPERBLOCK_VERSION: u32 = 4;
 
-const INODE_TABLE_START: u32 = 1;
 /// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
 /// `Inode` itself, since it isn't `#[repr(C)]` and `InodeKind` has no explicit discriminant, so its
 /// true in-memory layout isn't guaranteed across compiler versions/profiles. `pack_inode`/
@@ -652,14 +645,13 @@ const INODE_TABLE_START: u32 = 1;
 /// `dir_record_inode` already established for directory records.
 const INODE_STRIDE: usize = 128;
 const INODES_PER_BLOCK: usize = BLOCK_SIZE / INODE_STRIDE;
-const INODE_TABLE_BLOCKS: u32 = ((MAX_INODES * INODE_STRIDE + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32;
 /// How many physical blocks the block-used bitmap spans -- one bit per real (non-tmpfs) block,
 /// `BLOCK_SIZE * 8` bits per physical block. **Must be a real, computed span, not a hardcoded
 /// single block** -- see `NUM_BLOCKS`'s own doc comment for the real, previously-live bug this
 /// fixes (a `NUM_BLOCKS` past `BLOCK_SIZE * 8` = 32768 already silently exceeded a single block's
 /// worth of bits before this pass).
 const BITMAP_BLOCKS: u32 = ((NUM_BLOCKS + BLOCK_SIZE * 8 - 1) / (BLOCK_SIZE * 8)) as u32;
-const BITMAP_START: u32 = INODE_TABLE_START + INODE_TABLE_BLOCKS;
+const BITMAP_START: u32 = 1;
 const DATA_BLOCK_OFFSET: u32 = BITMAP_START + BITMAP_BLOCKS;
 
 /// Gates `write_block`/`write_inode`/`set_block_used`'s own write-through persistence (see those
@@ -716,12 +708,12 @@ const RECORDS_PER_BLOCK: usize = BLOCK_SIZE / DIR_RECORD_SIZE;
 const PROC_BUFFER: usize = 1024;
 /// Base for synthetic `d_ino` values `/proc`'s own `getdents` records report -- nothing
 /// dereferences these as real inodes (there's no real inode backing any `/proc` entry), they only
-/// need to be distinct and non-zero. Clear of `MAX_INODES`'s real range by a wide margin.
-const PROC_INODE_BASE: u64 = 0x7000_0000;
+/// need to be distinct and non-zero. Above every real inode number (those are `u32`).
+const PROC_INODE_BASE: u64 = 1 << 32;
 
 /// Sentinel tag marking `Process::cwd` (see `sys/process.rs`'s own doc comment -- a `u64`, fully
 /// opaque to the kernel) as a synthetic `/proc` location rather than a real inode number. Real
-/// inodes are bounded by `MAX_INODES` (~9 bits), so the top bit is always free.
+/// inode numbers are `u32`, so the top bit of the `u64` is always free.
 ///
 /// **Load-bearing detail**: `current_cwd()`/`set_current_cwd()` used to truncate this value to
 /// `u32` immediately (`oxidebsd_get_cwd() as u32`) before this pass -- entirely fine when `cwd`
@@ -967,7 +959,6 @@ impl Inode {
 /// values, so the optimizer can't treat any write as an unobservable dead store. All-zero initial
 /// values place these in `.bss` (not baked into the merged object's own size).
 const TOTAL_BLOCKS: usize = NUM_BLOCKS + TMPFS_NUM_BLOCKS;
-const TOTAL_INODES: usize = MAX_INODES + TMPFS_MAX_INODES;
 
 /// Real, kernel-allocated storage (`oxidebsd_module_alloc_zeroed`, set once by `init_pools` at the
 /// very top of `module_init`), *not* a `static mut [[u8; BLOCK_SIZE]; TOTAL_BLOCKS]` array baked
@@ -981,7 +972,58 @@ const TOTAL_INODES: usize = MAX_INODES + TMPFS_MAX_INODES;
 /// here goes through them, same discipline `WRITE_BUFFERS` below already establishes.
 static mut BLOCKS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
 static mut BLOCK_USED: [bool; TOTAL_BLOCKS] = [false; TOTAL_BLOCKS];
-static mut INODES: [Inode; TOTAL_INODES] = [Inode::FREE; TOTAL_INODES];
+
+/// One pool's inodes: an inode file whose data blocks, from that pool, hold packed inodes
+/// (`INODES_PER_BLOCK` per block, inode number `base + slot` at byte `slot * INODE_STRIDE`). The
+/// file's own inode record isn't numbered: the disk pool's is kept in the superblock, the tmpfs
+/// pool's only here. The table grows a block (32 inodes) at a time when no slot is free; freshly
+/// allocated blocks are zeroed, and a zeroed record decodes as `InodeKind::Free`.
+#[derive(Clone, Copy)]
+struct InodeTable {
+    file: Inode,
+    /// Slots in the file (`file.size / INODE_STRIDE`).
+    count: u32,
+    /// Slots holding `InodeKind::Free`, kept exact by `write_inode`.
+    free: u32,
+    /// Where `alloc_inode_from` starts looking.
+    hint: u32,
+}
+
+impl InodeTable {
+    const EMPTY: InodeTable = InodeTable { file: Inode::FREE, count: 0, free: 0, hint: 0 };
+}
+
+static mut DISK_INODES: InodeTable = InodeTable::EMPTY;
+static mut TMPFS_INODES: InodeTable = InodeTable::EMPTY;
+
+/// Whether `n` is a tmpfs mount's inode rather than the disk filesystem's.
+fn is_tmpfs_inode(n: u32) -> bool {
+    n >= TMPFS_INODE_BASE
+}
+
+fn inode_table(tmpfs: bool) -> &'static mut InodeTable {
+    // SAFETY: single-core, syscall-serialized access (as every pool here); callers never hold the
+    // reference across a call that takes it again.
+    unsafe {
+        if tmpfs {
+            &mut *core::ptr::addr_of_mut!(TMPFS_INODES)
+        } else {
+            &mut *core::ptr::addr_of_mut!(DISK_INODES)
+        }
+    }
+}
+
+/// The table `n` belongs to, and its slot there.
+fn table_slot(n: u32) -> (bool, u32) {
+    if is_tmpfs_inode(n) { (true, n - TMPFS_INODE_BASE) } else { (false, n) }
+}
+
+/// Every inode number either table holds, free or not.
+fn all_inode_numbers() -> impl Iterator<Item = u32> {
+    let disk = inode_table(false).count;
+    let tmpfs = inode_table(true).count;
+    (0..disk).chain(TMPFS_INODE_BASE..TMPFS_INODE_BASE + tmpfs)
+}
 static mut OPEN_FILES: [Option<(u64, OpenFile)>; MAX_OPEN_FILES] = [None; MAX_OPEN_FILES];
 
 /// Real per-open-file write-accumulation buffers, pooled separately from `OPEN_FILES` itself --
@@ -1087,6 +1129,13 @@ fn release_flocks_for(real_fd: u64) {
     }
 }
 
+/// Borrows block `n` in place, for reads that don't want `read_block`'s 4 KiB copy (index blocks,
+/// inode records). Must not be held across a `write_block` of the same block.
+fn block_ref(n: u32) -> &'static [u8; BLOCK_SIZE] {
+    // SAFETY: as `read_block`.
+    unsafe { &*BLOCKS_PTR.add(n as usize) }
+}
+
 fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
     // SAFETY: see BLOCKS_PTR's own doc comment -- single-core, syscall-serialized access only,
     // set once by `init_pools` before any real syscall is reachable. Copies the whole block out
@@ -1144,13 +1193,42 @@ fn set_block_used(n: u32, used: bool) {
     persist_bitmap_if_ready(n);
 }
 
-fn read_inode(n: u32) -> Inode {
-    unsafe { (*core::ptr::addr_of!(INODES))[n as usize] }
+/// Where inode `n`'s record is: its inode-file block and byte offset. `None` past the table.
+fn inode_location(n: u32) -> Option<(u32, usize)> {
+    let (tmpfs, slot) = table_slot(n);
+    let table = inode_table(tmpfs);
+    if slot >= table.count {
+        return None;
+    }
+    let block = inode_block_at(&table.file, slot as usize / INODES_PER_BLOCK)?;
+    Some((block, slot as usize % INODES_PER_BLOCK * INODE_STRIDE))
 }
 
+/// Inode `n`, or a free one if `n` is past its table.
+fn read_inode(n: u32) -> Inode {
+    match inode_location(n) {
+        Some((block, off)) => unpack_inode(&block_ref(block)[off..off + INODE_STRIDE]),
+        None => Inode::FREE,
+    }
+}
+
+/// Stores inode `n` (persisted with its block, like any data), keeping the table's free count.
+/// `n` must be in its table: numbers come from `alloc_inode_from`.
 fn write_inode(n: u32, inode: Inode) {
-    unsafe { (*core::ptr::addr_of_mut!(INODES))[n as usize] = inode };
-    persist_inode_block_if_ready(n);
+    let Some((block, off)) = inode_location(n) else {
+        return;
+    };
+    let was_free = block_ref(block)[off] == 0;
+    let mut data = read_block(block);
+    pack_inode(&inode, &mut data[off..off + INODE_STRIDE]);
+    write_block(block, &data);
+    let is_free = inode.kind == InodeKind::Free;
+    let table = inode_table(is_tmpfs_inode(n));
+    match (was_free, is_free) {
+        (true, false) => table.free -= 1,
+        (false, true) => table.free += 1,
+        _ => {}
+    }
 }
 
 /// Resume-scan cursor for `alloc_block` -- see that function's own doc comment for why a bare
@@ -1196,7 +1274,46 @@ fn alloc_indirect_block() -> Option<u32> {
 }
 
 fn alloc_inode() -> Option<u32> {
-    (0..MAX_INODES as u32).find(|&i| read_inode(i).kind == InodeKind::Free)
+    alloc_inode_from(false)
+}
+
+/// A free inode number from the disk (`tmpfs == false`) or tmpfs table, growing the table by a
+/// block when none is free. The caller writes the new inode.
+fn alloc_inode_from(tmpfs: bool) -> Option<u32> {
+    if inode_table(tmpfs).free == 0 {
+        grow_inode_table(tmpfs)?;
+    }
+    let base = if tmpfs { TMPFS_INODE_BASE } else { 0 };
+    let table = *inode_table(tmpfs);
+    let start = table.hint.min(table.count);
+    let slot = (start..table.count)
+        .chain(0..start)
+        .find(|&slot| read_inode(base + slot).kind == InodeKind::Free)?;
+    inode_table(tmpfs).hint = slot + 1;
+    Some(base + slot)
+}
+
+/// Adds a block of free inodes to a table (`None` when its pool is out of blocks or its number
+/// range is used up). The disk table's new shape goes to the superblock.
+fn grow_inode_table(tmpfs: bool) -> Option<()> {
+    let table = *inode_table(tmpfs);
+    let limit = if tmpfs { TMPFS_INODE_LIMIT - TMPFS_INODE_BASE } else { TMPFS_INODE_BASE };
+    if table.count as u64 + INODES_PER_BLOCK as u64 > limit as u64 {
+        return None;
+    }
+    let mut file = table.file;
+    // A fresh block from `alloc_block` is zeroed: `INODES_PER_BLOCK` free records.
+    ensure_block(&mut file, table.count as usize / INODES_PER_BLOCK, tmpfs)?;
+    let count = table.count + INODES_PER_BLOCK as u32;
+    file.size = count as u64 * INODE_STRIDE as u64;
+    let t = inode_table(tmpfs);
+    t.file = file;
+    t.count = count;
+    t.free += INODES_PER_BLOCK as u32;
+    if !tmpfs && persistence_ready() && block_device_present() {
+        write_superblock();
+    }
+    Some(())
 }
 
 /// `alloc_block`'s tmpfs-pool counterpart -- same linear scan, over the tail range reserved by
@@ -1224,7 +1341,7 @@ fn alloc_tmpfs_indirect_block() -> Option<u32> {
 /// directly by the tmpfs-mount-creation path (`oxfs_mount_tmpfs`, which has no parent directory to
 /// check -- it's creating the mount's own root) and by `alloc_inode_in` below for everything else.
 fn alloc_tmpfs_inode() -> Option<u32> {
-    (MAX_INODES as u32..TOTAL_INODES as u32).find(|&i| read_inode(i).kind == InodeKind::Free)
+    alloc_inode_from(true)
 }
 
 /// Picks `alloc_inode`/`alloc_tmpfs_inode` based on which pool `parent` (the directory the new
@@ -1236,7 +1353,7 @@ fn alloc_tmpfs_inode() -> Option<u32> {
 /// `O_CREAT` case specifically (a file created inside a tmpfs mount reported the real filesystem's
 /// `st_dev` instead of the tmpfs one).
 fn alloc_inode_in(parent: u32) -> Option<u32> {
-    if parent >= MAX_INODES as u32 {
+    if is_tmpfs_inode(parent) {
         alloc_tmpfs_inode()
     } else {
         alloc_inode()
@@ -1248,7 +1365,7 @@ fn alloc_inode_in(parent: u32) -> Option<u32> {
 /// indirection tier (a single-indirect block's own slots, and both levels of a double-indirect
 /// block's own two-level slot chain), factored out once there were three call sites instead of one.
 fn read_index_ptr(ib_num: u32, slot: usize) -> u32 {
-    let ib = read_block(ib_num);
+    let ib = block_ref(ib_num);
     let off = slot * 4;
     u32::from_le_bytes([ib[off], ib[off + 1], ib[off + 2], ib[off + 3]])
 }
@@ -1297,9 +1414,16 @@ fn inode_block_at(inode: &Inode, index: usize) -> Option<u32> {
 /// sufficient to make a tmpfs file/directory's own growth land in the tmpfs pool, with no other
 /// call site needing to change.
 fn inode_ensure_block_at(inode_num: u32, index: usize) -> Option<u32> {
-    let tmpfs = inode_num >= MAX_INODES as u32;
     let mut inode = read_inode(inode_num);
-    let result = if index < DIRECT_BLOCKS {
+    let result = ensure_block(&mut inode, index, is_tmpfs_inode(inode_num));
+    write_inode(inode_num, inode);
+    result
+}
+
+/// `inode_ensure_block_at` on an inode record held by the caller (the inode files' own records
+/// aren't numbered), allocating from the tmpfs pool if `tmpfs`.
+fn ensure_block(inode: &mut Inode, index: usize, tmpfs: bool) -> Option<u32> {
+    if index < DIRECT_BLOCKS {
         if inode.direct[index] == NO_BLOCK {
             inode.direct[index] = if tmpfs {
                 alloc_tmpfs_block()?
@@ -1351,9 +1475,7 @@ fn inode_ensure_block_at(inode_num: u32, index: usize) -> Option<u32> {
             write_block(inode.double_indirect, &outer);
         }
         ensure_index_slot(inner_block, inner_slot, tmpfs)
-    };
-    write_inode(inode_num, inode);
-    result
+    }
 }
 
 /// Shared by `inode_ensure_block_at`'s single-indirect branch and its double-indirect branch's own
@@ -1590,7 +1712,7 @@ const _: () = assert!(core::mem::size_of::<MuslStat>() == 144);
 /// fields (see `Inode`'s own doc comment) -- `st_atime`/`st_mtime`/`st_ctime` are real too (see
 /// `Inode::atime`/`Inode::mtime`'s own doc comments), whole-second precision only (`*_nsec` fields
 /// stay `0`). `st_dev` is `1` for the one real, persisted
-/// filesystem and `2` for anything in the tmpfs pool (`inode_num >= MAX_INODES`, see
+/// filesystem and `2` for anything in the tmpfs pool (`is_tmpfs_inode`, see
 /// `TMPFS_NUM_BLOCKS`'s own doc comment) -- derivable from the inode number alone, and just enough
 /// for `mountpoint`'s real `st_dev(path) != st_dev(parent)` check to detect a tmpfs mount. A bind
 /// mount deliberately keeps `st_dev == 1` (same underlying superblock, matching real Linux's own
@@ -1624,7 +1746,7 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
     };
     let mode = type_bits | inode.mode as u32;
     let size = inode.size as i64;
-    let dev = if inode_num >= MAX_INODES as u32 { 2 } else { 1 };
+    let dev = if is_tmpfs_inode(inode_num) { 2 } else { 1 };
     let rdev = if inode.kind == InodeKind::Device {
         inode.rdev as u64
     } else {
@@ -3635,7 +3757,7 @@ fn join_path(dir: u32, name: &[u8], deleted: bool, out: &mut [u8; MAX_CWD_PATH])
 /// Some path of `inode`, by searching every directory for an entry naming it. `None` if nothing
 /// does (it was unlinked).
 fn any_path_of(inode: u32, out: &mut [u8; MAX_CWD_PATH]) -> Option<usize> {
-    (0..TOTAL_INODES as u32)
+    all_inode_numbers()
         .filter(|&d| read_inode(d).kind == InodeKind::Dir)
         .find_map(|d| find_name_of_inode_in_dir(d, inode).map(|name| (d, name)))
         .map(|(dir, (name, name_len))| join_path(dir, &name[..name_len as usize], false, out))
@@ -4691,24 +4813,21 @@ const OXFS_STATFS_MAGIC: u64 = 0x4f584653;
 /// equal to `f_bfree` -- this filesystem has no reserved-for-root-only block reservation to make
 /// the two diverge, unlike a real ext-family filesystem's own `statfs()`.
 fn write_statfs(is_tmpfs: bool, buf_ptr: u64) -> i64 {
-    let (blocks_lo, blocks_hi, inodes_lo, inodes_hi) = if is_tmpfs {
-        (NUM_BLOCKS, TOTAL_BLOCKS, MAX_INODES, TOTAL_INODES)
-    } else {
-        (0, NUM_BLOCKS, 0, MAX_INODES)
-    };
+    let (blocks_lo, blocks_hi) = if is_tmpfs { (NUM_BLOCKS, TOTAL_BLOCKS) } else { (0, NUM_BLOCKS) };
     let used = unsafe { &*core::ptr::addr_of!(BLOCK_USED) };
     let free_blocks = (blocks_lo..blocks_hi).filter(|&i| !used[i]).count() as u64;
-    let inodes = unsafe { &*core::ptr::addr_of!(INODES) };
-    let free_inodes = (inodes_lo..inodes_hi)
-        .filter(|&i| inodes[i].kind == InodeKind::Free)
-        .count() as u64;
+    // The table grows into free blocks, so each free block is `INODES_PER_BLOCK` inodes to come
+    // (as ZFS reports it): the count is an estimate that shrinks as data fills the pool.
+    let table = inode_table(is_tmpfs);
+    let free_inodes = table.free as u64 + free_blocks * INODES_PER_BLOCK as u64;
+    let used_inodes = (table.count - table.free) as u64;
     let statfs = MuslStatfs {
         f_type: OXFS_STATFS_MAGIC,
         f_bsize: BLOCK_SIZE as u64,
         f_blocks: (blocks_hi - blocks_lo) as u64,
         f_bfree: free_blocks,
         f_bavail: free_blocks,
-        f_files: (inodes_hi - inodes_lo) as u64,
+        f_files: used_inodes + free_inodes,
         f_ffree: free_inodes,
         f_fsid: [0, 0],
         f_namelen: NAME_MAX as u64,
@@ -4740,7 +4859,7 @@ extern "C" fn oxfs_statfs(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64)
         }
     };
     match resolve_path(cwd, path) {
-        Ok(inode_num) => write_statfs(inode_num >= MAX_INODES as u32, buf_ptr),
+        Ok(inode_num) => write_statfs(is_tmpfs_inode(inode_num), buf_ptr),
         Err(e) => errno_for(e),
     }
 }
@@ -4753,7 +4872,7 @@ extern "C" fn oxfs_fstatfs(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
         return -EBADF;
     }
     match inode_of_open_file(real_fd as u64) {
-        Some(inode_num) => write_statfs(inode_num >= MAX_INODES as u32, buf_ptr),
+        Some(inode_num) => write_statfs(is_tmpfs_inode(inode_num), buf_ptr),
         None => -EBADF,
     }
 }
@@ -5060,8 +5179,8 @@ fn link_impl(
     if dir_lookup(new_parent, new_leaf).is_some() {
         return -EEXIST;
     }
-    let existing_pool_tmpfs = existing_inode >= MAX_INODES as u32;
-    let new_pool_tmpfs = new_parent >= MAX_INODES as u32;
+    let existing_pool_tmpfs = is_tmpfs_inode(existing_inode);
+    let new_pool_tmpfs = is_tmpfs_inode(new_parent);
     if existing_pool_tmpfs != new_pool_tmpfs {
         return -EXDEV;
     }
@@ -5366,7 +5485,7 @@ fn rename_open_files(old_parent: u32, old_leaf: &[u8], new_parent: u32, new_leaf
 /// Is `dir` the directory `ancestor` itself, or somewhere beneath it? Walks `..` up to the root.
 fn is_same_or_descendant(mut dir: u32, ancestor: u32) -> bool {
     // Bounded: a corrupted `..` chain must not hang a syscall.
-    for _ in 0..MAX_INODES {
+    for _ in 0..(1u32 << 16) {
         if dir == ancestor {
             return true;
         }
@@ -6548,7 +6667,7 @@ fn proc_dir_nth_entry(kind: ProcDirKind, n: usize) -> Option<(u64, [u8; NAME_MAX
                 let mut name = [0u8; NAME_MAX];
                 name[..name_bytes.len()].copy_from_slice(name_bytes);
                 // Distinct, cosmetic-only d_ino (see PROC_INODE_BASE's own doc comment) -- clear
-                // of both MAX_INODES's real range and every pid-derived d_ino below it.
+                // of every real inode number and every pid-derived d_ino.
                 return Some((
                     PROC_INODE_BASE - 1 - n as u64,
                     name,
@@ -6898,40 +7017,9 @@ fn persist_data_block_if_ready(n: u32, data: &[u8; BLOCK_SIZE]) {
     }
 }
 
-/// Write-through hook for `write_inode` -- repacks the *entire* physical inode-table block `n`
-/// belongs to from the in-memory `INODES` array (which already holds the correct value for every
-/// inode in that block, `n` included, by the time this runs) and writes it whole. No
-/// read-before-write needed: memory is always the complete source of truth here, unlike a real
-/// on-disk filesystem recovering from a crash mid-write.
-fn persist_inode_block_if_ready(n: u32) {
-    // Tmpfs-pool inodes are never persisted, same reasoning as persist_data_block_if_ready above
-    // -- without this, `block_idx` below would be computed from a bogus, out-of-range `n` and
-    // corrupt some unrelated physical inode-table block.
-    if n >= MAX_INODES as u32 || !persistence_ready() || !block_device_present() {
-        return;
-    }
-    let block_idx = n as usize / INODES_PER_BLOCK;
-    let mut block = [0u8; BLOCK_SIZE];
-    for slot in 0..INODES_PER_BLOCK {
-        let ino = block_idx * INODES_PER_BLOCK + slot;
-        if ino >= MAX_INODES {
-            break;
-        }
-        let inode = read_inode(ino as u32);
-        pack_inode(
-            &inode,
-            &mut block[slot * INODE_STRIDE..(slot + 1) * INODE_STRIDE],
-        );
-    }
-    let phys = INODE_TABLE_START as u64 + block_idx as u64;
-    unsafe {
-        oxidebsd_block_write(phys, block.as_ptr() as u64);
-    }
-}
-
 /// Write-through hook for `set_block_used` -- repacks and writes only the *one* physical bitmap
 /// block covering `n`, from the in-memory `BLOCK_USED` array, same "memory is the complete source
-/// of truth, no read-modify-write needed" reasoning as `persist_inode_block_if_ready`. **Used to
+/// of truth, no read-modify-write needed" reasoning as `persist_data_block_if_ready`. **Used to
 /// repack and write the *entire* multi-block bitmap on every single call** -- harmless at the old,
 /// much smaller `NUM_BLOCKS`, but with the pool now spanning `BITMAP_BLOCKS` real physical blocks
 /// (see that constant's own doc comment), rewriting every one of them on every single block
@@ -6939,7 +7027,7 @@ fn persist_inode_block_if_ready(n: u32) {
 /// emulation sector transfers (see CLAUDE.md's own "Real disk persistence" gotcha on this exact
 /// cost) for exactly one call site: the file's own already-correct data-block writes, which each
 /// already write independently via `persist_data_block_if_ready`. Scoped to one block the same way
-/// that function (and `persist_inode_block_if_ready`) already are.
+/// that function already is.
 fn persist_bitmap_if_ready(n: u32) {
     if n >= NUM_BLOCKS as u32 || !persistence_ready() || !block_device_present() {
         return;
@@ -6960,20 +7048,25 @@ fn persist_bitmap_if_ready(n: u32) {
     }
 }
 
+/// Where the superblock keeps the disk inode file's own inode record.
+const SB_INODE_FILE: usize = 128;
+
 fn write_superblock() {
     let mut block = [0u8; BLOCK_SIZE];
     block[0..4].copy_from_slice(&SUPERBLOCK_MAGIC);
     block[4..8].copy_from_slice(&SUPERBLOCK_VERSION.to_le_bytes());
     block[8..12].copy_from_slice(&(NUM_BLOCKS as u32).to_le_bytes());
-    block[12..16].copy_from_slice(&(MAX_INODES as u32).to_le_bytes());
+    let table = inode_table(false);
+    block[12..16].copy_from_slice(&table.count.to_le_bytes());
     block[16..20].copy_from_slice(&ROOT_INODE.to_le_bytes());
+    pack_inode(&table.file, &mut block[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
     unsafe {
         oxidebsd_block_write(0, block.as_ptr() as u64);
     }
 }
 
 /// Resets the *real* (non-tmpfs) block-used bitmap and inode table back to a pristine, all-free
-/// state -- `0..NUM_BLOCKS`/`0..MAX_INODES` by the named constants, never touching the separate
+/// state -- `0..NUM_BLOCKS` and an empty disk `InodeTable`, never touching the separate
 /// tmpfs pool above them (which `mount_from_disk` never populates in the first place, and which
 /// `module_init` never touches at this stage either). Must run before `format_fresh_filesystem` on
 /// *any* path that might have already partially populated this state -- concretely, a failed
@@ -6983,9 +7076,8 @@ fn write_superblock() {
 /// (both, below) run to completion *before* its own subsequent per-block data-read loop, which is
 /// where a real failure (`oxidebsd_block_read` returning nonzero partway through) actually gets
 /// detected and turned into a `return false`. A stale disk image predating a real layout change --
-/// concretely, the very case this fix was found from: `MAX_INODES` doubling (512 -> 1024, for
-/// TinyCC's own runtime tree -- see `MAX_INODES`'s own doc comment) shifts
-/// `INODE_TABLE_BLOCKS`/`DATA_BLOCK_OFFSET` forward, so an
+/// concretely, the very case this fix was found from: the then-fixed inode table doubling (512 ->
+/// 1024, for TinyCC's own runtime tree) shifted `DATA_BLOCK_OFFSET` forward, so an
 /// already-existing disk image written under the old, smaller layout has real, physically
 /// different bytes at every "data block" location the new layout expects -- mounted cleanly enough
 /// to load a bitmap marking most of the *old* install's blocks used (a fully-packed ~300-applet
@@ -7001,9 +7093,7 @@ fn reset_real_pool_for_fresh_format() {
     for i in 0..NUM_BLOCKS as u32 {
         set_block_used(i, false);
     }
-    for i in 0..MAX_INODES as u32 {
-        write_inode(i, Inode::FREE);
-    }
+    *inode_table(false) = InodeTable::EMPTY;
     // A pristine, all-free state means `alloc_block`'s own resume cursor (see `NEXT_FREE_BLOCK`'s
     // own doc comment) has nothing behind it to skip past either.
     unsafe { *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK) = 0 };
@@ -7030,8 +7120,8 @@ fn mount_from_disk() -> bool {
     }
 
     // Layout check, not just a magic check -- a disk formatted under a previous `NUM_BLOCKS`/
-    // `MAX_INODES`/`SUPERBLOCK_VERSION` has the right magic but real, physically different bytes
-    // at every block-offset this build's own `INODE_TABLE_START`/`BITMAP_START`/
+    // `SUPERBLOCK_VERSION` has the right magic but real, physically different bytes
+    // at every block-offset this build's own `BITMAP_START`/
     // `DATA_BLOCK_OFFSET` expect (all derived from these same constants -- see this file's own
     // "Real disk persistence" section). Before this check, a stale disk merely *usually* failed
     // loudly partway through the loops below (see `reset_real_pool_for_fresh_format`'s own doc
@@ -7040,11 +7130,7 @@ fn mount_from_disk() -> bool {
     // silently misinterpret stale bytes as this build's own inode table/bitmap/data.
     let stored_version = u32::from_le_bytes(sb[4..8].try_into().unwrap());
     let stored_num_blocks = u32::from_le_bytes(sb[8..12].try_into().unwrap());
-    let stored_max_inodes = u32::from_le_bytes(sb[12..16].try_into().unwrap());
-    if stored_version != SUPERBLOCK_VERSION
-        || stored_num_blocks as usize != NUM_BLOCKS
-        || stored_max_inodes as usize != MAX_INODES
-    {
+    if stored_version != SUPERBLOCK_VERSION || stored_num_blocks as usize != NUM_BLOCKS {
         log("[oxfs] mount: on-disk layout doesn't match this build -- falling back to format\n");
         return false;
     }
@@ -7069,22 +7155,11 @@ fn mount_from_disk() -> bool {
         }
     }
 
-    for block_idx in 0..INODE_TABLE_BLOCKS as usize {
-        let mut block = [0u8; BLOCK_SIZE];
-        let phys = INODE_TABLE_START as u64 + block_idx as u64;
-        if unsafe { oxidebsd_block_read(phys, block.as_mut_ptr() as u64) } != 0 {
-            log("[oxfs] mount: failed to read an inode table block -- falling back to format\n");
-            return false;
-        }
-        for slot in 0..INODES_PER_BLOCK {
-            let ino = block_idx * INODES_PER_BLOCK + slot;
-            if ino >= MAX_INODES {
-                break;
-            }
-            let off = slot * INODE_STRIDE;
-            write_inode(ino as u32, unpack_inode(&block[off..off + INODE_STRIDE]));
-        }
-    }
+    // The disk inode file: its record is in the superblock, its blocks are ordinary data
+    // blocks, loaded below with the rest.
+    let count = u32::from_le_bytes(sb[12..16].try_into().unwrap());
+    let file = unpack_inode(&sb[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
+    *inode_table(false) = InodeTable { file, count, free: 0, hint: 0 };
 
     // Real, multi-block data read: one `oxidebsd_block_read_batch` call per *contiguous* run of
     // used blocks, not one `oxidebsd_block_read` per individual block -- see that function's own
@@ -7123,16 +7198,22 @@ fn mount_from_disk() -> bool {
         buf: &mut msg_buf,
         len: 0,
     };
+    // The free count isn't stored: count it once.
+    let free = (0..count).filter(|&n| read_inode(n).kind == InodeKind::Free).count() as u32;
+    inode_table(false).free = free;
+
     msg.push_bytes(b"[oxfs] mounted existing filesystem from disk (");
     msg.push_decimal(loaded);
-    msg.push_bytes(b" data blocks loaded)\n");
+    msg.push_bytes(b" data blocks loaded, ");
+    msg.push_decimal(count - free);
+    msg.push_bytes(b" inodes in use)\n");
     let len = msg.len;
     log_bytes(&msg_buf[..len]);
     true
 }
 
-/// Performs the one-time bulk write a freshly formatted filesystem needs: the full bitmap, the
-/// full inode table, every block the bitmap marks used, and last the superblock. Called once,
+/// Performs the one-time bulk write a freshly formatted filesystem needs: the full bitmap, every
+/// block the bitmap marks used (the inode file's among them), and last the superblock. Called once,
 /// right after `format_fresh_filesystem` completes, while `PERSISTENCE_READY` is still `false`
 /// (see that flag's own doc comment for why the format pass itself doesn't write through
 /// block-by-block) -- so every subsequent boot mounts this disk instead of reformatting it.
@@ -7165,25 +7246,6 @@ fn flush_all_to_disk() {
         let phys = BITMAP_START as u64 + bitmap_block_idx as u64;
         unsafe {
             oxidebsd_block_write(phys, bitmap_block.as_ptr() as u64);
-        }
-    }
-
-    for block_idx in 0..INODE_TABLE_BLOCKS as usize {
-        let mut block = [0u8; BLOCK_SIZE];
-        for slot in 0..INODES_PER_BLOCK {
-            let ino = block_idx * INODES_PER_BLOCK + slot;
-            if ino >= MAX_INODES {
-                break;
-            }
-            let inode = read_inode(ino as u32);
-            pack_inode(
-                &inode,
-                &mut block[slot * INODE_STRIDE..(slot + 1) * INODE_STRIDE],
-            );
-        }
-        let phys = INODE_TABLE_START as u64 + block_idx as u64;
-        unsafe {
-            oxidebsd_block_write(phys, block.as_ptr() as u64);
         }
     }
 
@@ -7227,7 +7289,10 @@ fn flush_all_to_disk() {
     };
     msg.push_bytes(b"[oxfs] formatted fresh filesystem and flushed to disk (");
     msg.push_decimal(flushed);
-    msg.push_bytes(b" data blocks)\n");
+    msg.push_bytes(b" data blocks, ");
+    let table = inode_table(false);
+    msg.push_decimal(table.count - table.free);
+    msg.push_bytes(b" inodes)\n");
     let len = msg.len;
     log_bytes(&msg_buf[..len]);
 }
