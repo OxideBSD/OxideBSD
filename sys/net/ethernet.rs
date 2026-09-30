@@ -33,7 +33,7 @@ pub fn handle_frame(frame: &[u8]) {
 
     match ethertype {
         ETHERTYPE_ARP => arp::handle_packet(payload),
-        ETHERTYPE_IPV4 => ipv4::handle_packet(payload),
+        ETHERTYPE_IPV4 => ipv4::handle_packet(payload, super::ifnet::Interface::Ethernet),
         _ => {}
     }
 }

@@ -1,0 +1,4 @@
+# Host names, looked up before DNS (hosts(5)).
+#
+# The loopback interface, lo0, and this host's own names.
+127.0.0.1		localhost localhost.my.domain

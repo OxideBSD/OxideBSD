@@ -37,7 +37,7 @@ OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/R
   a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout follows `OxideBSD-doc/HIER.md`.
 
 **Known deliberate gaps**: no pointer validation in `sys_read`/`sys_write`, no module unload, no
-kernel-mode preemption, no COW fork, no general VFS, no IPv6, one default-gateway route, no SMP,
+kernel-mode preemption, no COW fork, no general VFS, no IPv6, static interfaces (no ifconfig/route), no SMP,
 no IOAPIC/MSI. Architecture decisions for unbuilt subsystems haven't been made: discuss with the
 user before large structural commitments.
 
@@ -278,7 +278,7 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   hush can't parse `>&$var`: run autoconf `configure` under `/bin/ash`.
 - **std target** (`external/mit/rust` + libc fork): reuses `sys::pal::unix`. A mysterious
   `ENOTTY`/`ENOSYS` from a std program is usually a hardcoded `target_os` allowlist in std missing
-  `oxidebsd` (`ioctl` only handles tty requests on tty fds). No loopback interface exists.
+  `oxidebsd` (`ioctl` only handles tty requests on tty fds).
 - **Rust crates using OpenSSL** (`openssl`/`openssl-sys`, unpatched): build with `OPENSSL_DIR` =
   `target/openssl/root/usr` and `CC_x86_64_unknown_oxidebsd` = musl-gcc (`openssl-rs-smoke`).
 - **PIE binaries** (`lib/oxlibc`, `bin/*`, `build_pie_crate_at`) must have zero relocations
@@ -296,6 +296,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 
 - BSD layout; spec `OxideBSD-doc/UNIX.md`. Protocols never block: they return `EAGAIN` and the
   socket layer waits via `net::wait_for_change`.
+- Interfaces `lo0` (127.0.0.1/8) and `rl0` (10.0.2.15/24) are static (`sys/net/ifnet.rs`);
+  `ifnet::route` picks interface, next hop and source. Loopback output is queued (`if_loop`) and
+  drained by `net::poll`, never delivered inside the send (protocol locks would re-enter).
 - QEMU needs `-accel kvm -accel tcg` or everything runs under TCG.
 - A test using sockets, `poll`, or `socketpair` must load the `socket` module.
 - TCP is stop-and-wait, fixed MSS.

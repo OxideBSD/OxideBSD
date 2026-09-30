@@ -314,6 +314,7 @@ fn main() {
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("devfs-syscall-smoke", "DEVFS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
@@ -585,6 +586,12 @@ fn main() {
         &[("OPENSSL_DIR", &openssl_usr), ("CC_x86_64_unknown_oxidebsd", &musl_gcc)],
         StdLink::Dynamic,
     );
+    // The loopback interface from a program (tests/loopback_syscall_smoke.rs).
+    let loopback_smoke_elf_path = build_std_oxidebsd_userland_crate(
+        "regress/std/loopback-smoke",
+        "OXFS_LOOPBACK_SMOKE_ELF_PATH",
+        &musl_sysroot,
+    );
     // The trust store (/usr/share/certs, /etc/ssl/certs, /etc/ssl/cert.pem) and certctl(8).
     let certs_manifest_path = build_trust_store();
     let certctl_elf_path =
@@ -775,6 +782,7 @@ fn main() {
         ("OPENSSL_MANIFEST_PATH", openssl.manifest.to_str().unwrap()),
         ("OXFS_OPENSSL_SMOKE_ELF_PATH", openssl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_OPENSSL_RS_SMOKE_ELF_PATH", openssl_rs_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_LOOPBACK_SMOKE_ELF_PATH", loopback_smoke_elf_path.to_str().unwrap()),
         ("CERTS_MANIFEST_PATH", certs_manifest_path.to_str().unwrap()),
         ("OXFS_CERTCTL_ELF_PATH", certctl_elf_path.to_str().unwrap()),
         ("OXFS_ZIC_ELF_PATH", tz.zic.to_str().unwrap()),
@@ -858,6 +866,7 @@ fn main() {
         "regress/syslog-syscall-smoke/run.sh",
         "regress/tz-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",
+        "regress/loopback-syscall-smoke/run.sh",
         "regress/devfs-syscall-smoke/run.sh",
     ] {
         println!(

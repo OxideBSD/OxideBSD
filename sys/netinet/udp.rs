@@ -20,6 +20,7 @@ const EDESTADDRREQ: i64 = 89;
 const EADDRINUSE: i64 = 98;
 const EISCONN: i64 = 106;
 const EHOSTUNREACH: i64 = 113;
+const EADDRNOTAVAIL: i64 = 99;
 
 const HEADER_LEN: usize = 8;
 const EPHEMERAL_PORT_START: u16 = 49152;
@@ -31,6 +32,8 @@ const MAX_QUEUED_DATAGRAMS: usize = 32;
 
 struct UdpSocket {
     local_port: Option<u16>,
+    /// The bound address: `INADDR_ANY`, or the one address it receives on and sends from.
+    local_addr: Ipv4Addr,
     /// The default destination set by `connect(2)`; while set, only its datagrams are received,
     /// as in the BSDs.
     peer: Option<(Ipv4Addr, u16)>,
@@ -41,6 +44,7 @@ impl UdpSocket {
     const fn new() -> Self {
         UdpSocket {
             local_port: None,
+            local_addr: crate::net::ifnet::ANY,
             peer: None,
             recv_queue: VecDeque::new(),
         }
@@ -100,7 +104,7 @@ static STATE: Mutex<UdpState> = Mutex::new(UdpState::new());
 /// Parses one UDP datagram (already IP-payload-only, see `ipv4::handle_packet`) and, if a socket
 /// is bound to its destination port, queues it there. No listener means the datagram is silently
 /// dropped -- a real stack would send back an ICMP port-unreachable; not implemented.
-pub fn handle_packet(payload: &[u8], src_ip: Ipv4Addr) {
+pub fn handle_packet(payload: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) {
     if payload.len() < HEADER_LEN {
         return;
     }
@@ -120,6 +124,9 @@ pub fn handle_packet(payload: &[u8], src_ip: Ipv4Addr) {
         return;
     };
     if socket.peer.is_some_and(|peer| peer != (src_ip, src_port)) {
+        return;
+    }
+    if socket.local_addr != crate::net::ifnet::ANY && socket.local_addr != dst_ip {
         return;
     }
     if socket.recv_queue.len() >= MAX_QUEUED_DATAGRAMS {
@@ -151,7 +158,10 @@ impl Protocol for Udp {
     }
 
     fn bind(&self, so: u64, addr: &[u8]) -> Result<(), i64> {
-        let (_local_addr, port) = super::parse_sockaddr_in(addr).ok_or(EINVAL as i64)?;
+        let (local_addr, port) = super::parse_sockaddr_in(addr).ok_or(EINVAL as i64)?;
+        if local_addr != crate::net::ifnet::ANY && !crate::net::ifnet::is_local(local_addr) {
+            return Err(EADDRNOTAVAIL);
+        }
         let mut state = STATE.lock();
         if state.sockets.get(&so).ok_or(EBADF as i64)?.local_port.is_some() {
             return Err(EINVAL as i64);
@@ -164,7 +174,9 @@ impl Protocol for Udp {
             port
         };
         state.ports.insert(port, so);
-        state.sockets.get_mut(&so).ok_or(EBADF as i64)?.local_port = Some(port);
+        let socket = state.sockets.get_mut(&so).ok_or(EBADF as i64)?;
+        socket.local_port = Some(port);
+        socket.local_addr = local_addr;
         Ok(())
     }
 
@@ -195,6 +207,8 @@ impl Protocol for Udp {
             return Err(EMSGSIZE as i64);
         }
         let local_port = STATE.lock().ensure_bound(so).ok_or(EADDRINUSE)?;
+        let bound = STATE.lock().sockets.get(&so).ok_or(EBADF as i64)?.local_addr;
+        let src = crate::net::ifnet::source_for(bound, dest_ip).ok_or(EHOSTUNREACH)?;
 
         let mut packet = Vec::with_capacity(HEADER_LEN + data.len());
         packet.extend_from_slice(&local_port.to_be_bytes());
@@ -203,7 +217,7 @@ impl Protocol for Udp {
         packet.extend_from_slice(&[0, 0]); // checksum: 0 is a legal "not computed" value over IPv4
         packet.extend_from_slice(data);
 
-        match ipv4::send_packet(dest_ip, PROTO_UDP, &packet) {
+        match ipv4::send_packet(src, dest_ip, PROTO_UDP, &packet) {
             Some(()) => Ok(data.len()),
             None => Err(EHOSTUNREACH),
         }
@@ -233,8 +247,9 @@ impl Protocol for Udp {
     }
 
     fn sockname(&self, so: u64) -> Result<SockAddr, i64> {
-        let port = STATE.lock().sockets.get(&so).ok_or(EBADF as i64)?.local_port;
-        Ok(super::sockaddr_in(ipv4::GUEST_IP, port.unwrap_or(0)))
+        let state = STATE.lock();
+        let socket = state.sockets.get(&so).ok_or(EBADF as i64)?;
+        Ok(super::sockaddr_in(socket.local_addr, socket.local_port.unwrap_or(0)))
     }
 
     fn peername(&self, so: u64) -> Result<SockAddr, i64> {

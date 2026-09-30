@@ -8,6 +8,8 @@ use crate::netinet::tcp;
 use crate::syscall::{EINTR, EINVAL};
 
 pub mod ethernet;
+pub mod if_loop;
+pub mod ifnet;
 pub mod nic;
 
 /// Drains every frame currently queued in the NIC's RX ring and dispatches each through the
@@ -20,6 +22,12 @@ pub mod nic;
 /// `tests/rtl8139_smoke.rs` established for raw frames.
 pub fn poll() {
     tcp::check_retransmits();
+    // Looped packets first. Taking one can queue more (a TCP reply), so a pass takes a bounded
+    // number and leaves the rest to the next.
+    for _ in 0..256 {
+        let Some(packet) = if_loop::dequeue() else { break };
+        crate::netinet::ipv4::handle_packet(&packet, ifnet::Interface::Loopback);
+    }
     loop {
         let frame = {
             let mut guard = nic::NIC.lock();

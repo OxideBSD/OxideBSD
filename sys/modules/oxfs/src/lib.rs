@@ -8078,6 +8078,9 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests_openssl, b"run.sh", include_bytes!("../../../../regress/openssl-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests_openssl, b"openssl-smoke", include_bytes!(env!("OXFS_OPENSSL_SMOKE_ELF_PATH")));
     ok &= seed_file(usr_tests_openssl, b"openssl-rs-smoke", include_bytes!(env!("OXFS_OPENSSL_RS_SMOKE_ELF_PATH")));
+    let usr_tests_net = ensure_dir(usr_tests, b"net");
+    ok &= seed_file(usr_tests_net, b"run.sh", include_bytes!("../../../../regress/loopback-syscall-smoke/run.sh"));
+    ok &= seed_file(usr_tests_net, b"loopback-smoke", include_bytes!(env!("OXFS_LOOPBACK_SMOKE_ELF_PATH")));
     let usr_tests_syslog = ensure_dir(usr_tests, b"syslog");
     ok &= seed_file(usr_tests_syslog, b"run.sh", include_bytes!("../../../../regress/syslog-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
@@ -8564,6 +8567,7 @@ fn format_fresh_filesystem() -> bool {
     dir_insert(etc, b"..", root).expect("oxfs: failed to seed /etc's .. entry");
     dir_insert(root, b"etc", etc).expect("oxfs: failed to insert /etc into root");
     ok &= seed_file(etc, b"resolv.conf", b"nameserver 10.0.2.3\n");
+    ok &= seed_file(etc, b"hosts", include_bytes!("../../../../etc/hosts"));
     // rc(8): the boot and shutdown scripts and the rc.d services, from the source tree's etc/
     // (INIT.md in OxideBSD-doc).
     ok &= seed_file(etc, b"rc", include_bytes!("../../../../etc/rc"));

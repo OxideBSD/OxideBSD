@@ -55,7 +55,7 @@ pub fn take_echo_reply() -> Option<(Ipv4Addr, u16, u16)> {
 }
 
 /// `ip_packet` is the *whole* IP packet (header included) -- see this module's own doc comment.
-pub fn handle_packet(ip_packet: &[u8], src_ip: Ipv4Addr) {
+pub fn handle_packet(ip_packet: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) {
     if ip_packet.len() < ipv4::HEADER_LEN {
         return;
     }
@@ -67,7 +67,8 @@ pub fn handle_packet(ip_packet: &[u8], src_ip: Ipv4Addr) {
 
         match icmp_type {
             TYPE_ECHO_REQUEST => {
-                reply_to_echo(src_ip, identifier, sequence, &payload[HEADER_LEN..]);
+                // From the address the request was sent to (127.0.0.1, or rl0's).
+                reply_to_echo(dst_ip, src_ip, identifier, sequence, &payload[HEADER_LEN..]);
             }
             TYPE_ECHO_REPLY => {
                 *LAST_ECHO_REPLY.lock() = Some((src_ip, identifier, sequence));
@@ -114,7 +115,8 @@ impl Protocol for RawIcmp {
     /// `ping.c` does) in an IPv4 envelope.
     fn send(&self, _so: u64, data: &[u8], to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
         let (dest_ip, _) = to.and_then(super::parse_sockaddr_in).ok_or(EDESTADDRREQ)?;
-        match ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, data) {
+        let src = crate::net::ifnet::route(dest_ip).ok_or(EHOSTUNREACH)?.src;
+        match ipv4::send_packet(src, dest_ip, ipv4::PROTO_ICMP, data) {
             Some(()) => Ok(data.len()),
             None => Err(EHOSTUNREACH),
         }
@@ -148,8 +150,9 @@ impl Protocol for RawIcmp {
         super::get_option(so, level, name, false)
     }
 
+    /// Unbound (the address given to `bind` is checked, not kept): `INADDR_ANY`.
     fn sockname(&self, _so: u64) -> Result<SockAddr, i64> {
-        Ok(super::sockaddr_in(ipv4::GUEST_IP, 0))
+        Ok(super::sockaddr_in(crate::net::ifnet::ANY, 0))
     }
 
     fn readiness(&self, so: u64) -> Readiness {
@@ -176,9 +179,9 @@ fn build_packet(icmp_type: u8, identifier: u16, sequence: u16, data: &[u8]) -> V
     packet
 }
 
-fn reply_to_echo(dest_ip: Ipv4Addr, identifier: u16, sequence: u16, data: &[u8]) {
+fn reply_to_echo(src_ip: Ipv4Addr, dest_ip: Ipv4Addr, identifier: u16, sequence: u16, data: &[u8]) {
     let packet = build_packet(TYPE_ECHO_REPLY, identifier, sequence, data);
-    if ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, &packet).is_none() {
+    if ipv4::send_packet(src_ip, dest_ip, ipv4::PROTO_ICMP, &packet).is_none() {
         crate::serial_println!(
             "[net] icmp: failed to reply to echo request from {:?} (ARP resolution failed?)",
             dest_ip
@@ -194,5 +197,6 @@ pub fn send_echo_request(
     data: &[u8],
 ) -> Option<()> {
     let packet = build_packet(TYPE_ECHO_REQUEST, identifier, sequence, data);
-    ipv4::send_packet(dest_ip, ipv4::PROTO_ICMP, &packet)
+    let src = crate::net::ifnet::route(dest_ip)?.src;
+    ipv4::send_packet(src, dest_ip, ipv4::PROTO_ICMP, &packet)
 }

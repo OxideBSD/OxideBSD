@@ -175,17 +175,24 @@ fn test_syscall_dispatch_routes_registered_handlers() {
 }
 
 #[test_case]
-fn test_ipv4_next_hop_routes_off_subnet_to_gateway() {
+fn test_routes() {
+    use net::ifnet::{self, Interface, Route};
     use netinet::ipv4::{self, GATEWAY_IP, GUEST_IP};
 
+    let r = |dst| ifnet::route(dst).unwrap();
     // On-link (same /24 as GUEST_IP, e.g. SLIRP's own DNS relay): ARP the destination directly.
-    assert_eq!(ipv4::next_hop(ipv4::DNS_SERVER_IP), ipv4::DNS_SERVER_IP);
-    assert_eq!(ipv4::next_hop(GUEST_IP), GUEST_IP);
+    assert_eq!(r(ipv4::DNS_SERVER_IP), Route { interface: Interface::Ethernet, next_hop: ipv4::DNS_SERVER_IP, src: GUEST_IP });
     // Off-link (any real internet destination, e.g. 1.1.1.1): route via the default gateway --
     // SLIRP never answers ARP for an address it doesn't itself own, so without this, nothing off
-    // the local subnet could ever be reached at all (see ipv4.rs's own module doc comment).
-    assert_eq!(ipv4::next_hop([1, 1, 1, 1]), GATEWAY_IP);
-    assert_eq!(ipv4::next_hop([8, 8, 8, 8]), GATEWAY_IP);
+    // the local subnet could ever be reached at all.
+    assert_eq!(r([1, 1, 1, 1]).next_hop, GATEWAY_IP);
+    assert_eq!(r([8, 8, 8, 8]).interface, Interface::Ethernet);
+    // Loopback: 127.0.0.0/8 from 127.0.0.1, and the host's own address from itself.
+    assert_eq!(r([127, 0, 0, 1]), Route { interface: Interface::Loopback, next_hop: [127, 0, 0, 1], src: [127, 0, 0, 1] });
+    assert_eq!(r([127, 1, 2, 3]).interface, Interface::Loopback);
+    assert_eq!(r(GUEST_IP), Route { interface: Interface::Loopback, next_hop: GUEST_IP, src: GUEST_IP });
+    assert!(ifnet::route(ifnet::ANY).is_none());
+    assert!(ifnet::is_local([127, 9, 9, 9]) && ifnet::is_local(GUEST_IP) && !ifnet::is_local(GATEWAY_IP));
 }
 
 #[test_case]

@@ -272,6 +272,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "loopback-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "ls"
 version = "0.1.0"
 dependencies = [
