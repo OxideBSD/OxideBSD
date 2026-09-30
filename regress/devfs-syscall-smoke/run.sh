@@ -24,17 +24,13 @@ node_is() {
 	set -- "$1" "$2" "$3" "$4" $(entry "$1")
 	[ "$5" = "$2" ] && [ "$7" = "$3" ] && [ "$8" = "$4" ]
 }
-# The listing of $1 from its directory (this BusyBox's ls has no -d).
-entry() { ls -l "${1%/*}/" 2>&1 | grep -E " ${1##*/}( -> .*)?\$"; }
+entry() { ls -ld "$1" 2>&1; }
 mode_is() {
 	_l=$(entry "$1")
 	case "$_l" in "$2 "*) return 0 ;; esac
 	echo "devfs-smoke: $1: $_l"
 	return 1
 }
-# The raw st_mode of $1, in hex (stat -t's fourth field): this BusyBox's ls doesn't show the
-# sticky bit.
-raw_mode_is() { set -- "$2" $(stat -t "$1" 2>/dev/null); [ "$5" = "$1" ]; }
 gone() { [ ! -e "$1" ] && ! ls /dev | grep -qx "${1#/dev/}"; }
 # Reads $2 bytes from device $1 (dd: this BusyBox's head has no -c).
 bytes() { dd if="$1" bs="$2" count=1 2>/dev/null; }
@@ -52,7 +48,7 @@ check "/dev/ttyv0 is crw------- root tty" node_is /dev/ttyv0 crw------- root tty
 check "/dev/tty is crw-rw-rw-" mode_is /dev/tty crw-rw-rw-
 check "/dev/console is crw-------" mode_is /dev/console crw-------
 check "/dev/klog is crw-------" mode_is /dev/klog crw-------
-check "/dev/shm is a sticky, world-writable directory" raw_mode_is /dev/shm 43ff
+check "/dev/shm is drwxrwxrwt" mode_is /dev/shm drwxrwxrwt
 check "/dev/zero reads zeros" zeros
 check "/dev/null takes writes" sh -c 'echo discarded > /dev/null'
 check "/dev/urandom reads" random16
@@ -63,7 +59,7 @@ check "chmod of a node sticks" mode_is /dev/null crw-------
 chmod 666 /dev/null
 mkdir /dev/stickytest
 chmod 1777 /dev/stickytest
-check "chmod keeps the sticky bit" raw_mode_is /dev/stickytest 43ff
+check "chmod keeps the sticky bit" mode_is /dev/stickytest drwxrwxrwt
 rm -f /dev/zero
 check "rm removes a node" gone /dev/zero
 ls /dev > /dev/null

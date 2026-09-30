@@ -8,8 +8,9 @@
 //!
 //! `-a` includes dotfiles (and `.`/`..`). `-l` prints `mode nlink owner group size mtime name` with
 //! aligned columns, a `total` line for directory listings, owner/group *names* from `/etc/passwd`
-//! and `/etc/group` (numeric if absent), UTC times, and ` -> target` for symlinks. Flags may be
-//! clustered (`-la`).
+//! and `/etc/group` (numeric if absent), UTC times, and ` -> target` for symlinks; setuid, setgid
+//! and sticky show as `s`/`S`/`t`/`T`, as strmode(3) does. `-d` lists a directory itself instead of
+//! its contents. Flags may be clustered (`-la`).
 //!
 //! All output goes through a buffer: console writes cost ~1 ms each, so `ls /bin` used to take
 //! 770 ms to the console but 30 ms to `/dev/null`.
@@ -186,6 +187,16 @@ fn mode_string(st: &Stat) -> [u8; 10] {
             s[i + 1] = bits[i];
         }
     }
+    // Setuid, setgid and sticky take the execute slots, as strmode(3) shows them: lowercase when
+    // the execute bit under them is set too, uppercase when it isn't.
+    let special = |s: &mut [u8; 10], bit: u32, slot: usize, lower: u8| {
+        if st.mode & bit != 0 {
+            s[slot] = if s[slot] == b'x' { lower } else { lower - (b'a' - b'A') };
+        }
+    };
+    special(&mut s, 0o4000, 3, b's');
+    special(&mut s, 0o2000, 6, b's');
+    special(&mut s, 0o1000, 9, b't');
     s
 }
 
@@ -423,8 +434,21 @@ fn color_choice(argv: &[&[u8]]) -> Option<bool> {
     choice
 }
 
+/// Lists one path as itself (a file, or a directory under `-d`).
+fn list_entry(ctx: &Ctx, out: &mut BufWriter, path: &[u8], st: &Stat) {
+    if ctx.long {
+        let mut w = Widths::default();
+        measure(ctx, st, &mut w);
+        write_long_row(ctx, out, path, path, st, &w);
+    } else {
+        emit_name(ctx, out, path, kind_of(st));
+        out.write(b"\n");
+    }
+}
+
 fn main(argv: &[&[u8]]) -> u64 {
     let long = has_flag(argv, b'l', None);
+    let dirs_as_files = has_flag(argv, b'd', None);
     let term = tty_size(STDOUT);
     let force_columns = has_flag(argv, b'C', None);
     let one_per_line = has_flag(argv, b'1', None);
@@ -459,7 +483,19 @@ fn main(argv: &[&[u8]]) -> u64 {
     let mut status = 0;
 
     if count == 0 {
-        return if list_dir(&ctx, &mut out, b".") { 0 } else { 1 };
+        if !dirs_as_files {
+            return if list_dir(&ctx, &mut out, b".") { 0 } else { 1 };
+        }
+        return match lstat(b".") {
+            Ok(st) => {
+                list_entry(&ctx, &mut out, b".", &st);
+                0
+            }
+            Err(errno) => {
+                fail(&mut out, b".", errno);
+                1
+            }
+        };
     }
     let mut first = true;
     for path in positional_args(argv) {
@@ -471,15 +507,8 @@ fn main(argv: &[&[u8]]) -> u64 {
                 continue;
             }
         };
-        if !st.is_dir() {
-            if ctx.long {
-                let mut w = Widths::default();
-                measure(&ctx, &st, &mut w);
-                write_long_row(&ctx, &mut out, path, path, &st, &w);
-            } else {
-                emit_name(&ctx, &mut out, path, kind_of(&st));
-                out.write(b"\n");
-            }
+        if !st.is_dir() || dirs_as_files {
+            list_entry(&ctx, &mut out, path, &st);
             first = false;
             continue;
         }
