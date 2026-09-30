@@ -99,6 +99,7 @@ unsafe extern "C" {
         read: extern "C" fn(u64, u64, u64, u64) -> i64,
         write: extern "C" fn(u64, u64, u64) -> i64,
         size: extern "C" fn(u64) -> i64,
+        is_shm: extern "C" fn(u64) -> i64,
     );
     fn oxidebsd_close_fd(fd: u64) -> i32;
     /// Sets (`on != 0`) or clears real `FD_CLOEXEC` on `fd`, in the *current* process's own table
@@ -645,7 +646,9 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// Bumped 3 -> 4 for the dynamic inode table: inodes live in an inode file in the block pool
 /// (`InodeTable`), whose own inode record is in the superblock; the fixed inode-table region after
 /// the superblock is gone, so the bitmap now starts at block 1.
-const SUPERBLOCK_VERSION: u32 = 4;
+///
+/// Bumped 4 -> 5 for `Inode::shm`, one byte after `atime` in the packed inode.
+const SUPERBLOCK_VERSION: u32 = 5;
 
 /// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
 /// `Inode` itself, since it isn't `#[repr(C)]` and `InodeKind` has no explicit discriminant, so its
@@ -920,6 +923,11 @@ struct Inode {
     /// the last touch (a real, common Unix optimization, not a fake pass condition -- POSIX only
     /// requires atime be "marked for update," not persisted with per-read precision).
     atime: i64,
+    /// A POSIX shared memory object: a file created in `/dev/shm` (musl's `shm_open`). Set once at
+    /// creation and kept after `shm_unlink`, since the usual idiom unlinks at once and keeps using
+    /// the fd; `process::mm::do_mmap_file_backed` bounds a mapping of one at its size. Packed after
+    /// `atime`; a slot written before it existed reads `false`.
+    shm: bool,
 }
 
 impl Inode {
@@ -938,6 +946,7 @@ impl Inode {
         mtime: 0,
         ctime: 0,
         atime: 0,
+        shm: false,
     };
 
     fn new(kind: InodeKind) -> Inode {
@@ -957,6 +966,7 @@ impl Inode {
             mtime: now,
             ctime: now,
             atime: now,
+            shm: false,
         }
     }
 }
@@ -3362,6 +3372,18 @@ extern "C" fn oxfs_inode_content_size(inode: u64) -> i64 {
     read_inode(inode as u32).size as i64
 }
 
+/// `is_shm` accessor for `oxidebsd_register_content_accessors`: whether `inode` is a POSIX shared
+/// memory object (`Inode::shm`).
+extern "C" fn oxfs_inode_is_shm(inode: u64) -> i64 {
+    read_inode(inode as u32).shm as i64
+}
+
+/// Whether `dir` is devfs's `/dev/shm`, where musl's `shm_open` creates its objects.
+fn is_shm_dir(dir: u32) -> bool {
+    let root = devfs_root();
+    root != u32::MAX && dir_lookup(root, b"shm") == Some(dir)
+}
+
 fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
     for (slot_fd, file) in slots.iter_mut().flatten() {
@@ -4696,6 +4718,7 @@ fn commit_write_buffer(file: &mut OpenFile) -> i64 {
             let mut inode = Inode::new(InodeKind::File);
             inode.uid = *owner_uid;
             inode.mode = *mode;
+            inode.shm = is_shm_dir(*parent_inode);
             write_inode(new_inode, inode);
             // Real Unix semantics: this fd's own name was already unlinked before it ever got the
             // chance to name anything (see `unlinked`'s own doc comment) -- a real inode still
@@ -7368,7 +7391,9 @@ fn pack_inode(inode: &Inode, out: &mut [u8]) {
     out[ctime_off..ctime_off + 8].copy_from_slice(&inode.ctime.to_le_bytes());
     let atime_off = ctime_off + 8;
     out[atime_off..atime_off + 8].copy_from_slice(&inode.atime.to_le_bytes());
-    for b in &mut out[atime_off + 8..] {
+    let shm_off = atime_off + 8;
+    out[shm_off] = inode.shm as u8;
+    for b in &mut out[shm_off + 1..] {
         *b = 0;
     }
 }
@@ -7440,6 +7465,7 @@ fn unpack_inode(data: &[u8]) -> Inode {
     // no flooring is needed the way Inode::nlink's own doc comment describes for that field.
     let atime_off = ctime_off + 8;
     let atime = i64::from_le_bytes(data[atime_off..atime_off + 8].try_into().unwrap());
+    let shm = data[atime_off + 8] != 0;
     Inode {
         kind,
         size,
@@ -7455,6 +7481,7 @@ fn unpack_inode(data: &[u8]) -> Inode {
         mtime,
         ctime,
         atime,
+        shm,
     }
 }
 

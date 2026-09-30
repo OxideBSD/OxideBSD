@@ -244,6 +244,8 @@ pub struct MmapFileRegion {
     /// `signal_for_user_fault` below, which is what actually turns "unmapped" into a real signal
     /// instead of the reboot every other unmapped ring-3 reference still gets.
     mapped_pages: u64,
+    /// The object page mapped at `va_start` (the `mmap` offset in pages).
+    file_page: u64,
     content_id: u64,
     writable: bool,
     /// `true` for a real `MAP_SHARED` mapping (cross-open cache-backed, real writeback on
@@ -600,12 +602,11 @@ fn do_mmap_fb(
 }
 
 /// Real fd-backed mapping — `do_mmap`'s `fd >= 0` case, now honoring the caller's real
-/// `MAP_SHARED`/`MAP_PRIVATE` choice (`private`) instead of always behaving as `MAP_SHARED`. Scoped
-/// deliberately: a nonzero `off` is never actually populated/mapped from — a real, in-bounds
-/// request still gets an honest `EINVAL` (no real caller in this kernel's own call graph, BusyBox/
-/// Clang/LLVM/musl itself, ever requests one), and one genuinely out-of-bounds gets a real `ENXIO` —
-/// see the `off != 0` handling below for why that split exists and doesn't conflict with this same
-/// function's own MPR handling for the (far more common) `off == 0` case.
+/// `MAP_SHARED`/`MAP_PRIVATE` choice (`private`) instead of always behaving as `MAP_SHARED`. `off`
+/// (page-aligned) picks the object's first mapped page: musl's `ld.so` maps each `PT_LOAD` segment
+/// of a shared library from its own file offset. A regular file may be mapped past its end at any
+/// offset (the pages past it `SIGBUS`, below); a shared memory object may not, at a nonzero offset
+/// (`ENXIO`, see the `off != 0` handling below), as on FreeBSD.
 ///
 /// **Content population/writeback goes through `crate::fs::fd::content_read`/`content_write`
 /// (keyed by `content_id`, a real inode number), not any fd's own read/write callbacks** — found
@@ -681,24 +682,25 @@ fn do_mmap_file_backed(
     let phys_offset = memory::phys_mem_offset();
     let real_size = crate::fs::fd::content_size(content_id).max(0) as u64;
 
-    if off != 0 {
-        let off = off as u64;
-        // Real POSIX `[ENXIO]`: "Addresses in the range [off,off+len) are invalid for the object
-        // specified by fildes" (`mmap/28-1.c` in the conformance pilot) -- deliberately scoped to a
-        // nonzero, caller-chosen starting offset. `off == 0` is never ENXIO here even when `len`
-        // extends past the object's own real size -- that's real POSIX MPR territory instead (a
-        // legal, common pattern this kernel already handles via a real *deferred* SIGBUS on the
-        // actual out-of-bounds *reference*, not an upfront mmap()-time failure -- see
-        // `covered_pages` below and `mmap/11-2.c`/`11-3.c`, which depend on that succeeding).
-        if off >= real_size || off.saturating_add(region_len) > real_size {
-            return Err(ENXIO);
-        }
-        // Still no real support for actually populating from a nonzero offset -- no real caller in
-        // this kernel's own call graph (BusyBox, Clang/LLVM, musl itself) ever requests one, and the
-        // one case that does (a within-bounds nonzero offset) is purely hypothetical here, so this
-        // stays an honest EINVAL rather than silently reading from offset 0 instead.
+    let off = off as u64;
+    if !off.is_multiple_of(4096) {
         return Err(EINVAL);
     }
+    // Real POSIX `[ENXIO]`: "Addresses in the range [off,off+len) are invalid for the object
+    // specified by fildes" (`mmap/28-1.c` in the conformance pilot, on a shared memory object).
+    // Only for a shared memory object, and only at a nonzero offset: `off == 0` past the object's
+    // end is real POSIX MPR territory instead (a deferred `SIGBUS` on the actual out-of-bounds
+    // *reference*, see `covered_pages` below and `mmap/11-2.c`/`11-3.c`), and a regular file may be
+    // mapped past its end at any offset -- `ld.so` does exactly that for a library's last segment,
+    // whose `.bss` runs past the file.
+    if off != 0
+        && crate::fs::fd::content_is_shm(content_id)
+        && (off >= real_size || off.saturating_add(region_len) > real_size)
+    {
+        return Err(ENXIO);
+    }
+    // The first object page this mapping shows.
+    let file_page = off / 4096;
     // Real POSIX MPR (`mmap/11-2.c`/`11-3.c` in the conformance pilot): only pages actually
     // overlapping the object's own real content -- including its final, real-content-plus-
     // zero-padding partial page -- ever get backed by a real frame. Anything past that, up to the
@@ -706,7 +708,7 @@ fn do_mmap_file_backed(
     // real-faults instead of silently succeeding against a zero-filled page; `signal_for_user_fault`
     // below is what turns that fault into a real `SIGBUS` rather than a reboot. Applies to both
     // MAP_SHARED and MAP_PRIVATE alike -- real POSIX MPR doesn't distinguish the two.
-    let covered_pages = real_size.div_ceil(4096).min(page_count);
+    let covered_pages = real_size.div_ceil(4096).saturating_sub(file_page).min(page_count);
 
     let frames: Vec<PhysFrame<Size4KiB>> = if private {
         // Real MAP_PRIVATE: a fresh copy, populated once from the object's own real content but
@@ -727,11 +729,11 @@ fn do_mmap_file_backed(
             Ok(new_frames)
         })?;
         let covered_len = covered_pages * 4096;
-        let read_len = real_size.min(covered_len);
+        let read_len = real_size.saturating_sub(off).min(covered_len);
         if read_len > 0 {
             let mut staging = alloc::vec![0u8; read_len as usize];
             let n =
-                crate::fs::fd::content_read(content_id, 0, staging.as_mut_ptr() as u64, read_len);
+                crate::fs::fd::content_read(content_id, off, staging.as_mut_ptr() as u64, read_len);
             if n > 0 {
                 staging.truncate(n as usize);
                 for (i, chunk) in staging.chunks(4096).enumerate() {
@@ -745,9 +747,11 @@ fn do_mmap_file_backed(
         }
         new_frames
     } else {
+        // The cache holds the object's pages from its start, so it has to reach this mapping's end.
+        let cached_pages = file_page + covered_pages;
         let mut cache = MMAP_FILE_CACHE.lock();
         let existing_len = cache.get(&content_id).map(Vec::len).unwrap_or(0) as u64;
-        if existing_len < covered_pages {
+        if existing_len < cached_pages {
             // First mmap of this file, or a later mmap asking for more real-content pages than any
             // earlier one did -- allocate+zero exactly the *new* frames needed and append them,
             // never discarding whatever's already cached (those frames may already be live in
@@ -755,8 +759,8 @@ fn do_mmap_file_backed(
             // own doc comment for why replacing them outright would be a real correctness bug, not
             // just a missed optimization).
             let new_frames: Vec<PhysFrame<Size4KiB>> = with_frame_allocator(|fa| {
-                let mut new_frames = Vec::with_capacity((covered_pages - existing_len) as usize);
-                for _ in existing_len..covered_pages {
+                let mut new_frames = Vec::with_capacity((cached_pages - existing_len) as usize);
+                for _ in existing_len..cached_pages {
                     let frame = fa.allocate_frame().ok_or(ENOMEM)?;
                     let frame_ptr =
                         (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
@@ -775,7 +779,7 @@ fn do_mmap_file_backed(
             // zeroed), matching POSIX's own "bytes past EOF within the mapped region read as
             // zero".
             let new_region_start = existing_len * 4096;
-            let covered_len = covered_pages * 4096;
+            let covered_len = cached_pages * 4096;
             let read_len = real_size
                 .saturating_sub(new_region_start)
                 .min(covered_len - new_region_start);
@@ -811,6 +815,7 @@ fn do_mmap_file_backed(
             .entry(content_id)
             .or_default()
             .iter()
+            .skip(file_page as usize)
             .take(covered_pages as usize)
             .copied()
             .collect()
@@ -901,6 +906,7 @@ fn do_mmap_file_backed(
         va_start: base,
         npages: page_count,
         mapped_pages: covered_pages,
+        file_page,
         content_id,
         writable,
         shared: !private,
@@ -957,7 +963,7 @@ fn writeback_region(region: &MmapFileRegion, phys_offset: VirtAddr) {
         return;
     }
     let current_size = crate::fs::fd::content_size(region.content_id).max(0) as u64;
-    let region_len = region.npages * 4096;
+    let region_len = (region.file_page + region.npages) * 4096;
     if current_size > region_len {
         // See this function's own doc comment -- a partial-coverage writeback here would
         // truncate/destroy real content past what this one mapping ever saw.

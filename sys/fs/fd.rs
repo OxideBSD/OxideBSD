@@ -815,16 +815,19 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
 pub(crate) type ContentRead = extern "C" fn(u64, u64, u64, u64) -> i64;
 pub(crate) type ContentWrite = extern "C" fn(u64, u64, u64) -> i64;
 pub(crate) type ContentSize = extern "C" fn(u64) -> i64;
+/// `content_id -> 1` if it's a POSIX shared memory object (`shm_open`), else `0`.
+pub(crate) type ContentIsShm = extern "C" fn(u64) -> i64;
 
-static CONTENT_ACCESSORS: Mutex<Option<(ContentRead, ContentWrite, ContentSize)>> =
+static CONTENT_ACCESSORS: Mutex<Option<(ContentRead, ContentWrite, ContentSize, ContentIsShm)>> =
     Mutex::new(None);
 
 pub(crate) extern "C" fn oxidebsd_register_content_accessors(
     read: ContentRead,
     write: ContentWrite,
     size: ContentSize,
+    is_shm: ContentIsShm,
 ) {
-    *CONTENT_ACCESSORS.lock() = Some((read, write, size));
+    *CONTENT_ACCESSORS.lock() = Some((read, write, size, is_shm));
 }
 
 /// `(content_id, offset, ptr, len) -> bytes read`, `-1` if no module ever registered content
@@ -832,7 +835,7 @@ pub(crate) extern "C" fn oxidebsd_register_content_accessors(
 /// real syscall is reachable).
 pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((read, _, _)) => read(content_id, offset, ptr, len),
+        Some((read, _, _, _)) => read(content_id, offset, ptr, len),
         None => -1,
     }
 }
@@ -842,7 +845,7 @@ pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> 
 /// `OpenFile::Write` doc comment).
 pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((_, write, _)) => write(content_id, ptr, len),
+        Some((_, write, _, _)) => write(content_id, ptr, len),
         None => -1,
     }
 }
@@ -850,8 +853,18 @@ pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
 /// Real current content length of `content_id`, in bytes.
 pub(crate) fn content_size(content_id: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((_, _, size)) => size(content_id),
+        Some((_, _, size, _)) => size(content_id),
         None => -1,
+    }
+}
+
+/// Whether `content_id` is a POSIX shared memory object: `mmap` bounds a mapping of one at the
+/// object's size, where a regular file may be mapped past its end (`crate::process::mm::
+/// do_mmap_file_backed`).
+pub(crate) fn content_is_shm(content_id: u64) -> bool {
+    match *CONTENT_ACCESSORS.lock() {
+        Some((_, _, _, is_shm)) => is_shm(content_id) != 0,
+        None => false,
     }
 }
 
