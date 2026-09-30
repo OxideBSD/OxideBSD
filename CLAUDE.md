@@ -240,8 +240,11 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 
 ## oxfs and disks (`sys/modules/oxfs`, `sys/drivers/`)
 
-- Fixed pools (`NUM_BLOCKS`, `MAX_INODES`, `NAME_MAX=255`, ...). Changing anything in the on-disk
-  layout **must bump `SUPERBLOCK_VERSION`** (mount checks version + sizes, else reformats).
+- Fixed block pool (`NUM_BLOCKS`, `NAME_MAX=255`, ...); inodes live in a growable inode file
+  (`InodeTable`), freed by `maybe_release` once no name, oxfs descriptor or kernel reference
+  (`oxidebsd_inode_in_use`) remains. **A new kernel structure that keeps an oxfs inode number must
+  be added to `oxidebsd_inode_in_use`**, or the inode can be freed and reused under it. Changing
+  anything in the on-disk layout **must bump `SUPERBLOCK_VERSION`** (mount checks, else reformats).
 - Only `write_block`, `write_inode`, `set_block_used` touch the backing pools (write-through
   persistence). Inodes are serialized by `pack_inode`/`unpack_inode`, never transmuted.
 - Mount never re-syncs seeded files; only a format does. `target/oxfs_disk.img` may be deleted to
