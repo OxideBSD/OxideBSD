@@ -33,6 +33,28 @@ pub fn local(secs: i64) -> Stamp {
     }
 }
 
+unsafe extern "C" {
+    fn tzset();
+}
+
+/// Makes the next conversion read the local zone afresh (`TIMEZONE.md` §5.4: syslogd re-reads it
+/// on `SIGHUP`). musl only reloads when the `TZ` string changes, so a new `/etc/localtime` link
+/// goes unnoticed otherwise: `TZ` is set to something else for one `tzset(3)`, then restored.
+/// Call only while the process is single-threaded (it sets environment variables).
+pub fn reload_zone() {
+    let saved = std::env::var_os("TZ");
+    // SAFETY: the caller guarantees no other thread reads the environment.
+    unsafe {
+        std::env::set_var("TZ", "UTC0");
+        tzset();
+        match saved {
+            Some(tz) => std::env::set_var("TZ", tz),
+            None => std::env::remove_var("TZ"),
+        }
+        tzset();
+    }
+}
+
 /// Seconds since the epoch.
 pub fn epoch() -> i64 {
     // SAFETY: time(NULL) has no preconditions.

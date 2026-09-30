@@ -1,0 +1,112 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt TZSETUP 8
+.Os OxideBSD
+.Sh NAME
+.Nm tzsetup
+.Nd set the local time zone
+.Sh SYNOPSIS
+.Nm
+.Op Fl nr
+.Op Ar zone
+.Sh DESCRIPTION
+The
+.Nm
+utility sets the system's local time zone by making
+.Pa /etc/localtime
+a symbolic link to a file of the time zone database in
+.Pa /usr/share/zoneinfo .
+.Pp
+With a
+.Ar zone ,
+such as
+.Ql Europe/Berlin
+or
+.Ql UTC ,
+.Nm
+checks that the zone's file exists and is a valid
+.Xr tzfile 5 ,
+then replaces the link.
+The new link is created beside the old one and renamed over it, so
+.Pa /etc/localtime
+is never missing, and it is left unchanged if anything fails.
+.Pp
+Without a
+.Ar zone ,
+.Nm
+shows numbered menus on the terminal: first the regions of the database, and
+UTC, then the zones within the chosen region, each with its country and the
+area it covers.
+Enter a number to choose,
+.Ql b
+to go back to the regions, or
+.Ql q
+to quit without changing anything.
+.Nm
+asks for confirmation before setting the zone.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl n
+Do nothing; print the command that would have been run.
+.It Fl r
+Read the zone's name from the current
+.Pa /etc/localtime
+link and create the link again, checking the zone's file anew.
+Useful after the database has been updated.
+.El
+.Pp
+Programs read the local time zone when they start, and running programs keep
+the zone they started with.
+.Xr syslogd 8
+and
+.Xr cron 8
+read it again when they receive
+.Dv SIGHUP ;
+other long-running programs must be restarted.
+Without
+.Pa /etc/localtime ,
+local time is UTC.
+The
+.Ev TZ
+environment variable overrides
+.Pa /etc/localtime
+for a process, with a zone name or a POSIX rule such as
+.Ql EST5EDT .
+.Sh FILES
+.Bl -tag -width /usr/share/zoneinfo/zone1970.tab -compact
+.It Pa /etc/localtime
+The link to the local time zone.
+.It Pa /usr/share/zoneinfo
+The time zone database.
+.It Pa /usr/share/zoneinfo/zone1970.tab
+The zones offered by the menus.
+.It Pa /usr/share/zoneinfo/iso3166.tab
+Country names for the menus.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Set the local time zone to Central European Time:
+.Pp
+.Dl # tzsetup Europe/Berlin
+.Pp
+Refresh the link after installing a newer database:
+.Pp
+.Dl # tzsetup -r
+.Sh SEE ALSO
+.Xr date 1 ,
+.Xr tzfile 5 ,
+.Xr cron 8 ,
+.Xr syslogd 8 ,
+.Xr zdump 8 ,
+.Xr zic 8
+.Sh HISTORY
+A
+.Nm
+utility first appeared in
+.Fx 2.0.5 .
+OxideBSD's was written from scratch; it keeps
+.Fx Ns 's
+name and options but offers numbered menus instead of
+.Xr dialog 1 .

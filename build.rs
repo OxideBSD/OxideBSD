@@ -108,6 +108,18 @@ fn build_man_index() -> PathBuf {
             }
         }
     }
+    // Pages oxfs seeds from vendored trees rather than share/man.
+    for (from, section) in [
+        ("external/public-domain/tz/tzfile.5", "man5"),
+        ("external/public-domain/tz/zic.8", "man8"),
+        ("external/public-domain/tz/zdump.8", "man8"),
+    ] {
+        let from = root.join(from);
+        let into = stage.join(section);
+        std::fs::create_dir_all(&into).unwrap_or_else(|e| panic!("{}: {e}", into.display()));
+        std::fs::copy(&from, into.join(from.file_name().unwrap()))
+            .unwrap_or_else(|e| panic!("{}: {e}", from.display()));
+    }
     let status = Command::new(&tool).arg(&stage).status().unwrap_or_else(|e| panic!("failed to run {}: {e}", tool.display()));
     if !status.success() {
         panic!("makewhatis-host {} failed: {status}", stage.display());
@@ -300,6 +312,7 @@ fn main() {
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -474,6 +487,7 @@ fn main() {
     let at_smoke_elf_path = build_at_smoke(&musl_sysroot);
     let socket_smoke_elf_path = build_socket_smoke(&musl_sysroot);
     let sysctl_smoke_elf_path = build_c_smoke(&musl_sysroot, "sysctl-smoke", "0x8380000");
+    let tz_smoke_elf_path = build_c_smoke(&musl_sysroot, "tz-smoke", "0x83c0000");
     let ppoll_smoke_elf_path = build_ppoll_smoke(&musl_sysroot);
     let fd_smoke_elf_path = build_fd_smoke(&musl_sysroot);
     let tty_smoke_elf_path = build_tty_smoke(&musl_sysroot);
@@ -521,6 +535,12 @@ fn main() {
     let ncurses_sysroot = build_ncurses(&musl_sysroot);
     let ncurses_runtime_manifest_path = write_ncurses_runtime_manifest(&ncurses_sysroot);
     let ncurses_terminfo_manifest_path = write_ncurses_terminfo_manifest();
+
+    // Time zones (TIMEZONE.md in OxideBSD-doc): the compiled IANA database for
+    // /usr/share/zoneinfo, and zic/zdump for the target.
+    let tz = build_tz(&musl_sysroot);
+    let tzsetup_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/tzsetup", "OXFS_TZSETUP_ELF_PATH", &musl_sysroot);
 
     // OpenVi (`/bin/vi`) and GNU nano (`/usr/bin/nano`) -- OxideBSD's two real editors, see
     // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
@@ -709,6 +729,11 @@ fn main() {
             "NCURSES_TERMINFO_MANIFEST_PATH",
             ncurses_terminfo_manifest_path.to_str().unwrap(),
         ),
+        ("TZ_ZONEINFO_MANIFEST_PATH", tz.manifest.to_str().unwrap()),
+        ("OXFS_ZIC_ELF_PATH", tz.zic.to_str().unwrap()),
+        ("OXFS_ZDUMP_ELF_PATH", tz.zdump.to_str().unwrap()),
+        ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
+        ("OXFS_TZ_SMOKE_ELF_PATH", tz_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
         ("OXFS_NINJA_ELF_PATH", ninja_elf_path.to_str().unwrap()),
@@ -782,6 +807,7 @@ fn main() {
         "share/man",
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
+        "regress/tz-syscall-smoke/run.sh",
     ] {
         println!(
             "cargo:rerun-if-changed={}",
@@ -3173,6 +3199,135 @@ fn write_ncurses_terminfo_manifest() -> PathBuf {
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     }
     out_path
+}
+
+/// What `build_tz` produces.
+struct TzBuild {
+    /// The generated `TZ_ZONEINFO_FILES`/`TZ_ZONEINFO_LINKS` for oxfs.
+    manifest: PathBuf,
+    zic: PathBuf,
+    zdump: PathBuf,
+}
+
+/// The IANA time zone database (`external/public-domain/tz`, see its `VENDOR_NOTES.md`):
+/// compiles the zones with a host build of the vendored `zic` (not the host's own, so the output
+/// doesn't depend on the build machine; `TIMEZONE.md` §3.2) into `target/tz/zoneinfo`, writes the
+/// manifest oxfs seeds `/usr/share/zoneinfo` from, and builds `zic` and `zdump` for OxideBSD.
+///
+/// Everything runs in a copy (`target/tz/src`): tzcode's Makefile rewrites the tracked `version`
+/// file and writes its generated headers next to the sources. `VERSION` is given on make's
+/// command line so the output is stamped with the release, not `-dirty`. Rebuilt only when a file
+/// in the vendored tree is newer than the manifest.
+fn build_tz(musl_sysroot: &Path) -> TzBuild {
+    const ZIC_LOAD_ADDR: u64 = 0x1100_0000;
+    const ZDUMP_LOAD_ADDR: u64 = 0x1200_0000;
+    /// `TDATA` in tzcode's Makefile, `backward` (the aliases) included.
+    const ZONE_SOURCES: &[&str] = &[
+        "africa", "antarctica", "asia", "australasia", "europe", "northamerica", "southamerica",
+        "etcetera", "backward", "factory",
+    ];
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vendored = manifest_dir.join("external/public-domain/tz");
+    let work = manifest_dir.join("target/tz");
+    let src = work.join("src");
+    let zoneinfo = work.join("zoneinfo");
+    let manifest = manifest_dir.join("target/generated/tz_zoneinfo_manifest.rs");
+    let out = TzBuild { manifest: manifest.clone(), zic: work.join("zic"), zdump: work.join("zdump") };
+    println!("cargo:rerun-if-changed={}", vendored.display());
+
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let newest_source = std::fs::read_dir(&vendored)
+        .expect("external/public-domain/tz is missing")
+        .flatten()
+        .filter_map(|e| mtime(&e.path()))
+        .max();
+    let built = [&out.manifest, &out.zic, &out.zdump].iter().map(|p| mtime(p)).min().flatten();
+    if built.is_some() && built >= newest_source {
+        return out;
+    }
+
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&src).expect("failed to create target/tz/src");
+    for entry in std::fs::read_dir(&vendored).unwrap().flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_file()) {
+            std::fs::copy(entry.path(), src.join(entry.file_name())).unwrap();
+        }
+    }
+    let version = std::fs::read_to_string(src.join("version")).unwrap().trim().to_string();
+    let make = |targets: &[&str]| {
+        let status = Command::new("make")
+            .current_dir(&src)
+            .arg(format!("VERSION={version}"))
+            .arg("CC=cc")
+            .arg("TZDIR=/usr/share/zoneinfo")
+            .args(targets)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run make in {}: {e}", src.display()));
+        assert!(status.success(), "tzcode `make {}` failed: {status}", targets.join(" "));
+    };
+    // The host zic, the generated headers the target build needs too, and tzdata.zi.
+    make(&["zic", "version.h", "tzdir.h", "tzdata.zi"]);
+
+    std::fs::create_dir_all(&zoneinfo).unwrap();
+    let status = Command::new(src.join("zic"))
+        .current_dir(&src)
+        .args(["-b", "slim", "-d"])
+        .arg(&zoneinfo)
+        .args(ZONE_SOURCES)
+        .status()
+        .expect("failed to run the host zic");
+    assert!(status.success(), "zic failed: {status}");
+    for f in ["zone1970.tab", "zone.tab", "iso3166.tab", "tzdata.zi"] {
+        std::fs::copy(src.join(f), zoneinfo.join(f)).unwrap();
+    }
+
+    // zic makes each alias a hard link to its zone: the first name of each inode is the file,
+    // the rest are links to it.
+    use std::os::unix::fs::MetadataExt;
+    let mut files = collect_dir_files(&zoneinfo);
+    files.sort();
+    let mut first_name: std::collections::BTreeMap<(u64, u64), String> = Default::default();
+    let mut src_out = String::from("pub static TZ_ZONEINFO_FILES: &[(&str, &[u8])] = &[\n");
+    let mut links = String::from("pub static TZ_ZONEINFO_LINKS: &[(&str, &str)] = &[\n");
+    for (rel, abs) in &files {
+        let meta = std::fs::metadata(abs).unwrap();
+        match first_name.get(&(meta.dev(), meta.ino())) {
+            Some(target) => links.push_str(&format!("    ({rel:?}, {target:?}),\n")),
+            None => {
+                first_name.insert((meta.dev(), meta.ino()), rel.clone());
+                src_out.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", abs.display()));
+            }
+        }
+    }
+    src_out.push_str("];\n");
+    links.push_str("];\n");
+    src_out.push_str(&links);
+
+    // zic and zdump for OxideBSD, with the same generated headers. zdump uses NetBSD's
+    // tzalloc/localtime_rz, which musl lacks, so it links tzcode's own localtime as the Makefile's
+    // TZDOBJS do.
+    let musl_gcc = musl_sysroot.join("bin/musl-gcc");
+    let programs: [(&str, u64, &PathBuf, &[&str]); 2] = [
+        ("zic", ZIC_LOAD_ADDR, &out.zic, &["zic.c"]),
+        ("zdump", ZDUMP_LOAD_ADDR, &out.zdump, &["zdump.c", "localtime.c", "strftime.c"]),
+    ];
+    for (name, addr, out_path, sources) in programs {
+        let status = Command::new(&musl_gcc)
+            .current_dir(&src)
+            .args(["-static", "-no-pie", "-O2", "-DHAVE_GETTEXT=0", "-I."])
+            .arg(format!("-Wl,-Ttext-segment={addr:#x}"))
+            .arg("-o")
+            .arg(out_path)
+            .args(sources)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run musl-gcc for {name}: {e}"));
+        assert!(status.success(), "building {name} for OxideBSD failed: {status}");
+    }
+
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, src_out).unwrap();
+    out
 }
 
 /// Cross-builds OpenVi (vendored as `bin/vi`, a submodule -- see CLAUDE.md's ncurses/nano/nvi
