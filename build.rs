@@ -299,6 +299,7 @@ fn main() {
     build_userland_crate("ninja-syscall-smoke", "NINJA_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -400,6 +401,18 @@ fn main() {
         build_std_oxidebsd_userland_crate("sbin/sysctl", "OXFS_SBIN_SYSCTL_ELF_PATH", &musl_sysroot);
     let dmesg_elf_path =
         build_std_oxidebsd_userland_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
+    // System logging (SYSLOG.md in OxideBSD-doc). The helper only watches each program's own
+    // src/, so the library they share is watched here.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libsyslog/src").display()
+    );
+    let syslogd_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/syslogd", "OXFS_SYSLOGD_ELF_PATH", &musl_sysroot);
+    let newsyslog_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/newsyslog", "OXFS_NEWSYSLOG_ELF_PATH", &musl_sysroot);
+    let logger_elf_path =
+        build_std_oxidebsd_userland_crate("usr.bin/logger", "OXFS_LOGGER_ELF_PATH", &musl_sysroot);
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
     let emergency_elf_path =
         build_std_oxidebsd_userland_crate("sbin/emergency", "OXFS_EMERGENCY_ELF_PATH", &musl_sysroot);
@@ -640,6 +653,9 @@ fn main() {
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         ("OXFS_SBIN_SYSCTL_ELF_PATH", sysctl_elf_path.to_str().unwrap()),
         ("OXFS_SBIN_DMESG_ELF_PATH", dmesg_elf_path.to_str().unwrap()),
+        ("OXFS_SYSLOGD_ELF_PATH", syslogd_elf_path.to_str().unwrap()),
+        ("OXFS_NEWSYSLOG_ELF_PATH", newsyslog_elf_path.to_str().unwrap()),
+        ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
@@ -761,7 +777,12 @@ fn main() {
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
-    for seeded in ["etc", "share/man", "regress/rc-syscall-smoke/run.sh"] {
+    for seeded in [
+        "etc",
+        "share/man",
+        "regress/rc-syscall-smoke/run.sh",
+        "regress/syslog-syscall-smoke/run.sh",
+    ] {
         println!(
             "cargo:rerun-if-changed={}",
             Path::new(env!("CARGO_MANIFEST_DIR")).join(seeded).display()

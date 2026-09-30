@@ -1,0 +1,34 @@
+#!/sbin/init_sh
+#
+# PROVIDE: syslogd
+# REQUIRE: FILESYSTEMS newsyslog
+# BEFORE: SERVERS
+# KEYWORD: shutdown
+#
+# The system log daemon (SYSLOG.md §11.2). It binds /dev/log before going into the background,
+# so everything started after it can log.
+
+. /etc/rc.subr
+
+name="syslogd"
+desc="System log daemon"
+rcvar="syslogd_enable"
+command="/usr/sbin/syslogd"
+pidfile="/var/run/syslog.pid"
+extra_commands="reload"
+reload_cmd="syslogd_reload"
+
+# SIGHUP: re-read syslog.conf and reopen every log file.
+syslogd_reload()
+{
+	_pid=$(check_pidfile $pidfile $command)
+	if [ -z "$_pid" ]; then
+		echo "$name not running? (check $pidfile)." >&2
+		return 1
+	fi
+	echo "Reloading $name config files."
+	kill -HUP $_pid
+}
+
+load_rc_config $name
+run_rc_command "$1"

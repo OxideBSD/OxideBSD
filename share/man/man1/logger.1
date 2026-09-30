@@ -1,0 +1,121 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt LOGGER 1
+.Os OxideBSD
+.Sh NAME
+.Nm logger
+.Nd make entries in the system log
+.Sh SYNOPSIS
+.Nm
+.Op Fl 46Ais
+.Op Fl f Ar file
+.Op Fl H Ar hostname
+.Op Fl h Ar host
+.Op Fl P Ar port
+.Op Fl p Ar pri
+.Op Fl S Ar addr Ns Op : Ns Ar port
+.Op Fl t Ar tag
+.Op Ar message ...
+.Sh DESCRIPTION
+The
+.Nm
+utility sends a message to
+.Xr syslogd 8 :
+its arguments, joined by spaces, or else each non-empty line of
+.Ar file
+or of the standard input as a message of its own.
+Messages go to the local log socket
+.Pa /dev/log
+through
+.Xr syslog 3 ,
+or with
+.Fl h
+to another host.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl 4
+Use IPv4, which is the only protocol.
+.It Fl 6
+Use IPv6: not supported, an error.
+.It Fl A
+With
+.Fl h ,
+send to every IPv4 address of the host, not only the first.
+.It Fl f Ar file
+Read the messages from
+.Ar file .
+.It Fl H Ar hostname
+With
+.Fl h ,
+name this host
+.Ar hostname
+in the messages, instead of its own name.
+.It Fl h Ar host
+Send over UDP to
+.Xr syslogd 8
+on
+.Ar host ,
+as RFC 3164 messages that name this host.
+.It Fl i
+Include the process ID of
+.Nm
+after the tag.
+.It Fl P Ar port
+With
+.Fl h ,
+send to
+.Ar port ,
+a number or
+.Cm syslog ,
+instead of 514.
+.It Fl p Ar pri
+Log with priority
+.Ar pri ,
+given as
+.Ar facility . Ns Ar level
+with the names of
+.Xr syslog.conf 5
+.Pq Cm mark No excepted ,
+or as a number.
+The default is
+.Cm user.notice .
+.It Fl S Ar addr Ns Op : Ns Ar port
+With
+.Fl h ,
+send from this address and port.
+.It Fl s
+Also write each message to the standard error.
+.It Fl t Ar tag
+Tag each message with
+.Ar tag
+instead of the login name.
+.El
+.Sh EXIT STATUS
+.Ex -std
+With
+.Fl h ,
+it fails if a message cannot be sent.
+Local messages are handed to
+.Xr syslog 3 ,
+which reports nothing: when
+.Xr syslogd 8
+is not running they are lost, and
+.Nm
+still succeeds.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+logger -p local0.info -t backup "backup finished"
+dmesg | logger -t boot -h loghost
+.Ed
+.Sh SEE ALSO
+.Xr syslog 3 ,
+.Xr syslog.conf 5 ,
+.Xr syslogd 8
+.Sh HISTORY
+The
+.Nm
+utility first appeared in
+.Bx 4.3 .
+This one is OxideBSD's own, written in Rust, with the options of
+.Fx .

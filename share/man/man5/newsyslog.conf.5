@@ -1,0 +1,172 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt NEWSYSLOG.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm newsyslog.conf
+.Nd log rotation configuration
+.Sh DESCRIPTION
+The file
+.Pa /etc/newsyslog.conf
+tells
+.Xr newsyslog 8
+which logs to rotate, when, and how.
+Each line describes one log, in fields separated by white space:
+.Bd -literal -offset indent
+logfile [owner:group] mode count size when [flags [pid_file [signal]]]
+.Ed
+.Pp
+A
+.Ql #
+starts a comment, which runs to the end of the line.
+A line
+.Ql include Ar path
+.Po or
+.Ql <include> Ar path
+.Pc
+reads another file, each file of a directory whose name ends in
+.Pa .conf ,
+in name order, or each file a shell pattern matches.
+A path that does not exist is ignored.
+.Pp
+The fields are:
+.Bl -tag -width indent
+.It Ar logfile
+The log's absolute path name; with the
+.Cm G
+flag, a shell pattern, every match of which is a log.
+The name
+.Ql <default>
+gives the settings for files named on the
+.Xr newsyslog 8
+command line that no other line names.
+.It Ar owner : Ns Ar group
+Optional: the owner and group of the new log, as names or numbers.
+Either may be left out, keeping the old file's.
+.It Ar mode
+The new log's mode, in octal.
+.It Ar count
+How many archives to keep.
+With 0, a rotated log is removed, not archived.
+.It Ar size
+The size, in kilobytes, at which the log is rotated, or
+.Ql *
+not to rotate by size.
+.It Ar when
+When the log is rotated regardless of its size:
+.Ql * ,
+never; a number, that many hours after the last rotation; or a rotation time,
+optionally after a number of hours.
+A log is rotated when its size or its time comes, whichever is first.
+A rotation time is either
+.Bl -tag -width indent
+.It Cm @ Ns Oo Oo Oo Oo Ar cc Oc Ns Ar yy Oc Ns Ar mm Oc Ns Ar dd Oc Ns Oo Cm T Ns Oo Ar hh Ns Oo Ar mm Ns Oo Ar ss Oc Oc Oc Oc
+An ISO 8601 time.
+Fields before the first one given mean
+.Dq every ,
+fields after the last one given are zero:
+.Ql @T00
+is every midnight,
+.Ql @01T05
+the first of each month at 05:00, and
+.Ql @0101T
+every New Year.
+.It Cm $ Ns Oo Cm W Ns Ar weekday | Cm M Ns Ar day Oc Ns Op Cm D Ns Ar hh
+A day, week or month:
+.Cm D Ns Ar hh
+is the hour (0 if left out),
+.Cm W Ns Ar weekday
+the day of the week, 0 being Sunday, and
+.Cm M Ns Ar day
+the day of the month, or
+.Cm ML
+its last day.
+.Ql $D0
+is every midnight,
+.Ql $W0D23
+Sundays at 23:00, and
+.Ql $M1D0
+the first of each month.
+.El
+.Pp
+A log with a rotation time that has never been rotated is rotated only
+within the hour that time names.
+An interval counts from the last rotation; a log never rotated is rotated
+once it has something in it.
+.It Ar flags
+Optional letters, or
+.Ql -
+for none:
+.Bl -tag -width 3n -compact
+.It Cm B
+The log is binary: write no rotation message into the new file.
+.It Cm C
+Create the log if it is missing, when
+.Xr newsyslog 8
+is run with
+.Fl C .
+.It Cm D
+No dump.
+Accepted, and does nothing.
+.It Cm G
+The
+.Ar logfile
+field is a shell pattern.
+.It Cm J
+Compress archives with
+.Xr bzip2 1 .
+.It Cm N
+Signal no process.
+.It Cm R
+Run the command in the
+.Ar pid_file
+field, instead of signalling a process.
+.It Cm U
+The pid file names a process group, which is signalled.
+.It Cm X
+Compress with
+.Xr xz 1 ,
+when it is installed.
+.It Cm Y
+Compress with
+.Xr zstd 1 ,
+when it is installed.
+.It Cm Z
+Compress archives with
+.Xr gzip 1 .
+.El
+.It Ar pid_file
+Optional: the file holding the process ID of the daemon to signal after the
+log is rotated; with
+.Cm R ,
+the command to run.
+The default is
+.Pa /var/run/syslog.pid .
+.It Ar signal
+Optional: the signal, as a number or a name such as
+.Dv SIGUSR1 ;
+the default is
+.Dv SIGHUP .
+.El
+.Sh FILES
+.Bl -tag -width ".Pa /usr/local/etc/newsyslog.conf.d" -compact
+.It Pa /etc/newsyslog.conf
+the configuration
+.It Pa /etc/newsyslog.conf.d
+more configuration, for the system
+.It Pa /usr/local/etc/newsyslog.conf.d
+more configuration, for installed software
+.El
+.Sh EXAMPLES
+Keep five compressed weeks of a daemon's log, rotated on Sundays, and tell
+the daemon with
+.Dv SIGUSR1 :
+.Bd -literal -offset indent
+/var/log/food.log  daemon:  640  5  *  $W0D0  JC  /var/run/food.pid  SIGUSR1
+.Ed
+.Sh SEE ALSO
+.Xr newsyslog 8 ,
+.Xr syslogd 8
+.Sh HISTORY
+The format is
+.Fx Ns 's .

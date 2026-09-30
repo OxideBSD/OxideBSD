@@ -1,0 +1,271 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SYSLOG.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm syslog.conf
+.Nd configuration file for syslogd
+.Sh DESCRIPTION
+The
+.Nm
+file tells
+.Xr syslogd 8
+where to write each message it receives.
+Each line is a rule: a
+.Em selector ,
+white space, and an
+.Em action .
+A
+.Ql #
+starts a comment line, and blank lines are ignored.
+Every rule whose selector takes a message is carried out, in the order of
+the file.
+A line that cannot be parsed is reported and left out; the rest of the file
+still applies.
+.Ss Selectors
+A selector is one or more
+.Ar facility . Ns Ar level
+terms joined by
+.Ql \&; .
+Several facilities may share one level, joined by
+.Ql \&, .
+A later term replaces what earlier ones said about the facilities it names,
+so
+.Ql *.notice;mail.none
+selects
+.Cm notice
+and above from every facility but
+.Cm mail .
+.Pp
+The facilities are
+.Cm auth ,
+.Cm authpriv ,
+.Cm console ,
+.Cm cron ,
+.Cm daemon ,
+.Cm ftp ,
+.Cm kern ,
+.Cm lpr ,
+.Cm mail ,
+.Cm mark ,
+.Cm news ,
+.Cm ntp ,
+.Cm security ,
+.Cm syslog ,
+.Cm user ,
+.Cm uucp
+and
+.Cm local0
+to
+.Cm local7 .
+.Ql *
+is every facility but
+.Cm mark ,
+which must be named.
+.Pp
+The levels, most severe first, are
+.Cm emerg
+.Pq or Cm panic ,
+.Cm alert ,
+.Cm crit ,
+.Cm err
+.Pq or Cm error ,
+.Cm warning
+.Pq or Cm warn ,
+.Cm notice ,
+.Cm info
+and
+.Cm debug .
+A level selects that level and every more severe one.
+It may be preceded by a comparison:
+.Ql =
+selects only that level,
+.Ql >
+the more severe levels,
+.Ql <
+the less severe ones, and
+.Ql >= ,
+.Ql <=
+and
+.Ql <>
+as expected.
+A
+.Ql \&!
+before it selects the levels it would not.
+The level
+.Ql *
+selects every level, and
+.Cm none
+none, excluding the facility.
+Names are not case-sensitive.
+.Ss Actions
+.Bl -tag -width indent
+.It Pa /path
+Append to the file, which must exist
+.Po see
+.Xr syslogd 8 Ns 's
+.Fl C
+.Pc ,
+writing it to disk after each line.
+A path that names a terminal, such as
+.Pa /dev/console ,
+is written as a terminal, each line ending in a carriage return and a
+newline.
+.It Li - Ns Pa /path
+The same, without writing to disk after each line.
+.It Li \&| Ns Ar command
+Write each line to the standard input of
+.Ql /bin/sh -c Ar command ,
+started with the first message and again after it exits.
+Its standard output and error go to
+.Pa /dev/null .
+.It Li @ Ns Ar host Ns Op : Ns Ar port
+Send to
+.Xr syslogd 8
+on another host, over UDP, port 514 by default.
+.It Ar user Ns Op , Ns Ar user ...
+Write to every terminal where one of these users is logged in.
+.It Li *
+Write to every logged-in user.
+.El
+.Ss Blocks
+These lines apply to the rules that follow them, until the same kind of
+line changes them:
+.Bl -tag -width indent
+.It Li \&! Ns Ar prog Ns Op , Ns Ar prog ...
+Only messages whose tag is one of these programs.
+.It Li !- Ns Ar prog Ns Op , Ns Ar prog ...
+Only messages whose tag is none of these.
+.It Li + Ns Ar host Ns Op , Ns Ar host ...
+Only messages from these hosts;
+.Ql @
+is this host.
+.It Li - Ns Ar host Ns Op , Ns Ar host ...
+Only messages from any host but these.
+.It Li \&: Ns Ar property , Oo Li \&! Oc Ns Oo Li icase_ Oc Ns Ar operator , Li \(dq Ns Ar value Ns Li \(dq
+Only messages whose
+.Ar property ,
+one of
+.Cm msg
+(the text),
+.Cm programname
+(the tag),
+.Cm hostname
+and
+.Cm source ,
+passes the comparison.
+The operators are
+.Cm contains ,
+.Cm isequal ,
+.Cm startswith ,
+.Cm regex
+(a basic regular expression) and
+.Cm ereg
+(an extended one, see
+.Xr re_format 7 ) .
+.Li icase_
+ignores case,
+.Li \&!
+negates.
+Inside the quotes,
+.Ql \e
+quotes the next character.
+.El
+.Pp
+.Ql \&!* ,
+.Ql +*
+and
+.Ql :*
+end the block of their kind.
+.Ql #!
+and
+.Ql #+
+are older spellings of
+.Ql \&!
+and
+.Ql + .
+.Ss Other lines
+.Bl -tag -width indent
+.It Li include Ar path
+Read another file, or every file ending in
+.Pa .conf
+in a directory, in name order.
+A path that does not exist is ignored.
+.It Ar name Ns Li = Ns Ar value
+A global option, in
+.Nx Ns 's
+form.
+The options of TCP and TLS transport
+.Po
+.Va tcp_server ,
+.Va tcp_bindhost ,
+.Va tcp_bindport ,
+.Va tls_*
+.Pc
+are recognized and reported as not supported yet; no other option exists.
+.El
+.Sh FILES
+.Bl -tag -width /usr/local/etc/syslog.d -compact
+.It Pa /etc/syslog.conf
+.It Pa /etc/syslog.d
+.It Pa /usr/local/etc/syslog.d
+.El
+.Sh EXAMPLES
+The default
+.Pa /etc/syslog.conf :
+.Bd -literal -offset indent
+*.err;kern.warning;auth.notice;mail.crit		/dev/console
+*.notice;authpriv.none;kern.debug;lpr.info;mail.crit;news.err	/var/log/messages
+security.*					/var/log/security
+auth.info;authpriv.info				/var/log/auth.log
+mail.info					/var/log/maillog
+cron.*						/var/log/cron
+*.emerg						*
+include						/etc/syslog.d
+include						/usr/local/etc/syslog.d
+.Ed
+.Pp
+Everything from
+.Xr sshd 8 ,
+and everything else except debugging messages to another host:
+.Bd -literal -offset indent
+!sshd
+*.*			/var/log/sshd.log
+!*
+*.info			@loghost
+.Ed
+.Pp
+Messages from this host mentioning a failure, in any case, to a script:
+.Bd -literal -offset indent
++@
+:msg, icase_contains, "fail"
+*.*			|/usr/local/sbin/alert
+:*
++*
+.Ed
+.Sh SEE ALSO
+.Xr logger 1 ,
+.Xr syslog 3 ,
+.Xr newsyslog.conf 5 ,
+.Xr syslogd 8
+.Sh HISTORY
+The
+.Nm
+file first appeared in
+.Bx 4.3 .
+Its format here is
+.Fx Ns 's ,
+with
+.Nx Ns 's
+global options.
+.Sh BUGS
+The
+.Li @@ Ns Ar host
+(TCP) and
+.Li @[ Ns Ar host Ns Li ]: Ns Ar port
+(TLS) actions are not supported yet: such a rule is reported and left out.
+.Pp
+Unlike
+.Fx ,
+.Ql #-
+does not start a host block, so a comment of dashes stays a comment.

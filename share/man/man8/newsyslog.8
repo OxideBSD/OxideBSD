@@ -1,0 +1,175 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt NEWSYSLOG 8
+.Os OxideBSD
+.Sh NAME
+.Nm newsyslog
+.Nd rotate log files
+.Sh SYNOPSIS
+.Nm
+.Op Fl CFNnrsv
+.Op Fl a Ar directory
+.Op Fl d Ar directory
+.Op Fl f Ar config_file
+.Op Fl S Ar pidfile
+.Op Fl t Ar timefmt
+.Op Ar
+.Sh DESCRIPTION
+The
+.Nm
+utility keeps log files from growing without bound.
+For each log named in
+.Xr newsyslog.conf 5
+it decides whether the log is due: whether it has reached its size limit, or
+its interval or rotation time has come since it was last rotated.
+A due log is rotated: its archives are renumbered, the oldest beyond the
+configured count removed,
+.Ar file
+becomes
+.Ar file Ns .0 ,
+and a new, empty
+.Ar file
+is created with the configured owner, group and mode.
+Unless the entry has the
+.Cm B
+flag, the new file begins with a line saying the log was turned over.
+.Pp
+Once every log has been looked at, each daemon whose log was rotated is
+signalled once: by default
+.Xr syslogd 8 ,
+through
+.Pa /var/run/syslog.pid ,
+with
+.Dv SIGHUP ,
+so that it reopens its files.
+Then the new archives are compressed, if their entries say so, with
+.Xr gzip 1
+or
+.Xr bzip2 1 .
+.Pp
+When a log was last rotated is the modification time of its newest archive,
+which
+.Nm
+sets to the time of rotation.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl a Ar directory
+Put archives in
+.Ar directory ,
+which must exist; a relative
+.Ar directory
+is taken from each log's own directory.
+.It Fl C
+Create each missing log whose entry has the
+.Cm C
+flag.
+Given twice, create every missing log.
+.It Fl d Ar directory
+Prefix every log file name with
+.Ar directory ,
+for logs under another root.
+.It Fl F
+Rotate every log, due or not.
+.It Fl f Ar config_file
+Read
+.Ar config_file
+instead of
+.Pa /etc/newsyslog.conf .
+.It Fl N
+Do nothing but what
+.Fl C
+asks for.
+.It Fl n
+Print what would be done, and do nothing.
+.It Fl r
+Run without superuser privileges.
+Without this option, or
+.Fl n ,
+.Nm
+refuses to run as another user.
+.It Fl S Ar pidfile
+Signal the process named in
+.Ar pidfile
+for entries that name no pid file, instead of
+.Xr syslogd 8 .
+.It Fl s
+Signal no process.
+.It Fl t Ar timefmt
+Name archives with the time of rotation, in the
+.Xr strftime 3
+format
+.Ar timefmt ,
+instead of numbering them.
+An empty
+.Ar timefmt ,
+or
+.Ql DEFAULT ,
+is
+.Ql %Y%m%dT%H%M%S .
+.It Fl v
+Say what is being done.
+.El
+.Pp
+If
+.Ar file
+arguments are given, only those logs are looked at.
+A file that no entry names takes the settings of the
+.Ql <default>
+entry, if there is one.
+.Pp
+.Nm
+runs from
+.Xr cron 8
+every hour, and at boot as
+.Ql newsyslog -CN ,
+from
+.Pa /etc/rc.d/newsyslog ,
+to create missing logs before
+.Xr syslogd 8
+starts.
+.Sh FILES
+.Bl -tag -width ".Pa /var/run/syslog.pid" -compact
+.It Pa /etc/newsyslog.conf
+the configuration
+.It Pa /var/run/syslog.pid
+the process ID of
+.Xr syslogd 8
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Rotate the system log now, whatever its size:
+.Pp
+.Dl newsyslog -F /var/log/messages
+.Pp
+Show what the next hourly run would do:
+.Pp
+.Dl newsyslog -nv
+.Sh SEE ALSO
+.Xr bzip2 1 ,
+.Xr gzip 1 ,
+.Xr newsyslog.conf 5 ,
+.Xr syslog.conf 5 ,
+.Xr syslogd 8
+.Sh HISTORY
+The
+.Nm
+utility first appeared in MIT Project Athena, and in
+.Fx 2.0 .
+OxideBSD's follows
+.Fx Ns 's
+options and configuration format; it is OxideBSD's own, written in Rust.
+.Sh BUGS
+The
+.Cm X
+and
+.Cm Y
+flags fail, leaving the archive uncompressed, while
+.Xr xz 1
+and
+.Xr zstd 1
+are not installed.
+The
+.Cm D
+flag is accepted and does nothing: there are no file flags yet.

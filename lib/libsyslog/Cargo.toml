@@ -1,0 +1,17 @@
+[package]
+name = "syslog"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+# syslog(3) priorities, facility and level names, and RFC 3164 / RFC 5424 messages (SYSLOG.md in
+# OxideBSD-doc), shared by syslogd, logger and newsyslog. Its own workspace, testable on the host
+# (.cargo/config.toml).
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("oxidebsd"))'] }

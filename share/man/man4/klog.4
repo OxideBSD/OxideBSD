@@ -1,0 +1,79 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt KLOG 4
+.Os OxideBSD
+.Sh NAME
+.Nm klog
+.Nd kernel message buffer device
+.Sh SYNOPSIS
+.Pa /dev/klog
+.Sh DESCRIPTION
+The kernel keeps every message it prints in a circular buffer of
+.Va kern.msgbufsize
+bytes, 64 KiB by default; when the buffer is full, the oldest bytes are
+overwritten.
+Messages printed before the kernel's memory allocator is ready are kept too,
+and moved into the buffer once it is.
+User space cannot write to the buffer.
+.Pp
+The character device
+.Pa /dev/klog ,
+number 7, 0, owned by root with mode 0600, reads the buffer for
+.Xr syslogd 8 .
+Each line is stored as the kernel printed it, with a
+.Ql \&< Ns Ar priority Ns \&>
+prefix when the code printing it gave one.
+.Pp
+Only one descriptor may have
+.Pa /dev/klog
+open at a time.
+A
+.Xr read 2
+returns the bytes nobody has read yet, as many as fit, and consumes them; if
+some unread bytes have been overwritten, reading resumes at the oldest byte
+still held, and the lost ones are skipped.
+With nothing unread it waits for the kernel to print, or fails with
+.Er EAGAIN
+if the descriptor is non-blocking.
+A signal interrupts the wait.
+.Xr poll 2
+reports the descriptor readable when there is unread data.
+.Pp
+Reading
+.Pa /dev/klog
+does not change what
+.Xr dmesg 8
+shows: it reads the whole buffer through the
+.Va kern.msgbuf
+sysctl, and
+.Va kern.msgbuf_clear
+empties that view without affecting
+.Pa /dev/klog .
+.Sh FILES
+.Bl -tag -width /dev/klog -compact
+.It Pa /dev/klog
+.El
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBUSY
+.Xr open 2 :
+another descriptor has the device open.
+.It Bq Er EAGAIN
+.Xr read 2 :
+nothing is unread and the descriptor is non-blocking.
+.It Bq Er EOPNOTSUPP
+.Xr write 2
+was called.
+.El
+.Sh SEE ALSO
+.Xr sysctl 3 ,
+.Xr dmesg 8 ,
+.Xr syslogd 8
+.Sh HISTORY
+A
+.Pa /dev/klog
+device first appeared in
+.Bx 4.3 .
+OxideBSD's follows the BSDs': exclusive and consuming, with the whole buffer
+also readable through
+.Va kern.msgbuf .

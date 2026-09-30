@@ -7465,6 +7465,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests, b"smoke", include_bytes!(env!("OXFS_SMOKE_ELF_PATH")));
     let usr_tests_rc = ensure_dir(usr_tests, b"rc");
     ok &= seed_file(usr_tests_rc, b"run.sh", include_bytes!("../../../../regress/rc-syscall-smoke/run.sh"));
+    let usr_tests_syslog = ensure_dir(usr_tests, b"syslog");
+    ok &= seed_file(usr_tests_syslog, b"run.sh", include_bytes!("../../../../regress/syslog-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
     ok &= seed_file(
         usr_tests,
@@ -7696,6 +7698,7 @@ fn format_fresh_filesystem() -> bool {
     );
     ok &= seed_file(bin, b"link", include_bytes!(env!("OXFS_LINK_ELF_PATH")));
     ok &= seed_file(bin, b"ln", include_bytes!(env!("OXFS_LN_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"logger", include_bytes!(env!("OXFS_LOGGER_ELF_PATH")));
     ok &= seed_file(usr_bin, b"login", include_bytes!(env!("OXFS_LOGIN_ELF_PATH")));
     ok &= seed_file(
         usr_bin,
@@ -7740,6 +7743,7 @@ fn format_fresh_filesystem() -> bool {
         b"netstat",
         include_bytes!(env!("OXFS_NETSTAT_ELF_PATH")),
     );
+    ok &= seed_file(usr_sbin, b"newsyslog", include_bytes!(env!("OXFS_NEWSYSLOG_ELF_PATH")));
     ok &= seed_file(usr_bin, b"nice", include_bytes!(env!("OXFS_NICE_ELF_PATH")));
     ok &= seed_file(usr_bin, b"nl", include_bytes!(env!("OXFS_NL_ELF_PATH")));
     ok &= seed_file(usr_bin, b"nohup", include_bytes!(env!("OXFS_NOHUP_ELF_PATH")));
@@ -7840,6 +7844,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"su", include_bytes!(env!("OXFS_SU_ELF_PATH")));
     ok &= seed_file(usr_bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"syslogd", include_bytes!(env!("OXFS_SYSLOGD_ELF_PATH")));
     ok &= seed_file(usr_bin, b"tac", include_bytes!(env!("OXFS_TAC_ELF_PATH")));
     ok &= seed_file(bin, b"tar", include_bytes!(env!("OXFS_TAR_ELF_PATH")));
     ok &= seed_file(usr_bin, b"tee", include_bytes!(env!("OXFS_TEE_ELF_PATH")));
@@ -7961,7 +7966,14 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"hostname", include_bytes!("../../../../etc/rc.d/hostname"));
     ok &= seed_file(rc_d, b"tmp", include_bytes!("../../../../etc/rc.d/tmp"));
     ok &= seed_file(rc_d, b"sysctl", include_bytes!("../../../../etc/rc.d/sysctl"));
+    ok &= seed_file(rc_d, b"newsyslog", include_bytes!("../../../../etc/rc.d/newsyslog"));
+    ok &= seed_file(rc_d, b"syslogd", include_bytes!("../../../../etc/rc.d/syslogd"));
     ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
+    // System logging (SYSLOG.md): routing, rotation, and their drop-in directories.
+    ok &= seed_file(etc, b"syslog.conf", include_bytes!("../../../../etc/syslog.conf"));
+    ensure_dir(etc, b"syslog.d");
+    ok &= seed_file(etc, b"newsyslog.conf", include_bytes!("../../../../etc/newsyslog.conf"));
+    ensure_dir(etc, b"newsyslog.conf.d");
     // /etc/passwd + /etc/group -- musl's own getpwnam/getpwuid/getgrnam/getgrgid
     // (external/mit/musl/src/passwd/*.c) parse these directly via plain fopen/fgets, no syscall of
     // their own beyond the open/read/readv this filesystem already supports -- same "port libc's
@@ -8126,6 +8138,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(man_man1, b"whatis.1", b"apropos.1");
     ok &= seed_file(man_man1, b"login.1", include_bytes!("../../../../share/man/man1/login.1"));
     ok &= seed_file(man_man1, b"less.1", include_bytes!("../../../../share/man/man1/more.1"));
+    ok &= seed_file(man_man1, b"logger.1", include_bytes!("../../../../share/man/man1/logger.1"));
     ok &= seed_file(man_man1, b"man.1", include_bytes!("../../../../share/man/man1/man.1"));
     ok &= seed_hardlink(man_man1, b"more.1", b"less.1");
     ok &= seed_file(man_man1, b"oxdoc.1", include_bytes!("../../../../share/man/man1/oxdoc.1"));
@@ -8155,15 +8168,18 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(man_man3, b"sysctlbyname.3", b"sysctl.3");
     ok &= seed_hardlink(man_man3, b"sysctlnametomib.3", b"sysctl.3");
     let man_man4 = ensure_dir(usr_share_man, b"man4");
+    ok &= seed_file(man_man4, b"klog.4", include_bytes!("../../../../share/man/man4/klog.4"));
     ok &= seed_file(man_man4, b"unix.4", include_bytes!("../../../../share/man/man4/unix.4"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
     ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
     ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
     ok &= seed_file(man_man5, b"man.conf.5", include_bytes!("../../../../share/man/man5/man.conf.5"));
+    ok &= seed_file(man_man5, b"newsyslog.conf.5", include_bytes!("../../../../share/man/man5/newsyslog.conf.5"));
     ok &= seed_file(man_man5, b"passwd.5", include_bytes!("../../../../share/man/man5/passwd.5"));
     ok &= seed_hardlink(man_man5, b"master.passwd.5", b"passwd.5");
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
     ok &= seed_file(man_man5, b"sysctl.conf.5", include_bytes!("../../../../share/man/man5/sysctl.conf.5"));
+    ok &= seed_file(man_man5, b"syslog.conf.5", include_bytes!("../../../../share/man/man5/syslog.conf.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
     let man_man7 = ensure_dir(usr_share_man, b"man7");
     ok &= seed_file(man_man7, b"eqn.7", include_bytes!("../../../../share/man/man7/eqn.7"));
@@ -8176,12 +8192,14 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"dmesg.8", include_bytes!("../../../../share/man/man8/dmesg.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));
+    ok &= seed_file(man_man8, b"newsyslog.8", include_bytes!("../../../../share/man/man8/newsyslog.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
     ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
     ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));
     ok &= seed_file(man_man8, b"reboot.8", include_bytes!("../../../../share/man/man8/reboot.8"));
     ok &= seed_file(man_man8, b"sysctl.8", include_bytes!("../../../../share/man/man8/sysctl.8"));
+    ok &= seed_file(man_man8, b"syslogd.8", include_bytes!("../../../../share/man/man8/syslogd.8"));
     ok &= seed_hardlink(man_man8, b"halt.8", b"reboot.8");
     ok &= seed_hardlink(man_man8, b"poweroff.8", b"reboot.8");
     ok &= seed_file(man_man8, b"shutdown.8", include_bytes!("../../../../share/man/man8/shutdown.8"));

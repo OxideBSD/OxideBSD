@@ -1,0 +1,26 @@
+#!/sbin/init_sh
+#
+# PROVIDE: newsyslog
+# REQUIRE: FILESYSTEMS
+#
+# Creates the log files syslogd writes to, which must exist (SYSLOG.md §9.5, §11.1); the hourly
+# rotation itself runs from cron.
+
+. /etc/rc.subr
+
+name="newsyslog"
+desc="Create missing log files"
+rcvar="newsyslog_enable"
+command="/usr/sbin/newsyslog"
+start_cmd="newsyslog_start"
+stop_cmd=":"
+
+newsyslog_start()
+{
+	echo -n "Creating and/or trimming log files"
+	$command $newsyslog_flags
+	echo "."
+}
+
+load_rc_config $name
+run_rc_command "$1"

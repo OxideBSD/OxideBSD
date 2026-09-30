@@ -556,6 +556,10 @@ name = "sysinfo-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "syslog-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "sysv-msg-syscall-smoke"
 version = "0.1.0"
 

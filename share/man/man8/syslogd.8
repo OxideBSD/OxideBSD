@@ -1,0 +1,352 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 29, 2026
+.Dt SYSLOGD 8
+.Os OxideBSD
+.Sh NAME
+.Nm syslogd
+.Nd log systems messages
+.Sh SYNOPSIS
+.Nm
+.Op Fl CdFkNnTv
+.Op Fl a Ar allowed_peer
+.Op Fl b Ar address Ns Op : Ns Ar service
+.Op Fl f Ar config_file
+.Op Fl l Oo Ar mode : Oc Ns Ar path
+.Op Fl m Ar mark_interval
+.Op Fl O Ar format
+.Op Fl P Ar pid_file
+.Op Fl s
+.Sh DESCRIPTION
+The
+.Nm
+daemon reads messages from programs on this host, from the kernel and from
+other hosts, and writes each one to the files, terminals, programs, users
+and hosts that
+.Xr syslog.conf 5
+selects for it.
+.Pp
+It reads from:
+.Bl -bullet
+.It
+the local socket
+.Pa /dev/log ,
+a datagram socket in the
+.Dv AF_UNIX
+domain, to which
+.Xr syslog 3
+and
+.Xr logger 1
+send.
+A stale file at that path is removed first, and the new socket is made mode
+0666.
+Further sockets are added with
+.Fl l ;
+.It
+.Pa /dev/klog ,
+the kernel message buffer
+.Pq Xr klog 4 ,
+which holds the kernel's messages from boot on until
+.Nm
+reads them;
+.It
+UDP port 514, unless
+.Fl s ,
+.Fl ss
+or
+.Fl N
+is given.
+.El
+.Pp
+The local sockets are created before
+.Nm
+goes into the background, so that
+.Pa /dev/log
+exists when the command returns.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl a Ar allowed_peer
+Accept messages from the network only from
+.Ar allowed_peer ,
+which is
+.Ar address Ns Oo / Ns Ar mask Oc Ns Op : Ns Ar service ,
+with
+.Ar mask
+a prefix length or a dotted mask, or
+.Ar domain Ns Op : Ns Ar service ,
+where a
+.Ar domain
+of the form
+.Li *. Ns Ar suffix
+matches every name ending in
+.Li \&. Ns Ar suffix .
+Domain names are compared with the name the sender's address resolves to,
+so under
+.Fl n
+they match nothing.
+.Ar service
+is a port number or
+.Cm syslog .
+May be repeated; without it every sender is accepted.
+.It Fl b Ar address Ns Op : Ns Ar service
+Receive on
+.Ar address
+instead of every address.
+An empty
+.Ar address ,
+or
+.Ql * ,
+means every address.
+May be repeated.
+.It Fl C
+Create a log file named in
+.Xr syslog.conf 5
+that does not exist, with mode 0600.
+Without it, a missing file is reported and its rule is not carried out.
+.It Fl d
+Debug: stay in the foreground and also print
+.Nm Ns 's
+own messages, and rejected datagrams, on standard error.
+.It Fl F
+Stay in the foreground.
+.It Fl f Ar config_file
+Read
+.Ar config_file
+instead of
+.Pa /etc/syslog.conf .
+.It Fl k
+Keep facility
+.Cm kern
+on messages that did not come from the kernel.
+By default such messages are given facility
+.Cm user .
+.It Fl l Oo Ar mode : Oc Ns Ar path
+Also receive on a local socket at
+.Ar path ,
+made mode
+.Ar mode
+(octal), 0666 by default.
+May be repeated.
+.It Fl m Ar mark_interval
+Write a
+.Dq -- MARK --
+message of facility
+.Cm mark ,
+level
+.Cm info ,
+every
+.Ar mark_interval
+minutes, to the files selecting it that have not been written to for that
+long.
+The default is 20; 0 turns marks off.
+.It Fl N
+Open no network socket at all, for receiving or sending.
+.It Fl n
+Do not look up the names of hosts messages arrive from; use their addresses.
+.It Fl O Ar format
+Write messages as
+.Cm bsd
+or
+.Cm rfc3164 ,
+the default, or as
+.Cm syslog
+or
+.Cm rfc5424 ,
+both locally and to other hosts.
+.It Fl P Ar pid_file
+Write the process ID to
+.Ar pid_file
+instead of
+.Pa /var/run/syslog.pid .
+.It Fl s
+Do not receive messages from the network.
+Given twice, do not send messages to other hosts either.
+The default
+.Va syslogd_flags
+in
+.Xr rc.conf 5
+is
+.Fl s .
+.It Fl T
+Stamp messages from the network with the time they arrive, instead of the
+time stamp they carry.
+.It Fl v
+Write each message's facility and level, as numbers, before its tag:
+.Ql <4.6> .
+Given twice, write them by name:
+.Ql <auth.info> .
+Only in the
+.Cm rfc3164
+format.
+.El
+.Ss Messages
+A message is a
+.Ql \&< Ns Ar priority Ns \&>
+prefix, followed by an RFC 3164 or an RFC 5424 header and the text.
+A message without a priority is
+.Cm user.notice .
+A newline or a NUL byte ends a message; control characters other than tab
+are written as
+.Ql ^X ,
+and DEL as
+.Ql ^? .
+Messages longer than 8192 bytes are cut.
+.Pp
+Messages from this host, those from the local sockets and the kernel's, are
+stamped with the time they arrive; the sender's own time stamp is ignored.
+Messages from the network keep the time stamp they carry, unless
+.Fl T
+is given or they have none that can be read; an RFC 3164 time stamp, which
+has no year, is given the current one, or the previous year for a month
+well ahead of the current one.
+.Pp
+A message from the network is logged under the name of the host it came
+from, as its address resolves, whatever host its header names.
+.Pp
+The kernel's lines are tagged
+.Ql kernel .
+A kernel line without a priority is
+.Cm kern.notice .
+.Pp
+On a local socket
+.Nm
+asks the kernel for each sender's credentials
+.Pq Dv LOCAL_CREDS_PERSISTENT , see Xr unix 4 .
+A message that has a tag but names no process ID is given the sender's
+process ID, which the sender cannot forge.
+.Pp
+A message identical to the last one an action wrote, from the same host, is
+not written again but counted.
+The count is written as
+.Dq last message repeated Ar N No times
+when a different message arrives, or 30 seconds after the first repeat, and
+after 2 and then 10 minutes while repeats go on.
+.Ss Output
+In the
+.Cm rfc3164
+format each line is
+.Pp
+.Dl Mmm dd hh:mm:ss host tag[pid]: text
+.Pp
+and in the
+.Cm rfc5424
+format
+.Pp
+.Dl <N>1 timestamp host app-name procid msgid structured-data text
+.Pp
+with the time stamp to the microsecond and its offset from UTC.
+Times are local time.
+Messages sent to other hosts over UDP are the same line, with the priority
+prefix in the
+.Cm rfc3164
+format; they go out of the first receiving socket, so from port 514, or,
+under
+.Fl s ,
+from a socket of their own.
+.Pp
+Messages to logged-in users, found in
+.Xr utmpx 5 ,
+are preceded by a
+.Dq Message from syslogd@ Ns Ar host No at Ar time No ...
+line.
+Terminals are written without waiting; a terminal that is stopped loses the
+message.
+.Pp
+A file that cannot be opened or written, and a regular expression that
+does not compile, are reported once, as a message of facility
+.Cm syslog ,
+level
+.Cm err ;
+the rule is then left out until the configuration is read again.
+A host that cannot be found is looked up again, at most once a minute.
+A pipe command that exits is started again for the next message; messages
+arriving meanwhile are lost.
+.Pp
+If the configuration file does not exist,
+.Nm
+logs
+.Cm *.err
+to
+.Pa /dev/console
+and
+.Cm *.emerg
+to every logged-in user.
+.Nm Ns 's
+own messages are of facility
+.Cm syslog
+and tagged
+.Ql syslogd .
+.Ss Signals
+.Bl -tag -width SIGTERM
+.It Dv SIGHUP
+Read the configuration again, reopening every file and restarting every pipe
+command.
+.It Dv SIGTERM , Dv SIGINT
+Log
+.Dq exiting on signal Ar n ,
+remove the local sockets and the process ID file, and exit.
+.It Dv SIGPIPE
+Ignored.
+.El
+.Sh FILES
+.Bl -tag -width /var/run/syslog.pid -compact
+.It Pa /etc/syslog.conf
+The configuration.
+.It Pa /etc/syslog.d
+Further configuration, included by the default
+.Pa /etc/syslog.conf .
+.It Pa /var/run/syslog.pid
+The process ID of the running
+.Nm ,
+which keeps the file locked with
+.Xr flock 2 :
+a second
+.Nm
+finds it locked and exits instead of taking
+.Pa /dev/log .
+.It Pa /dev/log
+The local log socket.
+.It Pa /dev/klog
+The kernel message buffer.
+.El
+.Sh SEE ALSO
+.Xr logger 1 ,
+.Xr syslog 3 ,
+.Xr klog 4 ,
+.Xr unix 4 ,
+.Xr newsyslog.conf 5 ,
+.Xr syslog.conf 5 ,
+.Xr dmesg 8 ,
+.Xr newsyslog 8
+.Sh STANDARDS
+.Rs
+.%A C. Lonvick
+.%T The BSD syslog Protocol
+.%R RFC 3164
+.%D August 2001
+.Re
+.Pp
+.Rs
+.%A R. Gerhards
+.%T The Syslog Protocol
+.%R RFC 5424
+.%D March 2009
+.Re
+.Sh HISTORY
+The
+.Nm
+daemon first appeared in
+.Bx 4.3 .
+This one is OxideBSD's own, written in Rust, with the options of
+.Fx .
+.Sh BUGS
+Messages are sent and received over UDP only: the TCP and TLS actions
+.Pq Li @@ Ns Ar host , Li @[ Ns Ar host Ns Li ]: Ns Ar port
+and the
+.Va tcp_*
+and
+.Va tls_*
+options of
+.Xr syslog.conf 5
+are not supported yet.
+There is no IPv6.
