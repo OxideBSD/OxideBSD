@@ -10,13 +10,31 @@ This technique also speeds up development as it allows critical system component
 It also removes one of the key disadvantages of modularity, as it allows components to run at the same level as the kernel.
 
 Dependencies:
-A C compiler (clang or gcc) with musl support
+A C compiler (gcc and/or clang)
 GNU make (for BusyBox)
 Cargo nightly
 QEMU (for testing in a VM), plus OVMF firmware for the default UEFI boot path
+git to retrieve the submodules
+rustup
+cmake, ninja, python3
+perl
+nasm
+mtools
+tic
+binutils
+xorriso
+(optional but recommended for developers:) ccache
 
 Building:
-To build it, use `cargo build`.
+To build it, begin by fetching the submodules.
+
+git submodule update --init
+git -C external/mit/rust submodule update --init library/backtrace
+
+Then, run cargo bv or cargo build -vv.
+
+You will need a beefy computer for the LLVM build.
+
 
 Documentation:
 Design docs, the project roadmap, and POSIX compliance tracking live in a separate repo,
