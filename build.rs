@@ -305,6 +305,7 @@ fn main() {
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("socket-syscall-smoke", "SOCKET_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sysctl-syscall-smoke", "SYSCTL_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("pagecache-syscall-smoke", "PAGECACHE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
@@ -565,6 +566,7 @@ fn main() {
     let at_smoke_elf_path = build_c_pie(&musl_sysroot, "at-smoke");
     let socket_smoke_elf_path = build_c_pie(&musl_sysroot, "socket-smoke");
     let sysctl_smoke_elf_path = build_c_pie(&musl_sysroot, "sysctl-smoke");
+    let pagecache_smoke_elf_path = build_c_pie(&musl_sysroot, "pagecache-smoke");
     let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
     let ppoll_smoke_elf_path = build_c_pie(&musl_sysroot, "ppoll-smoke");
     let fd_smoke_elf_path = build_c_pie(&musl_sysroot, "fd-smoke");
@@ -806,6 +808,7 @@ fn main() {
         ("OXFS_AT_SMOKE_ELF_PATH", at_smoke_elf_path.to_str().unwrap()),
         ("OXFS_SOCKET_SMOKE_ELF_PATH", socket_smoke_elf_path.to_str().unwrap()),
         ("OXFS_SYSCTL_SMOKE_ELF_PATH", sysctl_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_PAGECACHE_SMOKE_ELF_PATH", pagecache_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
         ("OXFS_TTY_SMOKE_ELF_PATH", tty_smoke_elf_path.to_str().unwrap()),

@@ -385,6 +385,10 @@ name = "oxlibc"
 version = "0.1.0"
 
 [[package]]
+name = "pagecache-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "pause-syscall-smoke"
 version = "0.1.0"
 

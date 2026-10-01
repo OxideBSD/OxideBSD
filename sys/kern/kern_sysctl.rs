@@ -600,18 +600,20 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     );
     // The read-only page cache (`memory::pagecache`, PAGECACHE.md §4).
     let pagecache = add_node(t, &vm, None, "pagecache", "Read-only file page cache");
-    let counts: [(&'static str, &'static str, Getter); 5] = [
-        ("entries", "Files with cached pages", || uint(crate::memory::pagecache::stats().0)),
-        ("pages", "Frames held", || uint(crate::memory::pagecache::stats().1)),
-        ("hits", "Pages mapped that were already cached", || uint(crate::memory::pagecache::stats().2)),
-        ("misses", "Pages read into the cache", || uint(crate::memory::pagecache::stats().3)),
-        ("limit", "Frames unused files may hold", || uint(crate::memory::pagecache::stats().4)),
+    // Page counts are `u_int`, like `vm.stats.vm.*`; hits and misses count up forever, `u_long`.
+    let counts: [(&'static str, &'static str, Getter, bool); 5] = [
+        ("entries", "Files with cached pages", || uint(crate::memory::pagecache::stats().0), false),
+        ("pages", "Frames held", || uint(crate::memory::pagecache::stats().1), false),
+        ("hits", "Pages mapped that were already cached", || ulong(crate::memory::pagecache::stats().2), true),
+        ("misses", "Pages read into the cache", || ulong(crate::memory::pagecache::stats().3), true),
+        ("limit", "Frames unused files may hold", || uint(crate::memory::pagecache::stats().4), false),
     ];
-    for (name, descr, get) in counts {
+    for (name, descr, get, long) in counts {
+        let (kind, fmt) = if long { (CTLTYPE_ULONG, "LU") } else { (CTLTYPE_UINT, "IU") };
         add_leaf(
             t,
             &pagecache,
-            Leaf { number: None, name, kind: CTLTYPE_UINT, fmt: "IU", flags: CTLFLAG_RD, descr, get, set: None },
+            Leaf { number: None, name, kind, fmt, flags: CTLFLAG_RD, descr, get, set: None },
         );
     }
     add_leaf(

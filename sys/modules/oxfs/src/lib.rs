@@ -9007,6 +9007,13 @@ fn format_fresh_filesystem() -> bool {
         b"sysctl-smoke.elf",
         include_bytes!(env!("OXFS_SYSCTL_SMOKE_ELF_PATH")),
     );
+    // The read-only page cache, run by `tests/pagecache_syscall_smoke.rs` -- see
+    // `regress/pagecache-smoke/main.c`.
+    ok &= seed_file(
+        root,
+        b"pagecache-smoke.elf",
+        include_bytes!(env!("OXFS_PAGECACHE_SMOKE_ELF_PATH")),
+    );
     // `ppoll(2)` coverage, run by `tests/ppoll_syscall_smoke.rs` -- see `regress/ppoll-smoke/main.c`.
     ok &= seed_file(
         root,

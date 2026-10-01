@@ -770,8 +770,10 @@ pub extern "C" fn _start() -> ! {
     // --- Part 12: real ENXIO for a nonzero-offset request whose range doesn't fit the object
     // (`mmap/28-1.c`) -- deliberately distinct from parts 2/3/5 above, which all use off == 0 and
     // must keep succeeding (real POSIX MPR, not ENXIO) even when their own `len` extends past the
-    // object's real content.
-    let path_nxio = b"/tmp/mmap-smoke-nxio\0";
+    // object's real content. A POSIX shared memory object (created in `/dev/shm`, where musl's
+    // `shm_open` puts them), as in the pilot test: a regular file may be mapped past its end at any
+    // offset, which `ld.so` does for a library's last segment.
+    let path_nxio = b"/dev/shm/mmap-smoke-nxio\0";
     let fd_nxio = open_create(path_nxio).expect("part 12: open failed");
     let shm_size: u64 = 8192; // two pages
     check!(

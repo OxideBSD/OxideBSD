@@ -11,7 +11,7 @@
 //!   aliases them) and `CACHED_LEAF` (`mprotect` copies one before making it writable). They're freed when their entry has left the cache (the file changed,
 //!   `oxidebsd_content_changed`, or eviction) and no address space uses it.
 //! - At most a quarter of memory is held in entries nobody uses; beyond that the least recently
-//!   used go.
+//!   used go. When the frame allocator runs out, it takes them back too (`reclaim`).
 //!
 //! **Locking.** `execve` and `mmap` fill entries while holding the frame allocator, so
 //! `oxidebsd_content_changed`, which oxfs calls, never takes it: it only retires the entry, and
@@ -221,6 +221,28 @@ pub fn collect(fa: &mut impl FrameDeallocator<Size4KiB>) {
         // SAFETY: a frame of a retired entry no address space uses.
         unsafe { fa.deallocate_frame(f) };
     }
+}
+
+/// Gives `free` the frames of retired entries, else of the least recently used entry no address
+/// space uses, for a frame allocator that has run out. `false` when there's nothing to give, or
+/// the cache is locked (the allocation came from inside it). Allocates nothing: it runs inside the
+/// frame allocator.
+pub fn reclaim(free: &mut dyn FnMut(PhysFrame<Size4KiB>)) -> bool {
+    let Some(mut c) = CACHE.try_lock() else { return false };
+    if !c.pending_free.is_empty() {
+        c.pending_free.drain(..).for_each(&mut *free);
+        return true;
+    }
+    let Some(oldest) = c.entries.iter().filter(|(_, e)| e.uses == 0).min_by_key(|(_, e)| e.last_used).map(|(&id, _)| id)
+    else {
+        return false;
+    };
+    let e = c.entries.remove(&oldest).unwrap();
+    if c.by_content.get(&e.content_id) == Some(&oldest) {
+        c.by_content.remove(&e.content_id);
+    }
+    e.frames.into_iter().flatten().for_each(free);
+    true
 }
 
 /// Called by oxfs when inode `content_id`'s contents change or it is freed: later users read it

@@ -133,6 +133,23 @@ impl BootInfoFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        loop {
+            if let Some(frame) = self.allocate_unreclaimed() {
+                return Some(frame);
+            }
+            // Out of memory: take back frames the page cache holds for files no process uses,
+            // least recently used first, one file at a time, until one is free.
+            // SAFETY: the cache hands over only frames no address space maps.
+            if !pagecache::reclaim(&mut |frame| unsafe { self.deallocate_frame(frame) }) {
+                return None;
+            }
+        }
+    }
+}
+
+impl BootInfoFrameAllocator {
+    /// `allocate_frame` without reclaiming from the page cache.
+    fn allocate_unreclaimed(&mut self) -> Option<PhysFrame> {
         // Real reuse first: `free_list` only ever becomes `Some` via `deallocate_frame` below,
         // which never runs before `install_global_memory_state` has already populated
         // `PHYS_MEM_OFFSET` (real process teardown, the only caller, happens well after boot) --
