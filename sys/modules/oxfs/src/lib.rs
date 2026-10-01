@@ -4371,26 +4371,15 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
                     // than that, since the old whole-file-replace commit only ever wrote back
                     // whatever fit.
                     //
-                    // Plain O_WRONLY (no O_APPEND), or an explicit O_TRUNC regardless of access
-                    // mode: this filesystem's own established, tested behavior (`module_init`'s
-                    // self-check, "O_WRONLY overwrite did not truncate correctly") is that a plain
-                    // O_WRONLY reopen of an existing file replaces its *entire* content with
-                    // whatever gets written -- real POSIX would only overwrite the bytes actually
-                    // touched, leaving any untouched tail alone, but a plain write-only fd can
-                    // never observe that tail anyway (no real read-back path), and this matches
-                    // `modules/fat32`'s own established precedent (see `write_inode_data`'s own
-                    // doc comment). Resizes to `0` immediately, exactly like a real `O_TRUNC`
-                    // (whether or not the caller actually passed one for the O_WRONLY case).
-                    //
-                    // Real O_RDWR *without* O_TRUNC is the one case that keeps existing content:
-                    // a genuine read-modify-write fd needs to see what's already there via its own
-                    // real `read()`/`pread()` support (see `readwrite`'s own doc comment) --
-                    // buffered writes still flush positionally/additively from file offset `0`
-                    // (this filesystem's only write primitive), so bytes never actually written
-                    // keep their old content, matching real POSIX for this one case.
+                    // Only O_TRUNC truncates, resizing to `0` at once. Otherwise, O_WRONLY or
+                    // O_RDWR alike, the content stays: buffered writes flush positionally from
+                    // the fd's offset (this filesystem's only write primitive), so bytes never
+                    // written keep their old content. (A plain O_WRONLY open used to truncate as
+                    // well, on the theory that a write-only fd can't see the tail; every other
+                    // reader of the file can, and exec of a program patched in place ran zeros.)
                     let write_pos = if flags & O_APPEND != 0 {
                         inode.size
-                    } else if flags & O_ACCMODE != O_RDWR || flags & O_TRUNC != 0 {
+                    } else if flags & O_TRUNC != 0 {
                         resize_inode_data(resolved, 0);
                         0
                     } else {
@@ -9397,26 +9386,28 @@ fn format_fresh_filesystem() -> bool {
             }
             sc_close(fd);
 
-            // Plain O_WRONLY on an existing path: real overwrite-from-scratch, including a real
-            // truncate (writing fewer bytes than before must not leave the old tail behind).
-            let fd = oxfs_open(path.as_ptr() as u64, path.len() as u64, O_WRONLY, 0);
-            if fd < 0 {
-                ok = false;
-                log("[oxfs] self-check FAILED: O_WRONLY reopen of an existing file failed\n");
-            } else {
-                let fd = fd as u64;
-                sc_write(fd, b"BB".as_ptr() as u64, 2);
-                sc_close(fd);
+            // Plain O_WRONLY on an existing path overwrites only what it writes; O_TRUNC
+            // first empties the file.
+            for (flags, want, what) in [
+                (O_WRONLY, &b"BBAAA"[..], "[oxfs] self-check FAILED: O_WRONLY overwrite lost the file's tail\n"),
+                (O_WRONLY | O_TRUNC, &b"BB"[..], "[oxfs] self-check FAILED: O_TRUNC overwrite did not truncate\n"),
+            ] {
+                let fd = oxfs_open(path.as_ptr() as u64, path.len() as u64, flags, 0);
+                if fd < 0 {
+                    ok = false;
+                    log("[oxfs] self-check FAILED: O_WRONLY reopen of an existing file failed\n");
+                    continue;
+                }
+                sc_write(fd as u64, b"BB".as_ptr() as u64, 2);
+                sc_close(fd as u64);
 
                 let fd = oxfs_open(path.as_ptr() as u64, path.len() as u64, 0, 0);
                 let mut buf = [0u8; 16];
                 let n = sc_read(fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
                 sc_close(fd as u64);
-                if fd < 0 || n != 2 || &buf[..2] != b"BB" {
+                if fd < 0 || n != want.len() as i64 || &buf[..want.len()] != want {
                     ok = false;
-                    log(
-                        "[oxfs] self-check FAILED: O_WRONLY overwrite did not truncate correctly\n",
-                    );
+                    log(what);
                 }
             }
 
