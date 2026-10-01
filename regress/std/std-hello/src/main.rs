@@ -1,7 +1,7 @@
 //! Phase-0 spike for real Rust `std` on OxideBSD (see the "Rust std target" plan) — proves a
 //! genuinely unmodified, prebuilt upstream `std` (the real Tier-1 `x86_64-unknown-linux-musl`
 //! target, not a custom `sys/pal/oxidebsd` fork of `rust-lang/rust`) can be statically linked
-//! against this project's own patched musl sysroot (`target/musl-sysroot`, built by
+//! against this project's own patched musl sysroot (`toolchain/x86_64-unknown-oxidebsd`, built by
 //! `build.rs`'s `build_musl_sysroot`) and run correctly against OxideBSD's native syscall ABI.
 //!
 //! Built directly via `rustc` (see `build.rs`'s `build_std_hello_spike`), not `cargo` — the

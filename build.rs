@@ -61,6 +61,57 @@ fn build_jobs() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
+/// `toolchain/`: the cross compilers that build OxideBSD, kept apart from `target/` so that
+/// `cargo clean` leaves them (the host LLVM alone takes hours to build); `scripts/wipe.sh` removes
+/// both. Gitignored, laid out like a GNU cross toolchain:
+///
+/// - `bin/`: `x86_64-unknown-oxidebsd-{cc,gcc,clang,clang++,ld.lld}` and `oxidebsd-rustc-wrapper`
+///   (`write_toolchain_bin`, `write_oxidebsd_rustc_wrapper`);
+/// - `x86_64-unknown-oxidebsd/`: the sysroot, musl installed with `musl-gcc` (`build_musl_sysroot`);
+/// - `rust/sysroot`, `rust/src`: the hybrid Rust sysroot over our rust fork's `library/`
+///   (`build_oxidebsd_rust_sysroot`);
+/// - `build/`: build trees and stamps: `llvm-host` (host Clang and LLD, and the target's libc++
+///   and libunwind), `compiler-rt` (its builtins), `libgcc_s`, `musl-configure.stamp`.
+///
+/// Things built *for* OxideBSD (the on-target LLVM, ncurses, OpenSSL, OpenPAM, ...) stay in
+/// `target/`.
+fn toolchain_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchain")
+}
+
+/// `toolchain/bin`'s compiler names (see `toolchain_dir`): `cc` and `gcc` are `musl-gcc` (the host
+/// GCC with musl's specs), `clang`, `clang++` the host Clang aimed at OxideBSD and the sysroot, and
+/// `ld.lld` its linker. Rewritten when their content changes.
+fn write_toolchain_bin(musl_sysroot: &Path, llvm_host_build: &Path) {
+    let bin = toolchain_dir().join("bin");
+    std::fs::create_dir_all(&bin).expect("failed to create toolchain/bin");
+    let prefix = "x86_64-unknown-oxidebsd";
+    let write_script = |name: &str, script: String| {
+        let path = bin.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&path, &script).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    };
+    for name in ["cc", "gcc"] {
+        symlink_if_missing(&musl_sysroot.join("bin/musl-gcc"), &bin.join(format!("{prefix}-{name}")));
+    }
+    for name in ["clang", "clang++"] {
+        write_script(
+            &format!("{prefix}-{name}"),
+            format!(
+                "#!/bin/sh\nexec \"{}\" --target={CLANG_TARGET_TRIPLE} --sysroot=\"{}\" \"$@\"\n",
+                llvm_host_build.join("bin").join(name).display(),
+                musl_sysroot.display()
+            ),
+        );
+    }
+    symlink_if_missing(&llvm_host_build.join("bin/ld.lld"), &bin.join(format!("{prefix}-ld.lld")));
+}
+
 // `BUSYBOX_APPLETS`/`BUSYBOX_APPLETS_PASS2`/`build_busybox_applet`/`configure_busybox_single_applet`/
 // `resolve_busybox_new_config_options` -- split into their own file specifically so unrelated
 // edits to *this* file don't invalidate every cached BusyBox applet binary. See
@@ -359,6 +410,7 @@ fn main() {
     let llvm_host_build = build_llvm_host_toolchain();
     build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
     let libgcc_s_path = build_libgcc_s(&musl_sysroot, &llvm_host_build);
+    write_toolchain_bin(&musl_sysroot, &llvm_host_build);
     let libc_so_path = musl_sysroot.join("lib/libc.so");
 
     // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section.
@@ -1015,7 +1067,8 @@ fn target_dir_busybox_elf(out_name: &str) -> String {
 
 /// Configures, builds, and installs the vendored, OxideBSD-patched musl (`external/mit/musl` -- a
 /// submodule pointing at a personal fork, patched on its own `oxidebsd` branch to speak this
-/// kernel's native ABI directly -- see `CLAUDE.md`'s musl section) into `target/musl-sysroot`,
+/// kernel's native ABI directly -- see `CLAUDE.md`'s musl section) into the toolchain's sysroot,
+/// `toolchain/x86_64-unknown-oxidebsd` (`toolchain_dir`),
 /// producing a `musl-gcc`-style wrapper this build script can shell out to for
 /// `regress/musl-smoke/`. Uses musl's own build system directly (`configure`/`make`/
 /// `make install`) -- there's no Cargo/Rust involved at all, it's a plain C library. Skips
@@ -1025,7 +1078,7 @@ fn target_dir_busybox_elf(out_name: &str) -> String {
 fn build_musl_sysroot() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let musl_dir = Path::new(manifest_dir).join("external/mit/musl");
-    let sysroot = Path::new(manifest_dir).join("target/musl-sysroot");
+    let sysroot = toolchain_dir().join("x86_64-unknown-oxidebsd");
 
     println!(
         "cargo:rerun-if-changed={}",
@@ -1051,7 +1104,7 @@ fn build_musl_sysroot() -> PathBuf {
         "CFLAGS=-fPIE".to_string(),
     ];
     let configure_key = configure_args.join(" ");
-    let configure_stamp = Path::new(manifest_dir).join("target/musl-configure.stamp");
+    let configure_stamp = toolchain_dir().join("build/musl-configure.stamp");
     let configured = musl_dir.join("config.mak").exists()
         && std::fs::read_to_string(&configure_stamp).ok().as_deref() == Some(configure_key.as_str());
     if !configured {
@@ -1077,7 +1130,8 @@ fn build_musl_sysroot() -> PathBuf {
         if !status.success() {
             panic!("musl clean failed: {status}");
         }
-        std::fs::write(&configure_stamp, &configure_key).expect("writing target/musl-configure.stamp");
+        std::fs::create_dir_all(configure_stamp.parent().unwrap()).expect("creating toolchain/build");
+        std::fs::write(&configure_stamp, &configure_key).expect("writing toolchain/build/musl-configure.stamp");
     }
 
     let jobs = build_jobs();
@@ -1137,9 +1191,8 @@ fn build_musl_sysroot() -> PathBuf {
 /// finds it before the host compiler's own (glibc) `libgcc_s`. Rebuilt when libunwind or musl's
 /// `libc.so` is newer.
 fn build_libgcc_s(musl_sysroot: &Path, llvm_host_build: &Path) -> PathBuf {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let libunwind = llvm_host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libunwind.a"));
-    let out = manifest_dir.join("target/libgcc_s/libgcc_s.so.1");
+    let out = toolchain_dir().join("build/libgcc_s/libgcc_s.so.1");
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     // musl-gcc.specs too: it holds link flags (--eh-frame-hdr) that end up in the library.
     let newest_input = [&libunwind, &musl_sysroot.join("lib/libc.so"), &musl_sysroot.join("lib/musl-gcc.specs")]
@@ -1235,7 +1288,7 @@ fn ensure_libunwind_in_sysroot(sysroot: &Path) {
 /// (see the plan this spike came from):
 /// - `-C target-feature=+crt-static -C link-self-contained=no -C linker=<our musl-gcc>`: forces
 ///   the link to go through *our own* sysroot's `musl-gcc` wrapper (its `musl-gcc.specs` already
-///   points `-L`/crt startfile/endfile paths at `target/musl-sysroot`), rather than rustc silently
+///   points `-L`/crt startfile/endfile paths at the toolchain sysroot), rather than rustc silently
 ///   linking its own bundled self-contained musl objects.
 /// - `-C panic=abort`: matches every other binary in this project; also required in practice --
 ///   without it, rustc still tries to pull in `libpanic_unwind`/`-lunwind` regardless (see
@@ -1321,10 +1374,10 @@ fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
 fn build_oxidebsd_rust_sysroot() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let rust_fork = Path::new(manifest_dir).join("external/mit/rust");
-    let sysroot_dir = Path::new(manifest_dir).join("target/oxidebsd-rust-sysroot");
-    let src_mirror = Path::new(manifest_dir).join("target/oxidebsd-rust-src-mirror");
+    let sysroot_dir = toolchain_dir().join("rust/sysroot");
+    let src_mirror = toolchain_dir().join("rust/src");
 
-    std::fs::create_dir_all(&src_mirror).expect("failed to create target/oxidebsd-rust-src-mirror");
+    std::fs::create_dir_all(&src_mirror).expect("failed to create toolchain/rust/src");
     for name in ["library", "src"] {
         symlink_if_missing(&rust_fork.join(name), &src_mirror.join(name));
     }
@@ -1332,7 +1385,7 @@ fn build_oxidebsd_rust_sysroot() -> PathBuf {
     let toolchain_dir = PathBuf::from(rustc_output(manifest_dir, &["--print", "sysroot"]));
 
     std::fs::create_dir_all(sysroot_dir.join("lib/rustlib/src"))
-        .expect("failed to create target/oxidebsd-rust-sysroot/lib/rustlib/src");
+        .expect("failed to create toolchain/rust/sysroot/lib/rustlib/src");
     for entry in dir_entry_names(&toolchain_dir) {
         if entry != "lib" {
             symlink_if_missing(&toolchain_dir.join(&entry), &sysroot_dir.join(&entry));
@@ -1365,7 +1418,7 @@ fn build_oxidebsd_rust_sysroot() -> PathBuf {
 /// function's own point of view, so it fell through to `symlink()`, which fails with a real
 /// `EEXIST` since the dangling link itself is still a real directory entry needing removal first,
 /// not creation. Confirmed live: moving `third_party/rust` -> `external/mit/rust` left exactly
-/// this stale symlink behind in `target/oxidebsd-rust-src-mirror/`. Fixed: `symlink_metadata`
+/// this stale symlink behind in the source mirror (then `target/oxidebsd-rust-src-mirror/`). Fixed: `symlink_metadata`
 /// (does *not* follow symlinks) tells this function whether *any* entry sits at `link` -- if it's
 /// already a symlink pointing at the current `target`, done; if it's a symlink pointing anywhere
 /// else (stale), remove it and recreate; anything else already there is a genuine, unexpected
@@ -1410,19 +1463,19 @@ fn dir_entry_names(dir: &Path) -> Vec<String> {
 /// invocation cargo makes onto our hybrid sysroot. `RUSTC_WRAPPER` is invoked as
 /// `$RUSTC_WRAPPER $RUSTC <args...>` -- `$1` is the real (stock) rustc path cargo resolved.
 fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = Path::new(manifest_dir).join("target/oxidebsd-rustc-wrapper.sh");
+    let path = toolchain_dir().join("bin/oxidebsd-rustc-wrapper");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("failed to create toolchain/bin");
     let script = format!(
         "#!/bin/sh\nreal_rustc=\"$1\"\nshift\nexec \"$real_rustc\" --sysroot=\"{}\" \"$@\"\n",
         sysroot.display()
     );
-    std::fs::write(&path, script).expect("failed to write target/oxidebsd-rustc-wrapper.sh");
+    std::fs::write(&path, script).expect("failed to write toolchain/bin/oxidebsd-rustc-wrapper");
     let mut perms = std::fs::metadata(&path)
-        .expect("failed to stat target/oxidebsd-rustc-wrapper.sh")
+        .expect("failed to stat toolchain/bin/oxidebsd-rustc-wrapper")
         .permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     std::fs::set_permissions(&path, perms)
-        .expect("failed to chmod target/oxidebsd-rustc-wrapper.sh");
+        .expect("failed to chmod toolchain/bin/oxidebsd-rustc-wrapper");
     path
 }
 
@@ -2050,7 +2103,7 @@ fn vendor_linux_uapi_headers(musl_sysroot: &Path) {
 fn build_llvm_host_toolchain() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let llvm_root = Path::new(manifest_dir).join("external/apache2/llvm");
-    let build_dir = Path::new(manifest_dir).join("target/llvm-host-build");
+    let build_dir = toolchain_dir().join("build/llvm-host");
     let clang_bin = build_dir.join("bin/clang-23");
     let lld_bin = build_dir.join("bin/lld");
 
@@ -2126,25 +2179,25 @@ fn build_llvm_host_toolchain() -> PathBuf {
         .map(|old| old != configure_args_text)
         .unwrap_or(true);
     if configure_changed || !build_dir.join("build.ninja").exists() {
-        std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-host-build");
+        std::fs::create_dir_all(&build_dir).expect("failed to create toolchain/build/llvm-host");
         let status = Command::new("cmake")
             .args(&configure_args)
             .status()
-            .unwrap_or_else(|e| panic!("failed to run cmake for llvm-host-build: {e}"));
+            .unwrap_or_else(|e| panic!("failed to run cmake for toolchain/build/llvm-host: {e}"));
         if !status.success() {
-            panic!("cmake configure for llvm-host-build failed: {status}");
+            panic!("cmake configure for toolchain/build/llvm-host failed: {status}");
         }
         std::fs::write(&configure_stamp, &configure_args_text)
-            .expect("failed to write llvm-host-build configure stamp");
+            .expect("failed to write toolchain/build/llvm-host configure stamp");
     }
 
     let status = Command::new("ninja")
         .current_dir(&build_dir)
         .args(["clang", "lld"])
         .status()
-        .unwrap_or_else(|e| panic!("failed to run ninja for llvm-host-build: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run ninja for toolchain/build/llvm-host: {e}"));
     if !status.success() {
-        panic!("building llvm-host-build (host clang+lld) failed: {status}");
+        panic!("building toolchain/build/llvm-host (host clang+lld) failed: {status}");
     }
 
     build_dir
@@ -2166,7 +2219,7 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let llvm_root = Path::new(manifest_dir).join("external/apache2/llvm");
     let libcxx_out = host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a"));
-    let compiler_rt_build = Path::new(manifest_dir).join("target/compiler-rt-target-build");
+    let compiler_rt_build = toolchain_dir().join("build/compiler-rt");
     let builtins_dest = host_build.join(format!(
         "lib/clang/23/lib/{CLANG_TARGET_TRIPLE}/libclang_rt.builtins.a"
     ));
@@ -2188,7 +2241,7 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
     // at all -- these are freestanding numeric helpers with no syscalls of their own.
     if !compiler_rt_build.join("build.ninja").exists() {
         std::fs::create_dir_all(&compiler_rt_build)
-            .expect("failed to create target/compiler-rt-target-build");
+            .expect("failed to create toolchain/build/compiler-rt");
         let host_clang = host_build.join("bin/clang");
         let status = Command::new("cmake")
             .args(["-G", "Ninja", "-S"])
@@ -2220,9 +2273,9 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
                 "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
             ])
             .status()
-            .unwrap_or_else(|e| panic!("failed to run cmake for compiler-rt-target-build: {e}"));
+            .unwrap_or_else(|e| panic!("failed to run cmake for toolchain/build/compiler-rt: {e}"));
         if !status.success() {
-            panic!("cmake configure for compiler-rt-target-build failed: {status}");
+            panic!("cmake configure for toolchain/build/compiler-rt failed: {status}");
         }
     }
     let status = Command::new("ninja")
@@ -2276,7 +2329,7 @@ fn build_llvm_target_runtimes(host_build: &Path, musl_sysroot: &Path) {
         .arg(format!("-D{p}LIBUNWIND_ENABLE_STATIC=ON"))
         .arg(".")
         .status()
-        .unwrap_or_else(|e| panic!("failed to reconfigure llvm-host-build for runtimes: {e}"));
+        .unwrap_or_else(|e| panic!("failed to reconfigure toolchain/build/llvm-host for runtimes: {e}"));
     if !status.success() {
         panic!("cmake reconfigure for target runtimes failed: {status}");
     }
@@ -2445,6 +2498,14 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
     }
     if configure_changed || !build_dir.join("build.ninja").exists() {
         std::fs::create_dir_all(&build_dir).expect("failed to create target/llvm-target-build");
+        // Changed arguments start from an empty cache. Given a different compiler (the host
+        // Clang moved to `toolchain/`), CMake deletes its own cache and configures again without
+        // any of these -D options, and this source tree has no tests, examples or docs for its
+        // defaults to find.
+        if configure_changed {
+            let _ = std::fs::remove_file(build_dir.join("CMakeCache.txt"));
+            let _ = std::fs::remove_dir_all(build_dir.join("CMakeFiles"));
+        }
         let status = Command::new("cmake")
             .args(&configure_args)
             .status()

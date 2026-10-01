@@ -35,6 +35,10 @@ Then, run cargo bv or cargo build -vv.
 
 You will need a beefy computer for the LLVM build.
 
+The cross compilers (the host LLVM, musl and its sysroot, the Rust sysroot) are built into
+toolchain/, which cargo clean leaves alone: they take hours to build again. To start over from
+nothing, scripts/wipe.sh removes both target/ and toolchain/ (it asks first).
+
 
 Documentation:
 Design docs, the project roadmap, and POSIX compliance tracking live in a separate repo,

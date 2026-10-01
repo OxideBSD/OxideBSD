@@ -56,6 +56,11 @@ user before large structural commitments.
   fork if std's required `libc` version moved.
 - Needs `qemu-system-x86_64` and OVMF (UEFI is the default firmware).
 - `.cargo/config.toml`: default target `x86_64-oxidebsd.json`, `runner = scripts/qemu_runner.sh`.
+- **Cross compilers live in `toolchain/`** (gitignored, built by `build.rs`, `toolchain_dir`): the
+  musl sysroot `toolchain/x86_64-unknown-oxidebsd`, `toolchain/bin/x86_64-unknown-oxidebsd-{cc,
+  clang,clang++,ld.lld}` and `oxidebsd-rustc-wrapper`, the Rust sysroot, and `build/` (host LLVM,
+  compiler-rt, libgcc_s). `cargo clean` leaves it; `scripts/wipe.sh` removes `target/` and
+  `toolchain/`. Things built *for* OxideBSD stay in `target/`.
 
 ## Commands
 
@@ -290,7 +295,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `ENOTTY`/`ENOSYS` from a std program is usually a hardcoded `target_os` allowlist in std missing
   `oxidebsd` (`ioctl` only handles tty requests on tty fds).
 - **Rust crates using OpenSSL** (`openssl`/`openssl-sys`, unpatched): build with `OPENSSL_DIR` =
-  `target/openssl/root/usr` and `CC_x86_64_unknown_oxidebsd` = musl-gcc (`openssl-rs-smoke`).
+  `target/openssl/root/usr` and `CC_x86_64_unknown_oxidebsd` = `toolchain/bin/x86_64-unknown-
+  oxidebsd-cc` (`openssl-rs-smoke`).
 - **PIE binaries** (`lib/oxlibc`, `bin/*`, `build_pie_crate_at`) must have zero relocations
   (checked at build): `panic=immediate-abort`, `location-detail=none`, symbol addresses via
   `asm!("lea ...")`, no `core::fmt`, no tables of slices, no `-T` linker script.

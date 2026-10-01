@@ -1,14 +1,14 @@
 # An OxideBSD program: it builds for x86_64-unknown-oxidebsd only, never for the host. The root
 # build.rs builds it into the system image; `cargo build` here does the same build by hand, once
-# the root build has made the wrapper and the musl sysroot. Paths are relative to this crate.
+# the root build has made the toolchain (`toolchain/`). Paths are relative to this crate.
 [build]
 target = "../../x86_64-unknown-oxidebsd.json"
 # Points rustc at the std built from OxideBSD's rust fork.
-rustc-wrapper = "../../target/oxidebsd-rustc-wrapper.sh"
+rustc-wrapper = "../../toolchain/bin/oxidebsd-rustc-wrapper"
 rustflags = ["-C", "link-self-contained=no", "-C", "link-arg=-no-pie", "-C", "link-arg=-Wl,-Ttext-segment=0x16000000"]
 
 [target.x86_64-unknown-oxidebsd]
-linker = "../../target/musl-sysroot/bin/musl-gcc"
+linker = "../../toolchain/bin/x86_64-unknown-oxidebsd-cc"
 
 [env]
 OXIDEBSD_LIBPAM_DIR = { value = "../../target/openpam", relative = true }

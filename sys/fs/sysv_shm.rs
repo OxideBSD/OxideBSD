@@ -141,7 +141,7 @@ static NEXT_SHM_PAGE: spin::Mutex<u64> = spin::Mutex::new(SHM_REGION_BASE);
 
 /// musl's own `struct shmid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/shm.h`) -- 112
 /// bytes, verified via a direct `musl-gcc`/`sizeof`/`offsetof` probe against that exact field
-/// list (against this port's own patched sysroot, `target/musl-sysroot`), same rigor `RawIpcPerm`/
+/// list (against this port's own patched sysroot, `toolchain/x86_64-unknown-oxidebsd`), same rigor `RawIpcPerm`/
 /// `RawMsqidDs`/`RawSemidDs` already established.
 #[repr(C)]
 struct RawShmidDs {
