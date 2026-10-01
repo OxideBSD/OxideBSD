@@ -2041,6 +2041,12 @@ const R_OK: u8 = 4;
 /// `access(2)`'s own encoding, see the constants above) to be set. `oxfs_open`'s own existing
 /// callers only ever pass a single bit (`R_OK` or `W_OK`); `oxfs_access` below is the one caller
 /// that can pass a real combination.
+/// The group a new file, directory, node or symlink in `parent` gets: `parent`'s, as on all
+/// three BSDs (POSIX allows this or the creator's group). Its owner is always the creator.
+fn new_entry_gid(parent: u32) -> u32 {
+    read_inode(parent).gid
+}
+
 fn check_access(inode: &Inode, uid: u64, gid: u64, want: u8) -> bool {
     if uid == 0 {
         return true;
@@ -4736,6 +4742,7 @@ fn commit_write_buffer(file: &mut OpenFile) -> i64 {
             };
             let mut inode = Inode::new(InodeKind::File);
             inode.uid = *owner_uid;
+            inode.gid = new_entry_gid(*parent_inode);
             inode.mode = *mode;
             inode.shm = is_shm_dir(*parent_inode);
             write_inode(new_inode, inode);
@@ -5275,7 +5282,7 @@ extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, mode: u64, _a3: u64) -> i
     let mut inode = Inode::new(InodeKind::Dir);
     inode.mode = ((mode as u16) & 0o1777) & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
-    inode.gid = gid as u32;
+    inode.gid = new_entry_gid(parent);
     write_inode(new_inode, inode);
     if dir_insert(new_inode, b".", new_inode).is_err()
         || dir_insert(new_inode, b"..", parent).is_err()
@@ -5508,7 +5515,7 @@ fn make_node(path: &[u8], kind: InodeKind, perm: u16, dev: u32, device_char: boo
     let mut inode = Inode::new(kind);
     inode.mode = perm & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
-    inode.gid = gid as u32;
+    inode.gid = new_entry_gid(parent);
     if kind == InodeKind::Device {
         inode.rdev = dev;
         inode.device_char = device_char;
@@ -5941,7 +5948,10 @@ extern "C" fn oxfs_symlink(
     let Some(new_inode) = alloc_inode_in(parent) else {
         return -ENOSPC;
     };
-    write_inode(new_inode, Inode::new(InodeKind::Symlink));
+    let mut inode = Inode::new(InodeKind::Symlink);
+    inode.uid = unsafe { oxidebsd_current_uid() } as u32;
+    inode.gid = new_entry_gid(parent);
+    write_inode(new_inode, inode);
     if !write_inode_data(new_inode, target) {
         return -EIO;
     }

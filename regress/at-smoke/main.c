@@ -93,11 +93,14 @@ static void child_execveat_relative(void)
 /* Runs as uid 1000 in a forked child; its exit status is its own failure count. */
 static void child_unprivileged(void)
 {
-	struct stat st;
+	struct stat st, parent;
 	failures = 0;
 	CHECK(setgid(1000) == 0 && setuid(1000) == 0, "drop to uid 1000");
-	CHECK(mkdir("/tmp/cleanup-user-dir", 0777) == 0 && stat("/tmp/cleanup-user-dir", &st) == 0
-	      && st.st_uid == 1000 && st.st_gid == 1000, "mkdir records the creator as owner");
+	/* The owner is the creator; the group is the directory's, as on the BSDs (/tmp's is 0). */
+	CHECK(stat("/tmp", &parent) == 0 && mkdir("/tmp/cleanup-user-dir", 0777) == 0
+	      && stat("/tmp/cleanup-user-dir", &st) == 0 && st.st_uid == 1000
+	      && st.st_gid == parent.st_gid && st.st_gid != 1000,
+	      "mkdir records the creator as owner and the directory's group");
 	rmdir("/tmp/cleanup-user-dir");
 	CHECK_ERR(mkdir("/cleanup-denied", 0777), EACCES, "mkdir needs write permission on the parent");
 	CHECK_ERR(rmdir("/at-test/cleanup/perm"), EACCES, "rmdir needs write permission on the parent");

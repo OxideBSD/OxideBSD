@@ -8,7 +8,7 @@
 //! on real per-process state (`Process::root_inode`, resolved via `scheduler::current_pid()` on
 //! every call), exactly the class of thing a plain-Rust-function test can't exercise.
 //!
-//! Five parts (and 1b, directory times), all through `tests/needs_syscall2_smoke.rs` spawning this binary as pid 1:
+//! Five parts (and 1b, directory times; 1c, a new entry's group), all through `tests/needs_syscall2_smoke.rs` spawning this binary as pid 1:
 //! 1. `link`/`unlink`: a real hard link round trip against a freshly created file -- both names
 //!    report the same inode/content and `nlink == 2`, and unlinking one drops `nlink` back to `1`
 //!    without disturbing the other name.
@@ -47,6 +47,9 @@ const SYS_CHDIR: u64 = 12;
 const SYS_UNLINK: u64 = 109;
 const SYS_GETCWD: u64 = 108;
 const SYS_STAT: u64 = 127;
+const SYS_LSTAT: u64 = 128;
+const SYS_SYMLINK: u64 = 155;
+const SYS_CHOWN: u64 = 166;
 const SYS_MKDIR: u64 = 136;
 const SYS_SETUID: u64 = 162;
 const SYS_UTIMENSAT: u64 = 167;
@@ -68,6 +71,7 @@ const O_CREAT: u64 = 0o100;
 const O_WRONLY: u64 = 0o1;
 const S_IFREG: u32 = 0o100000;
 const S_IFCHR: u32 = 0o020000;
+const S_IFIFO: u32 = 0o010000;
 const S_IFMT: u32 = 0o170000;
 /// Real value, matches `sys/syscall.rs`'s own `EPERM` -- identical on Linux/BSD/musl.
 const EPERM: u64 = 1;
@@ -321,6 +325,57 @@ fn check_dir_times() -> bool {
     true
 }
 
+fn lstat_of(path: &[u8]) -> Result<MuslStat, u64> {
+    let mut buf = [0u8; 144];
+    unsafe { syscall(SYS_LSTAT, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64) }?;
+    Ok(unsafe { (buf.as_ptr() as *const MuslStat).read_unaligned() })
+}
+
+/// Part 1c: a new file, directory, FIFO and symlink take their directory's group, as on the
+/// BSDs, not the creator's (root, gid 0, here).
+fn check_new_entry_gid() -> bool {
+    const GID: u32 = 1000;
+    let dir = b"/n2grp";
+    if unsafe { syscall(SYS_MKDIR, dir.as_ptr() as u64, dir.len() as u64, 0o755) }.is_err()
+        || unsafe { syscall4(SYS_CHOWN, dir.as_ptr() as u64, dir.len() as u64, 0, GID as u64) }.is_err()
+    {
+        write_bytes(b"needs-syscall2-smoke: mkdir/chown /n2grp failed\n");
+        return false;
+    }
+    let file = b"/n2grp/file";
+    let sub = b"/n2grp/sub";
+    let fifo = b"/n2grp/fifo";
+    let link = b"/n2grp/link";
+    let Ok(fd) = open_create(file) else {
+        write_bytes(b"needs-syscall2-smoke: create /n2grp/file failed\n");
+        return false;
+    };
+    close(fd);
+    let made = unsafe { syscall(SYS_MKDIR, sub.as_ptr() as u64, sub.len() as u64, 0o755) }.is_ok()
+        && unsafe { syscall4(SYS_MKNOD, fifo.as_ptr() as u64, fifo.len() as u64, (S_IFIFO | 0o644) as u64, 0) }.is_ok()
+        && unsafe { syscall4(SYS_SYMLINK, file.as_ptr() as u64, file.len() as u64, link.as_ptr() as u64, link.len() as u64) }
+            .is_ok();
+    if !made {
+        write_bytes(b"needs-syscall2-smoke: mkdir/mknod/symlink in /n2grp failed\n");
+        return false;
+    }
+    let checks: [(&[u8], Result<MuslStat, u64>); 4] =
+        [(b"file", stat_of(file)), (b"sub", stat_of(sub)), (b"fifo", stat_of(fifo)), (b"link", lstat_of(link))];
+    for (name, st) in checks {
+        match st {
+            Ok(st) if st.st_gid == GID && st.st_uid == 0 => {}
+            _ => {
+                write_bytes(b"needs-syscall2-smoke: /n2grp/");
+                write_bytes(name);
+                write_bytes(b" didn't get the directory's group\n");
+                return false;
+            }
+        }
+    }
+    write_bytes(b"needs-syscall2-smoke: new entries take the directory's group OK\n");
+    true
+}
+
 unsafe fn syscall_unlink(path: &[u8]) -> Result<u64, u64> {
     unsafe { syscall(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0) }
 }
@@ -534,6 +589,7 @@ pub extern "C" fn _start() -> ! {
 
     check!(check_link(), b"link/unlink round trip failed");
     check!(check_dir_times(), b"directory times check failed");
+    check!(check_new_entry_gid(), b"new entry group check failed");
     check!(check_mknod(), b"mknod round trip failed");
     check!(
         check_getrusage_wait4(),
