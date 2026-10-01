@@ -156,9 +156,10 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   links dynamically (`PT_INTERP` `/lib/ld-musl-x86_64.so.1`). Every `ET_DYN` main binary gets an
   ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
   `PT_INTERP` image: it loads no dynamic linker).
-- **Rust std programs are dynamic PIEs** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
-  libunwind, `build_libgcc_s`). Exceptions (`StdLink::StaticPie`): `/sbin/init`, `/bin/sh` (its
-  fallback) and `/sbin/emergency`, which the kernel embeds and spawns as pid 1.
+- **`/bin` and `/sbin` are static** (OpenBSD-style; `build_static_std_crate`, `StdLink::StaticPie`),
+  including `/sbin/init`, `/bin/sh` and `/sbin/emergency`, which the kernel embeds and spawns as
+  pid 1. **Everything else is a dynamic PIE** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
+  libunwind, `build_libgcc_s`).
 - **`/sbin/init` has no controlling terminal** (`InitProgram::console`); each child it starts is
   its own session and takes the console with `TIOCSCTTY`. The kernel never lets a session leader
   drop its terminal, so pid 1 must not be given one.

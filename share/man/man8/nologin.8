@@ -1,0 +1,51 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt NOLOGIN 8
+.Os OxideBSD
+.Sh NAME
+.Nm nologin
+.Nd politely refuse a login
+.Sh SYNOPSIS
+.Nm /sbin/nologin
+.Sh DESCRIPTION
+.Nm
+is meant to be the login shell, in
+.Xr passwd 5 ,
+of an account that must not log in, such as one a daemon runs as.
+It writes a message to its standard output, logs the attempt with
+.Xr syslog 3
+at
+.Dq auth.crit ,
+naming the user and the terminal, and exits with status 1.
+Any arguments, such as the
+.Fl c Ar command
+another program may pass to a shell, are ignored.
+.Pp
+The message is the contents of
+.Pa /etc/nologin.txt
+if that file exists, and otherwise
+.Dq This account is currently not available.
+.Sh FILES
+.Bl -tag -width /etc/nologin.txt
+.It Pa /etc/nologin.txt
+The message to show, if present.
+.El
+.Sh EXIT STATUS
+.Nm
+always exits with status 1.
+.Sh SEE ALSO
+.Xr login 1 ,
+.Xr passwd 5 ,
+.Xr syslog.conf 5
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Bx 4.4 .
+OxideBSD's shows
+.Pa /etc/nologin.txt
+as
+.Ox Ns 's
+does, and logs the attempt as
+.Fx Ns 's
+does.

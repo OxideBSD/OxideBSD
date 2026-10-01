@@ -37,21 +37,17 @@ If so, it goes in one of the
 directories.
 .El
 .Pp
-A library follows the programs that need it: one that a program in
+The programs in
 .Pa /bin
-or
-.Pa /sbin
-needs goes in
-.Pa /lib ,
-every other one in
-.Pa /usr/lib .
-Every program is dynamically linked except the two the kernel can start as
-process 1,
-.Pa /bin/sh
 and
-.Pa /sbin/emergency ,
-so a broken shared library cannot keep the system from reaching single-user
-mode.
+.Pa /sbin
+are statically linked, as on
+.Ox ,
+so that a broken shared library cannot take away the tools for repairing the
+system.
+Everything under
+.Pa /usr
+is dynamically linked.
 .Ss The directories
 .Bl -tag -width "/usr/share/"
 .It Pa /
@@ -140,11 +136,8 @@ and
 .It Pa /home
 Users' home directories.
 .It Pa /lib
-Shared libraries the programs in
-.Pa /bin
-and
-.Pa /sbin
-need:
+The dynamic linker and the libraries every dynamically linked program needs,
+where those programs look for them:
 .Pa libc.so ,
 musl's C library, which is also the dynamic linker
 .Pa ld-musl-x86_64.so.1 ;

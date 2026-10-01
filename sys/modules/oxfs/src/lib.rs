@@ -8741,6 +8741,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(sbin, b"poweroff", b"reboot");
     ok &= seed_file(sbin, b"shutdown", include_bytes!(env!("OXFS_SHUTDOWN_ELF_PATH")));
     ok &= seed_file(sbin, b"emergency", include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH")));
+    ok &= seed_file(sbin, b"nologin", include_bytes!(env!("OXFS_NOLOGIN_ELF_PATH")));
 
     let usr = ensure_dir(root, b"usr");
     let usr_include = ensure_dir(usr, b"include");
@@ -8830,6 +8831,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_hardlink(man_man8, b"halt.8", b"reboot.8");
     ok &= seed_hardlink(man_man8, b"poweroff.8", b"reboot.8");
     ok &= seed_file(man_man8, b"shutdown.8", include_bytes!("../../../../share/man/man8/shutdown.8"));
+    ok &= seed_file(man_man8, b"nologin.8", include_bytes!("../../../../share/man/man8/nologin.8"));
     let usr_share_mk = ensure_dir(usr_share, b"mk");
     ok &= seed_tree(usr_share_mk, BMAKE_MK_FILES);
 

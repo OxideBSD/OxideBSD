@@ -424,19 +424,21 @@ fn main() {
         StdLink::StaticPie,
     );
     let init_sh_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/init_sh", "OXFS_INIT_SH_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/init_sh", "OXFS_INIT_SH_ELF_PATH", &musl_sysroot);
     // /sbin/rcorder links libsh too, for service blocks (INIT_SH.md §6).
     let rcorder_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
     let reboot_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
     // SBIN_: BusyBox's sysctl/dmesg still build (until the roster cut) under the plain names.
     let sysctl_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/sysctl", "OXFS_SBIN_SYSCTL_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/sysctl", "OXFS_SBIN_SYSCTL_ELF_PATH", &musl_sysroot);
     let dmesg_elf_path =
-        build_std_oxidebsd_userland_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
+        build_static_std_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
+    let nologin_elf_path =
+        build_static_std_crate("sbin/nologin", "OXFS_NOLOGIN_ELF_PATH", &musl_sysroot);
     // System logging (SYSLOG.md in OxideBSD-doc). The helper only watches each program's own
     // src/, so the library they share is watched here.
     println!(
@@ -752,6 +754,7 @@ fn main() {
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_INIT_ELF_PATH", init_elf_path.to_str().unwrap()),
         ("OXFS_CRON_ELF_PATH", cron_elf_path.to_str().unwrap()),
+        ("OXFS_NOLOGIN_ELF_PATH", nologin_elf_path.to_str().unwrap()),
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
         ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),
@@ -1404,13 +1407,20 @@ fn build_std_oxidebsd_userland_crate(
     build_std_oxidebsd_userland_crate_with_env(crate_path, env_var, musl_sysroot, &[], StdLink::Dynamic)
 }
 
+/// A std program for `/bin` or `/sbin`: statically linked, as on OpenBSD (hier(7)), so that the
+/// tools for repairing a system keep working when `/lib` doesn't.
+fn build_static_std_crate(crate_path: &str, env_var: &str, musl_sysroot: &Path) -> PathBuf {
+    build_std_oxidebsd_userland_crate_with_env(crate_path, env_var, musl_sysroot, &[], StdLink::StaticPie)
+}
+
 /// How a std program for OxideBSD is linked.
 #[derive(Clone, Copy, PartialEq)]
 enum StdLink {
-    /// A dynamically linked PIE on `/lib/libc.so` and `/lib/libgcc_s.so.1`: every program but pid 1.
+    /// A dynamically linked PIE on `/lib/libc.so` and `/lib/libgcc_s.so.1`: every program outside
+    /// `/bin` and `/sbin`.
     Dynamic,
-    /// A static PIE (`crt-static`), for pid 1, which has to start even if the dynamic linker or a
-    /// shared library is broken (as FreeBSD links `init` with `NO_SHARED`).
+    /// A static PIE (`crt-static`), for `/bin` and `/sbin` (as OpenBSD links them) and above all
+    /// pid 1, which have to work even if the dynamic linker or a shared library is broken.
     StaticPie,
 }
 
