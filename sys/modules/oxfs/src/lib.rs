@@ -2219,6 +2219,22 @@ fn errno_for(e: OxfsError) -> i64 {
     }
 }
 
+/// Marks `dir_inode` changed after an entry was added or removed: POSIX has `creat`, `mkdir`,
+/// `link`, `symlink`, `mknod`, `unlink`, `rmdir` and `rename` update the directory's `st_mtime`
+/// and `st_ctime`, and programs rely on it to notice a directory's contents changed (cron(8)
+/// rereads `/etc/cron.d` when its time moves). Like `touch_atime`, skips the write when the
+/// stamp already holds this second, which keeps seeding thousands of files cheap.
+fn touch_dir(dir_inode: u32) {
+    let mut inode = read_inode(dir_inode);
+    let now = unsafe { oxidebsd_unix_time() };
+    if inode.mtime == now && inode.ctime == now {
+        return;
+    }
+    inode.mtime = now;
+    inode.ctime = now;
+    write_inode(dir_inode, inode);
+}
+
 /// Inserts a new `(name, target_inode)` record into `dir_inode`, reusing the first free (cleared
 /// by a previous `dir_remove`) or never-yet-used record slot -- growing `dir_inode` with a fresh
 /// block via `inode_ensure_block_at` if every existing block is full. This is the "a directory can
@@ -2240,6 +2256,7 @@ fn dir_insert(dir_inode: u32, name: &[u8], target_inode: u32) -> Result<(), Oxfs
                     if !dir_record_used(&block, r) {
                         write_dir_record(&mut block, r, name, target_inode);
                         write_block(blk, &block);
+                        touch_dir(dir_inode);
                         return Ok(());
                     }
                 }
@@ -2254,6 +2271,7 @@ fn dir_insert(dir_inode: u32, name: &[u8], target_inode: u32) -> Result<(), Oxfs
                 let mut block = [0u8; BLOCK_SIZE];
                 write_dir_record(&mut block, 0, name, target_inode);
                 write_block(blk, &block);
+                touch_dir(dir_inode);
                 return Ok(());
             }
         }
@@ -2272,6 +2290,7 @@ fn dir_remove(dir_inode: u32, name: &[u8]) -> Result<(), OxfsError> {
             if dir_record_used(&block, r) && dir_record_name(&block, r) == name {
                 clear_dir_record(&mut block, r);
                 write_block(blk, &block);
+                touch_dir(dir_inode);
                 return Ok(());
             }
         }

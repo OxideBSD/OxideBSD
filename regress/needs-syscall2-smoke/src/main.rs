@@ -8,7 +8,7 @@
 //! on real per-process state (`Process::root_inode`, resolved via `scheduler::current_pid()` on
 //! every call), exactly the class of thing a plain-Rust-function test can't exercise.
 //!
-//! Five parts, all through `tests/needs_syscall2_smoke.rs` spawning this binary as pid 1:
+//! Five parts (and 1b, directory times), all through `tests/needs_syscall2_smoke.rs` spawning this binary as pid 1:
 //! 1. `link`/`unlink`: a real hard link round trip against a freshly created file -- both names
 //!    report the same inode/content and `nlink == 2`, and unlinking one drops `nlink` back to `1`
 //!    without disturbing the other name.
@@ -49,6 +49,7 @@ const SYS_GETCWD: u64 = 108;
 const SYS_STAT: u64 = 127;
 const SYS_MKDIR: u64 = 136;
 const SYS_SETUID: u64 = 162;
+const SYS_UTIMENSAT: u64 = 167;
 const SYS_LINK: u64 = 488;
 const SYS_MKNOD: u64 = 489;
 const SYS_CHROOT: u64 = 490;
@@ -270,6 +271,56 @@ fn check_link() -> bool {
     true
 }
 
+/// Sets `path`'s access and modification times to `secs`.
+fn set_times(path: &[u8], secs: i64) -> bool {
+    let times: [i64; 4] = [secs, 0, secs, 0];
+    unsafe { syscall4(SYS_UTIMENSAT, path.as_ptr() as u64, path.len() as u64, times.as_ptr() as u64, 0) }.is_ok()
+}
+
+/// Part 1b: adding or removing a directory entry updates the directory's `st_mtime` and
+/// `st_ctime` (POSIX `creat`, `link`, `unlink`, `mkdir`). The directory's times are first set
+/// far in the past, so a change is visible despite whole-second timestamps.
+fn check_dir_times() -> bool {
+    let dir = b"/n2dir";
+    let entry = b"/n2dir/f";
+    const OLD: i64 = 1_000_000;
+    let moved = |what: &[u8]| -> bool {
+        match stat_of(dir) {
+            Ok(st) if st.st_mtime_sec > OLD && st.st_ctime_sec > OLD => true,
+            _ => {
+                write_bytes(b"needs-syscall2-smoke: directory times didn't move after ");
+                write_bytes(what);
+                write_bytes(b"\n");
+                false
+            }
+        }
+    };
+    if unsafe { syscall(SYS_MKDIR, dir.as_ptr() as u64, dir.len() as u64, 0o755) }.is_err() || !set_times(dir, OLD) {
+        write_bytes(b"needs-syscall2-smoke: mkdir/utimensat /n2dir failed\n");
+        return false;
+    }
+    match stat_of(dir) {
+        Ok(st) if st.st_mtime_sec == OLD => {}
+        _ => {
+            write_bytes(b"needs-syscall2-smoke: utimensat didn't set /n2dir's time\n");
+            return false;
+        }
+    }
+    let Ok(fd) = open_create(entry) else {
+        write_bytes(b"needs-syscall2-smoke: create /n2dir/f failed\n");
+        return false;
+    };
+    close(fd);
+    if !moved(b"a create") {
+        return false;
+    }
+    if !set_times(dir, OLD) || unsafe { syscall_unlink(entry) }.is_err() || !moved(b"an unlink") {
+        return false;
+    }
+    write_bytes(b"needs-syscall2-smoke: directory times OK\n");
+    true
+}
+
 unsafe fn syscall_unlink(path: &[u8]) -> Result<u64, u64> {
     unsafe { syscall(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0) }
 }
@@ -482,6 +533,7 @@ pub extern "C" fn _start() -> ! {
     write_bytes(b"needs-syscall2-smoke: starting\n");
 
     check!(check_link(), b"link/unlink round trip failed");
+    check!(check_dir_times(), b"directory times check failed");
     check!(check_mknod(), b"mknod round trip failed");
     check!(
         check_getrusage_wait4(),
