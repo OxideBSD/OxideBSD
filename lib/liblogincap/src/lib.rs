@@ -1,5 +1,5 @@
 //! Login classes (`login.conf(5)`, LOGIN.md §7), the BSDs' `login_cap(3)`: the record for a
-//! user's class, and the values `login(1)` applies. Numbers may be written either way the BSDs' files use, `name#n` or `name=n`,
+//! user's class, and [`setusercontext`], which applies it for `login(1)` and `cron(8)`. Numbers may be written either way the BSDs' files use, `name#n` or `name=n`,
 //! with `unlimited`/`infinity`, size suffixes (`b`, `k`, `m`, `g`, `t`) and time suffixes (`s`,
 //! `m`, `h`, `d`, `w`, `y`).
 
@@ -126,6 +126,126 @@ impl Class {
     }
 }
 
+impl Class {
+    /// `path`, as a `PATH` value: the words joined with `:`, a leading `~` in each standing for
+    /// the home directory, as in the BSDs' `login_cap`.
+    pub fn path(&self, home: &str) -> Option<String> {
+        let words = self.string("path")?.split_whitespace().map(|d| match d.strip_prefix('~') {
+            Some(rest) => format!("{home}{rest}"),
+            None => d.to_string(),
+        });
+        Some(words.collect::<Vec<_>>().join(":"))
+    }
+
+    /// The environment the class sets (the BSDs' `LOGIN_SETENV`): `lang`, `charset` and
+    /// `timezone` as `LANG`, `MM_CHARSET` and `TZ`, then `setenv`, in whose values `~` and `$`
+    /// stand for the home directory and the user name.
+    ///
+    /// Unlike the BSDs' `setusercontext`, which sets these in the calling process, this returns
+    /// them, for a caller building a `Command`'s environment.
+    pub fn environment(&self, user: &str, home: &str) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        for (cap, var) in [("lang", "LANG"), ("charset", "MM_CHARSET"), ("timezone", "TZ")] {
+            if let Some(v) = self.string(cap) {
+                env.push((var.to_string(), v.to_string()));
+            }
+        }
+        for (k, v) in self.setenv() {
+            env.push((k, v.replace('~', home).replace('$', user)));
+        }
+        env
+    }
+}
+
+/// `setusercontext(3)`'s flags, with FreeBSD's values. `LOGIN_SETPATH` and `LOGIN_SETENV` are
+/// accepted and ignored: see [`Class::path`] and [`Class::environment`].
+pub const LOGIN_SETGROUP: u32 = 0x0001;
+pub const LOGIN_SETLOGIN: u32 = 0x0002;
+pub const LOGIN_SETPATH: u32 = 0x0004;
+pub const LOGIN_SETPRIORITY: u32 = 0x0008;
+pub const LOGIN_SETRESOURCES: u32 = 0x0010;
+pub const LOGIN_SETUMASK: u32 = 0x0020;
+pub const LOGIN_SETUSER: u32 = 0x0040;
+pub const LOGIN_SETENV: u32 = 0x0080;
+pub const LOGIN_SETALL: u32 = 0x7fff;
+
+/// The resource limits a class sets, and the `rlimit` each is.
+const RESOURCES: [(libc::c_int, &str, bool); 10] = [
+    (libc::RLIMIT_CPU as libc::c_int, "cputime", true),
+    (libc::RLIMIT_FSIZE as libc::c_int, "filesize", false),
+    (libc::RLIMIT_DATA as libc::c_int, "datasize", false),
+    (libc::RLIMIT_STACK as libc::c_int, "stacksize", false),
+    (libc::RLIMIT_CORE as libc::c_int, "coredumpsize", false),
+    (libc::RLIMIT_RSS as libc::c_int, "memoryuse", false),
+    (libc::RLIMIT_MEMLOCK as libc::c_int, "memorylocked", false),
+    (libc::RLIMIT_NPROC as libc::c_int, "maxproc", false),
+    (libc::RLIMIT_NOFILE as libc::c_int, "openfiles", false),
+    (libc::RLIMIT_AS as libc::c_int, "vmemoryuse", false),
+];
+
+/// Sets one limit from `cap` (both), `cap-cur` and `cap-max`, leaving what the class doesn't say.
+fn set_limit(class: &Class, resource: libc::c_int, cap: &str, time: bool) {
+    let get = |name: &str| if time { class.time(name) } else { class.size(name) };
+    let value = |l: Limit| match l {
+        Limit::Unlimited => libc::RLIM_INFINITY,
+        Limit::Value(v) => v as libc::rlim_t,
+    };
+    let (both, cur, max) = (get(cap), get(&format!("{cap}-cur")), get(&format!("{cap}-max")));
+    if both.is_none() && cur.is_none() && max.is_none() {
+        return;
+    }
+    // SAFETY: getrlimit/setrlimit with a local struct.
+    let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrlimit(resource as _, &mut rl) };
+    if let Some(v) = both {
+        rl.rlim_cur = value(v);
+        rl.rlim_max = value(v);
+    }
+    if let Some(v) = cur {
+        rl.rlim_cur = value(v);
+    }
+    if let Some(v) = max {
+        rl.rlim_max = value(v);
+    }
+    unsafe { libc::setrlimit(resource as _, &rl) };
+}
+
+/// The BSDs' `setusercontext(3)`: applies what `flags` asks for of `class` to this process, and
+/// becomes user `name` (`uid`, `gid`), in the BSDs' order: resource limits, priority, umask,
+/// groups, then the user ID, after which the rest can no longer be changed. Limits, priority and
+/// umask are best effort, as in the BSDs; failing to change groups or user is an error.
+pub fn setusercontext(class: &Class, name: &str, uid: u32, gid: u32, flags: u32) -> std::io::Result<()> {
+    if flags & LOGIN_SETRESOURCES != 0 {
+        for (resource, cap, time) in RESOURCES {
+            set_limit(class, resource, cap, time);
+        }
+    }
+    if flags & LOGIN_SETPRIORITY != 0
+        && let Some(Limit::Value(p)) = class.size("priority")
+    {
+        // SAFETY: setpriority(2) for this process.
+        unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, p as libc::c_int) };
+    }
+    if flags & LOGIN_SETUMASK != 0
+        && let Some(mask) = class.umask()
+    {
+        // SAFETY: umask(2) can't fail.
+        unsafe { libc::umask(mask as libc::mode_t) };
+    }
+    let err = std::io::Error::last_os_error;
+    if flags & LOGIN_SETGROUP != 0 {
+        let cname = std::ffi::CString::new(name).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: initgroups/setgid with a valid name and ids.
+        if unsafe { libc::initgroups(cname.as_ptr(), gid as _) } != 0 || unsafe { libc::setgid(gid) } != 0 {
+            return Err(err());
+        }
+    }
+    if flags & LOGIN_SETUSER != 0 && unsafe { libc::setuid(uid) } != 0 {
+        return Err(err());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +273,16 @@ mod tests {
         assert_eq!(Class::from_text(CONF, "root").umask(), Some(0o077));
         assert_eq!(Class::from_text(CONF, "root").size("datasize"), Some(Limit::Value(64 << 20)));
         assert_eq!(Class::from_text(CONF, "nosuch").umask(), Some(0o022));
+    }
+
+    #[test]
+    fn path_and_environment() {
+        let conf = "default:\\\n\t:path=/bin ~/bin /usr/bin:\\\n\t:lang=en_US.UTF-8:timezone=UTC:\\\n\t:setenv=MAIL=/var/mail/$,DIR=~/x:\n";
+        let c = Class::from_text(conf, "default");
+        assert_eq!(c.path("/home/u").as_deref(), Some("/bin:/home/u/bin:/usr/bin"));
+        let env = c.environment("u", "/home/u");
+        let env: Vec<(&str, &str)> = env.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(env, [("LANG", "en_US.UTF-8"), ("TZ", "UTC"), ("MAIL", "/var/mail/u"), ("DIR", "/home/u/x")]);
+        assert_eq!(Class::from_text("", "default").path("/"), None);
     }
 }

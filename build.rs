@@ -470,7 +470,7 @@ fn main() {
     // keep their env var names, so oxfs seeds them at the same paths. login and passwd link
     // OpenPAM, whose modules are Rust (lib/libpam); every lib/ crate they use is watched here
     // since the helper only watches the program's own src/.
-    for lib in ["libpam", "libpwd", "liblogincap", "libgetcap", "libttyent"] {
+    for lib in ["libpam", "libpwd", "liblogincap", "libgetcap", "libttyent", "libcron"] {
         println!(
             "cargo:rerun-if-changed={}",
             Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join(lib).join("src").display()
@@ -490,6 +490,14 @@ fn main() {
     let passwd_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "usr.bin/passwd",
         "OXFS_PASSWD_ELF_PATH",
+        &musl_sysroot,
+        pam_env,
+        StdLink::Dynamic,
+    );
+    // cron (CRON.md in OxideBSD-doc) checks each job's account with PAM, as login does.
+    let cron_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "usr.sbin/cron",
+        "OXFS_CRON_ELF_PATH",
         &musl_sysroot,
         pam_env,
         StdLink::Dynamic,
@@ -743,6 +751,7 @@ fn main() {
         ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_INIT_ELF_PATH", init_elf_path.to_str().unwrap()),
+        ("OXFS_CRON_ELF_PATH", cron_elf_path.to_str().unwrap()),
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
         ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),

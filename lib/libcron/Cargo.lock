@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cron"
+name = "libcron"
 version = "0.1.0"

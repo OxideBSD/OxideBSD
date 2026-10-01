@@ -7,7 +7,9 @@ publish = false
 
 [dependencies]
 getcap = { path = "../libgetcap" }
+libc = "0.2"
 
-# Login classes (login.conf(5)), the BSDs' login_cap(3). Its own workspace, testable on the host
+# Login classes (login.conf(5)), the BSDs' login_cap(3), and setusercontext(3) for login(1) and
+# cron(8). Its own workspace, testable on the host
 # (.cargo/config.toml).
 [workspace]

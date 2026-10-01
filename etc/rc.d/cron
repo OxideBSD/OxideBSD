@@ -1,0 +1,18 @@
+#!/sbin/init_sh
+#
+# PROVIDE: cron
+# REQUIRE: LOGIN FILESYSTEMS
+# KEYWORD: shutdown
+#
+# The daemon that runs scheduled commands (CRON.md §8).
+
+. /etc/rc.subr
+
+name="cron"
+desc="Daemon to execute scheduled commands"
+rcvar="cron_enable"
+command="/usr/sbin/${name}"
+pidfile="/var/run/${name}.pid"
+
+load_rc_config $name
+run_rc_command "$1"

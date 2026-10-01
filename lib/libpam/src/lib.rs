@@ -42,6 +42,7 @@ pub const PAM_AUTH_ERR: c_int = 9;
 pub const PAM_NEW_AUTHTOK_REQD: c_int = 10;
 pub const PAM_USER_UNKNOWN: c_int = 13;
 pub const PAM_ACCT_EXPIRED: c_int = 17;
+pub const PAM_CONV_ERR: c_int = 19;
 pub const PAM_AUTHTOK_ERR: c_int = 20;
 pub const PAM_IGNORE: c_int = 25;
 
@@ -90,6 +91,12 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     pub fn crypt(key: *const c_char, salt: *const c_char) -> *mut c_char;
+}
+
+/// A conversation for programs with no one to ask, such as a daemon checking an account: every
+/// prompt fails (OpenPAM's `openpam_nullconv`).
+pub unsafe extern "C" fn nullconv(_n: c_int, _msg: *mut *const PamMessage, _resp: *mut *mut PamResponse, _data: *mut c_void) -> c_int {
+    PAM_CONV_ERR
 }
 
 /// Keeps the module table in the program: a program using PAM calls this once.

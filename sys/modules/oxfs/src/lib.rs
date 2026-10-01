@@ -8480,6 +8480,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"syslogd", include_bytes!(env!("OXFS_SYSLOGD_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"cron", include_bytes!(env!("OXFS_CRON_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"tzsetup", include_bytes!(env!("OXFS_TZSETUP_ELF_PATH")));
     ok &= seed_file(usr_bin, b"zdump", include_bytes!(env!("OXFS_ZDUMP_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"zic", include_bytes!(env!("OXFS_ZIC_ELF_PATH")));
@@ -8609,6 +8610,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"devfs", include_bytes!("../../../../etc/rc.d/devfs"));
     ok &= seed_file(rc_d, b"newsyslog", include_bytes!("../../../../etc/rc.d/newsyslog"));
     ok &= seed_file(rc_d, b"syslogd", include_bytes!("../../../../etc/rc.d/syslogd"));
+    ok &= seed_file(rc_d, b"cron", include_bytes!("../../../../etc/rc.d/cron"));
     ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
     // System logging (SYSLOG.md): routing, rotation, and their drop-in directories.
     ok &= seed_file(etc, b"devfs.conf", include_bytes!("../../../../etc/devfs.conf"));
@@ -8652,6 +8654,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(pam_d, b"other", include_bytes!("../../../../etc/pam.d/other"));
     ok &= seed_file(pam_d, b"passwd", include_bytes!("../../../../etc/pam.d/passwd"));
     ok &= seed_file(pam_d, b"system", include_bytes!("../../../../etc/pam.d/system"));
+    ok &= seed_file(pam_d, b"cron", include_bytes!("../../../../etc/pam.d/cron"));
 
     // /home/user -- real, owned by uid/gid 1000 -- so `su -`/`login`'s own real chdir-to-home
     // lands somewhere that's actually theirs (permission-checked, not just root's own `/`).
@@ -8688,6 +8691,17 @@ fn format_fresh_filesystem() -> bool {
     ensure_dir(var, b"log");
     // Mailboxes, $MAIL for every login (login.conf's setenv).
     ensure_dir(var, b"mail");
+    // cron (CRON.md §2): the system table, a directory for more, and the users' tables, which
+    // only root may list (crontab(1) writes them).
+    ok &= seed_file(etc, b"crontab", include_bytes!("../../../../etc/crontab"));
+    ensure_dir(etc, b"cron.d");
+    let var_cron = ensure_dir(var, b"cron");
+    let var_cron_tabs = ensure_dir(var_cron, b"tabs");
+    {
+        let mut inode = read_inode(var_cron_tabs);
+        inode.mode = 0o700;
+        write_inode(var_cron_tabs, inode);
+    }
 
     let tmp = ensure_dir(root, b"tmp");
     {

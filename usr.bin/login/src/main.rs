@@ -13,7 +13,7 @@ use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 
-use logincap::{Class, Limit};
+use logincap::Class;
 
 const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin";
 const MOTD: &str = "/etc/motd";
@@ -174,57 +174,6 @@ fn record(kind: libc::c_short, user: &str, tty: &str, host: Option<&str>) {
     }
 }
 
-fn set_limit(resource: libc::c_int, class: &Class, cap: &str, time: bool) {
-    let get = |name: &str| if time { class.time(name) } else { class.size(name) };
-    let value = |l: Limit| match l {
-        Limit::Unlimited => libc::RLIM_INFINITY,
-        Limit::Value(v) => v as libc::rlim_t,
-    };
-    let (both, cur, max) = (get(cap), get(&format!("{cap}-cur")), get(&format!("{cap}-max")));
-    if both.is_none() && cur.is_none() && max.is_none() {
-        return;
-    }
-    // SAFETY: getrlimit/setrlimit with a local struct.
-    let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrlimit(resource, &mut rl) };
-    if let Some(v) = both {
-        rl.rlim_cur = value(v);
-        rl.rlim_max = value(v);
-    }
-    if let Some(v) = cur {
-        rl.rlim_cur = value(v);
-    }
-    if let Some(v) = max {
-        rl.rlim_max = value(v);
-    }
-    unsafe { libc::setrlimit(resource, &rl) };
-}
-
-/// Applies a login class's limits, priority and umask (LOGIN.md §7.2).
-fn apply_class(class: &Class) {
-    for (resource, cap, time) in [
-        (libc::RLIMIT_CPU, "cputime", true),
-        (libc::RLIMIT_FSIZE, "filesize", false),
-        (libc::RLIMIT_DATA, "datasize", false),
-        (libc::RLIMIT_STACK, "stacksize", false),
-        (libc::RLIMIT_CORE, "coredumpsize", false),
-        (libc::RLIMIT_RSS, "memoryuse", false),
-        (libc::RLIMIT_MEMLOCK, "memorylocked", false),
-        (libc::RLIMIT_NPROC, "maxproc", false),
-        (libc::RLIMIT_NOFILE, "openfiles", false),
-        (libc::RLIMIT_AS, "vmemoryuse", false),
-    ] {
-        set_limit(resource, class, cap, time);
-    }
-    if let Some(Limit::Value(p)) = class.size("priority") {
-        // SAFETY: setpriority(2) for this process.
-        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, p as libc::c_int) };
-    }
-    if let Some(mask) = class.umask() {
-        unsafe { libc::umask(mask as libc::mode_t) };
-    }
-}
-
 /// The `tty` group, if there is one.
 fn tty_gid() -> Option<libc::gid_t> {
     // SAFETY: getgrnam returns a static entry or NULL.
@@ -339,14 +288,10 @@ fn main() {
         die(&format!("fork: {}", std::io::Error::last_os_error()));
     }
     if child == 0 {
-        let cname = CString::new(name.as_str()).unwrap_or_default();
-        // SAFETY: dropping root: groups, then gid, then uid.
-        unsafe {
-            if libc::initgroups(cname.as_ptr(), entry.gid) != 0 || libc::setgid(entry.gid) != 0 || libc::setuid(entry.uid) != 0 {
-                die("can't set user id");
-            }
+        // The class's limits, priority and umask, then groups and user (LOGIN.md §7.2).
+        if logincap::setusercontext(&class, &name, entry.uid, entry.gid, logincap::LOGIN_SETALL).is_err() {
+            die("can't set user id");
         }
-        apply_class(&class);
         let dir = if home_ok { entry.home.as_str() } else { "/" };
         if !home_ok {
             say("No home directory.\nLogging in with home = \"/\".\n");
@@ -356,19 +301,7 @@ fn main() {
         if !args.preserve {
             cmd.env_clear();
         }
-        // `~` in a path entry is the home directory, as in the BSDs' login_cap.
-        let path = class
-            .string("path")
-            .map(|p| {
-                p.split_whitespace()
-                    .map(|d| match d.strip_prefix('~') {
-                        Some(rest) => format!("{dir}{rest}"),
-                        None => d.to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(":")
-            })
-            .unwrap_or_else(|| DEFAULT_PATH.into());
+        let path = class.path(dir).unwrap_or_else(|| DEFAULT_PATH.into());
         cmd.env("HOME", dir)
             .env("SHELL", &shell)
             .env("USER", &name)
@@ -376,15 +309,7 @@ fn main() {
             .env("PATH", path)
             .env("TERM", term)
             .env("MAIL", format!("/var/mail/{name}"));
-        for (cap, var) in [("lang", "LANG"), ("charset", "MM_CHARSET"), ("timezone", "TZ")] {
-            if let Some(v) = class.string(cap) {
-                cmd.env(var, v);
-            }
-        }
-        for (k, v) in class.setenv() {
-            // `~` and `$` stand for the home directory and the user name, as in the BSDs.
-            cmd.env(k, v.replace('~', dir).replace('$', &name));
-        }
+        cmd.envs(class.environment(&name, dir));
         cmd.envs(pam_env);
         let hush = class.flag("hushlogin") || std::path::Path::new(dir).join(".hushlogin").exists();
         if !hush && let Ok(motd) = std::fs::read_to_string(class.string("welcome").unwrap_or(MOTD)) {

@@ -1,0 +1,12 @@
+# /etc/crontab: the system table; see crontab(5).
+#
+# Each job line names the user it runs as. Add local jobs here or, better, as files in
+# /etc/cron.d, which cron also reads. Other users' tables are edited with crontab(1).
+#
+SHELL=/bin/sh
+PATH=/etc:/bin:/sbin:/usr/bin:/usr/sbin
+#
+#minute	hour	mday	month	wday	who	command
+#
+# Rotate log files every hour, if necessary.
+0	*	*	*	*	root	newsyslog
