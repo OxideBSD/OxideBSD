@@ -13,10 +13,11 @@
 //! here uses.
 //!
 //! Three parts, all through `tests/sysinfo_syscall_smoke.rs` spawning this binary as pid 1:
-//! 1. A real call succeeds (`CF=0`), `mem_unit == 1`, `totalram > 0`, `freeram == totalram`
-//!    (this kernel's own documented "no deallocation tracking" honesty tier), `procs >= 1` (this
-//!    process itself), and every field with no real backing (`loads`, `sharedram`, `bufferram`,
-//!    `totalswap`, `freeswap`, `totalhigh`, `freehigh`) is honestly zero, not fabricated.
+//! 1. A real call succeeds (`CF=0`), `mem_unit == 1`, `totalram > 0`, `0 < freeram <= totalram`
+//!    and `sharedram <= totalram` (real page counts, `memory::vm_meter`), `procs >= 1` (this
+//!    process itself), and every field with no real backing (`bufferram`, `totalswap`,
+//!    `freeswap`, `totalhigh`, `freehigh`) is honestly zero, not fabricated. `loads` is the real
+//!    load average, so any value.
 //! 2. A second call's `uptime` is never less than the first's -- a real, monotonically
 //!    non-decreasing tick-derived value, not a fixed/stubbed number.
 //! 3. `totalram` is stable across both calls (a real, unchanging RAM-size constant).
@@ -140,17 +141,15 @@ pub extern "C" fn _start() -> ! {
         write_bytes(b"sysinfo-syscall-smoke: totalram == 0\n");
         test_exit(false);
     }
-    if info_a.freeram != info_a.totalram {
-        write_bytes(b"sysinfo-syscall-smoke: freeram != totalram\n");
+    if info_a.freeram == 0 || info_a.freeram > info_a.totalram || info_a.sharedram > info_a.totalram {
+        write_bytes(b"sysinfo-syscall-smoke: freeram or sharedram out of range\n");
         test_exit(false);
     }
     if info_a.procs < 1 {
         write_bytes(b"sysinfo-syscall-smoke: procs < 1\n");
         test_exit(false);
     }
-    if info_a.loads != [0; 3]
-        || info_a.sharedram != 0
-        || info_a.bufferram != 0
+    if info_a.bufferram != 0
         || info_a.totalswap != 0
         || info_a.freeswap != 0
         || info_a.totalhigh != 0

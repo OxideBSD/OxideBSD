@@ -1289,8 +1289,8 @@ const _: () = assert!(core::mem::size_of::<RawSysinfo>() == 368);
 /// - `procs`: real, the live process table's own length (`process::table().lock().len()`) --
 ///   truncated to `u16` (real `sysinfo(2)`'s own field width; this table will never remotely
 ///   approach 65536 entries on this kernel).
-/// - `bufferram`/`totalswap`/`freeswap`/`totalhigh`/`freehigh`: honest `0` -- no page cache and
-///   no swap exist, same tier as `/proc/meminfo`'s own `Buffers`/`Cached`/`SwapTotal`/`SwapFree`
+/// - `bufferram`/`totalswap`/`freeswap`/`totalhigh`/`freehigh`: honest `0` -- no buffer cache
+///   (the read-only page cache, `memory::pagecache`, isn't one) and no swap exist, same tier as `/proc/meminfo`'s own `Buffers`/`Cached`/`SwapTotal`/`SwapFree`
 ///   placeholders.
 pub(crate) fn sys_sysinfo(info_ptr: u64) -> Result<u64, u64> {
     let ticks = crate::cpu::interrupts::ticks();
