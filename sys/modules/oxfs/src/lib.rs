@@ -8112,6 +8112,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests_net, b"loopback-smoke", include_bytes!(env!("OXFS_LOOPBACK_SMOKE_ELF_PATH")));
     let usr_tests_syslog = ensure_dir(usr_tests, b"syslog");
     ok &= seed_file(usr_tests_syslog, b"run.sh", include_bytes!("../../../../regress/syslog-syscall-smoke/run.sh"));
+    let usr_tests_cron = ensure_dir(usr_tests, b"cron");
+    ok &= seed_file(usr_tests_cron, b"run.sh", include_bytes!("../../../../regress/cron-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
     ok &= seed_file(
         usr_tests,

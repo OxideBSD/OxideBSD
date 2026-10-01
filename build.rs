@@ -312,6 +312,7 @@ fn main() {
     build_userland_crate("sh-syscall-smoke", "SH_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("cron-syscall-smoke", "CRON_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
@@ -504,6 +505,10 @@ fn main() {
         pam_env,
         StdLink::Dynamic,
     );
+    // crontab(1) (CRON.md §5) replaces BusyBox's under the same oxfs name (pushed after the
+    // applets below), so /usr/bin/crontab is ours even while BusyBox still builds its own.
+    let crontab_elf_path =
+        build_std_oxidebsd_userland_crate("usr.bin/crontab", "NATIVE_CRONTAB_ELF_PATH", &musl_sysroot);
     let pwd_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
 
@@ -887,12 +892,14 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
+    oxfs_extra_env.push(("OXFS_CRONTAB_ELF_PATH", crontab_elf_path.to_str().unwrap()));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [
         "etc",
         "share/man",
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
+        "regress/cron-syscall-smoke/run.sh",
         "regress/tz-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",
         "regress/loopback-syscall-smoke/run.sh",

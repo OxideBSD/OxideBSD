@@ -64,6 +64,7 @@ members = [
   "regress/sh-syscall-smoke",
   "regress/rc-syscall-smoke",
   "regress/syslog-syscall-smoke",
+  "regress/cron-syscall-smoke",
   "regress/tz-syscall-smoke",
   "regress/openssl-syscall-smoke",
   "regress/loopback-syscall-smoke",
@@ -380,6 +381,10 @@ harness = false
 
 [[test]]
 name = "syslog_syscall_smoke"
+harness = false
+
+[[test]]
+name = "cron_syscall_smoke"
 harness = false
 
 [[test]]
