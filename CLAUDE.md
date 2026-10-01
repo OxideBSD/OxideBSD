@@ -61,6 +61,8 @@ user before large structural commitments.
 
 - `cargo bv` / `cargo tv` / `cargo rv`: build / test / run with `-vv` so `build.rs` output
   streams live. Prefer these.
+- The dev profile is `opt-level = 2` (with debug info): set it to 0 to step through the kernel in
+  gdb. `sysctl -n debug.syscall.stats` shows per-system-call cost (`debug.syscall.reset=1`).
 - `cargo run`: stages the ISO and boots QEMU, serial on stdio. `cargo run -- -s` (or
   `OXIDEBSD_KERNEL_CMDLINE=-s`) passes kernel boot flags.
 - `cargo test --test <name>`: each test boots its own QEMU (slow; no fast path).

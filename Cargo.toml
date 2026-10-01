@@ -464,6 +464,9 @@ harness = false
 
 [profile.dev]
 panic = "abort"
+# Optimized: an unoptimized kernel made exec and fork several times slower (bmake's configure on
+# target: 115 s at 0, 29 s at 2). Debug info stays. Set 0 to step through the kernel with gdb.
+opt-level = 2
 # Off: every test binary embeds the whole ~260 MiB kernel image, so the incremental cache grew to
 # 25 GB and outlives every toolchain bump. Costs a slower rebuild of the kernel crate itself.
 incremental = false

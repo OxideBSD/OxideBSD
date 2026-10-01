@@ -282,9 +282,16 @@ pub fn schedule() {
         // above, so an empty queue here means the system is genuinely idle right now -- wait_for_ready
         // blocks (with interrupts real-enabled, not spinning) until a hardware event makes that no
         // longer true.
+        let waited_from = crate::cpu::tsc::now();
         let next_pid = wait_for_ready();
 
         if has_prev && next_pid == prev_pid {
+            // The caller blocked with nothing else to run, and the machine idled until it could
+            // go on: that time wasn't the caller's work (`syscall::stats`'s CPU time).
+            crate::syscall::stats::OFF_CPU.fetch_add(
+                crate::cpu::tsc::now().saturating_sub(waited_from),
+                Ordering::Relaxed,
+            );
             let mut table = process::table().lock();
             let prev = table.get_mut(&prev_pid).unwrap();
             prev.state = ProcState::Running;
