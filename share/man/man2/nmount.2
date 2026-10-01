@@ -1,0 +1,92 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt NMOUNT 2
+.Os OxideBSD
+.Sh NAME
+.Nm nmount
+.Nd mount a file system
+.Sh SYNOPSIS
+.In sys/uio.h
+.Ft int
+.Fn nmount "struct iovec *iov" "unsigned int niov" "int flags"
+.Sh DESCRIPTION
+.Fn nmount
+mounts a file system.
+.Fa iov
+holds
+.Fa niov
+/ 2 name and value pairs, each a
+.Vt struct iovec ;
+a name is a string (its length may include the terminating NUL), a value
+may be empty.
+The names are:
+.Bl -tag -width "from, target"
+.It Dv fstype
+the file system type:
+.Dq tmpfs
+or
+.Dq nullfs .
+Required.
+.It Dv fspath
+the directory to mount on.
+Required.
+.It Dv from , target
+for
+.Dq nullfs ,
+the directory to show at
+.Dv fspath .
+.It Dv errmsg
+a buffer, of the length its
+.Vt iovec
+gives, which the kernel fills with a sentence saying why the call failed.
+.El
+.Pp
+.Fa flags
+must be 0: no file system can yet be mounted read-only or with other
+options.
+Only the superuser may mount.
+.Sh RETURN VALUES
+.Rv -std nmount
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EPERM
+The caller isn't the superuser.
+.It Bq Er EINVAL
+.Fa niov
+is odd, or
+.Dv fstype ,
+.Dv fspath
+or a nullfs
+.Dv target
+is missing.
+.It Bq Er ENODEV
+The file system type is unknown.
+.It Bq Er EOPNOTSUPP
+An option other than those above, or a non-zero
+.Fa flags ,
+was given.
+.It Bq Er ENOENT
+A directory named doesn't exist.
+.It Bq Er ENOTDIR
+One of them isn't a directory.
+.It Bq Er ENOSPC
+No more file systems can be mounted.
+.El
+.Sh SEE ALSO
+.Xr mount 8 ,
+.Xr umount 8
+.Sh HISTORY
+An
+.Fn nmount
+system call appeared in
+.Fx 5.0 .
+OxideBSD's takes the same form, with its own system call number and
+options.
+.Sh BUGS
+The C library has no
+.Fn nmount
+function yet; programs call
+.Ql syscall(584, iov, niov, flags) ,
+as
+.Xr mount 8
+does.

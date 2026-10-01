@@ -35,7 +35,7 @@ order=
 for f in $(rcorder /etc/rc.d/*); do
 	order="$order ${f##*/}"
 done
-expected=" sysctl devfs tmp cleanvar FILESYSTEMS hostname NETWORKING newsyslog syslogd SERVERS DAEMON LOGIN cron"
+expected=" sysctl devfs mountcritlocal tmp cleanvar FILESYSTEMS hostname NETWORKING newsyslog syslogd SERVERS DAEMON LOGIN cron"
 check "rcorder orders /etc/rc.d" [ "$order" = "$expected" ]
 [ "$order" = "$expected" ] || echo "rc-smoke: rcorder gave:$order"
 

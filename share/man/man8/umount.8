@@ -1,0 +1,50 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt UMOUNT 8
+.Os OxideBSD
+.Sh NAME
+.Nm umount
+.Nd unmount file systems
+.Sh SYNOPSIS
+.Nm
+.Op Fl fv
+.Ar special | node ...
+.Nm
+.Fl a
+.Op Fl fv
+.Op Fl t Ar type Ns Op , Ns Ar type ...
+.Sh DESCRIPTION
+.Nm
+detaches the file system mounted on each
+.Ar node ,
+or named by
+.Ar special ,
+so that the directory shows its own contents again.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Unmount every file system in
+.Xr fstab 5
+that is mounted, except the root, last listed first.
+.It Fl f
+Unmount even while files on it are in use.
+.It Fl t Ar type
+With
+.Fl a ,
+only these types, or with a leading
+.Dq no ,
+not these.
+.It Fl v
+Name each file system unmounted.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr mount 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .

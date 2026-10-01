@@ -1,0 +1,27 @@
+#!/sbin/init_sh
+#
+# PROVIDE: mountcritlocal
+# REQUIRE: devfs
+# BEFORE: tmp
+#
+# Mounts the local file systems /etc/fstab lists (mount -a), early, so that a /tmp of its own
+# wins over rc.d/tmp's.
+
+. /etc/rc.subr
+
+name="mountcritlocal"
+desc="Mount the local file systems in /etc/fstab"
+start_cmd="mountcritlocal_start"
+stop_cmd=":"
+
+mountcritlocal_start()
+{
+	echo -n "Mounting local file systems:"
+	mount -a
+	_status=$?
+	echo "."
+	return $_status
+}
+
+load_rc_config $name
+run_rc_command "$1"

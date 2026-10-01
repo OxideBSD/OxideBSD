@@ -298,6 +298,9 @@ const SYS_MOUNT_TMPFS: u64 = 175;
 /// path convention added, same as every other path-taking syscall here) -- no shape change needed,
 /// unlike `mount` above.
 const SYS_UMOUNT2: u64 = 176;
+/// `nmount(2)`: one call for every file-system type, by name/value options (FreeBSD's design;
+/// OxideBSD's number). Supersedes `SYS_MOUNT_BIND`/`SYS_MOUNT_TMPFS`.
+const SYS_NMOUNT: u64 = 584;
 
 /// `SYS_FSYNC=471` through `SYS_FSTATFS=477` (continuing with `SYS_PRLIMIT64=478` through
 /// `SYS_REBOOT=486` in `sys/modules/posix_compat`) are the NEEDS_SYSCALL gap-table pass's own
@@ -489,6 +492,8 @@ const EROFS: i64 = 30;
 /// own doc comment), and by `oxfs_open`/the create-new-file path when `check_access` denies real
 /// read/write permission.
 const EPERM: i64 = 1;
+/// musl's `ENODEV`: an `nmount` file-system type that doesn't exist.
+const ENODEV: i64 = 19;
 const EACCES: i64 = 13;
 const EADDRINUSE: i64 = 98;
 const ENOTSOCK: i64 = 88;
@@ -3627,7 +3632,7 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
         push(b" ");
         push(&m.path[..m.path_len as usize]);
         match m.kind {
-            MountKind::Bind => push(b" none rw,bind 0 0\n"),
+            MountKind::Bind => push(b" nullfs rw 0 0\n"),
             MountKind::Tmpfs => push(b" tmpfs rw 0 0\n"),
             MountKind::Devfs => push(b" devfs rw 0 0\n"),
         }
@@ -6613,7 +6618,12 @@ extern "C" fn oxfs_mount_bind(
         unsafe { core::slice::from_raw_parts(source_ptr as *const u8, source_len as usize) };
     let target =
         unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
+    mount_nullfs(source, target)
+}
 
+/// A nullfs (bind) mount of directory `source` on directory `target`: `oxfs_mount_bind`, and
+/// `oxfs_nmount` with `fstype=nullfs`.
+fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
     let source_cwd = match real_cwd_for_mutation(source) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6669,7 +6679,12 @@ extern "C" fn oxfs_mount_tmpfs(target_ptr: u64, target_len: u64, _a2: u64, _a3: 
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let target =
         unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
+    mount_tmpfs(target)
+}
 
+/// A new, empty tmpfs on directory `target`: `oxfs_mount_tmpfs`, and `oxfs_nmount` with
+/// `fstype=tmpfs`.
+fn mount_tmpfs(target: &[u8]) -> i64 {
     let target_cwd = match real_cwd_for_mutation(target) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6708,6 +6723,84 @@ extern "C" fn oxfs_mount_tmpfs(target_ptr: u64, target_len: u64, _a2: u64, _a3: 
         source_len,
     };
     0
+}
+
+/// One `struct iovec`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+/// An `nmount` option's bytes, without the terminating NUL the caller may include in its length.
+fn iov_str(v: IoVec) -> &'static [u8] {
+    if v.base == 0 {
+        return &[];
+    }
+    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
+    let s = unsafe { core::slice::from_raw_parts(v.base as *const u8, v.len as usize) };
+    match s.iter().position(|&b| b == 0) {
+        Some(n) => &s[..n],
+        None => s,
+    }
+}
+
+/// Registered for `SYS_NMOUNT`: `nmount(iov, niov, flags)`, after FreeBSD's. `iov` holds
+/// `niov / 2` name/value pairs, each a `struct iovec` (a value may be empty): `fstype` (`tmpfs` or
+/// `nullfs`), `fspath` (the directory to mount on), and for nullfs `from` or `target` (the
+/// directory to mount). `errmsg`, if given, is a buffer the kernel fills with a sentence saying
+/// why the call failed. Any other option, or a non-zero `flags`, is refused with `EOPNOTSUPP`:
+/// nothing here can be mounted read-only or with other options yet. Only root may mount.
+extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
+    if niov % 2 != 0 || niov > 64 {
+        return -EINVAL;
+    }
+    // SAFETY: same trust boundary as elsewhere -- caller-owned array of `niov` iovecs.
+    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const IoVec, niov as usize) };
+    let mut errmsg: Option<IoVec> = None;
+    let (mut fstype, mut fspath, mut from): (&[u8], &[u8], &[u8]) = (&[], &[], &[]);
+    let mut unknown = false;
+    for pair in iov.chunks_exact(2) {
+        let (name, value) = (iov_str(pair[0]), pair[1]);
+        match name {
+            b"fstype" => fstype = iov_str(value),
+            b"fspath" => fspath = iov_str(value),
+            b"from" | b"target" => from = iov_str(value),
+            b"errmsg" => errmsg = Some(value),
+            _ => unknown = true,
+        }
+    }
+    let fail = |errno: i64, msg: &[u8]| -> i64 {
+        if let Some(buf) = errmsg
+            && buf.base != 0
+            && buf.len > 0
+        {
+            let n = msg.len().min(buf.len as usize - 1);
+            // SAFETY: the caller's own buffer, of the length it gave.
+            unsafe {
+                core::ptr::copy_nonoverlapping(msg.as_ptr(), buf.base as *mut u8, n);
+                *(buf.base as *mut u8).add(n) = 0;
+            }
+        }
+        errno
+    };
+    if unsafe { oxidebsd_current_uid() } != 0 {
+        return fail(-EPERM, b"only root may mount file systems");
+    }
+    if unknown || flags != 0 {
+        return fail(-EOPNOTSUPP, b"mount options and flags aren't supported");
+    }
+    if fspath.is_empty() {
+        return fail(-EINVAL, b"no fspath: the directory to mount on");
+    }
+    match fstype {
+        b"tmpfs" => mount_tmpfs(fspath),
+        b"nullfs" if from.is_empty() => fail(-EINVAL, b"nullfs needs a target: the directory to mount"),
+        b"nullfs" => mount_nullfs(from, fspath),
+        b"" => fail(-EINVAL, b"no fstype"),
+        _ => fail(-ENODEV, b"unknown file system type"),
+    }
 }
 
 // --- devfs (`DEVFS.md` §4) ---------------------------------------------------------------------
@@ -8320,6 +8413,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(sbin, b"mknod", include_bytes!(env!("OXFS_MKNOD_ELF_PATH")));
     ok &= seed_file(usr_bin, b"mktemp", include_bytes!(env!("OXFS_MKTEMP_ELF_PATH")));
     ok &= seed_file(sbin, b"mount", include_bytes!(env!("OXFS_MOUNT_ELF_PATH")));
+    ok &= seed_hardlink(sbin, b"mount_nullfs", b"mount");
     ok &= seed_file(usr_bin, b"nc", include_bytes!(env!("OXFS_NC_ELF_PATH")));
     ok &= seed_file(usr_bin, b"netcat", include_bytes!(env!("OXFS_NETCAT_ELF_PATH")));
     ok &= seed_file(
@@ -8519,6 +8613,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"newsyslog", include_bytes!("../../../../etc/rc.d/newsyslog"));
     ok &= seed_file(rc_d, b"syslogd", include_bytes!("../../../../etc/rc.d/syslogd"));
     ok &= seed_file(rc_d, b"cron", include_bytes!("../../../../etc/rc.d/cron"));
+    ok &= seed_file(rc_d, b"mountcritlocal", include_bytes!("../../../../etc/rc.d/mountcritlocal"));
     ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
     // System logging (SYSLOG.md): routing, rotation, and their drop-in directories.
     ok &= seed_file(etc, b"devfs.conf", include_bytes!("../../../../etc/devfs.conf"));
@@ -8602,6 +8697,8 @@ fn format_fresh_filesystem() -> bool {
     // cron (CRON.md §2): the system table, a directory for more, and the users' tables, which
     // only root may list (crontab(1) writes them).
     ok &= seed_file(etc, b"crontab", include_bytes!("../../../../etc/crontab"));
+    // fstab(5): the file systems rc.d/mountcritlocal mounts.
+    ok &= seed_file(etc, b"fstab", include_bytes!("../../../../etc/fstab"));
     ensure_dir(etc, b"cron.d");
     // periodic(8) (CRON.md §7): its settings, and the daily, weekly and monthly scripts.
     ok &= seed_file(etc_defaults, b"periodic.conf", include_bytes!("../../../../etc/defaults/periodic.conf"));
@@ -8686,6 +8783,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man1, b"passwd.1", include_bytes!("../../../../share/man/man1/passwd.1"));
     let man_man2 = ensure_dir(usr_share_man, b"man2");
     ok &= seed_file(man_man2, b"accept.2", include_bytes!("../../../../share/man/man2/accept.2"));
+    ok &= seed_file(man_man2, b"nmount.2", include_bytes!("../../../../share/man/man2/nmount.2"));
     ok &= seed_hardlink(man_man2, b"accept4.2", b"accept.2");
     ok &= seed_file(man_man2, b"bind.2", include_bytes!("../../../../share/man/man2/bind.2"));
     ok &= seed_file(man_man2, b"connect.2", include_bytes!("../../../../share/man/man2/connect.2"));
@@ -8724,6 +8822,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man5, b"sysctl.conf.5", include_bytes!("../../../../share/man/man5/sysctl.conf.5"));
     ok &= seed_file(man_man5, b"syslog.conf.5", include_bytes!("../../../../share/man/man5/syslog.conf.5"));
     ok &= seed_file(man_man5, b"crontab.5", include_bytes!("../../../../share/man/man5/crontab.5"));
+    ok &= seed_file(man_man5, b"fstab.5", include_bytes!("../../../../share/man/man5/fstab.5"));
     ok &= seed_file(man_man5, b"periodic.conf.5", include_bytes!("../../../../share/man/man5/periodic.conf.5"));
     // tzcode's own pages, as IANA ships them.
     ok &= seed_file(man_man5, b"tzfile.5", include_bytes!("../../../../external/public-domain/tz/tzfile.5"));
@@ -8749,6 +8848,9 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"sysctl.8", include_bytes!("../../../../share/man/man8/sysctl.8"));
     ok &= seed_file(man_man8, b"syslogd.8", include_bytes!("../../../../share/man/man8/syslogd.8"));
     ok &= seed_file(man_man8, b"cron.8", include_bytes!("../../../../share/man/man8/cron.8"));
+    ok &= seed_file(man_man8, b"mount.8", include_bytes!("../../../../share/man/man8/mount.8"));
+    ok &= seed_hardlink(man_man8, b"mount_nullfs.8", b"mount.8");
+    ok &= seed_file(man_man8, b"umount.8", include_bytes!("../../../../share/man/man8/umount.8"));
     ok &= seed_file(man_man8, b"sync.8", include_bytes!("../../../../share/man/man8/sync.8"));
     ok &= seed_file(man_man8, b"periodic.8", include_bytes!("../../../../share/man/man8/periodic.8"));
     ok &= seed_file(man_man8, b"tzsetup.8", include_bytes!("../../../../share/man/man8/tzsetup.8"));
@@ -9883,6 +9985,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_MOUNT_BIND, oxfs_mount_bind);
         oxidebsd_register_syscall(SYS_MOUNT_TMPFS, oxfs_mount_tmpfs);
         oxidebsd_register_syscall(SYS_UMOUNT2, oxfs_umount2);
+        oxidebsd_register_syscall(SYS_NMOUNT, oxfs_nmount);
         oxidebsd_register_syscall(SYS_FSYNC, oxfs_fsync);
         oxidebsd_register_syscall(SYS_FDATASYNC, oxfs_fsync);
         oxidebsd_register_syscall(SYS_SYNC, oxfs_sync);

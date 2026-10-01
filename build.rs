@@ -442,6 +442,14 @@ fn main() {
         build_static_std_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
     let nologin_elf_path =
         build_static_std_crate("sbin/nologin", "OXFS_NOLOGIN_ELF_PATH", &musl_sysroot);
+    // mount(8) and umount(8), over nmount(2), replacing BusyBox's under the same oxfs names (pushed
+    // after the applets below). Both read /etc/fstab with lib/libfstab.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libfstab/src").display()
+    );
+    let mount_elf_path = build_static_std_crate("sbin/mount", "NATIVE_MOUNT_ELF_PATH", &musl_sysroot);
+    let umount_elf_path = build_static_std_crate("sbin/umount", "NATIVE_UMOUNT_ELF_PATH", &musl_sysroot);
     // /bin utilities rewritten in Rust std, replacing BusyBox's (INIT_WORKPLAN, "still BusyBox").
     // chmod parses modes with lib/libmode, which the helper doesn't watch itself.
     println!(
@@ -909,6 +917,8 @@ fn main() {
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
     oxfs_extra_env.push(("OXFS_CRONTAB_ELF_PATH", crontab_elf_path.to_str().unwrap()));
+    oxfs_extra_env.push(("OXFS_MOUNT_ELF_PATH", mount_elf_path.to_str().unwrap()));
+    oxfs_extra_env.push(("OXFS_UMOUNT_ELF_PATH", umount_elf_path.to_str().unwrap()));
     oxfs_extra_env.extend(std_bin_paths.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [

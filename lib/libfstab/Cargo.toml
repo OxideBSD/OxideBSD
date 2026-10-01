@@ -1,0 +1,10 @@
+[package]
+name = "fstab"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# /etc/fstab (fstab(5)), shared by mount(8) and umount(8): the BSDs' getfsent(3). No
+# dependencies; its own workspace, testable on the host (.cargo/config.toml), like lib/libsh.
+[workspace]

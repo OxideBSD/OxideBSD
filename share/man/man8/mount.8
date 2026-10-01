@@ -1,0 +1,107 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt MOUNT 8
+.Os OxideBSD
+.Sh NAME
+.Nm mount ,
+.Nm mount_nullfs
+.Nd mount file systems
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl a
+.Op Fl v
+.Op Fl t Ar type Ns Op , Ns Ar type ...
+.Nm
+.Op Fl v
+.Op Fl t Ar type
+.Op Fl o Ar options
+.Ar special node
+.Nm
+.Op Fl v
+.Ar special | node
+.Nm
+.Fl -bind
+.Ar directory node
+.Nm mount_nullfs
+.Op Fl o Ar options
+.Ar target node
+.Sh DESCRIPTION
+.Nm
+attaches a file system to the directory
+.Ar node ,
+which then shows the file system's contents instead of its own, with
+.Xr nmount 2 .
+With no arguments it lists what is mounted.
+.Pp
+The file system types are:
+.Bl -tag -width nullfs
+.It Cm tmpfs
+A new, empty file system in memory; its
+.Ar special
+is conventionally
+.Dq tmpfs .
+.It Cm nullfs
+The directory
+.Ar special
+(the
+.Ar target ) ,
+seen again at
+.Ar node ;
+what is created or removed in one is in the other.
+Linux calls this a bind mount, hence
+.Fl -bind .
+.El
+.Pp
+With a single
+.Ar special
+or
+.Ar node ,
+the rest is taken from its line in
+.Xr fstab 5 .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Mount every file system in
+.Xr fstab 5
+that isn't mounted, isn't marked
+.Cm noauto ,
+and isn't the root, in the order listed.
+.It Fl o Ar options
+Comma-separated mount options.
+.Cm rw
+is the only one accepted for now; the kernel refuses others.
+.It Fl t Ar type
+The type to mount; with
+.Fl a ,
+the types to mount, or with a leading
+.Dq no ,
+the types not to.
+.It Fl v
+Name each file system mounted.
+.El
+.Sh FILES
+.Bl -tag -width /proc/mounts -compact
+.It Pa /etc/fstab
+the file systems to mount
+.It Pa /proc/mounts
+what is mounted
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Bd -literal -offset indent
+mount -t tmpfs tmpfs /mnt/scratch
+mount -t nullfs /usr/src /mnt/src
+mount_nullfs /usr/src /mnt/src
+.Ed
+.Sh SEE ALSO
+.Xr nmount 2 ,
+.Xr fstab 5 ,
+.Xr umount 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .

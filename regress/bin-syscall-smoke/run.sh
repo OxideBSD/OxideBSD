@@ -1,6 +1,7 @@
 #!/sbin/init_sh
 #
-# On-target check for the /bin utilities rewritten in Rust std, seeded as /usr/tests/bin/run.sh.
+# On-target check for the /bin and /sbin utilities rewritten in Rust std (and nmount(2) through
+# mount), seeded as /usr/tests/bin/run.sh.
 # Runs as root; prints one line per check and exits 0 if all pass. test, [ and kill are named
 # by path: the shell has built-ins of its own by those names.
 
@@ -99,6 +100,31 @@ check "chmod -R" [ "$(perms tree/sub/g)" = -rw------- ]
 check "on directories too" [ "$(perms tree/sub)" = drwx------ ]
 check "chmod -v names the file" [ "$(chmod -v 600 f)" = f ]
 check "chmod refuses a bad mode" status_is 1 chmod u+q f
+
+# --- mount, umount (nmount(2)) and /etc/fstab ------------------------------------------------
+mkdir -p $T/m1 $T/m2 $T/src
+echo seen > $T/src/f
+check "mount -t tmpfs" mount -t tmpfs tmpfs $T/m1
+check "a fresh, empty file system" [ -z "$(ls $T/m1)" ]
+check "listed by mount" sh -c "mount | grep -q 'tmpfs on $T/m1 (tmpfs, local)'"
+check "mount -t nullfs shows a directory again" mount -t nullfs $T/src $T/m2
+check "with its contents" [ "$(cat $T/m2/f)" = seen ]
+check "umount by node" umount $T/m2
+check "after which the contents are gone" not /bin/test -e $T/m2/f
+check "mount --bind is nullfs" mount --bind $T/src $T/m2
+check "umount by special" umount $T/src
+check "umount -v" [ "$(umount -v $T/m1)" = "$T/m1: unmounted" ]
+check "an unknown type is refused" status_is 1 mount -t nosuchfs x $T/m1
+check "with the kernel's reason" sh -c "mount -t nosuchfs x $T/m1 2>&1 | grep -q 'unknown file system type'"
+check "an unsupported option is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'options and flags'"
+cp /etc/fstab $T/fstab.saved
+printf 'tmpfs %s tmpfs rw 0 0\n%s %s nullfs rw,noauto 0 0\n' $T/m1 $T/src $T/m2 >> /etc/fstab
+check "mount -a mounts fstab's entries" mount -a
+check "but not noauto ones" not sh -c "mount | grep -q ' on $T/m2 '"
+check "mount node uses its fstab line" mount $T/m2
+check "umount -a unmounts them" umount -a
+check "all of them" not sh -c "mount | grep -q ' on $T/m[12] '"
+cp $T/fstab.saved /etc/fstab
 
 cd /
 rm -rf $T

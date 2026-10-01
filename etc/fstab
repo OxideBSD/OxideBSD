@@ -1,0 +1,11 @@
+# /etc/fstab: the file systems mounted at boot; see fstab(5).
+#
+# rc.d/mountcritlocal mounts every entry that isn't noauto with `mount -a`. The root is mounted
+# by the kernel; its line is here for completeness.
+#
+# Device	Mountpoint	FStype	Options		Dump	Pass#
+oxfs		/		oxfs	rw		1	1
+#
+# Examples:
+# tmpfs		/tmp		tmpfs	rw		0	0
+# /usr/src	/mnt/src	nullfs	rw,noauto	0	0

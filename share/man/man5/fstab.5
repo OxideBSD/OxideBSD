@@ -1,0 +1,79 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt FSTAB 5
+.Os OxideBSD
+.Sh NAME
+.Nm fstab
+.Nd the file systems to mount
+.Sh DESCRIPTION
+.Pa /etc/fstab
+lists file systems, one per line, for
+.Xr mount 8
+and
+.Xr umount 8 ;
+.Pa /etc/rc.d/mountcritlocal
+mounts them at boot with
+.Ql mount -a .
+Blank lines and text after a
+.Ql #
+are ignored.
+Each line has these fields, separated by blanks:
+.Bl -enum
+.It
+.Em spec :
+what to mount: the directory for
+.Cm nullfs ,
+or the file system's name, such as
+.Dq tmpfs .
+.It
+.Em file :
+the directory to mount it on.
+.It
+.Em vfstype :
+.Cm oxfs
+(the root),
+.Cm tmpfs
+or
+.Cm nullfs ;
+see
+.Xr mount 8 .
+.It
+.Em mntops :
+comma-separated options:
+.Cm rw ,
+and
+.Cm noauto ,
+which keeps
+.Ql mount -a
+from mounting it.
+.It
+.Em freq :
+for
+.Xr dump 8 ,
+which doesn't exist yet; 0 if left out.
+.It
+.Em passno :
+the order for checking file systems at boot, 0 for never; 0 if left out.
+.El
+.Pp
+.Ql \e040
+in a field stands for a space.
+.Sh FILES
+.Bl -tag -width /etc/fstab -compact
+.It Pa /etc/fstab
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# Device	Mountpoint	FStype	Options		Dump	Pass#
+oxfs		/		oxfs	rw		1	1
+tmpfs		/tmp		tmpfs	rw		0	0
+/usr/src	/mnt/src	nullfs	rw,noauto	0	0
+.Ed
+.Sh SEE ALSO
+.Xr mount 8 ,
+.Xr umount 8
+.Sh HISTORY
+An
+.Nm
+file appeared in
+.Bx 4.0 .
