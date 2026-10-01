@@ -280,7 +280,7 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   accepted stock-musl bugs (stale-tid UAF in pthread_*, async-cancel deadlock) are not ours.
 - **BusyBox** (`external/gpl2/busybox`, `1_38_0`, no patches): one static binary per applet,
   `build_busybox_applet` asserts `NUM_APPLETS == 1`. Roster: `OxideBSD-doc/BUSYBOX_APPLETS.md`.
-  Run autoconf `configure` under `/bin/ash` (`/bin/sh` can't yet).
+  `/bin/sh` runs autoconf `configure` (bmake's on target, nano/ncurses on the host match dash).
 - **std target** (`external/mit/rust` + libc fork): reuses `sys::pal::unix`. A mysterious
   `ENOTTY`/`ENOSYS` from a std program is usually a hardcoded `target_os` allowlist in std missing
   `oxidebsd` (`ioctl` only handles tty requests on tty fds).
