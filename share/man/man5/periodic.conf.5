@@ -1,0 +1,124 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt PERIODIC.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm periodic.conf
+.Nd settings for the periodic maintenance scripts
+.Sh DESCRIPTION
+.Xr periodic 8
+and its scripts read
+.Pa /etc/defaults/periodic.conf ,
+which holds the defaults and must not be edited, and then the files that its
+.Va periodic_conf_files
+names,
+.Pa /etc/periodic.conf
+and
+.Pa /etc/periodic.conf.local ,
+whichever exist, where local settings go.
+Like
+.Xr rc.conf 5 ,
+they are
+.Xr sh 1
+assignments; a flag is on when its value is
+.Dq YES .
+.Pp
+For each run, where
+.Ar name
+is
+.Dq daily ,
+.Dq weekly ,
+.Dq monthly ,
+or the name of another directory of scripts:
+.Bl -tag -width Ds
+.It Ar name Ns Va _output
+Where the kept output goes: a file to append it to, if a path; a user, if a
+name; the standard output, if empty.
+The defaults are
+.Pa /var/log/daily.log ,
+.Pa /var/log/weekly.log
+and
+.Pa /var/log/monthly.log .
+.It Ar name Ns Va _show_success
+Keep the output of scripts that found nothing notable.
+Default
+.Dq YES .
+.It Ar name Ns Va _show_info
+Keep the output of scripts that found something.
+Default
+.Dq YES .
+.It Ar name Ns Va _show_badconfig
+Keep the output of scripts whose settings are invalid.
+Default
+.Dq NO .
+.El
+.Pp
+The scripts' own settings:
+.Bl -tag -width Ds
+.It Va daily_clean_tmps_enable
+Remove old files in
+.Va daily_clean_tmps_dirs .
+Default
+.Dq NO .
+.It Va daily_clean_tmps_dirs
+The directories to clean; default
+.Pa /tmp .
+.It Va daily_clean_tmps_days
+Remove files neither read nor changed for this many days; default 3.
+.It Va daily_clean_tmps_ignore
+Names, and
+.Xr find 1
+patterns, of files never to remove; default the lock files and sockets of
+X11 and its relatives.
+.It Va daily_backup_passwd_enable
+Report changes to the account files and keep copies in
+.Pa /var/backups .
+Default
+.Dq YES .
+.It Va daily_status_disks_enable
+Show how full each file system is.
+Default
+.Dq YES .
+.It Va daily_status_disks_df_flags
+Flags to
+.Xr df 1 ;
+default
+.Fl h .
+.It Va daily_status_uptime_enable
+Show the uptime and load.
+Default
+.Dq YES .
+.It Va daily_local , weekly_local , monthly_local
+Files of local commands, run by
+.Xr sh 1
+last; defaults
+.Pa /etc/daily.local ,
+.Pa /etc/weekly.local
+and
+.Pa /etc/monthly.local .
+.El
+.Sh FILES
+.Bl -tag -width /etc/defaults/periodic.conf -compact
+.It Pa /etc/defaults/periodic.conf
+the defaults
+.It Pa /etc/periodic.conf
+local settings
+.El
+.Sh EXAMPLES
+Clean
+.Pa /tmp
+of files older than a week, and log the daily output instead of keeping a
+file of it:
+.Bd -literal -offset indent
+daily_clean_tmps_enable="YES"
+daily_clean_tmps_days="7"
+daily_output="root"
+.Ed
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr periodic 8
+.Sh HISTORY
+A
+.Nm
+file appeared in
+.Fx 4.0 .

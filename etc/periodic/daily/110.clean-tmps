@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Removes files from $daily_clean_tmps_dirs that haven't been touched (read or changed) for
+# $daily_clean_tmps_days days, then the directories that leaves empty. Off by default.
+
+if [ -r /etc/defaults/periodic.conf ]; then
+	. /etc/defaults/periodic.conf
+	source_periodic_confs
+fi
+
+case "$daily_clean_tmps_enable" in
+[Yy][Ee][Ss]) ;;
+*) exit 0 ;;
+esac
+
+case "$daily_clean_tmps_days" in
+"" | *[!0-9]*)
+	echo '$daily_clean_tmps_enable is set but $daily_clean_tmps_days is not a number of days'
+	exit 2
+	;;
+esac
+
+echo "Removing old temporary files:"
+# The ignore patterns are for find, not the shell.
+set -f
+rc=0
+for dir in $daily_clean_tmps_dirs; do
+	[ -d "$dir" ] || continue
+	cd "$dir" || { rc=3; continue; }
+	ignore=
+	for pattern in $daily_clean_tmps_ignore; do
+		ignore="$ignore ! -name $pattern"
+	done
+	# $ignore is split into words on purpose: each pattern is a separate -name test.
+	find . -type f -atime +$daily_clean_tmps_days -mtime +$daily_clean_tmps_days $ignore \
+		-print -exec rm -f {} \; | sed "s|^\.|  $dir|"
+	find . -mindepth 1 -type d -empty -mtime +$daily_clean_tmps_days $ignore \
+		-print -exec rmdir {} \; 2>/dev/null | sed "s|^\.|  $dir|"
+done
+exit $rc

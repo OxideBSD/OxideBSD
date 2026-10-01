@@ -900,6 +900,7 @@ fn main() {
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
         "regress/cron-syscall-smoke/run.sh",
+        "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",
         "regress/loopback-syscall-smoke/run.sh",

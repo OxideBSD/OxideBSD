@@ -87,6 +87,37 @@ check "after which -l says there is none" not crontab -u user -l
 # A minute's job: runs at the next minute boundary.
 check "a job's % text is its input" within 70 has /tmp/cron/input "second line"
 
+# --- periodic --------------------------------------------------------------------------------
+periodic daily
+check "periodic daily writes /var/log/daily.log" has /var/log/daily.log "daily run output"
+check "with the disk status" has /var/log/daily.log "Disk status:"
+check "and the uptime" has /var/log/daily.log "Uptime:"
+check "and the end of the run" has /var/log/daily.log "End of daily output"
+check "the account files are backed up" [ -f /var/backups/master.passwd.bak ]
+check "readable only by root" [ "$(ls -l /var/backups/master.passwd.bak | cut -c1-10)" = "-rw-------" ]
+check "a first run reports no change" not has /var/log/daily.log "has changed"
+echo "smoke:*:2000:" >> /etc/group
+periodic daily
+check "a change to /etc/group is reported" has /var/log/daily.log "/etc/group has changed"
+check "with the line that changed" has /var/log/daily.log "smoke:\*:2000:"
+
+# Exit statuses and the show_* settings, in a directory of its own (named by its path).
+mkdir -p /tmp/cron/p
+for s in "a 0 quiet-ok" "b 1 notable-out" "c 2 badconfig-out" "d 3 error-out"; do
+	set -- $s
+	printf '#!/bin/sh\necho %s\nexit %s\n' "$3" "$2" > /tmp/cron/p/$1
+	chmod 755 /tmp/cron/p/$1
+done
+printf '#!/bin/sh\necho not-executable\n' > /tmp/cron/p/e
+printf 'p_output=/tmp/cron/p.log\np_show_success=NO\n' > /etc/periodic.conf
+periodic /tmp/cron/p
+rm -f /etc/periodic.conf
+check "a script that found nothing is hidden by show_success=NO" not has /tmp/cron/p.log quiet-ok
+check "one with notable output is kept" has /tmp/cron/p.log notable-out
+check "a misconfigured one is hidden by default" not has /tmp/cron/p.log badconfig-out
+check "an error is always kept" has /tmp/cron/p.log error-out
+check "a file that isn't executable isn't run" not has /tmp/cron/p.log not-executable
+
 kill "$cronpid"
 check "cron stops" eventually not running "$cronpid"
 

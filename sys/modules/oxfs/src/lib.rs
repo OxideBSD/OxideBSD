@@ -8493,6 +8493,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"syslogd", include_bytes!(env!("OXFS_SYSLOGD_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"cron", include_bytes!(env!("OXFS_CRON_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"periodic", include_bytes!("../../../../usr.sbin/periodic/periodic.sh"));
     ok &= seed_file(usr_sbin, b"tzsetup", include_bytes!(env!("OXFS_TZSETUP_ELF_PATH")));
     ok &= seed_file(usr_bin, b"zdump", include_bytes!(env!("OXFS_ZDUMP_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"zic", include_bytes!(env!("OXFS_ZIC_ELF_PATH")));
@@ -8707,6 +8708,20 @@ fn format_fresh_filesystem() -> bool {
     // only root may list (crontab(1) writes them).
     ok &= seed_file(etc, b"crontab", include_bytes!("../../../../etc/crontab"));
     ensure_dir(etc, b"cron.d");
+    // periodic(8) (CRON.md §7): its settings, and the daily, weekly and monthly scripts.
+    ok &= seed_file(etc_defaults, b"periodic.conf", include_bytes!("../../../../etc/defaults/periodic.conf"));
+    let periodic = ensure_dir(etc, b"periodic");
+    let periodic_daily = ensure_dir(periodic, b"daily");
+    ok &= seed_file(periodic_daily, b"110.clean-tmps", include_bytes!("../../../../etc/periodic/daily/110.clean-tmps"));
+    ok &= seed_file(periodic_daily, b"200.backup-passwd", include_bytes!("../../../../etc/periodic/daily/200.backup-passwd"));
+    ok &= seed_file(periodic_daily, b"400.status-disks", include_bytes!("../../../../etc/periodic/daily/400.status-disks"));
+    ok &= seed_file(periodic_daily, b"430.status-uptime", include_bytes!("../../../../etc/periodic/daily/430.status-uptime"));
+    ok &= seed_file(periodic_daily, b"999.local", include_bytes!("../../../../etc/periodic/daily/999.local"));
+    let periodic_weekly = ensure_dir(periodic, b"weekly");
+    ok &= seed_file(periodic_weekly, b"999.local", include_bytes!("../../../../etc/periodic/weekly/999.local"));
+    let periodic_monthly = ensure_dir(periodic, b"monthly");
+    ok &= seed_file(periodic_monthly, b"999.local", include_bytes!("../../../../etc/periodic/monthly/999.local"));
+    ensure_dir(var, b"backups");
     let var_cron = ensure_dir(var, b"cron");
     let var_cron_tabs = ensure_dir(var_cron, b"tabs");
     {
@@ -8761,6 +8776,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man1, b"login.1", include_bytes!("../../../../share/man/man1/login.1"));
     ok &= seed_file(man_man1, b"less.1", include_bytes!("../../../../share/man/man1/more.1"));
     ok &= seed_file(man_man1, b"logger.1", include_bytes!("../../../../share/man/man1/logger.1"));
+    ok &= seed_file(man_man1, b"crontab.1", include_bytes!("../../../../share/man/man1/crontab.1"));
     ok &= seed_file(man_man1, b"man.1", include_bytes!("../../../../share/man/man1/man.1"));
     ok &= seed_hardlink(man_man1, b"more.1", b"less.1");
     ok &= seed_file(man_man1, b"oxdoc.1", include_bytes!("../../../../share/man/man1/oxdoc.1"));
@@ -8804,6 +8820,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man5, b"rc.conf.5", include_bytes!("../../../../share/man/man5/rc.conf.5"));
     ok &= seed_file(man_man5, b"sysctl.conf.5", include_bytes!("../../../../share/man/man5/sysctl.conf.5"));
     ok &= seed_file(man_man5, b"syslog.conf.5", include_bytes!("../../../../share/man/man5/syslog.conf.5"));
+    ok &= seed_file(man_man5, b"crontab.5", include_bytes!("../../../../share/man/man5/crontab.5"));
+    ok &= seed_file(man_man5, b"periodic.conf.5", include_bytes!("../../../../share/man/man5/periodic.conf.5"));
     // tzcode's own pages, as IANA ships them.
     ok &= seed_file(man_man5, b"tzfile.5", include_bytes!("../../../../external/public-domain/tz/tzfile.5"));
     ok &= seed_file(man_man5, b"ttys.5", include_bytes!("../../../../share/man/man5/ttys.5"));
@@ -8827,6 +8845,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"reboot.8", include_bytes!("../../../../share/man/man8/reboot.8"));
     ok &= seed_file(man_man8, b"sysctl.8", include_bytes!("../../../../share/man/man8/sysctl.8"));
     ok &= seed_file(man_man8, b"syslogd.8", include_bytes!("../../../../share/man/man8/syslogd.8"));
+    ok &= seed_file(man_man8, b"cron.8", include_bytes!("../../../../share/man/man8/cron.8"));
+    ok &= seed_file(man_man8, b"periodic.8", include_bytes!("../../../../share/man/man8/periodic.8"));
     ok &= seed_file(man_man8, b"tzsetup.8", include_bytes!("../../../../share/man/man8/tzsetup.8"));
     ok &= seed_file(man_man8, b"zdump.8", include_bytes!("../../../../external/public-domain/tz/zdump.8"));
     ok &= seed_file(man_man8, b"zic.8", include_bytes!("../../../../external/public-domain/tz/zic.8"));

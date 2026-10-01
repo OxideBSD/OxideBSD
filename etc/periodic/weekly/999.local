@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# Runs the local weekly commands, $weekly_local (/etc/weekly.local), if there are any.
+
+if [ -r /etc/defaults/periodic.conf ]; then
+	. /etc/defaults/periodic.conf
+	source_periodic_confs
+fi
+
+rc=0
+for script in $weekly_local; do
+	if [ -r "$script" ]; then
+		echo "Running $script:"
+		sh "$script" || rc=3
+		[ $rc -eq 0 ] && rc=1
+	fi
+done
+exit $rc

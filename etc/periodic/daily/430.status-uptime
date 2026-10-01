@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# Shows how long the system has been up, and its load.
+
+if [ -r /etc/defaults/periodic.conf ]; then
+	. /etc/defaults/periodic.conf
+	source_periodic_confs
+fi
+
+case "$daily_status_uptime_enable" in
+[Yy][Ee][Ss]) ;;
+*) exit 0 ;;
+esac
+
+echo "Uptime:"
+uptime || exit 3
+exit 0

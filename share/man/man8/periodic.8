@@ -1,0 +1,114 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt PERIODIC 8
+.Os OxideBSD
+.Sh NAME
+.Nm periodic
+.Nd run the periodic maintenance scripts
+.Sh SYNOPSIS
+.Nm
+.Ar directory ...
+.Sh DESCRIPTION
+.Nm
+runs, for each
+.Ar directory ,
+every executable file in
+.Pa /etc/periodic/ Ns Ar directory
+and then in
+.Pa /usr/local/etc/periodic/ Ns Ar directory ,
+in the order of their names.
+A
+.Ar directory
+that begins with
+.Ql /
+names the directory itself, and its last component is its name below.
+.Xr cron 8
+runs
+.Ql periodic daily ,
+.Ql periodic weekly
+and
+.Ql periodic monthly
+from
+.Pa /etc/crontab .
+.Pp
+Each script reads its settings from
+.Xr periodic.conf 5
+and exits with:
+.Bl -tag -width Ds -compact
+.It 0
+nothing notable to report;
+.It 1
+something to report;
+.It 2
+its settings are invalid;
+.It more
+an error.
+.El
+.Pp
+Which scripts' output is kept depends on the exit status and on the settings
+.Ar name Ns Va _show_success ,
+.Ar name Ns Va _show_info
+and
+.Ar name Ns Va _show_badconfig
+for statuses 0, 1 and 2; an error's output is always kept.
+The output kept, under a heading with the host name and the date, goes where
+.Ar name Ns Va _output
+says: appended to a file, if it is a path; sent to a user, if it is a name;
+or written to the standard output, if it is empty.
+.Pp
+The scripts that come with the system are:
+.Bl -tag -width daily/200.backup-passwd
+.It Pa daily/110.clean-tmps
+Removes files that haven't been read or changed for some days from
+.Pa /tmp .
+Off by default.
+.It Pa daily/200.backup-passwd
+Reports changes to
+.Pa /etc/master.passwd
+and
+.Pa /etc/group
+since the last run, and keeps copies in
+.Pa /var/backups .
+.It Pa daily/400.status-disks
+Shows how full each file system is.
+.It Pa daily/430.status-uptime
+Shows the uptime and load.
+.It Pa daily/999.local , weekly/999.local , monthly/999.local
+Run
+.Pa /etc/daily.local ,
+.Pa /etc/weekly.local
+and
+.Pa /etc/monthly.local ,
+if they exist.
+.El
+.Sh FILES
+.Bl -tag -width /usr/local/etc/periodic -compact
+.It Pa /etc/periodic
+the system's scripts
+.It Pa /usr/local/etc/periodic
+scripts added to the system
+.It Pa /var/log/daily.log , /var/log/weekly.log , /var/log/monthly.log
+the default outputs, rotated by
+.Xr newsyslog 8
+.It Pa /var/backups
+the copies of the account files
+.El
+.Sh EXIT STATUS
+.Nm
+exits with status 0, or 1 if it is given no directory.
+.Sh SEE ALSO
+.Xr crontab 5 ,
+.Xr periodic.conf 5 ,
+.Xr cron 8 ,
+.Xr newsyslog 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 3.0 .
+.Sh BUGS
+There is no mail system, so output for a user is logged with
+.Xr logger 1
+at
+.Dq daemon.notice
+instead of mailed.

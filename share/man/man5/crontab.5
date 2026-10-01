@@ -1,0 +1,131 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt CRONTAB 5
+.Os OxideBSD
+.Sh NAME
+.Nm crontab
+.Nd tables of scheduled commands
+.Sh DESCRIPTION
+A
+.Nm
+file lists commands for
+.Xr cron 8
+to run, and when.
+Users' tables are installed with
+.Xr crontab 1 ;
+the system's are
+.Pa /etc/crontab
+and the files in
+.Pa /etc/cron.d .
+.Pp
+Each line is one of:
+.Bl -bullet
+.It
+a blank line, or a comment, beginning with
+.Ql # ;
+.It
+an environment setting,
+.Ar name Li = Ar value ,
+with or without blanks around the
+.Ql = .
+The value may be quoted with
+.Ql \(aq
+or
+.Ql \(dq ,
+which is the way to give it leading or trailing blanks.
+Settings apply to every job of the table;
+.Ql MAILTO=\(dq\(dq
+discards the jobs' output;
+.It
+a job: five time fields, then, in a system table only, the user to run it as,
+then the command, which is the rest of the line.
+.El
+.Ss Time fields
+The fields are, in order:
+.Bl -column "day of the month" "0-7, or sun-sat"
+.It Sy field Ta Sy values
+.It minute Ta 0-59
+.It hour Ta 0-23
+.It day of the month Ta 1-31
+.It month Ta 1-12, or jan-dec
+.It day of the week Ta 0-7, or sun-sat
+.El
+.Pp
+Sunday is both 0 and 7.
+Names are three letters, in any case, and may be used anywhere a number may.
+A field is
+.Ql *
+(every value), a number, a range
+.Ql 1-5 ,
+or a list
+.Ql 1,15,30
+of numbers and ranges; any of these may have a step,
+.Ql /n ,
+which takes every
+.Ar n Ns th
+value: so
+.Ql */15
+in the minute is 0, 15, 30 and 45, and
+.Ql 5/20
+is 5, 25 and 45.
+.Pp
+A job runs in a minute that matches all of the minute, hour and month.
+If both day fields are restricted, a day that matches either one counts; if
+either begins with
+.Ql * ,
+a day must match both.
+So
+.Ql 0 0 13 * 5
+runs on the 13th of each month and on every Friday, while
+.Ql 0 0 */2 * 5
+runs on Fridays that fall on an odd day of the month.
+.Ss Special times
+The five fields may be replaced by one of:
+.Bl -column "@every_second" "0 0 1 1 *"
+.It Cm @reboot Ta once, when Xr cron 8 starts after the system boots
+.It Cm @yearly Ta Li "0 0 1 1 *" ; also Cm @annually
+.It Cm @monthly Ta Li "0 0 1 * *"
+.It Cm @weekly Ta Li "0 0 * * 0"
+.It Cm @daily Ta Li "0 0 * * *" ; also Cm @midnight
+.It Cm @hourly Ta Li "0 * * * *"
+.It Cm @every_minute Ta Li "* * * * *"
+.It Cm @every_second Ta every second
+.El
+.Ss The command
+The command is run with
+.Ql $SHELL -c .
+An unescaped
+.Ql %
+ends it: the text after it is the command's standard input, each further
+.Ql %
+standing for a new line.
+.Ql \e%
+is a
+.Ql %
+in either part.
+.Sh EXAMPLES
+A user's table:
+.Bd -literal -offset indent
+MAILTO=""
+# Every 15 minutes during working hours, Monday to Friday.
+*/15	9-17	*	*	mon-fri	$HOME/bin/sync-mail
+# On the first of the month, two lines added to a file.
+0	9	1	*	*	cat >> $HOME/todo%Pay the rent.%Back up the laptop.
+@reboot	$HOME/bin/start-agent
+.Ed
+.Pp
+A system table line, run as
+.Dq operator :
+.Bd -literal -offset indent
+30	2	*	*	*	operator	/usr/local/bin/backup
+.Ed
+.Sh SEE ALSO
+.Xr crontab 1 ,
+.Xr cron 8 ,
+.Xr periodic 8
+.Sh HISTORY
+OxideBSD's format is Paul Vixie's, as on the BSDs, with
+.Fx Ns 's
+.Cm @every_minute
+and
+.Cm @every_second .

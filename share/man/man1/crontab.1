@@ -1,0 +1,106 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt CRONTAB 1
+.Os OxideBSD
+.Sh NAME
+.Nm crontab
+.Nd install, list, edit or remove a user's table of scheduled commands
+.Sh SYNOPSIS
+.Nm
+.Op Fl u Ar user
+.Ar file
+.Nm
+.Op Fl u Ar user
+.Fl l | e
+.Nm
+.Op Fl u Ar user
+.Fl r Op Fl f
+.Sh DESCRIPTION
+.Nm
+manages the table of commands
+.Xr cron 8
+runs for a user, in the format of
+.Xr crontab 5 .
+.Pp
+Given a
+.Ar file ,
+or
+.Ql -
+for the standard input,
+.Nm
+installs it as the user's table, replacing any other.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl e
+Edit the table: a copy is opened with the editor named by
+.Ev VISUAL ,
+or else
+.Ev EDITOR ,
+or else
+.Xr vi 1 ,
+and installed when the editor exits, if it changed.
+An edit that isn't a valid table is not installed: the errors are shown, and
+.Nm
+offers to edit it again.
+.It Fl f
+With
+.Fl r ,
+don't ask first.
+.It Fl l
+Write the table to the standard output.
+.It Fl r
+Remove the table, after asking, unless
+.Fl f .
+.It Fl u Ar user
+Act on the table of
+.Ar user
+instead of one's own.
+Only root may.
+.El
+.Pp
+A table is checked before it is installed: one with an error is refused, and
+each error is reported with its line number, so that a mistake never replaces
+a working table.
+Tables are kept in
+.Pa /var/cron/tabs ,
+owned by root and readable only by root, and
+.Xr cron 8
+reads a new one within a minute.
+.Pp
+Root may always use
+.Nm .
+Other users may if
+.Pa /var/cron/allow
+exists and lists them, one name per line; if it doesn't exist, every user may
+whom
+.Pa /var/cron/deny
+doesn't list.
+.Sh FILES
+.Bl -tag -width /var/cron/tabs/user -compact
+.It Pa /var/cron/tabs/ Ns Ar user
+the user's table
+.It Pa /var/cron/allow
+users who may use
+.Nm
+.It Pa /var/cron/deny
+users who may not
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr crontab 5 ,
+.Xr cron 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At V .
+.Sh BUGS
+On the BSDs
+.Nm
+is set-user-ID root, which lets every user write their table to
+.Pa /var/cron/tabs .
+OxideBSD doesn't run set-user-ID programs yet, so for now only root can use
+.Nm ;
+other users are told so.

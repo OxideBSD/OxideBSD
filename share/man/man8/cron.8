@@ -1,0 +1,197 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt CRON 8
+.Os OxideBSD
+.Sh NAME
+.Nm cron
+.Nd run scheduled commands
+.Sh SYNOPSIS
+.Nm
+.Op Fl nos
+.Op Fl j Ar jitter
+.Op Fl J Ar rootjitter
+.Op Fl m Ar mailto
+.Sh DESCRIPTION
+The
+.Nm
+daemon runs commands at the times its tables give, as the users they name.
+It is started at boot by
+.Pa /etc/rc.d/cron
+when
+.Va cron_enable
+is
+.Dq YES
+in
+.Xr rc.conf 5 .
+.Pp
+It reads these tables, in the format of
+.Xr crontab 5 :
+.Bl -bullet
+.It
+the system table
+.Pa /etc/crontab
+and every table in
+.Pa /etc/cron.d
+and
+.Pa /usr/local/etc/cron.d ,
+whose job lines name the user each job runs as.
+Files whose names begin with
+.Ql \&.
+or
+.Ql # ,
+or end in
+.Ql ~ ,
+.Ql \&, ,
+.Pa .bak ,
+.Pa .orig ,
+.Pa .new
+or
+.Pa .swp ,
+are skipped;
+.It
+each user's table,
+.Pa /var/cron/tabs/ Ns Ar user ,
+installed with
+.Xr crontab 1 .
+.El
+.Pp
+A table that isn't a regular file owned by root and writable only by its owner
+is skipped whole, and logged; so is a user's table whose user has no account.
+A line that can't be read is logged with its number, and the rest of its table
+is used.
+.Pp
+.Nm
+wakes at the start of every minute, or of every second while any table has an
+.Cm @every_second
+job.
+Each time it wakes it reads every table again if any of them, or any of the
+directories holding them, has changed, then starts the jobs due.
+Times are local time.
+.Ss Running a job
+Each job runs in a process of its own, so a long job never delays another.
+That process waits for the jitter, if any; checks the user's account with the
+PAM service
+.Dq cron
+.Pq Pa /etc/pam.d/cron ,
+skipping the job, and logging why, if the account may not run it now; sets
+the resource limits, priority and umask of the user's login class
+.Pq Xr login.conf 5 ,
+the user's groups and user ID; and runs the command with
+.Ql $SHELL -c
+in the user's home directory.
+Text after a
+.Ql %
+in the command is the job's standard input.
+.Pp
+A job's environment is
+.Ev SHELL Ns = Ns Pa /bin/sh ,
+.Ev PATH Ns = Ns Pa /usr/bin:/bin ,
+.Ev HOME
+from the password file,
+.Ev LOGNAME
+and
+.Ev USER ;
+then the environment of the login class; then the table's own settings, which
+may replace all of these but
+.Ev LOGNAME
+and
+.Ev USER .
+.Pp
+Each start is logged at
+.Dq cron.info
+as
+.Ql ( Ns Ar user Ns ) CMD ( Ns Ar command Ns ) .
+What the job writes to its standard output and standard error is logged, one
+message per line, at
+.Dq cron.notice
+as
+.Ql ( Ns Ar user Ns ) CMDOUT ( Ns Ar line Ns ) ,
+unless
+.Ev MAILTO
+is set to the empty string.
+.Ss Special times
+An
+.Cm @reboot
+job runs when
+.Nm
+starts, once per boot:
+.Nm
+then creates
+.Pa /var/run/cron.reboot ,
+which
+.Pa /etc/rc.d/cleanvar
+removes at the next boot.
+.Pp
+When the clock moves forward by up to three hours, a job with a fixed time
+.Pq neither its minute nor its hour is Ql *
+that fell in the skipped time runs once; other jobs run only for the new time.
+When it moves back by up to three hours, only the jobs whose minute or hour is
+.Ql *
+run until the clock is past where it was, so that no fixed-time job runs twice.
+A larger change starts again from the new time.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl j Ar jitter
+Delay each job of a user other than root by a random number of seconds, from 0
+to
+.Ar jitter
+(at most 60).
+.It Fl J Ar rootjitter
+The same for root's jobs.
+.It Fl m Ar mailto
+The value of
+.Ev MAILTO
+for tables that don't set it.
+.It Fl n
+Stay in the foreground.
+.It Fl s
+Treat a change between standard and daylight-saving time as a change of the
+clock: a fixed-time job whose time is skipped runs once, and one whose time is
+repeated doesn't run again.
+.It Fl o
+Don't: a skipped time is skipped, and a repeated one runs its jobs again.
+This is the default.
+If both
+.Fl s
+and
+.Fl o
+are given, the last one counts.
+.El
+.Sh FILES
+.Bl -tag -width /var/run/cron.reboot -compact
+.It Pa /etc/crontab
+the system table
+.It Pa /etc/cron.d
+more system tables
+.It Pa /var/cron/tabs
+the users' tables
+.It Pa /var/run/cron.pid
+the process ID, locked while
+.Nm
+runs, so that a second one exits
+.It Pa /var/run/cron.reboot
+present once the
+.Cm @reboot
+jobs have run
+.El
+.Sh SEE ALSO
+.Xr crontab 1 ,
+.Xr crontab 5 ,
+.Xr login.conf 5 ,
+.Xr syslog.conf 5 ,
+.Xr periodic 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v7 .
+OxideBSD's follows Paul Vixie's, which the BSDs share, with
+.Fx Ns 's
+options.
+.Sh BUGS
+There is no mail system, so a job's output is logged instead of mailed, and
+.Fl m
+and
+.Ev MAILTO
+only decide whether it is kept.
