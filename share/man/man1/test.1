@@ -1,0 +1,152 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt TEST 1
+.Os OxideBSD
+.Sh NAME
+.Nm test ,
+.Nm \&[
+.Nd evaluate a condition
+.Sh SYNOPSIS
+.Nm
+.Ar expression
+.Nm \&[
+.Ar expression Cm \&]
+.Sh DESCRIPTION
+.Nm
+evaluates
+.Ar expression
+and exits 0 if it is true, 1 if it is false.
+Called as
+.Nm \&[ ,
+its last argument must be
+.Cm \&] .
+.Ss Files
+Each is true if
+.Ar file
+exists and:
+.Bl -tag -width "-t fd" -compact
+.It Fl b Ar file
+is a block device
+.It Fl c Ar file
+is a character device
+.It Fl d Ar file
+is a directory
+.It Fl e Ar file
+(only exists)
+.It Fl f Ar file
+is a regular file
+.It Fl g Ar file
+has its set-group-ID bit set
+.It Fl h Ar file
+is a symbolic link; also
+.Fl L
+.It Fl k Ar file
+has its sticky bit set
+.It Fl p Ar file
+is a named pipe
+.It Fl r Ar file
+is readable by this process
+.It Fl s Ar file
+is not empty
+.It Fl S Ar file
+is a socket
+.It Fl u Ar file
+has its set-user-ID bit set
+.It Fl w Ar file
+is writable by this process
+.It Fl x Ar file
+is executable (searchable, for a directory) by this process
+.It Fl O Ar file
+is owned by this process's effective user
+.It Fl G Ar file
+belongs to this process's effective group
+.El
+.Pp
+.Fl t Ar fd
+is true if descriptor
+.Ar fd
+is open on a terminal.
+.Ar file1 Fl nt Ar file2
+is true if
+.Ar file1
+was modified more recently than
+.Ar file2 ,
+or exists when
+.Ar file2
+doesn't;
+.Fl ot
+the reverse;
+.Fl ef ,
+if both names refer to the same file.
+.Ss Strings and integers
+.Bl -tag -width "s1 != s2" -compact
+.It Ar string
+not empty
+.It Fl n Ar string
+not empty
+.It Fl z Ar string
+empty
+.It Ar s1 Cm = Ar s2
+equal
+.It Ar s1 Cm != Ar s2
+not equal
+.It Ar s1 Cm < Ar s2
+sorts before (by byte value);
+.Cm >
+after
+.It Ar n1 Fl eq Ar n2
+the integers are equal; also
+.Fl ne , gt , ge , lt , le
+.El
+.Ss Combining
+.Bl -tag -width "e1 -o e2" -compact
+.It Cm \&! Ar e
+not
+.It Ar e1 Fl a Ar e2
+and, binding tighter than
+.Fl o
+.It Ar e1 Fl o Ar e2
+or
+.It Cm \&( Ar e Cm \&)
+grouping
+.El
+.Pp
+With up to four arguments, their number decides how they are read, as POSIX
+specifies, so that for example
+.Ql test -n
+(one argument, a non-empty string) is true.
+Write
+.Fl a ,
+.Fl o
+and parentheses as separate arguments, and quote the parentheses for the shell.
+.Sh EXIT STATUS
+0 if the expression is true, 1 if false, 2 if it can't be evaluated.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+if [ -f /etc/rc.conf ] && [ "$x" -gt 3 ]; then ...
+test \e( -d /tmp -o -d /var/tmp \e) -a -w /tmp
+.Ed
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr access 2 ,
+.Xr stat 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl h ,
+.Fl k ,
+.Fl O ,
+.Fl G ,
+.Fl nt ,
+.Fl ot ,
+.Fl ef ,
+.Cm <
+and
+.Cm >
+are extensions, as on the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v7 .

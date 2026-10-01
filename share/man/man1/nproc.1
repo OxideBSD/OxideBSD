@@ -1,0 +1,32 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt NPROC 1
+.Os OxideBSD
+.Sh NAME
+.Nm nproc
+.Nd count the processors
+.Sh SYNOPSIS
+.Nm
+.Op Fl -all
+.Op Fl -ignore Ns = Ns Ar count
+.Sh DESCRIPTION
+.Nm
+writes the number of processors available to run programs.
+.Bl -tag -width Ds
+.It Fl -all
+Count every processor installed, available or not.
+.It Fl -ignore Ns = Ns Ar count
+Subtract
+.Ar count .
+The answer is never less than 1.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr sysconf 3 ,
+.Xr sysctl 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 13.2 .

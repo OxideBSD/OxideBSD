@@ -313,6 +313,7 @@ fn main() {
     build_userland_crate("rc-syscall-smoke", "RC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("syslog-syscall-smoke", "SYSLOG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("cron-syscall-smoke", "CRON_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("bin-syscall-smoke", "BIN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
@@ -441,6 +442,20 @@ fn main() {
         build_static_std_crate("sbin/dmesg", "OXFS_SBIN_DMESG_ELF_PATH", &musl_sysroot);
     let nologin_elf_path =
         build_static_std_crate("sbin/nologin", "OXFS_NOLOGIN_ELF_PATH", &musl_sysroot);
+    // /bin utilities rewritten in Rust std, replacing BusyBox's (INIT_WORKPLAN, "still BusyBox").
+    // chmod parses modes with lib/libmode, which the helper doesn't watch itself.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmode/src").display()
+    );
+    let std_bin_paths: Vec<(String, String)> = ["sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod"]
+        .iter()
+        .map(|name| {
+            let env = oxfs_env_var_name(name);
+            let elf = build_static_std_crate(&format!("bin/{name}"), &env, &musl_sysroot);
+            (env, elf.to_str().unwrap().to_string())
+        })
+        .collect();
     // System logging (SYSLOG.md in OxideBSD-doc). The helper only watches each program's own
     // src/, so the library they share is watched here.
     println!(
@@ -894,6 +909,7 @@ fn main() {
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
     oxfs_extra_env.push(("OXFS_CRONTAB_ELF_PATH", crontab_elf_path.to_str().unwrap()));
+    oxfs_extra_env.extend(std_bin_paths.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [
         "etc",
@@ -901,6 +917,7 @@ fn main() {
         "regress/rc-syscall-smoke/run.sh",
         "regress/syslog-syscall-smoke/run.sh",
         "regress/cron-syscall-smoke/run.sh",
+        "regress/bin-syscall-smoke/run.sh",
         "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",

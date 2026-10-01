@@ -1,0 +1,33 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt LINK 1
+.Os OxideBSD
+.Sh NAME
+.Nm link
+.Nd make a hard link
+.Sh SYNOPSIS
+.Nm
+.Ar file1 file2
+.Sh DESCRIPTION
+.Nm
+makes
+.Ar file2
+a new name for
+.Ar file1
+with
+.Xr link 2 ,
+and does nothing else: it has no options, and
+.Ar file2
+must not exist.
+.Xr ln 1
+is the tool with options.
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr ln 1 ,
+.Xr unlink 1 ,
+.Xr link 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 .

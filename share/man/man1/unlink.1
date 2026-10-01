@@ -1,0 +1,30 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt UNLINK 1
+.Os OxideBSD
+.Sh NAME
+.Nm unlink
+.Nd remove a name
+.Sh SYNOPSIS
+.Nm
+.Ar file
+.Sh DESCRIPTION
+.Nm
+removes the name
+.Ar file
+with
+.Xr unlink 2 ,
+and does nothing else: it has no options, and refuses a directory.
+.Xr rm 1
+is the tool with options.
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr link 1 ,
+.Xr rm 1 ,
+.Xr rmdir 1 ,
+.Xr unlink 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 .

@@ -8112,6 +8112,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests_net, b"loopback-smoke", include_bytes!(env!("OXFS_LOOPBACK_SMOKE_ELF_PATH")));
     let usr_tests_syslog = ensure_dir(usr_tests, b"syslog");
     ok &= seed_file(usr_tests_syslog, b"run.sh", include_bytes!("../../../../regress/syslog-syscall-smoke/run.sh"));
+    let usr_tests_bin = ensure_dir(usr_tests, b"bin");
+    ok &= seed_file(usr_tests_bin, b"run.sh", include_bytes!("../../../../regress/bin-syscall-smoke/run.sh"));
     let usr_tests_cron = ensure_dir(usr_tests, b"cron");
     ok &= seed_file(usr_tests_cron, b"run.sh", include_bytes!("../../../../regress/cron-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
@@ -8415,6 +8417,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_bin, b"tee", include_bytes!(env!("OXFS_TEE_ELF_PATH")));
     ok &= seed_file(usr_bin, b"telnet", include_bytes!(env!("OXFS_TELNET_ELF_PATH")));
     ok &= seed_file(bin, b"test", include_bytes!(env!("OXFS_TEST_ELF_PATH")));
+    ok &= seed_hardlink(bin, b"[", b"test");
     ok &= seed_file(usr_bin, b"time", include_bytes!(env!("OXFS_TIME_ELF_PATH")));
     ok &= seed_file(
         bin,
@@ -8669,6 +8672,14 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man1, b"less.1", include_bytes!("../../../../share/man/man1/more.1"));
     ok &= seed_file(man_man1, b"logger.1", include_bytes!("../../../../share/man/man1/logger.1"));
     ok &= seed_file(man_man1, b"crontab.1", include_bytes!("../../../../share/man/man1/crontab.1"));
+    ok &= seed_file(man_man1, b"chmod.1", include_bytes!("../../../../share/man/man1/chmod.1"));
+    ok &= seed_file(man_man1, b"kill.1", include_bytes!("../../../../share/man/man1/kill.1"));
+    ok &= seed_file(man_man1, b"link.1", include_bytes!("../../../../share/man/man1/link.1"));
+    ok &= seed_file(man_man1, b"nproc.1", include_bytes!("../../../../share/man/man1/nproc.1"));
+    ok &= seed_file(man_man1, b"rmdir.1", include_bytes!("../../../../share/man/man1/rmdir.1"));
+    ok &= seed_file(man_man1, b"sleep.1", include_bytes!("../../../../share/man/man1/sleep.1"));
+    ok &= seed_file(man_man1, b"test.1", include_bytes!("../../../../share/man/man1/test.1"));
+    ok &= seed_file(man_man1, b"unlink.1", include_bytes!("../../../../share/man/man1/unlink.1"));
     ok &= seed_file(man_man1, b"man.1", include_bytes!("../../../../share/man/man1/man.1"));
     ok &= seed_hardlink(man_man1, b"more.1", b"less.1");
     ok &= seed_file(man_man1, b"oxdoc.1", include_bytes!("../../../../share/man/man1/oxdoc.1"));
@@ -8738,6 +8749,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"sysctl.8", include_bytes!("../../../../share/man/man8/sysctl.8"));
     ok &= seed_file(man_man8, b"syslogd.8", include_bytes!("../../../../share/man/man8/syslogd.8"));
     ok &= seed_file(man_man8, b"cron.8", include_bytes!("../../../../share/man/man8/cron.8"));
+    ok &= seed_file(man_man8, b"sync.8", include_bytes!("../../../../share/man/man8/sync.8"));
     ok &= seed_file(man_man8, b"periodic.8", include_bytes!("../../../../share/man/man8/periodic.8"));
     ok &= seed_file(man_man8, b"tzsetup.8", include_bytes!("../../../../share/man/man8/tzsetup.8"));
     ok &= seed_file(man_man8, b"zdump.8", include_bytes!("../../../../external/public-domain/tz/zdump.8"));

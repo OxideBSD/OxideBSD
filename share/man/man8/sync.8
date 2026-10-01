@@ -1,0 +1,25 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt SYNC 8
+.Os OxideBSD
+.Sh NAME
+.Nm sync
+.Nd write cached data to the disks
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+writes everything the system holds in memory for its disks out to them, with
+.Xr sync 2 .
+It is rarely needed: the file system writes through, and
+.Xr reboot 8
+synchronizes before restarting.
+Arguments are ignored.
+.Sh SEE ALSO
+.Xr sync 2 ,
+.Xr reboot 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v4 .

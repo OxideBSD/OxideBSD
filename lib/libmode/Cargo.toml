@@ -1,0 +1,11 @@
+[package]
+name = "mode"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# File modes written as text, octal or symbolic (chmod(1)'s "u+x,go-w"): the BSDs' setmode(3)
+# and getmode(3), for chmod now and mkdir -m, install and find -perm later. No dependencies;
+# its own workspace, testable on the host (.cargo/config.toml), like lib/libsh.
+[workspace]

@@ -1,0 +1,71 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt KILL 1
+.Os OxideBSD
+.Sh NAME
+.Nm kill
+.Nd send a signal to processes
+.Sh SYNOPSIS
+.Nm
+.Op Fl s Ar signal_name
+.Ar pid ...
+.Nm
+.Fl l
+.Op Ar exit_status
+.Nm
+.Fl Ar signal_name
+.Ar pid ...
+.Nm
+.Fl Ar signal_number
+.Ar pid ...
+.Sh DESCRIPTION
+.Nm
+sends a signal, by default
+.Dv SIGTERM ,
+to each
+.Ar pid .
+A negative
+.Ar pid
+names a process group; write it after
+.Fl -
+or after the signal, so that it isn't read as an option.
+Signals are named with or without
+.Dq SIG ,
+in any case, or given by number; 0 sends nothing, but checks that the process
+exists and may be signalled.
+.Pp
+.Fl l
+writes the names of the signals; with an
+.Ar exit_status ,
+the name of the signal that ended a process with that status
+.Pq for example 143, Dv SIGTERM .
+.Pp
+Shells have a
+.Ic kill
+built-in that also takes job numbers
+.Pq Li %1 ;
+this is the program, for use where a shell isn't.
+.Sh EXIT STATUS
+0 if every signal was sent, 1 if any wasn't, 2 on a usage error.
+.Sh EXAMPLES
+Ask process 123 to terminate, then make sure:
+.Bd -literal -offset indent
+kill 123
+kill -KILL 123
+.Ed
+.Pp
+Hang up every process in group 42:
+.Dl kill -s HUP -- -42
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr kill 2 ,
+.Xr signal 3
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v3 .

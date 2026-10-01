@@ -1,0 +1,50 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt RMDIR 1
+.Os OxideBSD
+.Sh NAME
+.Nm rmdir
+.Nd remove empty directories
+.Sh SYNOPSIS
+.Nm
+.Op Fl pv
+.Ar directory ...
+.Sh DESCRIPTION
+.Nm
+removes each
+.Ar directory ,
+which must be empty, in the order given.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl p
+Also remove each parent named in
+.Ar directory Ns 's
+path, from the innermost out, stopping at the first that can't be removed.
+.It Fl v
+Write the name of each directory removed.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Remove
+.Pa a/b/c ,
+then
+.Pa a/b
+and
+.Pa a :
+.Dl rmdir -p a/b/c
+.Sh SEE ALSO
+.Xr rm 1 ,
+.Xr rmdir 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl v
+is an extension.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .

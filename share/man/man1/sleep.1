@@ -1,0 +1,42 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt SLEEP 1
+.Os OxideBSD
+.Sh NAME
+.Nm sleep
+.Nd wait for a time
+.Sh SYNOPSIS
+.Nm
+.Ar number Ns Op Ar unit
+.Op Ar ...
+.Sh DESCRIPTION
+.Nm
+waits for the total of its arguments, then exits.
+Each is a number of seconds, which may have a fraction, optionally followed by
+a unit:
+.Cm s
+(seconds),
+.Cm m
+(minutes),
+.Cm h
+(hours) or
+.Cm d
+(days).
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Wait a minute and a half:
+.Dl sleep 1m 30
+.Sh SEE ALSO
+.Xr nanosleep 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+fractions, units and more than one argument are extensions, as on
+.Fx .
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v4 .

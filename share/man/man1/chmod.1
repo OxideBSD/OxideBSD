@@ -1,0 +1,139 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd September 30, 2026
+.Dt CHMOD 1
+.Os OxideBSD
+.Sh NAME
+.Nm chmod
+.Nd change file modes
+.Sh SYNOPSIS
+.Nm
+.Op Fl fhv
+.Op Fl R Op Fl H | L | P
+.Ar mode
+.Ar file ...
+.Sh DESCRIPTION
+.Nm
+sets the permission bits of each
+.Ar file
+as
+.Ar mode
+says.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl f
+Don't report files that can't be changed (the exit status still says so).
+.It Fl h
+Change a symbolic link itself, not what it points to, where the system can;
+otherwise leave it alone.
+.It Fl R
+Change the files in each directory, and in the directories in it, too.
+Symbolic links met on the way are not followed
+.Pq Fl P ,
+unless
+.Fl H
+(follow those named on the command line) or
+.Fl L
+(follow all) is given; the last of the three counts.
+.It Fl v
+Name each file changed; given twice, also show its old and new mode.
+.El
+.Ss Modes
+A mode is either octal, a number from 0 to 7777 made of these:
+.Bl -column "XXXX" "set-group-ID" "0400, 0200, 0100" "owner's read, write, execute" -offset indent -compact
+.It 4000 Ta set-user-ID Ta 0400, 0200, 0100 Ta owner's read, write, execute
+.It 2000 Ta set-group-ID Ta 0040, 0020, 0010 Ta group's
+.It 1000 Ta sticky Ta 0004, 0002, 0001 Ta others'
+.El
+.Pp
+or symbolic: clauses separated by commas, each who it is for, then one or more
+operations.
+.Bl -tag -width Ds
+.It Who
+.Cm u
+the owner,
+.Cm g
+the group,
+.Cm o
+others,
+.Cm a
+all three.
+With none, all three are meant, but bits set in the
+.Xr umask 2
+are neither added nor removed.
+.It Operation
+.Cm +
+adds the permissions that follow,
+.Cm -
+removes them,
+.Cm =
+clears the classes' bits (with no
+.Cm who ,
+all bits) and then adds them.
+.It Permissions
+.Cm r ,
+.Cm w ,
+.Cm x ;
+.Cm X ,
+execute only for a directory or a file that someone may already execute;
+.Cm s ,
+set-user-ID with
+.Cm u
+and set-group-ID with
+.Cm g ;
+.Cm t ,
+the sticky bit, with
+.Cm o ,
+.Cm a
+or no
+.Cm who .
+Or one of
+.Cm u ,
+.Cm g
+or
+.Cm o
+alone: a copy of that class's current permissions.
+.El
+.Pp
+Operations apply left to right, each to the result of the one before.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Bl -tag -width "u=rwx,go=rx" -compact
+.It Li 644
+owner reads and writes, everyone else reads
+.It Li u+x
+add the owner's execute
+.It Li go-w
+nobody but the owner may write
+.It Li g=u
+the group gets what the owner has
+.It Li a+rX
+everyone may read, and search directories
+.It Li u=rwx,go=rx
+the same as 755
+.El
+.Pp
+Make a tree private to its owner:
+.Dl chmod -R go-rwx project
+.Sh SEE ALSO
+.Xr ls 1 ,
+.Xr chmod 2 ,
+.Xr umask 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl f ,
+.Fl h ,
+.Fl v ,
+.Fl H ,
+.Fl L
+and
+.Fl P
+are extensions, as on the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .

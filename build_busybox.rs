@@ -86,7 +86,6 @@
     // again.
     const BUSYBOX_APPLETS: &[(&str, &str, u64)] = &[
         ("YES", "yes", 0x8600000),
-        ("RMDIR", "rmdir", 0x8900000),
         ("HEAD", "head", 0x8e00000),
         ("TAIL", "tail", 0x8f00000),
         ("WC", "wc", 0x9000000),
@@ -97,7 +96,6 @@
         ("CUT", "cut", 0x9500000),
         ("SORT", "sort", 0x9600000),
         ("UNIQ", "uniq", 0x9700000),
-        ("KILL", "kill", 0x9800000),
     ];
 
     /// The second pass itself -- see `OxideBSD-doc/BUSYBOX_APPLETS.md` for what every one of these
@@ -117,7 +115,6 @@
         ("CAL", "cal", 0x9f80000),
         ("CHAT", "chat", 0x9fc0000),
         ("CHGRP", "chgrp", 0xa040000),
-        ("CHMOD", "chmod", 0xa080000),
         ("CHOWN", "chown", 0xa0c0000),
         ("CHROOT", "chroot", 0xa140000),
         ("CKSUM", "cksum", 0xa200000),
@@ -153,7 +150,6 @@
         ("HEXDUMP", "hexdump", 0xb240000),
         ("HOSTID", "hostid", 0xb2c0000),
         ("INSTALL", "install", 0xb480000),
-        ("LINK", "link", 0xb680000),
         ("LOGNAME", "logname", 0xb840000),
         ("MD5SUM", "md5sum", 0xbc40000),
         ("MINIPS", "minips", 0xbd00000),
@@ -166,7 +162,6 @@
         ("NICE", "nice", 0xc0c0000),
         ("NL", "nl", 0xc100000),
         ("NOHUP", "nohup", 0xc180000),
-        ("NPROC", "nproc", 0xc1c0000),
         ("NSLOOKUP", "nslookup", 0xc240000),
         ("NTPD", "ntpd", 0xc280000),
         ("OD", "od", 0xc300000),
@@ -189,7 +184,6 @@
         ("SHA256SUM", "sha256sum", 0xd040000),
         ("SHA3SUM", "sha3sum", 0xd080000),
         ("SHA512SUM", "sha512sum", 0xd0c0000),
-        ("SLEEP", "sleep", 0xd180000),
         ("SPLIT", "split", 0xd240000),
         ("SSL_CLIENT", "ssl_client", 0xd280000),
         ("STAT", "stat", 0xd300000),
@@ -197,12 +191,10 @@
         ("STTY", "stty", 0xd380000),
         ("SU", "su", 0xd3c0000),
         ("SUM", "sum", 0xd440000),
-        ("SYNC", "sync", 0xd580000),
         ("TAC", "tac", 0xd600000),
         ("TAR", "tar", 0xd640000),
         ("TEE", "tee", 0xd700000),
         ("TELNET", "telnet", 0xd740000),
-        ("TEST", "test", 0xd7c0000),
         ("TIME", "time", 0xd800000),
         ("TIMEOUT", "timeout", 0xd840000),
         ("TOP", "top", 0xd880000),
@@ -214,7 +206,6 @@
         ("UMOUNT", "umount", 0xdb40000),
         ("UNCOMPRESS", "uncompress", 0xdb80000),
         ("UNEXPAND", "unexpand", 0xdbc0000),
-        ("UNLINK", "unlink", 0xdc80000),
         ("UNXZ", "unxz", 0xdd40000),
         ("UNZIP", "unzip", 0xdd80000),
         ("UPTIME", "uptime", 0xddc0000),
