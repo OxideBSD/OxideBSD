@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd September 30, 2026
+.Dd October 1, 2026
 .Dt NMOUNT 2
 .Os OxideBSD
 .Sh NAME
@@ -7,6 +7,7 @@
 .Nd mount a file system
 .Sh SYNOPSIS
 .In sys/uio.h
+.In sys/mount.h
 .Ft int
 .Fn nmount "struct iovec *iov" "unsigned int niov" "int flags"
 .Sh DESCRIPTION
@@ -82,11 +83,3 @@ system call appeared in
 .Fx 5.0 .
 OxideBSD's takes the same form, with its own system call number and
 options.
-.Sh BUGS
-The C library has no
-.Fn nmount
-function yet; programs call
-.Ql syscall(584, iov, niov, flags) ,
-as
-.Xr mount 8
-does.

@@ -155,7 +155,6 @@
         ("MINIPS", "minips", 0xbd00000),
         ("MKNOD", "mknod", 0xbdc0000),
         ("MKTEMP", "mktemp", 0xbe80000),
-        ("MOUNT", "mount", 0xbf00000),
         ("NC", "nc", 0xc000000),
         ("NETCAT", "netcat", 0xc040000),
         ("NETSTAT", "netstat", 0xc080000),
@@ -203,7 +202,6 @@
         ("TRUNCATE", "truncate", 0xd980000),
         ("TSORT", "tsort", 0xda00000),
         ("TTY", "tty", 0xda40000),
-        ("UMOUNT", "umount", 0xdb40000),
         ("UNCOMPRESS", "uncompress", 0xdb80000),
         ("UNEXPAND", "unexpand", 0xdbc0000),
         ("UNXZ", "unxz", 0xdd40000),
@@ -312,7 +310,7 @@ fn build_busybox_applet(
     // `out_dir`'s existing `busybox` binary, but re-running `make allnoconfig` + `make` against
     // that *same, already-populated* `O=` directory doesn't actually guarantee every object file
     // gets recompiled -- BusyBox's own incremental build tracks its own source files, but not
-    // musl's *installed* sysroot headers (`target/musl-sysroot/include/...`, copied out of
+    // musl's *installed* sysroot headers (`toolchain/x86_64-unknown-oxidebsd/include/...`, copied out of
     // `external/mit/musl` by `build_musl_sysroot`'s own `make install`) as a dependency at all.
     // Confirmed live: after a real musl syscall-number fix, `libbb/change_identity.o` inside an
     // already-built applet's own `O=` directory still had a five-day-old mtime predating the fix

@@ -1,5 +1,5 @@
-//! Real-`SYSCALL` smoke test for the mount table added this pass: `SYS_MOUNT_BIND`/
-//! `SYS_MOUNT_TMPFS`/`SYS_UMOUNT2` (`174`-`176`, `sys/modules/oxfs`) plus the `resolve_path_impl`
+//! Real-`SYSCALL` smoke test for the mount table: `SYS_NMOUNT` (584, `fstype` `tmpfs` and
+//! `nullfs`) and `SYS_UMOUNT2` (176, `sys/modules/oxfs`) plus the `resolve_path_impl`
 //! redirect, the tmpfs pool, `/proc/mounts`, and the `st_dev` split those rest on -- see
 //! `sys/modules/oxfs/src/lib.rs`'s own "Mount table" section for the full design.
 //!
@@ -16,7 +16,8 @@
 //! 3. Create+write+read a file inside the tmpfs mount, confirm its `stat` reports `st_dev == 2`
 //!    (the tmpfs-pool marker), confirm `getdents` lists it.
 //! 4. Confirm a known BusyBox applet (`ls`) is visible through the bind mount.
-//! 5. `umount` both. A second `umount` of the same path now fails `EINVAL` (no longer a
+//! 5. The retired mount syscalls (174, 175) answer `ENOSYS`.
+//! 6. `umount` both. A second `umount` of the same path now fails `EINVAL` (no longer a
 //!    mountpoint). `stat`ing the tmpfs mountpoint again reports `st_dev == 1` (the real
 //!    filesystem, unmodified underneath), `getdents` no longer shows the tmpfs file, and the
 //!    applet is no longer reachable through the (now-empty, real) former bind-mount directory.
@@ -34,8 +35,11 @@ const SYS_READ: u64 = 3;
 const SYS_STAT: u64 = 127;
 const SYS_GETDENTS: u64 = 129;
 const SYS_MKDIR: u64 = 136;
-const SYS_MOUNT_BIND: u64 = 174;
-const SYS_MOUNT_TMPFS: u64 = 175;
+const SYS_NMOUNT: u64 = 584;
+/// What `nmount` replaced: a bind mount and a tmpfs mount. Now unregistered.
+const RETIRED_MOUNT_SYSCALLS: [u64; 2] = [174, 175];
+/// musl's `ENOSYS`.
+const ENOSYS: u64 = 38;
 const SYS_UMOUNT2: u64 = 176;
 /// Not a real syscall number anything else in this codebase registers -- `tests/
 /// mount_syscall_smoke.rs` registers this one directly against a test-only handler, same
@@ -53,6 +57,24 @@ const O_WRONLY: u64 = 0o1;
 const EINVAL: u64 = 22;
 /// Real value, matches `sys/modules/oxfs/src/lib.rs`'s own `ENOENT`.
 const ENOENT: u64 = 2;
+
+/// One `struct iovec`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+/// `nmount(2)` with name/value pairs (each NUL-terminated).
+fn nmount(pairs: &[(&[u8], &[u8])]) -> Result<u64, u64> {
+    let mut iov = [IoVec { base: 0, len: 0 }; 8];
+    for (i, (name, value)) in pairs.iter().enumerate() {
+        iov[2 * i] = IoVec { base: name.as_ptr() as u64, len: name.len() as u64 };
+        iov[2 * i + 1] = IoVec { base: value.as_ptr() as u64, len: value.len() as u64 };
+    }
+    unsafe { syscall(SYS_NMOUNT, iov.as_ptr() as u64, 2 * pairs.len() as u64, 0) }
+}
 
 #[inline(always)]
 unsafe fn syscall(number: u64, arg0: u64, arg1: u64, arg2: u64) -> Result<u64, u64> {
@@ -171,7 +193,6 @@ pub extern "C" fn _start() -> ! {
 
     let mnttest = b"/mnttest";
     let bindtest = b"/bindtest";
-    let bin = b"/bin";
 
     if unsafe { syscall(SYS_MKDIR, mnttest.as_ptr() as u64, mnttest.len() as u64, 0o755) }.is_err()
         || unsafe { syscall(SYS_MKDIR, bindtest.as_ptr() as u64, bindtest.len() as u64, 0o755) }
@@ -181,34 +202,23 @@ pub extern "C" fn _start() -> ! {
         test_exit(false);
     }
 
-    if unsafe {
-        syscall(
-            SYS_MOUNT_TMPFS,
-            mnttest.as_ptr() as u64,
-            mnttest.len() as u64,
-            0,
-        )
-    }
-    .is_err()
-    {
+    if nmount(&[(b"fstype\0", b"tmpfs\0"), (b"fspath\0", b"/mnttest\0")]).is_err() {
         write_bytes(b"mount-syscall-smoke: mount -t tmpfs /mnttest failed\n");
         test_exit(false);
     }
-    if unsafe {
-        syscall4(
-            SYS_MOUNT_BIND,
-            bin.as_ptr() as u64,
-            bin.len() as u64,
-            bindtest.as_ptr() as u64,
-            bindtest.len() as u64,
-        )
-    }
-    .is_err()
+    if nmount(&[(b"fstype\0", b"nullfs\0"), (b"from\0", b"/bin\0"), (b"fspath\0", b"/bindtest\0")])
+        .is_err()
     {
         write_bytes(b"mount-syscall-smoke: mount --bind /bin /bindtest failed\n");
         test_exit(false);
     }
     write_bytes(b"mount-syscall-smoke: both mounts established\n");
+    for number in RETIRED_MOUNT_SYSCALLS {
+        if unsafe { syscall4(number, mnttest.as_ptr() as u64, mnttest.len() as u64, 0, 0) } != Err(ENOSYS) {
+            write_bytes(b"mount-syscall-smoke: a retired mount syscall (174/175) still answers\n");
+            test_exit(false);
+        }
+    }
 
     // /proc/mounts should report both while they're active.
     let mounts_path = b"/proc/mounts";

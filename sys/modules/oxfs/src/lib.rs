@@ -279,30 +279,14 @@ const SYS_FCHDIR: u64 = 81;
 /// does (a real existence check, no real timestamp storage) and why that's enough to unblock
 /// BusyBox's `touch.c`.
 const SYS_UTIMENSAT: u64 = 167;
-/// The mount table (see this module's own "Mount table" section above `MAX_MOUNTS`). Real
-/// `mount(2)` takes 5 conceptual args (`special, dir, fstype, flags, data`), which doesn't fit
-/// this ABI's 4 registers -- rather than force one idealized shape, this splits into the two
-/// concrete shapes BusyBox's own `mount.c` actually needs (`--bind`/`-t tmpfs`), matching the
-/// existing precedent of patching the musl call site instead (`open`/`execve`/`rename`/`chown`
-/// already do this; see `external/mit/musl/src/linux/mount.c`'s own patch, which dispatches to
-/// whichever of these two applies based on its own real `fstype` argument). **Not** the next three
-/// numbers after `SYS_UTIMENSAT=167` (168/169/170), despite every recent addition otherwise just
-/// continuing that sequence: those three real-Linux slots are `swapoff`/`reboot`/`sethostname`,
-/// all three already-seeded, already-built BusyBox applets in this port's roster that currently
-/// `ENOSYS` cleanly -- claiming those numbers would have silently misrouted a real call from any
-/// of them into the mount table instead. Landed on 174-176 instead (real Linux
-/// `create_module`/`init_module`/`delete_module` -- long-obsolete even on real Linux, and `insmod`/
-/// `rmmod`/`modprobe` never became build candidates in this port at all, see
-/// `OxideBSD-doc/BUSYBOX_APPLETS.md`'s own note on `lsmod`), matching the musl-side patch's own explanation
-/// (`external/mit/musl/arch/x86_64/bits/syscall.h.in`).
-const SYS_MOUNT_BIND: u64 = 174;
-const SYS_MOUNT_TMPFS: u64 = 175;
 /// Real `umount2(2)`'s own wire format fits this ABI's 4 registers whole (just the length-prefixed
 /// path convention added, same as every other path-taking syscall here) -- no shape change needed,
-/// unlike `mount` above.
+/// unlike `mount(2)`, whose five arguments don't fit (`SYS_NMOUNT` below). On Linux's
+/// `delete_module` number (musl's `umount2` calls it by that name).
 const SYS_UMOUNT2: u64 = 176;
 /// `nmount(2)`: one call for every file-system type, by name/value options (FreeBSD's design;
-/// OxideBSD's number). Supersedes `SYS_MOUNT_BIND`/`SYS_MOUNT_TMPFS`.
+/// OxideBSD's number). musl's `mount(3)` is built on it. (It replaced two syscalls, a bind mount
+/// at 174 and a tmpfs mount at 175, which are gone.)
 const SYS_NMOUNT: u64 = 584;
 
 /// `SYS_FSYNC=471` through `SYS_FSTATFS=477` (continuing with `SYS_PRLIMIT64=478` through
@@ -1600,7 +1584,7 @@ fn alloc_tmpfs_indirect_block() -> Option<u32> {
 }
 
 /// `alloc_inode`'s tmpfs-pool counterpart -- see `alloc_tmpfs_block`'s own doc comment. Called
-/// directly by the tmpfs-mount-creation path (`oxfs_mount_tmpfs`, which has no parent directory to
+/// directly by the tmpfs-mount-creation path (`mount_tmpfs`, which has no parent directory to
 /// check -- it's creating the mount's own root) and by `alloc_inode_in` below for everything else.
 fn alloc_tmpfs_inode() -> Option<u32> {
     alloc_inode_from(true)
@@ -6605,29 +6589,9 @@ fn free_mount_slot() -> Option<usize> {
     mounts().iter().position(|m| !m.used)
 }
 
-/// Registered for `SYS_MOUNT_BIND`. `(source_ptr, source_len, target_ptr, target_len)` -- see
-/// `SYS_MOUNT_BIND`'s own doc comment for why `mount(2)` splits into two syscalls here. `target`
-/// must already exist and be a real directory (the thing being shadowed); `source` is resolved
-/// through any mount already active on it (real behavior: binding from inside another mount binds
-/// the *effective* view, not the raw underlying inode) and must also be a directory -- this design
-/// only supports directory bind mounts, matching what every applet in this port's roster actually
-/// does with `--bind`.
-extern "C" fn oxfs_mount_bind(
-    source_ptr: u64,
-    source_len: u64,
-    target_ptr: u64,
-    target_len: u64,
-) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let source =
-        unsafe { core::slice::from_raw_parts(source_ptr as *const u8, source_len as usize) };
-    let target =
-        unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
-    mount_nullfs(source, target)
-}
-
-/// A nullfs (bind) mount of directory `source` on directory `target`: `oxfs_mount_bind`, and
-/// `oxfs_nmount` with `fstype=nullfs`.
+/// A nullfs (bind) mount of directory `source` on directory `target`: `oxfs_nmount` with
+/// `fstype=nullfs`. Both must be directories; `source` is resolved through any mount already on
+/// it (binding from inside another mount binds the effective view, not the raw inode).
 fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
     let source_cwd = match real_cwd_for_mutation(source) {
         Ok(v) => v,
@@ -6674,21 +6638,9 @@ fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
     0
 }
 
-/// Registered for `SYS_MOUNT_TMPFS`. `(target_ptr, target_len, _, _)` -- `target` must already
-/// exist and be a real directory, same requirement as the bind-mount case above. Allocates a fresh
-/// directory from the tmpfs pool (`alloc_tmpfs_inode`, see `TMPFS_NUM_BLOCKS`'s own doc comment)
-/// and gives it real `.`/`..` records the same way `oxfs_mkdir` does -- `..` points at the
-/// mountpoint's own real parent, so `cd ..` from inside this tmpfs mount escapes back to the real
-/// tree with no special-casing anywhere else in this file.
-extern "C" fn oxfs_mount_tmpfs(target_ptr: u64, target_len: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let target =
-        unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
-    mount_tmpfs(target)
-}
-
-/// A new, empty tmpfs on directory `target`: `oxfs_mount_tmpfs`, and `oxfs_nmount` with
-/// `fstype=tmpfs`.
+/// A new, empty tmpfs on directory `target`: `oxfs_nmount` with `fstype=tmpfs`. Its root comes
+/// from the tmpfs pool (`alloc_tmpfs_inode`) with real `.`/`..` records, `..` the mountpoint's own
+/// parent, so `cd ..` from inside it escapes back to the real tree with no special-casing.
 fn mount_tmpfs(target: &[u8]) -> i64 {
     let target_cwd = match real_cwd_for_mutation(target) {
         Ok(v) => v,
@@ -9996,8 +9948,6 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_FACCESSAT, oxfs_faccessat);
         oxidebsd_register_syscall(SYS_UTIMENSAT_AT, oxfs_utimensat_at);
         oxidebsd_register_syscall(SYS_RENAMEAT2, oxfs_renameat2);
-        oxidebsd_register_syscall(SYS_MOUNT_BIND, oxfs_mount_bind);
-        oxidebsd_register_syscall(SYS_MOUNT_TMPFS, oxfs_mount_tmpfs);
         oxidebsd_register_syscall(SYS_UMOUNT2, oxfs_umount2);
         oxidebsd_register_syscall(SYS_NMOUNT, oxfs_nmount);
         oxidebsd_register_syscall(SYS_FSYNC, oxfs_fsync);
