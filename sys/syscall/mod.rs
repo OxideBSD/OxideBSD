@@ -62,6 +62,7 @@
 //! (rather than delegating straight to `process::do_*`).
 
 pub mod ffi;
+pub mod stats;
 
 pub use ffi::*;
 
@@ -559,7 +560,9 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
 
     CURRENT_FRAME.store(frame as *mut SyscallFrame, Ordering::Relaxed);
     let number = frame.rax;
+    let started = stats::start();
     let result = dispatch(frame.rax, frame.rdi, frame.rsi, frame.rdx, frame.r10);
+    stats::record(number, started);
     match result {
         Ok(value) => {
             frame.rax = value;

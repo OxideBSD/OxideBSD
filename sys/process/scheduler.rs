@@ -303,6 +303,10 @@ pub fn schedule() {
             // cpu::fpu's own module doc comment for why this capture is required now that
             // preemption exists) and fpu_state is a valid, 16-byte-aligned FxSaveArea field.
             unsafe { crate::cpu::fpu::save(&mut prev.fpu_state as *mut _) };
+            // Off-CPU accounting for `syscall::stats`: what the outgoing process had, and when
+            // it stopped running.
+            prev.off_cpu_cycles = crate::syscall::stats::OFF_CPU.load(Ordering::Relaxed);
+            prev.switched_out_at = crate::cpu::tsc::now();
             &mut prev.rsp as *mut u64
         } else {
             &raw mut BOOT_SCRATCH_RSP
@@ -413,5 +417,10 @@ fn activate_and_prepare(pid: Pid) -> u64 {
     // fpu::save() (a process that's run before) or cpu::fpu::clean_state()'s own output (a
     // never-run process, see process::lifecycle::spawn/do_fork_from_current).
     unsafe { crate::cpu::fpu::restore(&next.fpu_state as *const _) };
+    if next.switched_out_at != 0 {
+        next.off_cpu_cycles += crate::cpu::tsc::now().saturating_sub(next.switched_out_at);
+        next.switched_out_at = 0;
+    }
+    crate::syscall::stats::OFF_CPU.store(next.off_cpu_cycles, Ordering::Relaxed);
     next.rsp
 }

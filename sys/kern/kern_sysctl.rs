@@ -258,7 +258,7 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     let vm = add_node(t, &[], Some(CTL_VM), "vm", "Virtual memory");
     add_node(t, &[], Some(CTL_VFS), "vfs", "File system");
     add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
-    add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
+    let debug = add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
     let hw = add_node(t, &[], Some(CTL_HW), "hw", "hardware");
     add_node(t, &[], Some(CTL_MACHDEP), "machdep", "machine dependent");
     add_node(t, &[], Some(CTL_USER), "user", "user-level");
@@ -563,6 +563,41 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     for leaf in vm_leaves {
         add_leaf(t, &vm, leaf);
     }
+    // System call costs (`syscall::stats`): debug.syscall.stats, zeroed by debug.syscall.reset=1.
+    let syscall = add_node(t, &debug, None, "syscall", "System call costs");
+    add_leaf(
+        t,
+        &syscall,
+        Leaf {
+            number: None,
+            name: "stats",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RD,
+            descr: "Calls, wall and CPU time per system call since boot or the last reset",
+            get: || string(&crate::syscall::stats::report()),
+            set: None,
+        },
+    );
+    add_leaf(
+        t,
+        &syscall,
+        Leaf {
+            number: None,
+            name: "reset",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Write 1 to zero debug.syscall.stats",
+            get: || int(0),
+            set: Some(|new| {
+                if new.len() >= 4 && i32::from_ne_bytes([new[0], new[1], new[2], new[3]]) != 0 {
+                    crate::syscall::stats::reset();
+                }
+                Ok(())
+            }),
+        },
+    );
     let stats = add_node(t, &vm, None, "stats", "VM meter stats");
     let stats_vm = add_node(t, &stats, None, "vm", "VM meter vm stats");
     let counts: [(&'static str, &'static str, Getter); 4] = [

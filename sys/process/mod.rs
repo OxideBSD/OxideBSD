@@ -1138,6 +1138,11 @@ pub struct Process {
     /// `fork`/`execve` (a fresh quantum, same as spawn) — this field describes *scheduling*
     /// standing, not process identity.
     pub quantum_ticks_left: u64,
+    /// TSC cycles this process has spent switched out, waiting or behind others, while it existed;
+    /// the scheduler keeps it, `syscall::stats` subtracts it to get a call's own CPU time.
+    pub off_cpu_cycles: u64,
+    /// The TSC when it was last switched out; 0 while it runs.
+    pub switched_out_at: u64,
     /// Snapshotted budget of signal instances still owed to synchronous `do_sigreturn` chaining
     /// (see "Real signal-stack chaining" -- the mechanism this closes a real gap in) for the
     /// *current* delivery cascade; `None` when no cascade is in progress. Taken fresh every time

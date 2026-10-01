@@ -247,6 +247,8 @@ fn spawn_finish(
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
+        off_cpu_cycles: 0,
+        switched_out_at: 0,
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
@@ -628,6 +630,8 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
+        off_cpu_cycles: 0,
+        switched_out_at: 0,
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
@@ -883,6 +887,8 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
+        off_cpu_cycles: 0,
+        switched_out_at: 0,
         // No cascade in progress for a process that hasn't run yet -- see `Process::
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
@@ -1032,47 +1038,46 @@ fn read_file_via_openat(at_ptr: u64, nofollow: bool) -> Result<Vec<u8>, u64> {
     read_fd_to_end_and_close(fd)
 }
 
-/// A whole file through an fd the *caller* already holds (`fexecve`'s `AT_EMPTY_PATH` case) --
-/// `pread` from offset 0, so the caller's own file offset is untouched if the exec then fails.
-fn pread_fd_to_end(fd: u64) -> Result<Vec<u8>, u64> {
+/// How much one `read` asks for while loading an executable. Large, because the per-call cost
+/// is what matters: at 512 bytes, exec of a 100 MB program (clang) took ~200,000 calls, and a
+/// `configure` running the compiler dozens of times took minutes. The buffer is the result
+/// itself, on the heap, never the kernel stack.
+const EXEC_READ_CHUNK: usize = 1 << 20;
+
+/// Reads `fd` to its end into one buffer, with `read` (`pread == false`, from the current offset)
+/// or `pread` from offset 0, which leaves the caller's own offset alone.
+fn read_fd_to_end(fd: u64, pread: bool) -> Result<Vec<u8>, u64> {
     let mut bytes: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 512];
     loop {
-        let n = syscall::dispatch(
-            SYS_PREAD,
-            fd,
-            chunk.as_mut_ptr() as u64,
-            chunk.len() as u64,
-            bytes.len() as u64,
-        )?;
+        // Straight into the spare capacity: no zero-filling first, which in the unoptimized
+        // kernel build is a per-byte loop (measured: it made exec slower than the 512-byte reads).
+        let len = bytes.len();
+        bytes.reserve(EXEC_READ_CHUNK);
+        let buf = bytes.spare_capacity_mut().as_mut_ptr() as u64;
+        let result = if pread {
+            syscall::dispatch(SYS_PREAD, fd, buf, EXEC_READ_CHUNK as u64, len as u64)
+        } else {
+            syscall::dispatch(SYS_READ, fd, buf, EXEC_READ_CHUNK as u64, 0)
+        };
+        let n = result? as usize;
         if n == 0 {
             return Ok(bytes);
         }
-        bytes.extend_from_slice(&chunk[..n as usize]);
+        // SAFETY: the read wrote `n` (at most EXEC_READ_CHUNK, all reserved) bytes there.
+        unsafe { bytes.set_len(len + n.min(EXEC_READ_CHUNK)) };
     }
 }
 
+/// A whole file through an fd the *caller* already holds (`fexecve`'s `AT_EMPTY_PATH` case) --
+/// `pread` from offset 0, so the caller's own file offset is untouched if the exec then fails.
+fn pread_fd_to_end(fd: u64) -> Result<Vec<u8>, u64> {
+    read_fd_to_end(fd, true)
+}
+
 fn read_fd_to_end_and_close(fd: u64) -> Result<Vec<u8>, u64> {
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 512];
-    loop {
-        match syscall::dispatch(
-            SYS_READ,
-            fd,
-            chunk.as_mut_ptr() as u64,
-            chunk.len() as u64,
-            0,
-        ) {
-            Ok(0) => break,
-            Ok(n) => bytes.extend_from_slice(&chunk[..n as usize]),
-            Err(errno) => {
-                let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
-                return Err(errno);
-            }
-        }
-    }
+    let result = read_fd_to_end(fd, false);
     let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
-    Ok(bytes)
+    result
 }
 
 /// Leading/trailing ASCII-whitespace trim -- `core::slice` has no built-in for `&[u8]` the way
@@ -1224,6 +1229,9 @@ fn exec_image(
     envp_ptr: u64,
 ) -> Result<u64, u64> {
     let mut arg_budget = MAX_EXEC_ARG_BYTES;
+    // Phase timing for `debug.syscall.stats` (`syscall::stats::exec_phases`).
+    let mut marks = [0u64; 9];
+    marks[0] = crate::cpu::tsc::now();
     let raw_argv = read_ptr_len_array(argv_ptr, &mut arg_budget)?;
     let envp = read_ptr_len_array(envp_ptr, &mut arg_budget)?;
 
@@ -1273,6 +1281,7 @@ fn exec_image(
         effective_path = interpreter;
     };
 
+    marks[1] = crate::cpu::tsc::now();
     let elf = Elf::parse(&elf_bytes).map_err(|_| ENOEXEC)?;
 
     let phys_offset = memory::phys_mem_offset();
@@ -1289,6 +1298,7 @@ fn exec_image(
 
     // Checked once, before the main binary's own load, so both the bias decision below and the
     // interpreter-loading branch reuse the same parse instead of scanning PT_INTERP twice.
+    marks[2] = crate::cpu::tsc::now();
     let interp_path = elf.interpreter().map_err(|_| ENOEXEC)?;
 
     // Any ET_DYN main binary gets a randomized bias (`process::aslr`): a static PIE, which the
@@ -1316,6 +1326,7 @@ fn exec_image(
     // a link-time address the interpreter file assumes -- see that function's own doc comment for
     // the real bug (a wild pointer inside the interpreter's own relocation self-processing) a
     // fixed-link-time-base interpreter caused, and why this bias has to be applied here instead.
+    marks[3] = crate::cpu::tsc::now();
     let mut jump_entry = entry;
     let mut interp_base: Option<u64> = None;
     if let Some(interp_path) = interp_path {
@@ -1330,6 +1341,7 @@ fn exec_image(
         interp_base = Some(INTERP_LOAD_BASE);
     }
 
+    marks[4] = crate::cpu::tsc::now();
     let stack_top = VirtAddr::new(USER_STACK_TOP);
     let arg_bytes: u64 = raw_argv
         .iter()
@@ -1384,6 +1396,7 @@ fn exec_image(
     // AddressSpace::activate's own contract requires. Activating it mid-syscall, still running on
     // the caller's own kernel stack, is safe: the kernel half is identical no matter which address
     // space is live.
+    marks[5] = crate::cpu::tsc::now();
     unsafe { new_address_space.activate() };
     let old_address_space = {
         let mut table = PROCESS_TABLE.lock();
@@ -1451,6 +1464,7 @@ fn exec_image(
     // one this function established above, still valid (it never changes at runtime).
     // `.expect()`: a live, currently-executing process (which execve always is) always had
     // Some -- only a Zombie ever has None.
+    marks[6] = crate::cpu::tsc::now();
     with_frame_allocator(|fa| unsafe {
         old_address_space
             .expect("execve: old address space already gone")
@@ -1462,6 +1476,7 @@ fn exec_image(
     // detach_all_for_exit call (see that function's own doc comment) except the process survives.
     // Must run after the PROCESS_TABLE-locked block above ends, not inside it -- this function
     // takes that same lock itself, briefly, to drain the attachment list.
+    marks[7] = crate::cpu::tsc::now();
     crate::fs::sysv_shm::detach_all_for_exit(caller_pid);
     // Same story for any real fd-backed mmap the old image had live -- see `mm::
     // cleanup_mmap_file_regions_for_exit`'s own doc comment.
@@ -1473,6 +1488,8 @@ fn exec_image(
     // why the fd/CLOEXEC tables are tgid-scoped -- though the two are identical until a real
     // `clone(2)`-created thread can execve.
     crate::fs::fd::close_cloexec(scheduler::current_tgid());
+    marks[8] = crate::cpu::tsc::now();
+    syscall::stats::exec_phases(&marks);
 
     let frame = syscall::current_frame();
     // SAFETY: frame is this exact syscall's own live frame -- do_execve is only ever reached via

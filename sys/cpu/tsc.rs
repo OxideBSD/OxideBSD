@@ -66,3 +66,9 @@ pub fn ms_to_cycles(ms: u64) -> u64 {
 pub fn cycles_to_ms(cycles: u64) -> u64 {
     cycles.div_ceil(CYCLES_PER_MS.load(Ordering::Relaxed).max(1))
 }
+
+/// A cycle count in microseconds, rounded down (0 before calibration).
+pub fn cycles_to_us(cycles: u64) -> u64 {
+    let per_ms = CYCLES_PER_MS.load(Ordering::Relaxed);
+    if per_ms == 0 { 0 } else { ((cycles as u128 * 1000) / per_ms as u128) as u64 }
+}

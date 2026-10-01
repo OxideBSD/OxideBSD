@@ -349,6 +349,7 @@ fn main() {
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.
     let musl_sysroot = build_musl_sysroot();
+    write_syscall_names();
 
     // The host cross compiler and the target's C++ runtime and libunwind (see the Clang/LLVM
     // comment further down), early: /lib/libgcc_s.so.1, which every dynamically linked Rust
@@ -5493,4 +5494,32 @@ fn host_triple(manifest_dir: &str) -> String {
         .find_map(|line| line.strip_prefix("host: "))
         .expect("rustc -vV output missing a 'host:' line")
         .to_string()
+}
+
+/// `$OUT_DIR/syscall_names.rs`: `(number, name)` for every `__NR_` in musl's
+/// `arch/x86_64/bits/syscall.h.in` (OxideBSD's numbers), the first name where several share a
+/// number -- for `debug.syscall.stats` (`sys/syscall/stats.rs`).
+fn write_syscall_names() {
+    let header = Path::new(env!("CARGO_MANIFEST_DIR")).join("external/mit/musl/arch/x86_64/bits/syscall.h.in");
+    println!("cargo:rerun-if-changed={}", header.display());
+    let text = std::fs::read_to_string(&header).unwrap_or_default();
+    let mut seen = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("#define") {
+            continue;
+        }
+        let (Some(name), Some(num)) = (words.next(), words.next()) else { continue };
+        let (Some(name), Ok(num)) = (name.strip_prefix("__NR_"), num.parse::<u16>()) else { continue };
+        seen.entry(num).or_insert_with(|| name.to_string());
+    }
+    let mut out = String::from("&[\n");
+    for (num, name) in &seen {
+        out.push_str(&format!("    ({num}, \"{name}\"),\n"));
+    }
+    out.push_str("]\n");
+    let path = Path::new(&std::env::var("OUT_DIR").unwrap()).join("syscall_names.rs");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(out.as_str()) {
+        std::fs::write(&path, out).expect("writing syscall_names.rs");
+    }
 }
