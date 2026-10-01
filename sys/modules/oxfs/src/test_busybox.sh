@@ -1,11 +1,11 @@
-#!/bin/hush
+#!/bin/ash
 # BusyBox applet self-test -- runs INSIDE OxideBSD, not on the host.
 #
-# Usage, at the hush prompt:
-#   hush /test_busybox.sh
+# Usage, at a shell prompt:
+#   ash /test_busybox.sh
 #
-# Under hush explicitly, not /bin/sh (OxideBSD's own shell now): the control-flow section is
-# hush's regression check, brace expansion and $RANDOM included.
+# Under BusyBox ash explicitly (hush, which it used to run under, left the roster on
+# 2026-09-30): the control-flow section is ash's regression check.
 #
 # A real POSIX-shell test harness now, not a flat sequence of hand-unrolled PASS/FAIL lines.
 # `sh`'s own .config (target/busybox-sh/.config after a real build.rs run) used to have only
@@ -179,8 +179,6 @@ check 'command substitution `...`' "`echo nested`" "nested"
 # arithmetic expansion on its own
 check 'arithmetic $((...))' "$((6 * 7))" "42"
 
-# brace expansion (a bash-compat extension, CONFIG_HUSH_BRACE_EXPANSION)
-check "brace expansion" "$(echo {a,b,c})" "a b c"
 
 # $RANDOM -- value is nondeterministic, so only assert it's a real nonempty decimal number
 r1=$RANDOM
@@ -380,16 +378,14 @@ check "sha256sum" "$1" "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61
 set -- $(sha512sum hash_in.txt)
 check "sha512sum" "$1" "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
 
-# --- gzip/gunzip, bzip2/bunzip2, lzop -- real on-target roundtrips (each applet provides both
-#     directions, unlike unxz/unlzma/uncompress/unzip, which have no on-target compressor
+# --- gzip/gunzip, bzip2/bunzip2 -- real on-target roundtrips (each applet provides both
+#     directions, unlike unxz/uncompress/unzip, which have no on-target compressor
 #     counterpart in this roster -- see NOT EXERCISED below) ---
 printf 'compress me\n' > comp_src.txt
 gzip -c comp_src.txt > comp_src.gz
 check "gzip/gunzip roundtrip" "$(gunzip -c comp_src.gz)" "$(cat comp_src.txt)"
 bzip2 -c comp_src.txt > comp_src.bz2
 check "bzip2/bunzip2 roundtrip" "$(bunzip2 -c comp_src.bz2)" "$(cat comp_src.txt)"
-lzop -c comp_src.txt > comp_src.lzo
-check "lzop roundtrip" "$(lzop -dc comp_src.lzo)" "$(cat comp_src.txt)"
 
 # --- tar / cpio / ar -- real on-target archive roundtrips ---
 tar cf comp_src.tar comp_src.txt
@@ -460,31 +456,21 @@ check_status "chown" $?
 chgrp 0 a.txt
 check_status "chgrp" $?
 
-softlimit -m 10000000 true
-check_status "softlimit (real SYS_PRLIMIT64, stored not enforced)" $?
 nice -n 5 true
 check_status "nice" $?
 
 setsid true
 check_status "setsid runs a trivial command in a new session" $?
 
-# Short flags only -- this build's start_stop_daemon usage text shows no long-option support
-# (CONFIG_LONG_OPTS-gated, off by default here; found live, `--start`/`--exec` were both rejected).
-start-stop-daemon -S -x /bin/true
-check_status "start_stop_daemon starts a trivial program" $?
-
-echo "--- mount table (mount --bind / mount -t tmpfs / umount / mountpoint) ---"
+echo "--- mount table (mount --bind / mount -t tmpfs / umount) ---"
 
 mkdir -p /mnt_tmpfs_test
 mount -t tmpfs tmpfs /mnt_tmpfs_test
 echo hi > /mnt_tmpfs_test/f.txt
 check "tmpfs mount is real and writable" "$(cat /mnt_tmpfs_test/f.txt)" "hi"
 umount /mnt_tmpfs_test
-if mountpoint -q /mnt_tmpfs_test; then
-    check_status "umount actually unmounted the tmpfs" 1
-else
-    check_status "umount actually unmounted the tmpfs" 0
-fi
+[ ! -f /mnt_tmpfs_test/f.txt ]
+check_status "umount actually unmounted the tmpfs" $?
 
 mkdir -p /bind_src_test /bind_dst_test
 echo bound > /bind_src_test/f.txt
@@ -519,9 +505,6 @@ t2=$(date +%s)
 elapsed=$((t2 - t1))
 [ "$elapsed" -ge 1 ]
 check_status "sleep 1 really elapses at least 1s of wall clock" $?
-
-usleep 100000
-check_status "usleep runs" $?
 
 timeout 1 sleep 5
 tstatus=$?
@@ -563,43 +546,33 @@ diff d1.txt d2.txt
 echo "--- df ---"
 df
 
-echo "--- free ---"
-free
-
 echo "--- uptime ---"
 uptime
 
-echo "--- ps-family: pstree / minips ---"
-pstree
+echo "--- minips ---"
 minips
-
-echo "--- mkpasswd (crypt hash generation, doesn't touch /etc/passwd) ---"
-mkpasswd -m sha512 testpassword
 
 # NOT EXERCISED, deliberately, and why:
 #
-# - daemons that listen/block and would hang this script rather than return: crond, ntpd.
+# - daemons that listen/block and would hang this script rather than return: ntpd.
 # - needs a real remote peer or infrastructure this environment doesn't guarantee: nc, netcat,
-#   telnet, traceroute, whois, ssl_client, pscan, dnsdomainname.
+#   telnet, traceroute, whois, ssl_client.
 # - real interactive-tty flows -- already documented elsewhere in this project as manual-QEMU-only
 #   (real Ctrl+C/SIGINT, sulogin/getty tty takeover, password prompts read from /dev/tty directly
-#   rather than stdin): login, getty, sulogin, su, cttyhack.
+#   rather than stdin): su.
 # - would mutate persistent on-disk system files (/etc/passwd, /etc/group, /etc/shadow) in a way
 #   that outlives this one test run and could break real su/login testing afterward: adduser,
-#   addgroup, delgroup, passwd, chpasswd, remove-shell, envuidgid, setuidgid.
+#   addgroup, delgroup, chpasswd.
 # - dangerous to run unscoped (kills processes matching a pattern, could take out this script's own
-#   interpreter or other live processes): killall5, pkill.
-# - needs a real interactive/full-screen terminal takeover: vi, hexedit, man, watch, top, less
-#   (BusyBox's own non-tty-output fallback behavior for `less` isn't reliable enough to assert).
+#   interpreter or other live processes): pkill.
+# - needs a real interactive/full-screen terminal takeover: top.
 # - decompression tools with no on-target compressor counterpart in this roster to roundtrip
-#   against (unlike gzip/bzip2/lzop, which each provide both directions): unxz, xzcat, unlzma,
-#   uncompress, unzip.
+#   against (unlike gzip/bzip2, which each provide both directions): unxz, xzcat, uncompress,
+#   unzip.
 # - reads real hardware this kernel doesn't model (see CLAUDE.md's BusyBox gap analysis,
-#   NEEDS_HARDWARE): volname, resize, ttysize.
-# - real destructive power state changes -- would kill the whole QEMU session, no test-exit-code
-#   ever gets read: halt, poweroff (SYS_REBOOT's RB_AUTOBOOT path too, though not a listed applet).
+#   NEEDS_HARDWARE): resize.
 # - hardware/proc stats with no meaningful assertion and uncertain real backing on this kernel:
-#   lsof, fuser, renice, dmesg.
+#   fuser, renice.
 
 echo "=== summary ==="
 echo "pass: $PASS  fail: $FAIL  total: $((PASS + FAIL))"

@@ -121,7 +121,7 @@ fn password_ok(hash: &CStr) -> bool {
 
 fn shell() {
     let env = [("PATH", "/sbin:/bin:/usr/sbin:/usr/bin"), ("HOME", "/"), ("TERM", "linux"), ("PS1", "emergency# ")];
-    for sh in ["/bin/sh", "/bin/hush"] {
+    for sh in ["/bin/sh", "/bin/ash"] {
         match Command::new(sh).arg0("-sh").env_clear().envs(env).current_dir("/").status() {
             Ok(_) => return,
             Err(e) => eprintln!("emergency: {sh}: {e}"),

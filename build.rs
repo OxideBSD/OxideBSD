@@ -433,7 +433,8 @@ fn main() {
         build_static_std_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
         build_static_std_crate("sbin/shutdown", "OXFS_SHUTDOWN_ELF_PATH", &musl_sysroot);
-    // SBIN_: BusyBox's sysctl/dmesg still build (until the roster cut) under the plain names.
+    // SBIN_: the names BusyBox's sysctl and dmesg used (OXFS_SYSCTL_...) were taken until the
+    // roster cut of 2026-09-30.
     let sysctl_elf_path =
         build_static_std_crate("sbin/sysctl", "OXFS_SBIN_SYSCTL_ELF_PATH", &musl_sysroot);
     let dmesg_elf_path =
