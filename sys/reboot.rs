@@ -20,12 +20,11 @@ pub fn reboot() -> ! {
     hlt_loop();
 }
 
-/// Powers off via QEMU's own ACPI PM shutdown port (`0x604`, value `0x2000`) -- the standard
-/// "system_powerdown" trick for QEMU's default `i440fx`/PIIX4 machine (see CLAUDE.md's own "Real
-/// disk persistence" section for this same machine's other fixed-port assumptions). Real hardware
-/// wouldn't have this port at all, and an older QEMU machine type might not act on the write --
-/// either way, falling through to a plain halt is the correct fallback, not a spin-forever wait.
+/// Powers off: ACPI S5 through the ports and sleep type the firmware's tables give
+/// (`acpi::enter_s5`). If that is unavailable or doesn't take, the old QEMU-only write (`0x2000`
+/// to port `0x604`, PM1a control under SeaBIOS) is tried, and then the CPU halts.
 pub fn poweroff() -> ! {
+    crate::acpi::enter_s5();
     let mut port: Port<u16> = Port::new(0x604);
     unsafe { port.write(0x2000u16) };
     hlt_loop();

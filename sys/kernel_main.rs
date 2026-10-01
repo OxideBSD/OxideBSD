@@ -72,6 +72,10 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // either way, same precedent as `usb::init` just above.
     crate::cpu::hpet::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
+    // What powering off needs (the FADT's PM1 control ports, the DSDT's \_S5 sleep type), found
+    // once now and used by `reboot::poweroff`. Not fatal either way, like the probes above.
+    crate::acpi::init(physical_memory_offset.as_u64());
+
     const HELLO_MOD: &[u8] = include_bytes!(env!("HELLO_MOD_PATH"));
     const HELLO_PANIC_SYMBOL: &str = env!("HELLO_MOD_PANIC_SYMBOL");
     crate::module::load(

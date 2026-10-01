@@ -13,15 +13,9 @@
 //! "catch-up" technique real Linux's own `hrtimer_forward()` uses. See `process::timers`' own
 //! `deadline_ns` doc comment for that half.
 //!
-//! **Discovery**: Limine hands back a real ACPI RSDP address directly (`boot::rsdp_address`, a
-//! genuine hardware/firmware value, not guessed or hardcoded) -- no manual BIOS/EBDA scanning
-//! needed. From there this is a plain, real ACPI table walk: RSDP -> XSDT (or RSDT on an ACPI
-//! 1.0 firmware with no XSDT) -> the `"HPET"` signature table -> its Generic Address Structure's
-//! real MMIO base. Every pointer *inside* those tables is a genuine ACPI physical address (unlike
-//! the RSDP pointer itself -- see `boot::rsdp_address`'s own doc comment), dereferenced via
-//! `boot::hhdm_offset()` like every other raw physical access in this codebase. Real per-table
-//! checksum validation before trusting anything, matching `drivers::usb::xhci`'s own defensive
-//! posture toward hardware/firmware this kernel doesn't fully control.
+//! **Discovery**: the `"HPET"` table, found by `acpi::find_table` (the RSDP -> XSDT/RSDT walk, with
+//! every table's checksum validated), gives the counter's MMIO base in its Generic Address
+//! Structure.
 //!
 //! **Absence is never fatal** -- missing RSDP, missing `"HPET"` table, a bad checksum, or a
 //! non-memory-space Generic Address Structure all just leave `HPET` at `None` for the rest of the
@@ -39,34 +33,6 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::serial_println;
 
-/// Real ACPI "System Description Table Header" -- the common 36-byte prefix of every ACPI table
-/// this walk touches (RSDT/XSDT/HPET), per the ACPI spec's own fixed layout.
-#[repr(C, packed)]
-struct AcpiSdtHeader {
-    signature: [u8; 4],
-    length: u32,
-    revision: u8,
-    checksum: u8,
-    oem_id: [u8; 6],
-    oem_table_id: [u8; 8],
-    oem_revision: u32,
-    creator_id: u32,
-    creator_revision: u32,
-}
-
-/// Real ACPI RSDP, revision-0/1 (ACPI 1.0) shape -- the first 20 bytes are common to every RSDP
-/// revision; a revision `>= 2` RSDP has more fields immediately following (`length`/
-/// `xsdt_address`/`extended_checksum`/reserved), read separately below rather than folded into
-/// one struct, since a real ACPI-1.0-only firmware's RSDP genuinely is only these 20 bytes long.
-#[repr(C, packed)]
-struct RsdpV1 {
-    signature: [u8; 8],
-    checksum: u8,
-    oem_id: [u8; 6],
-    revision: u8,
-    rsdt_address: u32,
-}
-
 /// Real ACPI HPET table body, immediately following the common `AcpiSdtHeader` -- fixed layout
 /// per the ACPI/HPET spec. `event_timer_block_id` packs hardware revision/comparator count/counter
 /// size/legacy-replacement-capable/PCI vendor ID into one `u32` -- none of those bitfields matter
@@ -74,7 +40,7 @@ struct RsdpV1 {
 /// `address_space_id` through `reserved0`+`address` are a real ACPI Generic Address Structure.
 #[repr(C, packed)]
 struct HpetTable {
-    header: AcpiSdtHeader,
+    header: crate::acpi::SdtHeader,
     event_timer_block_id: u32,
     address_space_id: u8,
     register_bit_width: u8,
@@ -147,18 +113,6 @@ fn read_counter64(virt_base: VirtAddr) -> u64 {
     }
 }
 
-/// Reads `len` bytes starting at kernel-virtual `virt` and sums them as a plain `u8` wrapping
-/// checksum -- real ACPI table validation (every table, including the RSDP itself, must sum to
-/// `0` over its own declared length). Used for both the RSDP's own fixed 20/36-byte extent and
-/// every subsequent `AcpiSdtHeader`-prefixed table's `length` field.
-fn checksum_ok(virt: VirtAddr, len: usize) -> bool {
-    let mut sum: u8 = 0;
-    for i in 0..len {
-        sum = sum.wrapping_add(unsafe { *(virt + i as u64).as_ptr::<u8>() });
-    }
-    sum == 0
-}
-
 /// Maps one real MMIO page at `phys_base` (rounded down to its containing page -- an HPET base is
 /// always page-aligned in practice, but this doesn't assume it), `NO_CACHE` -- adapted directly
 /// from `drivers::usb::xhci`'s own `map_bar_pages`: this is genuine, live hardware register space,
@@ -190,101 +144,11 @@ fn map_registers(
     Some(page_virt + (phys_base.as_u64() - page_phys.start_address().as_u64()))
 }
 
-/// Reads a real `AcpiSdtHeader`-prefixed table at physical `phys` and, if its signature matches
-/// `want_sig` and its own checksum validates, returns its real kernel-virtual address. `phys == 0`
-/// (an RSDP with no real XSDT, ACPI 1.0 firmware) is handled by the caller, not here.
-fn find_table(hhdm_offset: u64, table_phys_addrs: &[u64], want_sig: &[u8; 4]) -> Option<VirtAddr> {
-    for &phys in table_phys_addrs {
-        if phys == 0 {
-            continue;
-        }
-        let virt = VirtAddr::new(hhdm_offset + phys);
-        // SAFETY: `phys` is a real ACPI table pointer taken directly from a validated RSDT/XSDT
-        // entry; real ACPI tables always live well under the "at least 4 GiB" HHDM guarantee
-        // every other low-physical-address read in this codebase already relies on (see
-        // `boot::hhdm_offset`'s own doc comment).
-        let header = unsafe { core::ptr::read_unaligned(virt.as_ptr::<AcpiSdtHeader>()) };
-        if &header.signature != want_sig {
-            continue;
-        }
-        let length = header.length;
-        if checksum_ok(virt, length as usize) {
-            return Some(virt);
-        }
-        serial_println!("[hpet] table at phys {:#x} failed checksum, skipping", phys);
-    }
-    None
-}
-
-/// Real ACPI RSDP -> RSDT/XSDT -> `"HPET"` table walk. Returns the HPET table's own real MMIO
-/// base (`Generic Address Structure`'s `address` field) once every checksum/signature/address-
-/// space check has passed, or `None` (logged) at the first real failure.
+/// The HPET table's MMIO base (its Generic Address Structure's `address`), once `acpi::find_table`
+/// has found and checksum-validated it and the address is in system memory; `None` (logged)
+/// otherwise.
 fn discover_hpet_mmio_base(hhdm_offset: u64) -> Option<u64> {
-    let rsdp_virt = VirtAddr::new(crate::boot::rsdp_address()?);
-    // SAFETY: `rsdp_virt` is Limine's own real RSDP response pointer -- see
-    // `boot::rsdp_address`'s own doc comment for why this is already a valid virtual address at
-    // this project's base revision.
-    let rsdp = unsafe { core::ptr::read_unaligned(rsdp_virt.as_ptr::<RsdpV1>()) };
-    if &rsdp.signature != b"RSD PTR " {
-        serial_println!("[hpet] RSDP signature mismatch -- no ACPI tables, skipping");
-        return None;
-    }
-    if !checksum_ok(rsdp_virt, core::mem::size_of::<RsdpV1>()) {
-        serial_println!("[hpet] RSDP (v1) checksum mismatch, skipping");
-        return None;
-    }
-
-    // ACPI 2.0+: a real XSDT (64-bit entries), preferred over the 1.0-only RSDT whenever present.
-    // The extended fields sit immediately after the 20-byte v1 struct above.
-    let xsdt_phys = if rsdp.revision >= 2 {
-        let ext_virt = rsdp_virt + core::mem::size_of::<RsdpV1>() as u64;
-        let ext_len = unsafe { core::ptr::read_unaligned((ext_virt).as_ptr::<u32>()) };
-        if checksum_ok(rsdp_virt, ext_len as usize) {
-            let xsdt_addr = unsafe { core::ptr::read_unaligned((ext_virt + 4u64).as_ptr::<u64>()) };
-            (xsdt_addr != 0).then_some(xsdt_addr)
-        } else {
-            serial_println!("[hpet] RSDP (v2 extended) checksum mismatch -- falling back to RSDT");
-            None
-        }
-    } else {
-        None
-    };
-
-    let (root_phys, entry_size): (u64, u64) = match xsdt_phys {
-        Some(xsdt) => (xsdt, 8),
-        None => (rsdp.rsdt_address as u64, 4),
-    };
-    if root_phys == 0 {
-        serial_println!("[hpet] no real RSDT/XSDT address in the RSDP, skipping");
-        return None;
-    }
-
-    let root_virt = VirtAddr::new(hhdm_offset + root_phys);
-    let root_header = unsafe { core::ptr::read_unaligned(root_virt.as_ptr::<AcpiSdtHeader>()) };
-    let root_len = root_header.length;
-    if !checksum_ok(root_virt, root_len as usize) {
-        serial_println!("[hpet] RSDT/XSDT checksum mismatch, skipping");
-        return None;
-    }
-    let sdt_header_size = core::mem::size_of::<AcpiSdtHeader>() as u32;
-    let entry_count = ((root_len.saturating_sub(sdt_header_size)) as u64) / entry_size;
-
-    // Real table-pointer array immediately following the RSDT/XSDT's own header -- collected into
-    // a small on-stack buffer (a real system has a handful of ACPI tables, never remotely close to
-    // this cap) rather than needing `alloc` this early/this low-level.
-    const MAX_TABLES: usize = 64;
-    let mut table_phys = [0u64; MAX_TABLES];
-    let n = (entry_count as usize).min(MAX_TABLES);
-    for (i, slot) in table_phys.iter_mut().enumerate().take(n) {
-        let entry_addr = root_virt + sdt_header_size as u64 + (i as u64) * entry_size;
-        *slot = if entry_size == 8 {
-            unsafe { core::ptr::read_unaligned(entry_addr.as_ptr::<u64>()) }
-        } else {
-            unsafe { core::ptr::read_unaligned(entry_addr.as_ptr::<u32>()) as u64 }
-        };
-    }
-
-    let hpet_virt = find_table(hhdm_offset, &table_phys[..n], b"HPET")?;
+    let hpet_virt = crate::acpi::find_table(hhdm_offset, b"HPET")?;
     // SAFETY: `find_table` already validated this table's own signature and checksum.
     let hpet = unsafe { core::ptr::read_unaligned(hpet_virt.as_ptr::<HpetTable>()) };
     if hpet.address_space_id != ACPI_ADDRESS_SPACE_MEMORY {

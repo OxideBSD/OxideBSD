@@ -136,6 +136,10 @@ name = "basic_boot"
 harness = false
 
 [[test]]
+name = "acpi_smoke"
+harness = false
+
+[[test]]
 name = "fork_wait"
 harness = false
 
