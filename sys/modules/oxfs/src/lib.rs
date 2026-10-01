@@ -133,6 +133,9 @@ unsafe extern "C" {
     /// Whether the kernel still refers to an inode (a working or root directory, a file mapping,
     /// a bound socket file): see `maybe_release`.
     fn oxidebsd_inode_in_use(inode: u64) -> u64;
+    /// Drops the kernel's page cache entry for an inode whose contents change or which is freed
+    /// (`PAGECACHE.md` §2.4): see `content_changed`.
+    fn oxidebsd_content_changed(inode: u64);
     /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
     fn oxidebsd_make_dev(
         name_ptr: u64,
@@ -1381,10 +1384,20 @@ fn maybe_release(n: u32) {
     release_inode(n, inode);
 }
 
+/// Every change to a file's contents (`write_inode_at`, `write_inode_data`, `resize_inode_data`)
+/// and every freed inode (`release_inode`) goes through here first, so the kernel's page cache
+/// never maps a file's old pages into a new exec or mapping, nor a freed inode's pages into the
+/// file that reuses its number.
+fn content_changed(inode_num: u32) {
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    unsafe { oxidebsd_content_changed(inode_num as u64) };
+}
+
 /// Frees inode `n` (whose record is `inode`) and its blocks. The record goes first: interrupted
 /// between the two, the disk leaks blocks rather than keeping an inode that points at blocks
 /// someone else may be given.
 fn release_inode(n: u32, inode: Inode) {
+    content_changed(n);
     write_inode(n, Inode::FREE);
     free_inode_blocks(&inode);
     trim_inode_table(is_tmpfs_inode(n));
@@ -1781,6 +1794,7 @@ fn read_inode_at(inode_num: u32, position: usize, out: &mut [u8]) -> usize {
 /// right for its one remaining real caller, `oxfs_inode_content_write` (real fd-backed `MAP_SHARED`
 /// mmap writeback, which always supplies a mapping's complete current content).
 fn write_inode_data(inode_num: u32, content: &[u8]) -> bool {
+    content_changed(inode_num);
     let block_count = content.len().div_ceil(BLOCK_SIZE);
     for i in 0..block_count {
         let Some(blk) = inode_ensure_block_at(inode_num, i) else {
@@ -1829,6 +1843,7 @@ fn touch_atime(inode_num: u32) {
 /// GiB, see `Inode::double_indirect`'s own doc comment), far past what this kernel's 128 KiB
 /// kernel-stack floor could ever hold as one local buffer.
 fn resize_inode_data(inode_num: u32, new_size: usize) -> bool {
+    content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if new_size > old_size {
         let mut pos = old_size;
@@ -1872,6 +1887,7 @@ fn resize_inode_data(inode_num: u32, new_size: usize) -> bool {
 /// Test Suite's `aio_write`/`lio_listio` pilot -- `lio_listio/1-1.c` alone needs a real 1 MiB
 /// `pwrite()`, far past what the pooled buffer could ever hold).
 fn write_inode_at(inode_num: u32, position: usize, data: &[u8]) -> bool {
+    content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if position > old_size && !resize_inode_data(inode_num, position) {
         return false;

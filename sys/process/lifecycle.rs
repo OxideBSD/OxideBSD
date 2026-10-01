@@ -16,7 +16,7 @@ use crate::memory::{self, with_frame_allocator};
 use crate::process::elf::{self, Elf};
 use crate::process::scheduler;
 use crate::syscall::{
-    self, E2BIG, EACCES, EBADF, ECHILD, EINVAL, ELOOP, ENOENT, ENOEXEC, ENOMEM, SyscallFrame,
+    self, E2BIG, EACCES, EBADF, ECHILD, EINVAL, EIO, ELOOP, ENOENT, ENOEXEC, ENOMEM, SyscallFrame,
 };
 
 // Real FreeBSD syscall numbers, duplicated here rather than imported — same "no shared crate
@@ -1016,26 +1016,26 @@ fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Reads a whole file's contents via the real `SYS_OPEN`/`SYS_READ`/`SYS_CLOSE` syscall path,
-/// given a raw `(ptr, len)` pointing at a NUL-free path string. `ptr` may point into the
+/// Opens a program for `exec_image` via the real `SYS_OPEN` syscall path and reads its head
+/// (`ExecFile`), given a raw `(ptr, len)` pointing at a NUL-free path string. `ptr` may point into the
 /// *caller's* own user address space (a top-level `execve` target) or into this kernel's own heap
 /// (a `#!`-line interpreter path parsed out of a script's own content, see `do_execve`'s
 /// shebang-following loop below) -- both are valid dereference targets regardless of which
 /// process's `CR3` happens to be active: kernel-heap virtual addresses are mapped identically in
 /// every address space's page table (see CLAUDE.md's own address-space section on why
 /// `AddressSpace::fork`/`new_excluding_user` still shallow-copy the kernel's own high entries).
-fn read_file_via_syscall(path_ptr: u64, path_len: u64) -> Result<Vec<u8>, u64> {
+fn open_exec_file(path_ptr: u64, path_len: u64) -> Result<ExecFile, u64> {
     let fd = syscall::dispatch(SYS_OPEN, path_ptr, path_len, 0, 0)?;
-    read_fd_to_end_and_close(fd)
+    read_exec_head_and_close(fd)
 }
 
-/// `read_file_via_syscall`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
+/// `open_exec_file`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
 /// `execveat`'s dirfd-relative (and `AT_SYMLINK_NOFOLLOW`) target.
-fn read_file_via_openat(at_ptr: u64, nofollow: bool) -> Result<Vec<u8>, u64> {
+fn open_exec_file_at(at_ptr: u64, nofollow: bool) -> Result<ExecFile, u64> {
     const O_NOFOLLOW: u64 = 0o400000;
     let flags = if nofollow { O_NOFOLLOW } else { 0 };
     let fd = syscall::dispatch(SYS_OPENAT, at_ptr, flags, 0, 0)?;
-    read_fd_to_end_and_close(fd)
+    read_exec_head_and_close(fd)
 }
 
 /// How much one `read` asks for while loading an executable. Large, because the per-call cost
@@ -1068,16 +1068,68 @@ fn read_fd_to_end(fd: u64, pread: bool) -> Result<Vec<u8>, u64> {
     }
 }
 
-/// A whole file through an fd the *caller* already holds (`fexecve`'s `AT_EMPTY_PATH` case) --
-/// `pread` from offset 0, so the caller's own file offset is untouched if the exec then fails.
-fn pread_fd_to_end(fd: u64) -> Result<Vec<u8>, u64> {
-    read_fd_to_end(fd, true)
+
+
+/// What `exec_image` reads of a program before loading it: its head (`#!` line, or ELF and
+/// program headers), and the file the rest is read from, a page at a time and only where a
+/// page isn't mapped from the page cache. A file not on oxfs is read whole into `head`.
+struct ExecFile {
+    head: Vec<u8>,
+    size: u64,
+    content: Option<u64>,
 }
 
-fn read_fd_to_end_and_close(fd: u64) -> Result<Vec<u8>, u64> {
-    let result = read_fd_to_end(fd, false);
+impl ExecFile {
+    fn whole(image: Vec<u8>) -> Self {
+        ExecFile { size: image.len() as u64, head: image, content: None }
+    }
+}
+
+/// How much of a program `exec_image` reads up front: the ELF and program headers of anything
+/// our toolchains link fit in the first page, and the `#!` line too.
+const EXEC_HEAD: u64 = 4096;
+
+fn read_exec_head_and_close(fd: u64) -> Result<ExecFile, u64> {
+    let result = read_exec_head(fd, false);
     let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
     result
+}
+
+/// Reads the head of `fd`'s file for `exec_image`, never moving its offset unless it isn't on
+/// oxfs and `pread` is false.
+fn read_exec_head(fd: u64, pread: bool) -> Result<ExecFile, u64> {
+    let content = crate::fs::fd::content_id_of(fd);
+    let size = content.map_or(-1, crate::fs::fd::content_size);
+    let (Some(content), Ok(size)) = (content, u64::try_from(size)) else {
+        return read_fd_to_end(fd, pread).map(ExecFile::whole);
+    };
+    let read = |len: u64| -> Result<Vec<u8>, u64> {
+        let mut head = alloc::vec![0u8; len as usize];
+        if crate::fs::fd::content_read(content, 0, head.as_mut_ptr() as u64, len) != len as i64 {
+            return Err(EIO);
+        }
+        Ok(head)
+    };
+    let mut head = read(size.min(EXEC_HEAD))?;
+    // Program headers past the first page: read up to their end (a sane bound, else ENOEXEC
+    // from `Elf::parse_file`).
+    if head.len() >= 64 && head[..4] == *b"\x7fELF" {
+        let phoff = u64::from_le_bytes(head[32..40].try_into().unwrap());
+        let phsize = u64::from(u16::from_le_bytes([head[54], head[55]]))
+            * u64::from(u16::from_le_bytes([head[56], head[57]]));
+        let end = phoff.saturating_add(phsize);
+        if end > head.len() as u64 && end <= size.min(1 << 20) {
+            head = read(end)?;
+        }
+    }
+    Ok(ExecFile { head, size, content: Some(content) })
+}
+
+/// The page cache entry for `file`'s pages, used by `space` from now on (PAGECACHE.md §3.1).
+fn exec_cache_entry(file: &ExecFile, space: &AddressSpace) -> Option<crate::memory::pagecache::EntryId> {
+    let id = crate::memory::pagecache::entry_for(file.content?)?;
+    space.use_cached(id);
+    Some(id)
 }
 
 /// Leading/trailing ASCII-whitespace trim -- `core::slice` has no built-in for `&[u8]` the way
@@ -1196,7 +1248,7 @@ pub fn do_execveat(
         if dirfd < 0 {
             return Err(EBADF);
         }
-        let image = pread_fd_to_end(dirfd as u64)?;
+        let image = read_exec_head(dirfd as u64, true)?;
         return exec_image(caller_pid, path_bytes, Some(image), false, argv_ptr, envp_ptr);
     }
 
@@ -1205,7 +1257,7 @@ pub fn do_execveat(
     if path_is_cwd_relative && !nofollow {
         return exec_image(caller_pid, path_bytes, None, true, argv_ptr, envp_ptr);
     }
-    let image = read_file_via_openat(at_ptr, nofollow)?;
+    let image = open_exec_file_at(at_ptr, nofollow)?;
     exec_image(
         caller_pid,
         path_bytes,
@@ -1223,7 +1275,7 @@ pub fn do_execveat(
 fn exec_image(
     caller_pid: Pid,
     path_bytes: Vec<u8>,
-    first_image: Option<Vec<u8>>,
+    first_image: Option<ExecFile>,
     path_reopenable: bool,
     argv_ptr: u64,
     envp_ptr: u64,
@@ -1250,17 +1302,18 @@ fn exec_image(
     let mut shebang_argv_prefix: Option<Vec<Vec<u8>>> = None;
     let mut shebang_depth: u32 = 0;
     let mut first_image = first_image;
-    let elf_bytes: Vec<u8> = loop {
+    let file: ExecFile = loop {
         let from_first_image = first_image.is_some();
-        let bytes = match first_image.take() {
+        let file = match first_image.take() {
             Some(image) => image,
-            None => read_file_via_syscall(
+            None => open_exec_file(
                 effective_path.as_ptr() as u64,
                 effective_path.len() as u64,
             )?,
         };
+        let bytes = &file.head;
         if bytes.len() < 2 || &bytes[0..2] != b"#!" {
-            break bytes;
+            break file;
         }
         // See `do_execveat`'s doc comment: a script only reachable through a dirfd/fd has no path
         // its interpreter could open.
@@ -1271,7 +1324,7 @@ fn exec_image(
         if shebang_depth > MAX_SHEBANG_DEPTH {
             return Err(ELOOP);
         }
-        let (interpreter, optional_arg) = parse_shebang_line(&bytes).ok_or(ENOEXEC)?;
+        let (interpreter, optional_arg) = parse_shebang_line(bytes).ok_or(ENOEXEC)?;
         let mut prefix = alloc::vec![interpreter.clone()];
         if let Some(arg) = optional_arg {
             prefix.push(arg);
@@ -1282,7 +1335,7 @@ fn exec_image(
     };
 
     marks[1] = crate::cpu::tsc::now();
-    let elf = Elf::parse(&elf_bytes).map_err(|_| ENOEXEC)?;
+    let mut elf = Elf::parse_file(&file.head, file.size, file.content).map_err(|_| ENOEXEC)?;
 
     let phys_offset = memory::phys_mem_offset();
     // new_excluding_user, not AddressSpace::new: the currently active address space here is the
@@ -1296,63 +1349,78 @@ fn exec_image(
     // new_address_space's own (not-yet-active) level 4 table right now.
     let mut mapper = unsafe { new_address_space.mapper(phys_offset) };
 
-    // Checked once, before the main binary's own load, so both the bias decision below and the
-    // interpreter-loading branch reuse the same parse instead of scanning PT_INTERP twice.
-    marks[2] = crate::cpu::tsc::now();
-    let interp_path = elf.interpreter().map_err(|_| ENOEXEC)?;
+    // Everything that can fail while building the new image. On failure the half-built address
+    // space is torn down: never active, and it may already use page cache entries.
+    let built = (|| -> Result<_, u64> {
+        // Checked once, before the main binary's own load, so both the bias decision below and the
+        // interpreter-loading branch reuse the same parse instead of scanning PT_INTERP twice.
+        marks[2] = crate::cpu::tsc::now();
+        let interp_path = elf.interpreter().map_err(|_| ENOEXEC)?;
 
-    // Any ET_DYN main binary gets a randomized bias (`process::aslr`): a static PIE, which the
-    // kernel loads alone, and a dynamically linked PIE, where `ld.so` finds the bias through
-    // `AT_PHDR` (`user_stack::build` adds it) and relocates the image itself. Linked at 0, an
-    // unbiased PIE would map over the null page. A fixed-address ET_EXEC keeps bias 0.
-    let main_bias: u64 = if elf.is_dynamic() {
-        crate::process::aslr::pick_bias()
-    } else {
-        0
-    };
-    let entry =
-        with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, main_bias))
+        // Any ET_DYN main binary gets a randomized bias (`process::aslr`): a static PIE, which the
+        // kernel loads alone, and a dynamically linked PIE, where `ld.so` finds the bias through
+        // `AT_PHDR` (`user_stack::build` adds it) and relocates the image itself. Linked at 0, an
+        // unbiased PIE would map over the null page. A fixed-address ET_EXEC keeps bias 0.
+        let main_bias: u64 = if elf.is_dynamic() {
+            crate::process::aslr::pick_bias()
+        } else {
+            0
+        };
+        elf.cache = exec_cache_entry(&file, &new_address_space);
+        let entry =
+            with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, main_bias))
+                .map_err(|_| ENOEXEC)?;
+
+        // A real PT_INTERP dynamic linker, if the binary carries one, gets loaded into the same
+        // not-yet-active address space right here, immediately after the main binary's own segments --
+        // `SYSRETQ` needs to land in the interpreter's own entry, not the main binary's (the
+        // interpreter relocates/resolves itself, then jumps to the main binary's real entry on its
+        // own, via AT_ENTRY -- see `user_stack.rs`). `jump_entry`/`interp_base` stay `entry`/`None`
+        // when there's no interpreter (true for both a fixed-address main binary and a no-PT_INTERP
+        // PIE main binary -- `main_bias` above already covers the latter's own real bias, entirely
+        // independent of `interp_base`, which is the *interpreter's* bias, not the main binary's).
+        // `INTERP_LOAD_BASE` is a real, kernel-chosen runtime bias applied by `elf::load` itself, not
+        // a link-time address the interpreter file assumes -- see that function's own doc comment for
+        // the real bug (a wild pointer inside the interpreter's own relocation self-processing) a
+        // fixed-link-time-base interpreter caused, and why this bias has to be applied here instead.
+        marks[3] = crate::cpu::tsc::now();
+        let mut jump_entry = entry;
+        let mut interp_base: Option<u64> = None;
+        if let Some(interp_path) = interp_path {
+            let interp_file = open_exec_file(interp_path.as_ptr() as u64, interp_path.len() as u64)?;
+            let mut interp_elf = Elf::parse_file(&interp_file.head, interp_file.size, interp_file.content)
+                .map_err(|_| ENOEXEC)?;
+            interp_elf.cache = exec_cache_entry(&interp_file, &new_address_space);
+            let interp_entry = with_frame_allocator(|fa| {
+                elf::load(&interp_elf, &mut mapper, fa, phys_offset, INTERP_LOAD_BASE)
+            })
             .map_err(|_| ENOEXEC)?;
+            jump_entry = interp_entry;
+            interp_base = Some(INTERP_LOAD_BASE);
+        }
 
-    // A real PT_INTERP dynamic linker, if the binary carries one, gets loaded into the same
-    // not-yet-active address space right here, immediately after the main binary's own segments --
-    // `SYSRETQ` needs to land in the interpreter's own entry, not the main binary's (the
-    // interpreter relocates/resolves itself, then jumps to the main binary's real entry on its
-    // own, via AT_ENTRY -- see `user_stack.rs`). `jump_entry`/`interp_base` stay `entry`/`None`
-    // when there's no interpreter (true for both a fixed-address main binary and a no-PT_INTERP
-    // PIE main binary -- `main_bias` above already covers the latter's own real bias, entirely
-    // independent of `interp_base`, which is the *interpreter's* bias, not the main binary's).
-    // `INTERP_LOAD_BASE` is a real, kernel-chosen runtime bias applied by `elf::load` itself, not
-    // a link-time address the interpreter file assumes -- see that function's own doc comment for
-    // the real bug (a wild pointer inside the interpreter's own relocation self-processing) a
-    // fixed-link-time-base interpreter caused, and why this bias has to be applied here instead.
-    marks[3] = crate::cpu::tsc::now();
-    let mut jump_entry = entry;
-    let mut interp_base: Option<u64> = None;
-    if let Some(interp_path) = interp_path {
-        let interp_bytes =
-            read_file_via_syscall(interp_path.as_ptr() as u64, interp_path.len() as u64)?;
-        let interp_elf = Elf::parse(&interp_bytes).map_err(|_| ENOEXEC)?;
-        let interp_entry = with_frame_allocator(|fa| {
-            elf::load(&interp_elf, &mut mapper, fa, phys_offset, INTERP_LOAD_BASE)
-        })
-        .map_err(|_| ENOEXEC)?;
-        jump_entry = interp_entry;
-        interp_base = Some(INTERP_LOAD_BASE);
-    }
-
-    marks[4] = crate::cpu::tsc::now();
-    let stack_top = VirtAddr::new(USER_STACK_TOP);
-    let arg_bytes: u64 = raw_argv
-        .iter()
-        .chain(envp.iter())
-        .chain(shebang_argv_prefix.iter().flatten())
-        .map(|a| a.len() as u64 + 1)
-        .sum();
-    let stack_pages = user_stack_eager_pages(arg_bytes);
-    let mapped_pages =
-        map_user_stack(&mut mapper, stack_top, stack_pages).map_err(|_| ENOMEM)?;
-    crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
+        marks[4] = crate::cpu::tsc::now();
+        let stack_top = VirtAddr::new(USER_STACK_TOP);
+        let arg_bytes: u64 = raw_argv
+            .iter()
+            .chain(envp.iter())
+            .chain(shebang_argv_prefix.iter().flatten())
+            .map(|a| a.len() as u64 + 1)
+            .sum();
+        let stack_pages = user_stack_eager_pages(arg_bytes);
+        let mapped_pages =
+            map_user_stack(&mut mapper, stack_top, stack_pages).map_err(|_| ENOMEM)?;
+        crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
+        Ok((main_bias, jump_entry, interp_base, stack_top, stack_pages, mapped_pages))
+    })();
+    let (main_bias, jump_entry, interp_base, stack_top, stack_pages, mapped_pages) = match built {
+        Ok(built) => built,
+        Err(e) => {
+            // SAFETY: never activated, and nothing else holds it.
+            with_frame_allocator(|fa| unsafe { new_address_space.teardown(phys_offset, fa) });
+            return Err(e);
+        }
+    };
     // raw_argv (read above, while the caller's own address space was still active) is the caller's
     // complete, real argv[] -- including a real, caller-chosen argv[0], which need not equal
     // path_bytes (see RawArgvEntry's own doc comment). An empty raw_argv (argv_ptr == 0, or a

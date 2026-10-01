@@ -1,6 +1,8 @@
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 
+use spin::Mutex;
+
 use x86_64::VirtAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{
@@ -9,6 +11,7 @@ use x86_64::structures::paging::{
 };
 
 use crate::memory::frame_to_page_table;
+use crate::memory::pagecache::{self, EntryId};
 
 /// Marks a leaf page-table entry as **not** exclusively owned by the address space it's mapped
 /// into — real SysV `shmat` (`fs::sysv_shm::do_shmat`) and real fd-backed `MAP_SHARED` mmap
@@ -40,6 +43,12 @@ use crate::memory::frame_to_page_table;
 /// never unmaps on exit" laissez-faire tracking).
 pub const SHARED_LEAF: PageTableFlags = PageTableFlags::BIT_9;
 
+/// Marks a leaf as a page cache frame (`memory::pagecache`), always alongside `SHARED_LEAF`: one
+/// file page mapped read-only into every process running or privately mapping the file.
+/// `process::mm::do_mprotect` replaces such a page with a private copy before making it writable,
+/// where a `MAP_SHARED` or SysV leaf is shared on purpose and made writable in place.
+pub const CACHED_LEAF: PageTableFlags = PageTableFlags::BIT_10;
+
 /// A separate top-level page table — a distinct virtual address space from the kernel's own.
 ///
 /// New address spaces start as a **shallow** copy of the kernel's own level 4 table: the copy is
@@ -56,6 +65,9 @@ pub const SHARED_LEAF: PageTableFlags = PageTableFlags::BIT_9;
 #[derive(Clone)]
 pub struct AddressSpace {
     level_4_frame: Arc<PhysFrame>,
+    /// The page cache entries this address space maps frames of (`memory::pagecache`), shared
+    /// by its threads like the table itself.
+    cached: Arc<Mutex<BTreeSet<EntryId>>>,
 }
 
 impl AddressSpace {
@@ -102,6 +114,7 @@ impl AddressSpace {
 
         Ok(AddressSpace {
             level_4_frame: Arc::new(new_frame),
+            cached: Arc::default(),
         })
     }
 
@@ -162,7 +175,10 @@ impl AddressSpace {
         physical_memory_offset: VirtAddr,
         frame_allocator: &mut (impl FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>),
     ) -> Result<AddressSpace, ()> {
-        Self::build_from_active(physical_memory_offset, frame_allocator, true)
+        let mut child = Self::build_from_active(physical_memory_offset, frame_allocator, true)?;
+        // The child aliases the parent's cached frames (they're `SHARED_LEAF`), so uses them too.
+        child.cached = Arc::new(Mutex::new(pagecache::fork_uses(&self.cached)));
+        Ok(child)
     }
 
     /// Shared implementation behind `new_excluding_user`/`fork`: allocates a fresh level 4 table
@@ -222,6 +238,7 @@ impl AddressSpace {
 
         Ok(AddressSpace {
             level_4_frame: Arc::new(new_frame),
+            cached: Arc::default(),
         })
     }
 
@@ -233,6 +250,7 @@ impl AddressSpace {
     pub(crate) fn share(&self) -> AddressSpace {
         AddressSpace {
             level_4_frame: Arc::clone(&self.level_4_frame),
+            cached: Arc::clone(&self.cached),
         }
     }
 
@@ -332,10 +350,17 @@ impl AddressSpace {
         // safe to return to the allocator's own free list, same as every leaf/table frame it just
         // freed.
         unsafe { frame_allocator.deallocate_frame(*self.level_4_frame) };
+        // Its cached frames were left alone (`SHARED_LEAF`); the cache frees them once unused.
+        pagecache::release_all(&self.cached, frame_allocator);
     }
 }
 
 impl AddressSpace {
+    /// Records that this address space maps frames of page cache entry `id`.
+    pub fn use_cached(&self, id: EntryId) {
+        pagecache::add_use(&self.cached, id);
+    }
+
     /// Identifies the address space (its PML4's physical address): threads share one.
     pub fn id(&self) -> u64 {
         self.level_4_frame.start_address().as_u64()

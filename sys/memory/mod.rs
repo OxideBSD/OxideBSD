@@ -5,6 +5,7 @@
 pub mod address_space;
 pub mod allocator;
 pub mod kstack;
+pub mod pagecache;
 pub mod vm_meter;
 
 use core::sync::atomic::{AtomicU64, Ordering};

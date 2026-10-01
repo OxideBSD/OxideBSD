@@ -46,6 +46,14 @@ pub fn init(
     serial_println!("[boot] kernel initialization starting");
 
     cpu::gdt::init();
+    // Read-only pages bind the kernel too: page cache frames (`memory::pagecache`) are mapped
+    // read-only into many processes, and a system call writing into one through a user pointer
+    // must fault, not change every process's copy. Limine sets this; a Multiboot2 loader may not.
+    // SAFETY: the kernel writes no read-only mapping on purpose.
+    unsafe {
+        use x86_64::registers::control::{Cr0, Cr0Flags};
+        Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT));
+    }
     cpu::fpu::init();
     cpu::interrupts::init_idt();
     cpu::interrupts::init_pics();

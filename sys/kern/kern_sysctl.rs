@@ -598,6 +598,36 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             }),
         },
     );
+    // The read-only page cache (`memory::pagecache`, PAGECACHE.md §4).
+    let pagecache = add_node(t, &vm, None, "pagecache", "Read-only file page cache");
+    let counts: [(&'static str, &'static str, Getter); 5] = [
+        ("entries", "Files with cached pages", || uint(crate::memory::pagecache::stats().0)),
+        ("pages", "Frames held", || uint(crate::memory::pagecache::stats().1)),
+        ("hits", "Pages mapped that were already cached", || uint(crate::memory::pagecache::stats().2)),
+        ("misses", "Pages read into the cache", || uint(crate::memory::pagecache::stats().3)),
+        ("limit", "Frames unused files may hold", || uint(crate::memory::pagecache::stats().4)),
+    ];
+    for (name, descr, get) in counts {
+        add_leaf(
+            t,
+            &pagecache,
+            Leaf { number: None, name, kind: CTLTYPE_UINT, fmt: "IU", flags: CTLFLAG_RD, descr, get, set: None },
+        );
+    }
+    add_leaf(
+        t,
+        &pagecache,
+        Leaf {
+            number: None,
+            name: "list",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RD,
+            descr: "One line per entry: inode, size, frames held, uses",
+            get: || string(&crate::memory::pagecache::describe()),
+            set: None,
+        },
+    );
     let stats = add_node(t, &vm, None, "stats", "VM meter stats");
     let stats_vm = add_node(t, &stats, None, "vm", "VM meter vm stats");
     let counts: [(&'static str, &'static str, Getter); 4] = [

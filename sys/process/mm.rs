@@ -710,7 +710,38 @@ fn do_mmap_file_backed(
     // MAP_SHARED and MAP_PRIVATE alike -- real POSIX MPR doesn't distinguish the two.
     let covered_pages = real_size.div_ceil(4096).saturating_sub(file_page).min(page_count);
 
-    let frames: Vec<PhysFrame<Size4KiB>> = if private {
+    // A private mapping that can't be written shows the page cache's frames, shared with every
+    // other such mapping and every exec of the file (PAGECACHE.md §3.2). A page the cache can't
+    // supply is copied, as for any private mapping.
+    let cache_entry = if private && prot & PROT_WRITE == 0 && !crate::fs::fd::content_is_shm(content_id) {
+        memory::pagecache::entry_for(content_id)
+    } else {
+        None
+    };
+    let mut cached_pages: Vec<bool> = Vec::new();
+
+    let frames: Vec<PhysFrame<Size4KiB>> = if let Some(id) = cache_entry {
+        with_frame_allocator(|fa| -> Result<Vec<PhysFrame<Size4KiB>>, u64> {
+            let mut frames = Vec::with_capacity(covered_pages as usize);
+            for i in 0..covered_pages {
+                let page = file_page + i;
+                let (frame, cached) = match memory::pagecache::frame(id, page, fa) {
+                    Some(frame) => (frame, true),
+                    None => {
+                        let frame = fa.allocate_frame().ok_or(ENOMEM)?;
+                        let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+                        unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+                        let len = real_size.saturating_sub(page * 4096).min(4096);
+                        crate::fs::fd::content_read(content_id, page * 4096, frame_ptr as u64, len);
+                        (frame, false)
+                    }
+                };
+                frames.push(frame);
+                cached_pages.push(cached);
+            }
+            Ok(frames)
+        })?
+    } else if private {
         // Real MAP_PRIVATE: a fresh copy, populated once from the object's own real content but
         // never entered into MMAP_FILE_CACHE -- a second, independent MAP_PRIVATE of the same file
         // (by this or any other process) must never see this mapping's own writes, and this
@@ -855,14 +886,13 @@ fn do_mmap_file_backed(
     let me = table
         .get_mut(&caller_pid)
         .expect("mmap: current process missing from table");
+    let address_space = me.address_space.as_ref().expect("mm: caller has no address space");
+    if let Some(id) = cache_entry {
+        address_space.use_cached(id);
+    }
     // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
     // address space.
-    let mut mapper = unsafe {
-        me.address_space
-            .as_ref()
-            .expect("mm: caller has no address space")
-            .mapper(phys_offset)
-    };
+    let mut mapper = unsafe { address_space.mapper(phys_offset) };
     // Real `PROT_NONE` (`mmap/6-2.c`): neither `PROT_READ` nor `PROT_WRITE` set. Skipping the
     // mapping loop entirely reuses `signal_for_user_fault`'s own existing default with zero new
     // machinery -- that function already reports `SIGBUS` only for an address in a region's
@@ -881,7 +911,12 @@ fn do_mmap_file_backed(
         let end_page =
             Page::<Size4KiB>::containing_address(VirtAddr::new(base + covered_pages * 4096 - 1));
         with_frame_allocator(|fa| -> Result<(), u64> {
-            for (page, frame) in Page::range_inclusive(start_page, end_page).zip(frames.iter()) {
+            for (i, (page, frame)) in Page::range_inclusive(start_page, end_page).zip(frames.iter()).enumerate() {
+                let flags = if cached_pages.get(i) == Some(&true) {
+                    flags | memory::address_space::SHARED_LEAF | memory::address_space::CACHED_LEAF
+                } else {
+                    flags
+                };
                 // SAFETY: `frame` is either one of MMAP_FILE_CACHE's own real backing frames (a
                 // shared mapping, never reused for anything else) or a fresh, exclusively-owned
                 // private frame (a private mapping, allocated just above) -- either way this
@@ -1355,12 +1390,31 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
         for page in Page::range_inclusive(start_page, end_page) {
             match mapper.translate(page.start_address()) {
                 TranslateResult::Mapped {
-                    flags: old_flags, ..
+                    frame: old_frame,
+                    flags: old_flags,
+                    ..
                 } => {
                     let mut new_flags =
                         old_flags & !(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
                     new_flags |=
                         leaf_flags & (PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                    if writable && old_flags.contains(memory::address_space::CACHED_LEAF) {
+                        // A page cache page made writable: this process's own copy from now on,
+                        // the cache's page left as it is (PAGECACHE.md §3.2).
+                        let copy = fa.allocate_frame().ok_or(ENOMEM)?;
+                        let src = (phys_offset + old_frame.start_address().as_u64()).as_ptr::<u8>();
+                        let dst = (phys_offset + copy.start_address().as_u64()).as_mut_ptr::<u8>();
+                        // SAFETY: a live cache frame, and a frame just allocated.
+                        unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+                        new_flags &= !(memory::address_space::SHARED_LEAF | memory::address_space::CACHED_LEAF);
+                        // SAFETY: replaces this process's own leaf; the cache frame stays the
+                        // cache's (never freed here).
+                        unsafe {
+                            mapper.unmap(page).map_err(|_| ENOMEM)?.1.flush();
+                            mapper.map_to(page, copy, new_flags, fa).map_err(|_| ENOMEM)?.flush();
+                        }
+                        continue;
+                    }
                     // SAFETY: only ever narrows/widens WRITABLE/USER_ACCESSIBLE on a page this
                     // exact process already owns inside its own private mmap window (or, for a
                     // real CLONE_VM/CLONE_THREAD sibling, the whole shared address space --

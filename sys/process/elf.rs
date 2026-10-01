@@ -23,6 +23,7 @@
 //! unaligned struct cast would be undefined behavior.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{
@@ -58,9 +59,16 @@ pub enum ElfError {
     MappingFailed,
 }
 
-/// A parsed view over an in-memory ELF64 executable's header and program headers.
+/// A parsed view over an ELF64 executable's header and program headers: either a whole image in
+/// memory (`parse`), or a file's head with the rest read from the file as needed (`parse_file`).
 pub struct Elf<'a> {
     bytes: &'a [u8],
+    /// The image's size: `bytes.len()`, or the whole file's when `bytes` is only its head.
+    size: u64,
+    /// The file (`fd::content_id_of`) the bytes past `bytes` are read from.
+    content: Option<u64>,
+    /// The page cache entry `load` maps read-only pages from (`memory::pagecache`).
+    pub cache: Option<crate::memory::pagecache::EntryId>,
     entry: u64,
     e_type: u16,
     phoff: usize,
@@ -79,6 +87,12 @@ struct ProgramHeader {
 
 impl<'a> Elf<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_file(bytes, bytes.len() as u64, None)
+    }
+
+    /// `parse` over the first bytes of a file of `size` bytes, read further from `content`. The
+    /// program headers must lie in `head`.
+    pub fn parse_file(bytes: &'a [u8], size: u64, content: Option<u64>) -> Result<Self, ElfError> {
         if bytes.len() < EHDR_SIZE {
             return Err(ElfError::TooShort);
         }
@@ -124,6 +138,9 @@ impl<'a> Elf<'a> {
 
         Ok(Elf {
             bytes,
+            size,
+            content,
+            cache: None,
             entry: e_entry,
             e_type,
             phoff: e_phoff,
@@ -198,25 +215,74 @@ impl<'a> Elf<'a> {
     /// trailing NUL `p_filesz` always includes (a real interpreter string), returning the bare
     /// path bytes. Bounds-checked the same way `elf::load`'s own `PT_LOAD` handling is — this data
     /// comes from the same untrusted file bytes.
-    pub fn interpreter(&self) -> Result<Option<&'a [u8]>, ElfError> {
+    pub fn interpreter(&self) -> Result<Option<Vec<u8>>, ElfError> {
         for header in self.program_headers() {
             if header.p_type != PT_INTERP {
                 continue;
             }
-            let end = header
-                .p_offset
-                .checked_add(header.p_filesz)
-                .ok_or(ElfError::SegmentOutOfBounds)?;
-            if end as usize > self.bytes.len() {
+            if header.p_filesz > 4096 {
                 return Err(ElfError::SegmentOutOfBounds);
             }
-            let mut path = &self.bytes[header.p_offset as usize..end as usize];
+            let mut path = alloc::vec![0u8; header.p_filesz as usize];
+            if !self.read_at(header.p_offset, path.as_mut_ptr(), header.p_filesz) {
+                return Err(ElfError::SegmentOutOfBounds);
+            }
             if path.last() == Some(&0) {
-                path = &path[..path.len() - 1];
+                path.pop();
             }
             return Ok(Some(path));
         }
         Ok(None)
+    }
+
+    /// Copies `len` bytes at file offset `offset` to `dst`, from `bytes` or the file. `false`
+    /// past the end of the image, or if the file reads short.
+    fn read_at(&self, offset: u64, dst: *mut u8, len: u64) -> bool {
+        let Some(end) = offset.checked_add(len) else { return false };
+        if end > self.size {
+            return false;
+        }
+        if end <= self.bytes.len() as u64 {
+            // SAFETY: in bounds of `bytes`, checked above; `dst` is the caller's, `len` long.
+            unsafe { core::ptr::copy_nonoverlapping(self.bytes.as_ptr().add(offset as usize), dst, len as usize) };
+            return true;
+        }
+        match self.content {
+            Some(id) => crate::fs::fd::content_read(id, offset, dst as u64, len) == len as i64,
+            None => false,
+        }
+    }
+
+    /// The page of the file that virtual page `page_start` of `PT_LOAD` segment `index` can map
+    /// from the page cache (PAGECACHE.md §3.1), if it can: the segment is read-only, its file
+    /// offsets and addresses agree modulo the page size, the page holds no BSS, and no other
+    /// `PT_LOAD` segment touches it.
+    fn cache_page(&self, index: usize, h: &ProgramHeader, bias: u64, page_start: u64) -> Option<u64> {
+        self.cache?;
+        if h.p_flags & PF_WRITE != 0 {
+            return None;
+        }
+        let mem_start = h.p_vaddr.wrapping_add(bias);
+        let file_base = mem_start.checked_sub(h.p_offset)?;
+        if !file_base.is_multiple_of(PAGE_SIZE) || page_start < file_base {
+            return None;
+        }
+        let page_end = page_start + PAGE_SIZE;
+        if h.p_memsz > h.p_filesz && page_end > mem_start + h.p_filesz {
+            return None;
+        }
+        let touched_by_another = self.program_headers().enumerate().any(|(j, o)| {
+            let o_start = o.p_vaddr.wrapping_add(bias);
+            j != index
+                && o.p_type == PT_LOAD
+                && o.p_memsz > 0
+                && o_start < page_end
+                && o_start.saturating_add(o.p_memsz) > page_start
+        });
+        if touched_by_another {
+            return None;
+        }
+        Some((page_start - file_base) / PAGE_SIZE)
     }
 
     fn program_headers(&self) -> impl Iterator<Item = ProgramHeader> + '_ {
@@ -276,7 +342,7 @@ pub fn load(
     // it (which would wipe out an earlier segment's bytes already written there).
     let mut mapped_pages: BTreeMap<Page<Size4KiB>, PhysFrame<Size4KiB>> = BTreeMap::new();
 
-    for header in elf.program_headers() {
+    for (index, header) in elf.program_headers().enumerate() {
         if header.p_type != PT_LOAD {
             continue;
         }
@@ -287,7 +353,7 @@ pub fn load(
             .p_offset
             .checked_add(header.p_filesz)
             .ok_or(ElfError::SegmentOutOfBounds)?;
-        if file_end as usize > elf.bytes.len() {
+        if file_end > elf.size {
             return Err(ElfError::SegmentOutOfBounds);
         }
 
@@ -315,6 +381,23 @@ pub fn load(
             };
 
         for page in Page::range_inclusive(start_page, end_page) {
+            // Shared with every other process running this file, read-only. No other segment
+            // touches the page, so `mapped_pages` never needs it.
+            let cached = elf.cache.zip(elf.cache_page(index, &header, bias, page.start_address().as_u64()));
+            if let Some(frame) =
+                cached.and_then(|(id, file_page)| crate::memory::pagecache::frame(id, file_page, frame_allocator))
+            {
+                let flags = flags | crate::memory::address_space::SHARED_LEAF | crate::memory::address_space::CACHED_LEAF;
+                // SAFETY: a page cache frame, freed only once no address space uses its entry
+                // (the caller records this one's use).
+                unsafe {
+                    mapper
+                        .map_to(page, frame, flags, frame_allocator)
+                        .map_err(|_: MapToError<Size4KiB>| ElfError::MappingFailed)?
+                        .ignore();
+                }
+                continue;
+            }
             let frame = match mapped_pages.get(&page) {
                 Some(&frame) => frame,
                 None => {
@@ -346,11 +429,11 @@ pub fn load(
             let copy_start = mem_start.max(page_start);
             let copy_end = file_backed_end.min(page_end);
             if copy_start < copy_end {
-                let file_offset = (header.p_offset + (copy_start - mem_start)) as usize;
-                let len = (copy_end - copy_start) as usize;
+                let file_offset = header.p_offset + (copy_start - mem_start);
                 let dst = unsafe { frame_ptr.add((copy_start - page_start) as usize) };
-                let src = &elf.bytes[file_offset..file_offset + len];
-                unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, len) };
+                if !elf.read_at(file_offset, dst, copy_end - copy_start) {
+                    return Err(ElfError::SegmentOutOfBounds);
+                }
             }
         }
     }

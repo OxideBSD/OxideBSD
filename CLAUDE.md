@@ -263,6 +263,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   anything in the on-disk layout **must bump `SUPERBLOCK_VERSION`** (mount checks, else reformats).
 - Only `write_block`, `write_inode`, `set_block_used` touch the backing pools (write-through
   persistence). Inodes are serialized by `pack_inode`/`unpack_inode`, never transmuted.
+- **A new path that changes a file's contents or frees an inode must call `content_changed`**, or
+  the kernel's page cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping
+  the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
 - Mount never re-syncs seeded files; only a format does. `target/oxfs_disk.img` may be deleted to
   force a reformat (fast with virtio/DMA). Tests get a fresh `target/oxfs_test_disk.img`.
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
