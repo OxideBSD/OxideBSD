@@ -1,0 +1,13 @@
+#
+# /etc/sudoers: who may run what, as whom; see sudoers(5). Edit it with visudo(8), which checks
+# the result before installing it.
+#
+
+Defaults	env_reset
+Defaults	secure_path="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+
+# root may run anything, as anyone.
+root	ALL=(ALL:ALL) ALL
+
+# So may members of the wheel group, with their own password.
+%wheel	ALL=(ALL:ALL) ALL

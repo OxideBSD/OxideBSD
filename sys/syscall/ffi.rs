@@ -1341,6 +1341,21 @@ const CLOCK_MONOTONIC: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 
+/// Linux's other clocks, which musl defines and programs use (sudo-rs's session records use
+/// `CLOCK_BOOTTIME`), as the two clocks they amount to here: OxideBSD never suspends, so time
+/// since boot is the monotonic clock, and nothing is coarser or rawer than the tick.
+fn canonical_clock(clockid: u64) -> u64 {
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
+    match clockid {
+        CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => CLOCK_MONOTONIC,
+        CLOCK_REALTIME_COARSE => CLOCK_REALTIME,
+        other => other,
+    }
+}
+
 /// Decodes a real, dynamic per-process/per-thread `clockid_t` -- the encoding
 /// `clock_getcpuclockid(2)`'s own musl implementation produces
 /// (`external/mit/musl/src/time/clock_getcpuclockid.c`: `clockid_t id = (-pid-1)*8U + 2`, matching
@@ -1409,6 +1424,7 @@ fn cpu_time_ticks_to_ts(cpu_ticks: u64) -> RawTimespec {
 /// here, and for the real gap this closes: `clock_gettime/4-1.c`, the Open POSIX Test Suite
 /// pilot). Any other `clockid` is `EINVAL`.
 pub(crate) fn sys_clock_gettime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
+    let clockid = canonical_clock(clockid);
     let caller_pid = crate::process::scheduler::current_pid();
     let ts = match clockid {
         CLOCK_REALTIME => {
@@ -1473,6 +1489,7 @@ pub(crate) fn sys_clock_gettime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
 /// `timer_getoverrun/2-3.c` (its own `expectedoverruns`/fudge-factor math needs a resolution well
 /// under 10ms to have any pass window at all -- see `cpu::hpet`'s own module doc comment).
 pub(crate) fn sys_clock_getres(clockid: u64, res_ptr: u64) -> Result<u64, u64> {
+    let clockid = canonical_clock(clockid);
     let caller_pid = crate::process::scheduler::current_pid();
     match clockid {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {}
@@ -1783,6 +1800,10 @@ pub(crate) extern "C" fn oxidebsd_sys_setgid(gid: u64) -> i64 {
 
 pub(crate) extern "C" fn oxidebsd_sys_setresuid(ruid: u64, euid: u64, suid: u64) -> i64 {
     result_to_ffi(sys_setresuid(ruid, euid, suid))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_close_range(first: u64, last: u64, flags: u64) -> i64 {
+    result_to_ffi(crate::fs::fd::close_range(first, last, flags))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> i64 {

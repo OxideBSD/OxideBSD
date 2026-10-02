@@ -126,6 +126,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_setgid(gid: u64) -> i64;
     fn oxidebsd_sys_setresuid(ruid: u64, euid: u64, suid: u64) -> i64;
     fn oxidebsd_sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> i64;
+    fn oxidebsd_sys_close_range(first: u64, last: u64, flags: u64) -> i64;
     fn oxidebsd_sys_getresuid(r: u64, e: u64, s: u64) -> i64;
     fn oxidebsd_sys_getresgid(r: u64, e: u64, s: u64) -> i64;
     fn oxidebsd_sys_setreuid(ruid: u64, euid: u64) -> i64;
@@ -221,6 +222,8 @@ const SYS_SETRESGID: u64 = 501;
 const SYS_GETRESGID: u64 = 502;
 const SYS_SETREUID: u64 = 113;
 const SYS_SETREGID: u64 = 114;
+/// musl's `__NR_close_range`, Linux's number, unclaimed here.
+const SYS_CLOSE_RANGE: u64 = 436;
 const SYS_GETGROUPS: u64 = 164;
 /// Invented -- real `__NR_setgroups` (`116`) was already independently claimed by this ABI's own
 /// `SYS_KILL`, a real collision found live (see `external/mit/musl/arch/x86_64/bits/syscall.h.in`'s
@@ -471,6 +474,10 @@ extern "C" fn handle_setresuid(ruid: u64, euid: u64, suid: u64, _a3: u64) -> i64
     unsafe { oxidebsd_sys_setresuid(ruid, euid, suid) }
 }
 
+extern "C" fn handle_close_range(first: u64, last: u64, flags: u64, _a3: u64) -> i64 {
+    unsafe { oxidebsd_sys_close_range(first, last, flags) }
+}
+
 extern "C" fn handle_setresgid(rgid: u64, egid: u64, sgid: u64, _a3: u64) -> i64 {
     unsafe { oxidebsd_sys_setresgid(rgid, egid, sgid) }
 }
@@ -710,6 +717,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_GETRESGID, handle_getresgid);
         oxidebsd_register_syscall(SYS_SETREUID, handle_setreuid);
         oxidebsd_register_syscall(SYS_SETREGID, handle_setregid);
+        oxidebsd_register_syscall(SYS_CLOSE_RANGE, handle_close_range);
         oxidebsd_register_syscall(SYS_GETGROUPS, handle_getgroups);
         oxidebsd_register_syscall(SYS_SETGROUPS, handle_setgroups);
         oxidebsd_register_syscall(SYS_PRLIMIT64, handle_prlimit64);

@@ -39,3 +39,6 @@
 [submodule "external/apache2/openssl"]
 	path = external/apache2/openssl
 	url = https://github.com/OxideBSD/openssl-oxidebsd.git
+[submodule "external/mit/sudo-rs"]
+	path = external/mit/sudo-rs
+	url = https://github.com/OxideBSD/sudo-rs-oxidebsd.git

@@ -1,0 +1,13 @@
+#
+# /etc/pam.d/sudo: the policy for sudo(8); see pam.conf(5). The password asked for is the
+# invoking user's own; sudoers(5) decides who may run what.
+#
+
+# auth
+auth		include		system
+
+# account
+account		include		system
+
+# session
+session		required	pam_permit.so

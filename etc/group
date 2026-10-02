@@ -1,3 +1,4 @@
 root:*:0:
 tty:*:4:
+wheel:*:10:root,user
 user:*:1000:

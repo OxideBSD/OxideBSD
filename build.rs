@@ -611,6 +611,14 @@ fn main() {
         pam_env,
         StdLink::Dynamic,
     );
+    // sudo-rs (OxideBSD-doc SUDO.md §6): sudo, su and visudo, on OpenPAM like login.
+    let sudo_rs = build_std_oxidebsd_userland_bins(
+        "external/mit/sudo-rs",
+        &[("sudo", "OXFS_SUDO_ELF_PATH"), ("su", "OXFS_SUDO_RS_SU_ELF_PATH"), ("visudo", "OXFS_VISUDO_ELF_PATH")],
+        &musl_sysroot,
+        pam_env,
+        StdLink::Dynamic,
+    );
     // cron (CRON.md in OxideBSD-doc) checks each job's account with PAM, as login does.
     let cron_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "usr.sbin/cron",
@@ -878,6 +886,9 @@ fn main() {
         ("OXFS_GETTY_ELF_PATH", getty_elf_path.to_str().unwrap()),
         ("OXFS_LOGIN_ELF_PATH", login_elf_path.to_str().unwrap()),
         ("OXFS_PASSWD_ELF_PATH", passwd_elf_path.to_str().unwrap()),
+        ("OXFS_SUDO_ELF_PATH", sudo_rs[0].to_str().unwrap()),
+        ("OXFS_SUDO_RS_SU_ELF_PATH", sudo_rs[1].to_str().unwrap()),
+        ("OXFS_VISUDO_ELF_PATH", sudo_rs[2].to_str().unwrap()),
         ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
         ("OXFS_MAN_ELF_PATH", man_elf_path.to_str().unwrap()),
@@ -1565,10 +1576,25 @@ fn build_std_oxidebsd_userland_crate_with_env(
     extra_env: &[(&str, &Path)],
     link: StdLink,
 ) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let crate_dir = Path::new(manifest_dir).join(crate_path);
     // The package and binary name: the crate directory's last component (`regress/std/foo`,
     // `bin/sh`).
+    let crate_name = Path::new(crate_path).file_name().unwrap().to_str().unwrap().to_string();
+    build_std_oxidebsd_userland_bins(crate_path, &[(&crate_name, env_var)], musl_sysroot, extra_env, link)
+        .remove(0)
+}
+
+/// `build_std_oxidebsd_userland_crate_with_env` for a package with several binaries (sudo-rs's
+/// `sudo`, `su` and `visudo`): `bins` pairs each binary's name with the variable its path goes
+/// to. Binary names must be unique across the shared target dir.
+fn build_std_oxidebsd_userland_bins(
+    crate_path: &str,
+    bins: &[(&str, &str)],
+    musl_sysroot: &Path,
+    extra_env: &[(&str, &Path)],
+    link: StdLink,
+) -> Vec<PathBuf> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let crate_dir = Path::new(manifest_dir).join(crate_path);
     let crate_name = crate_dir.file_name().unwrap().to_str().unwrap();
     let target_spec = Path::new(manifest_dir).join("x86_64-unknown-oxidebsd.json");
     // One target dir for every std program: `-Z build-std` then compiles std/core/alloc once and
@@ -1633,19 +1659,21 @@ fn build_std_oxidebsd_userland_crate_with_env(
     // again. Removing the executable alone isn't enough: it's a hard link to
     // `build/<crate>/<hash>/out/<crate>`, which cargo re-links when fresh.
     let release_dir = target_dir.join("x86_64-unknown-oxidebsd/release");
-    let elf_path = release_dir.join(crate_name);
+    let elf_paths: Vec<PathBuf> = bins.iter().map(|(bin, _)| release_dir.join(bin)).collect();
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let newest_lib = ["lib/libc.a", "lib/libc.so", "lib/libgcc_s.so", "lib/musl-gcc.specs"]
         .iter()
         .filter_map(|l| mtime(&musl_sysroot.join(l)))
         .max();
-    if let (Some(exe), Some(libc)) = (mtime(&elf_path), newest_lib)
-        && exe < libc
-    {
-        let _ = std::fs::remove_file(&elf_path);
-        let units = std::fs::read_dir(release_dir.join("build").join(crate_name));
-        for unit in units.into_iter().flatten().flatten() {
-            let _ = std::fs::remove_dir_all(unit.path().join("fingerprint"));
+    for elf_path in &elf_paths {
+        if let (Some(exe), Some(libc)) = (mtime(elf_path), newest_lib)
+            && exe < libc
+        {
+            let _ = std::fs::remove_file(elf_path);
+            let units = std::fs::read_dir(release_dir.join("build").join(crate_name));
+            for unit in units.into_iter().flatten().flatten() {
+                let _ = std::fs::remove_dir_all(unit.path().join("fingerprint"));
+            }
         }
     }
 
@@ -1693,13 +1721,15 @@ fn build_std_oxidebsd_userland_crate_with_env(
         panic!("building the {crate_name} oxidebsd-target binary failed: {status}");
     }
 
-    assert!(
-        elf_path.exists(),
-        "{crate_name} (oxidebsd target) build reported success but {} doesn't exist",
-        elf_path.display()
-    );
-    println!("cargo:rustc-env={env_var}={}", elf_path.display());
-    elf_path
+    for (elf_path, (_, env_var)) in elf_paths.iter().zip(bins) {
+        assert!(
+            elf_path.exists(),
+            "{crate_name} (oxidebsd target) build reported success but {} doesn't exist",
+            elf_path.display()
+        );
+        println!("cargo:rustc-env={env_var}={}", elf_path.display());
+    }
+    elf_paths
 }
 
 /// The real id Software Doom engine sources this build compiles, matching

@@ -8591,7 +8591,21 @@ fn format_fresh_filesystem() -> bool {
         include_bytes!(env!("OXFS_STRINGS_ELF_PATH")),
     );
     ok &= seed_file(bin, b"stty", include_bytes!(env!("OXFS_STTY_ELF_PATH")));
-    ok &= seed_file(usr_bin, b"su", include_bytes!(env!("OXFS_SU_ELF_PATH")));
+    // sudo-rs (OxideBSD-doc SUDO.md §3): sudo and su set-user-ID root, visudo, sudoedit. Its su
+    // replaces BusyBox's, which is still built but no longer installed.
+    ok &= seed_file(usr_bin, b"sudo", include_bytes!(env!("OXFS_SUDO_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"su", include_bytes!(env!("OXFS_SUDO_RS_SU_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"visudo", include_bytes!(env!("OXFS_VISUDO_ELF_PATH")));
+    ok &= seed_symlink(usr_bin, b"sudoedit", b"sudo");
+    for name in [b"sudo".as_slice(), b"su"] {
+        if let Some(n) = dir_lookup(usr_bin, name) {
+            let mut inode = read_inode(n);
+            inode.uid = 0;
+            inode.gid = 0;
+            inode.mode = 0o4755;
+            write_inode(n, inode);
+        }
+    }
     ok &= seed_file(usr_bin, b"sum", include_bytes!(env!("OXFS_SUM_ELF_PATH")));
     ok &= seed_file(bin, b"sync", include_bytes!(env!("OXFS_SYNC_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"syslogd", include_bytes!(env!("OXFS_SYSLOGD_ELF_PATH")));
@@ -8755,6 +8769,14 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(pam_d, b"passwd", include_bytes!("../../../../etc/pam.d/passwd"));
     ok &= seed_file(pam_d, b"system", include_bytes!("../../../../etc/pam.d/system"));
     ok &= seed_file(pam_d, b"cron", include_bytes!("../../../../etc/pam.d/cron"));
+    ok &= seed_file(pam_d, b"sudo", include_bytes!("../../../../etc/pam.d/sudo"));
+    ok &= seed_file(pam_d, b"su", include_bytes!("../../../../etc/pam.d/su"));
+    ok &= seed_file(etc, b"sudoers", include_bytes!("../../../../etc/sudoers"));
+    if let Some(n) = dir_lookup(etc, b"sudoers") {
+        let mut inode = read_inode(n);
+        inode.mode = 0o440;
+        write_inode(n, inode);
+    }
 
     // /home/user -- real, owned by uid/gid 1000 -- so `su -`/`login`'s own real chdir-to-home
     // lands somewhere that's actually theirs (permission-checked, not just root's own `/`).

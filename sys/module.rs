@@ -993,6 +993,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_setresuid" => {
             Some(crate::syscall::oxidebsd_sys_setresuid as *const () as u64)
         }
+        "oxidebsd_sys_close_range" => Some(crate::syscall::oxidebsd_sys_close_range as *const () as u64),
         "oxidebsd_sys_setresgid" => Some(crate::syscall::oxidebsd_sys_setresgid as *const () as u64),
         "oxidebsd_sys_setreuid" => Some(crate::syscall::oxidebsd_sys_setreuid as *const () as u64),
         "oxidebsd_sys_setregid" => Some(crate::syscall::oxidebsd_sys_setregid as *const () as u64),

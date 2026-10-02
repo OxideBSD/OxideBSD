@@ -135,6 +135,21 @@ fn sudo_prerequisites() {
     }
     println!("cred-smoke: ok: getrandom at Linux's number");
 
+    // close_range(2), with and without CLOSE_RANGE_CLOEXEC.
+    let null = CString::new("/dev/null").unwrap();
+    let (a, b) = unsafe { (libc::open(null.as_ptr(), libc::O_RDONLY), libc::open(null.as_ptr(), libc::O_RDONLY)) };
+    let (lo, hi) = (a.min(b) as libc::c_uint, a.max(b) as libc::c_uint);
+    let r = unsafe { libc::syscall(436, lo, hi, 4 as libc::c_uint) };
+    let cloexec = unsafe { libc::fcntl(a, libc::F_GETFD) & libc::fcntl(b, libc::F_GETFD) & libc::FD_CLOEXEC };
+    if r != 0 || cloexec == 0 {
+        finish(false, &format!("close_range CLOEXEC returned {r}, FD_CLOEXEC {cloexec}"));
+    }
+    let r = unsafe { libc::syscall(436, lo, hi, 0 as libc::c_uint) };
+    if r != 0 || unsafe { libc::fcntl(a, libc::F_GETFD) } != -1 {
+        finish(false, &format!("close_range didn't close: {r}"));
+    }
+    println!("cred-smoke: ok: close_range");
+
     std::thread::sleep(std::time::Duration::from_millis(50));
     let parent = start_time("self");
     match unsafe { libc::fork() } {
@@ -237,9 +252,67 @@ fn script() -> ! {
     std::process::exit(0);
 }
 
+/// `tests/sudo_syscall_smoke.rs` (pid 1, root): as `user` (uid 1000, in `wheel`), sudo-rs's
+/// `sudo` and `su` with the passwords on standard input (`OxideBSD-doc/SUDO.md` §7).
+fn sudo_test() -> ! {
+    use std::io::Write;
+    use std::process::Stdio;
+    if std::process::id() != 1 {
+        finish(false, "not started as pid 1");
+    }
+    match unsafe { libc::fork() } {
+        0 => {
+            unsafe {
+                let groups = [USER, 10];
+                check(libc::setgroups(2, groups.as_ptr()) == 0, "setgroups user, wheel");
+                check(libc::setresgid(USER, USER, USER) == 0, "become gid 1000");
+                check(libc::setresuid(USER, USER, USER) == 0, "become uid 1000");
+            }
+            // Runs `argv` with `input` on its standard input; its output and exit status.
+            let run = |argv: &[&str], input: &str| -> (String, bool) {
+                let mut child = Command::new(argv[0])
+                    .args(&argv[1..])
+                    .env_clear()
+                    .env("PATH", "/sbin:/bin:/usr/sbin:/usr/bin")
+                    .env("HOME", "/home/user")
+                    .env("USER", "user")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap_or_else(|e| { check(false, &format!("{}: {e}", argv[0])); unreachable!() });
+                let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+                let out = child.wait_with_output().unwrap();
+                (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+            };
+            let (out, ok) = run(&["/usr/bin/sudo", "-S", SELF, "whoami"], "user\n");
+            check(ok && out.trim_end().ends_with("ids 0 0 0"), &format!("sudo -S runs a command as root ({out:?})"));
+            let (out, ok) = run(&["/usr/bin/sudo", "-n", SELF, "whoami"], "");
+            check(ok && out.trim_end().ends_with("ids 0 0 0"), &format!("a second sudo needs no password (session record) ({out:?})"));
+            let (_, ok) = run(&["/usr/bin/sudo", "-k", "-S", SELF, "whoami"], "wrong\n");
+            check(!ok, "sudo refuses a wrong password");
+            let cmd = format!("{SELF} whoami");
+            let (out, ok) = run(&["/usr/bin/su", "-c", &cmd, "root"], "root\n");
+            check(ok && out.trim_end().ends_with("ids 0 0 0"), &format!("su -c with root's password ({out:?})"));
+            std::process::exit(0);
+        }
+        child => {
+            let mut status = 0;
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            finish(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "sudo and su");
+        }
+    }
+}
+
 fn main() {
     let role = std::env::args().nth(1).unwrap_or_default();
     match role.as_str() {
+        "sudo-test" => sudo_test(),
+        "whoami" => {
+            let (r, e, s) = res_uid();
+            println!("ids {r} {e} {s}");
+            std::process::exit(0);
+        }
         "suid" => suid(),
         "script" => script(),
         "nosuid" => {

@@ -438,6 +438,10 @@ name = "pty_syscall_smoke"
 harness = false
 
 [[test]]
+name = "sudo_syscall_smoke"
+harness = false
+
+[[test]]
 name = "sem_open_syscall_smoke"
 harness = false
 

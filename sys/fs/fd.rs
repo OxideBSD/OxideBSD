@@ -392,6 +392,34 @@ pub(crate) fn close_cloexec(pid: u64) {
     }
 }
 
+/// `close_range(2)` (FreeBSD's and Linux's): closes the caller's descriptors `first..=last`, or
+/// with `CLOSE_RANGE_CLOEXEC` marks them close-on-exec. `CLOSE_RANGE_UNSHARE` changes nothing:
+/// threads already share one table.
+pub(crate) fn close_range(first: u64, last: u64, flags: u64) -> Result<u64, u64> {
+    const CLOSE_RANGE_UNSHARE: u64 = 2;
+    const CLOSE_RANGE_CLOEXEC: u64 = 4;
+    let (first, last) = (first as u32 as u64, last as u32 as u64);
+    if first > last || flags & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 {
+        return Err(crate::syscall::EINVAL);
+    }
+    let pid = scheduler::current_tgid();
+    let fds: alloc::vec::Vec<u64> = TABLE
+        .lock()
+        .keys()
+        .filter(|&&(p, fd)| p == pid && (first..=last).contains(&fd))
+        .map(|&(_, fd)| fd)
+        .collect();
+    for fd in fds {
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            set_cloexec(pid, fd, true);
+        } else {
+            close_one(pid, fd);
+            CLOEXEC.lock().remove(&(pid, fd));
+        }
+    }
+    Ok(0)
+}
+
 /// A fresh `real_fd`: the identity a module keys its own state by, and later passes to
 /// `oxidebsd_register_fd_ops*` to give the calling process an fd for it.
 pub(crate) extern "C" fn oxidebsd_alloc_fd() -> u64 {

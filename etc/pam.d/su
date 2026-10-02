@@ -1,0 +1,13 @@
+#
+# /etc/pam.d/su: the policy for su(1); see pam.conf(5). The password asked for is the target
+# user's.
+#
+
+# auth
+auth		include		system
+
+# account
+account		include		system
+
+# session
+session		required	pam_permit.so
