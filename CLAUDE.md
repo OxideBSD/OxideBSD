@@ -134,7 +134,8 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `memory_map`), `limine_entry_point!`. No direct `0xb8000` access: the console is the
   framebuffer (`sys/console/framebuffer.rs`), fed by `boot::FbInfo`.
 - Kernel cmdline (`boot::parse_cmdline`): `no-ata`/`no-disk`, `console.underline=color`, `-s`
-  single user, `-D` dual console, `-h` serial console. Tests and headless runs get `-D`.
+  single user, `-D` dual console, `-h` serial console, `init=`/`init_path=` (pid 1 is then the
+  embedded `sys/kern/start_init`, which execs them). Tests and headless runs get `-D`.
 - **Multiboot2**: works under Limine's multiboot2 loader and GRUB on BIOS. The full kernel needs
   `OXIDEBSD_FIRMWARE=bios` (UEFI has no contiguous hole for the ~266 MiB image; GRUB 2.14 under
   UEFI has an upstream relocator bug). `regress/multiboot2-boot-smoke/` is trampoline-only;

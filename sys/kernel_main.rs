@@ -234,7 +234,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // (§9.3); repeated deaths start `/sbin/emergency` (§9.4). If init can't be started at all,
     // `/bin/sh` runs on the console instead.
     const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
-    const INIT_RESTART_ARGV: &[&[u8]] = &[crate::boot::INIT_PATH, b"-R"];
+    // init=/init_path= on the command line: pid 1 execs those instead (sys/kern/start_init).
+    const START_INIT_ELF: &[u8] = include_bytes!(env!("START_INIT_ELF_PATH"));
     const SH_ELF: &[u8] = include_bytes!(env!("OXFS_SH_ELF_PATH"));
     const DEFAULT_ENVP: &[&[u8]] = crate::process::lifecycle::DEFAULT_ENVP;
     const SH_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], DEFAULT_ENVP[2], b"HOME=/"];
@@ -242,15 +243,9 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     const EMERGENCY_ARGV: &[&[u8]] = &[b"/sbin/emergency"];
     const EMERGENCY_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], b"HOME=/"];
     const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
-    let init_argv = crate::boot::init_argv();
+    let init = crate::process::init::pid1_program(INIT_ELF, START_INIT_ELF);
     crate::process::init::register(
-        crate::process::init::InitProgram {
-            elf: INIT_ELF,
-            argv: init_argv,
-            restart_argv: INIT_RESTART_ARGV,
-            envp: &[],
-            console: false,
-        },
+        init,
         crate::process::init::InitProgram {
             elf: EMERGENCY_ELF,
             argv: EMERGENCY_ARGV,
@@ -259,8 +254,15 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
             console: true,
         },
     );
-    serial_println!("[boot] spawning /sbin/init as pid 1 ({} byte ELF)", INIT_ELF.len());
-    let pid1 = crate::process::lifecycle::spawn_boot(INIT_ELF, None, init_argv, &[], false)
+    match crate::boot::init_paths() {
+        Some(paths) => {
+            serial_println!("[boot] spawning start_init as pid 1, for {}", paths);
+        }
+        None => {
+            serial_println!("[boot] spawning /sbin/init as pid 1 ({} byte ELF)", INIT_ELF.len());
+        }
+    }
+    let pid1 = crate::process::lifecycle::spawn_boot(init.elf, None, init.argv, init.envp, false)
         .or_else(|e| {
             serial_println!("[boot] failed to spawn /sbin/init: {:?}; running /bin/sh instead", e);
             crate::process::lifecycle::spawn_with(SH_ELF, None, SH_ARGV, SH_ENVP)

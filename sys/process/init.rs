@@ -13,6 +13,7 @@ use super::*;
 use crate::memory::with_frame_allocator;
 
 /// What the kernel runs as pid 1.
+#[derive(Clone, Copy)]
 pub struct InitProgram {
     /// Its image. Embedded in the kernel, so a damaged file system can't stop init from starting.
     pub elf: &'static [u8],
@@ -66,6 +67,37 @@ const REPEAT_WINDOW_TICKS: u64 = 30 * crate::cpu::pit::TIMER_HZ as u64;
 
 /// The most recent ring-3 fault in pid 1, so its death can say where it crashed.
 static LAST_FAULT: Mutex<Option<Fault>> = Mutex::new(None);
+
+/// pid 1's program (INIT.md §4.1, §9.6): the embedded `/sbin/init`, with the boot flags, or,
+/// when the command line names other programs (`boot::init_paths`), the embedded `start_init`,
+/// which execs each in turn. A restart after a death passes `-R` either way; `start_init` gives it
+/// only to `/sbin/init`.
+pub fn pid1_program(init_elf: &'static [u8], start_init_elf: &'static [u8]) -> InitProgram {
+    const INIT_RESTART_ARGV: &[&[u8]] = &[crate::boot::INIT_PATH, b"-R"];
+    let Some(paths) = crate::boot::init_paths() else {
+        return InitProgram {
+            elf: init_elf,
+            argv: crate::boot::init_argv(),
+            restart_argv: INIT_RESTART_ARGV,
+            envp: &[],
+            console: false,
+        };
+    };
+    let paths: &'static [u8] = alloc::boxed::Box::leak(paths.into_bytes().into_boxed_slice());
+    let mut argv: Vec<&'static [u8]> = alloc::vec![b"start_init", paths];
+    if crate::boot::single_user() {
+        argv.push(b"-s");
+    }
+    let restart: Vec<&'static [u8]> = alloc::vec![b"start_init", paths, b"-R"];
+    InitProgram {
+        elf: start_init_elf,
+        argv: alloc::boxed::Box::leak(argv.into_boxed_slice()),
+        restart_argv: alloc::boxed::Box::leak(restart.into_boxed_slice()),
+        // Passed on to whatever it runs; /sbin/init builds its own (INIT.md §4.2).
+        envp: lifecycle::DEFAULT_ENVP,
+        console: false,
+    }
+}
 
 /// Arms supervision; called once, before pid 1 is spawned.
 pub fn register(init: InitProgram, emergency: InitProgram) {
@@ -130,7 +162,7 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
 /// it, so that its restart in recovery mode (§9.2, §9.3) can be tested. Nothing in user space can
 /// do this otherwise: §9.1 discards every signal pid 1 has no handler for, `SIGKILL` included.
 /// `EINVAL` for a signal outside `1..=64`, `ESRCH` when pid 1 isn't supervised (a test kernel's
-/// own pid 1).
+/// own pid 1). Pid 1 may write it itself, and then never returns.
 pub(crate) fn kill_for_debug(sig: i32) -> Result<(), i64> {
     if !(1..=64).contains(&sig) {
         return Err(crate::syscall::EINVAL as i64);
@@ -138,7 +170,14 @@ pub(crate) fn kill_for_debug(sig: i32) -> Result<(), i64> {
     if !armed() {
         return Err(crate::syscall::ESRCH as i64);
     }
+    let caller = scheduler::current_pid();
+    let suicide = PROCESS_TABLE.lock().get(&caller).is_some_and(|p| p.tgid == INIT_PID);
     lifecycle::terminate_thread_group(INIT_PID, 128 + sig);
+    if suicide {
+        // As in do_exit_group: pid 1 killed itself, and a zombie must not return to user mode.
+        scheduler::schedule();
+        unreachable!("kill_for_debug: schedule() returned to the killed pid 1");
+    }
     Ok(())
 }
 

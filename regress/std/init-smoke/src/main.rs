@@ -276,8 +276,40 @@ fn killer(tag: &str, exclude: &[i32]) -> ! {
     finish(false, &format!("killer {tag}: no single-user shell on the console"));
 }
 
+/// `tests/init_path_smoke.rs`: the kernel was told `init=/nonexistent/init
+/// init_path=/usr/tests/init/init-smoke`, so its `start_init` must have skipped the first and
+/// exec'd this as pid 1, with no arguments. The first run kills itself through `debug.kill_init`;
+/// the restart must come the same way, still without `-R` (only `/sbin/init` gets it).
+fn started_by_start_init(args: &[String]) -> ! {
+    check(std::process::id() == 1, "not pid 1");
+    check(args.len() == 1, &format!("arguments {args:?}: -R is only for /sbin/init"));
+    check(std::env::var("PATH").is_ok(), "the kernel's environment wasn't passed on");
+    let _ = std::fs::create_dir_all("/var/run");
+    let deaths = std::fs::read_to_string("/proc/initdeaths").unwrap_or_default();
+    if count("start_init") == 0 {
+        check(deaths.is_empty(), &format!("/proc/initdeaths: {deaths:?}"));
+        log("start_init 1");
+        let sig: libc::c_int = libc::SIGKILL;
+        let r = unsafe {
+            sysctlbyname(
+                c"debug.kill_init".as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                (&sig as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>(),
+            )
+        };
+        finish(false, &format!("debug.kill_init returned {r}: {}", std::io::Error::last_os_error()));
+    }
+    check(deaths.lines().count() == 1 && deaths.contains(" signal 9"), &format!("/proc/initdeaths: {deaths:?}"));
+    finish(true, "start_init ran init_path's program, and again after a death, without -R");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 1 && args[0] == SELF {
+        started_by_start_init(&args);
+    }
     let role = args.get(1).map(String::as_str).unwrap_or("");
     let arg = args.get(2).cloned();
     let pid = std::process::id() as i32;

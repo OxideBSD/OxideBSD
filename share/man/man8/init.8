@@ -39,6 +39,19 @@ keyword (those
 stops) that is not running, keeps the sessions that are still running,
 and starts the missing ones.
 .El
+.Pp
+With
+.Cm init= Ns Ar path
+or
+.Cm init_path= Ns Ar path Ns Op : Ns Ar path ...
+on the kernel command line, the kernel instead runs a small program of its
+own as process 1, which executes each named program in turn, with the
+boot flags
+.Pf ( Fl R
+only to
+.Pa /sbin/init ) ,
+until one runs, and then
+.Pa /bin/sh .
 .Ss States
 .Bl -tag -width Ds
 .It single-user

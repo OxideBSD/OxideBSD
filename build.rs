@@ -547,6 +547,15 @@ fn main() {
         &[],
         StdLink::StaticPie,
     );
+    // Embedded in the kernel, never installed: pid 1 when init=/init_path= name other programs
+    // (sys/kern/start_init). Static, as pid 1 must be.
+    build_std_oxidebsd_userland_crate_with_env(
+        "sys/kern/start_init",
+        "START_INIT_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
     // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
     // What the kernel runs as pid 1 when init keeps dying: static for the same reason as /bin/sh.
     let emergency_elf_path = build_std_oxidebsd_userland_crate_with_env(

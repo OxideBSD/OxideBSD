@@ -213,6 +213,35 @@ pub fn single_user() -> bool {
     SINGLE_USER.load(Ordering::Relaxed)
 }
 
+/// The programs `init=` and `init_path=` name for pid 1, as one colon-separated list (`init=`'s
+/// first), or empty. Recorded before the heap exists, so in a fixed buffer.
+static INIT_PATHS: spin::Mutex<([u8; 512], usize)> = spin::Mutex::new(([0; 512], 0));
+
+fn add_init_paths(list: &str) {
+    let mut guard = INIT_PATHS.lock();
+    let (buf, len) = &mut *guard;
+    for path in list.split(':').filter(|p| !p.is_empty()) {
+        let sep = usize::from(*len > 0);
+        if *len + sep + path.len() > buf.len() {
+            return;
+        }
+        if sep == 1 {
+            buf[*len] = b':';
+        }
+        buf[*len + sep..*len + sep + path.len()].copy_from_slice(path.as_bytes());
+        *len += sep + path.len();
+    }
+}
+
+/// `init=<path>` (Linux's) and `init_path=<path>[:<path>...]` (FreeBSD's) on the kernel command
+/// line: the programs to try as pid 1, in order, instead of the embedded `/sbin/init`
+/// (`process::init::pid1_program`). `None` if neither was given.
+pub fn init_paths() -> Option<alloc::string::String> {
+    let guard = INIT_PATHS.lock();
+    let (buf, len) = &*guard;
+    (*len > 0).then(|| alloc::string::String::from_utf8_lossy(&buf[..*len]).into_owned())
+}
+
 /// What the kernel command line asks for. Dash tokens are boot flags in the BSD `boot -s` style
 /// (`-s` single-user, `-D` dual console, `-h` serial console, as in FreeBSD; they combine, as in
 /// `-sD`); the rest are kernel options. Unknown tokens of either kind are ignored.
@@ -264,6 +293,13 @@ pub fn apply_cmdline(cmdline: &str) {
         !flags.serial_console || flags.dual_console,
         flags.serial_console || flags.dual_console,
     );
+    *INIT_PATHS.lock() = ([0; 512], 0);
+    if let Some(path) = cmdline.split_whitespace().find_map(|t| t.strip_prefix("init=")) {
+        add_init_paths(path);
+    }
+    if let Some(list) = cmdline.split_whitespace().find_map(|t| t.strip_prefix("init_path=")) {
+        add_init_paths(list);
+    }
     for token in cmdline.split_whitespace() {
         if let Some((name, value)) = token.split_once('=')
             && name.contains('.')
