@@ -1,7 +1,8 @@
 //! `/sbin/init`'s states, ttys sessions and signals (INIT.md §§3, 5, 6): starts
 //! `regress/std/init-smoke/` as pid 1, which sets up a test `/etc/ttys` and `/etc/rc` and execs
 //! the real `/sbin/init`; see that program's doc comment for the sequence. Takes about a minute:
-//! one step waits out init's 30-second restart pause.
+//! one step waits out init's 30-second restart pause. The last step kills init, so pid 1 is
+//! supervised as on a real boot.
 #![no_std]
 #![no_main]
 
@@ -117,6 +118,19 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
+    // Registers SYS_SYSCTL: the last step kills init through debug.kill_init.
+    const SYSCTL_MOD: &[u8] = include_bytes!(env!("SYSCTL_MOD_PATH"));
+    const SYSCTL_PANIC_SYMBOL: &str = env!("SYSCTL_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "sysctl",
+        SYSCTL_MOD,
+        SYSCTL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
+
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 
@@ -126,6 +140,26 @@ fn main(boot_info: &'static BootInfo) -> ! {
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
     );
 
+    // The kernel's supervision of pid 1 (INIT.md §9), as the real boot arms it: the last step
+    // kills init through debug.kill_init, and the kernel restarts the real /sbin/init with -R.
+    const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
+    const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
+    oxidebsd::process::init::register(
+        oxidebsd::process::init::InitProgram {
+            elf: INIT_ELF,
+            argv: &[b"/sbin/init"],
+            restart_argv: &[b"/sbin/init", b"-R"],
+            envp: &[],
+            console: false,
+        },
+        oxidebsd::process::init::InitProgram {
+            elf: EMERGENCY_ELF,
+            argv: &[b"/sbin/emergency"],
+            restart_argv: &[b"/sbin/emergency"],
+            envp: &[],
+            console: true,
+        },
+    );
     const SMOKE_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_SMOKE_ELF_PATH"));
     serial_println!("init_syscall_smoke: spawning init-smoke as pid 1 ({} byte ELF)", SMOKE_ELF.len());
     // Without a controlling terminal, as the real boot starts /sbin/init (kernel_main): a session

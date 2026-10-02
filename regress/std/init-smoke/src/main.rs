@@ -13,6 +13,10 @@
 //!    to multi-user without running `/etc/rc`, and the new `session` checks the log, and the
 //!    utmpx records: one `BOOT_TIME`, and the login record the first session left open (as a
 //!    killed login(1) would) closed by init.
+//! 5. That session takes `ttyv0` as its controlling terminal, as getty does, adds an enabled
+//!    `rc.d` service with `KEYWORD: shutdown` that isn't running (`smoked`, this program as a
+//!    `daemon`), and kills init with `debug.kill_init`. The kernel restarts init with `-R`, which
+//!    must start `smoked` and keep the session rather than start another on `ttyv0`.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -152,6 +156,80 @@ fn utmpx_records() -> Vec<(libc::c_short, String)> {
     out
 }
 
+unsafe extern "C" {
+    fn sysctlbyname(
+        name: *const libc::c_char,
+        oldp: *mut libc::c_void,
+        oldlenp: *mut libc::size_t,
+        newp: *const libc::c_void,
+        newlen: libc::size_t,
+    ) -> libc::c_int;
+}
+
+/// Makes `/dev/<tty>` this process's controlling terminal, in a session of its own, as getty does.
+fn take_terminal(tty: &str) {
+    let path = std::ffi::CString::new(format!("/dev/{tty}")).unwrap();
+    unsafe {
+        check(libc::setsid() > 0, "setsid failed");
+        let fd = libc::open(path.as_ptr(), libc::O_RDWR);
+        check(fd >= 0, &format!("/dev/{tty}: {}", std::io::Error::last_os_error()));
+        check(libc::ioctl(fd, libc::TIOCSCTTY, 0) == 0, &format!("TIOCSCTTY on {tty}: {}", std::io::Error::last_os_error()));
+    }
+}
+
+const SMOKED: &str = "#!/sbin/init_sh
+#
+# PROVIDE: smoked
+# REQUIRE: FILESYSTEMS
+# KEYWORD: shutdown
+#
+# init-smoke's daemon, for init's recovery mode (INIT.md section 9.3).
+
+. /etc/rc.subr
+
+name=\"smoked\"
+rcvar=\"smoked_enable\"
+command=\"/usr/tests/init/init-smoke\"
+command_args=\"daemon\"
+pidfile=\"/var/run/smoked.pid\"
+
+load_rc_config $name
+run_rc_command \"$1\"
+";
+
+/// Step 5: sets up a stopped service and kills init; the restarted init must start the service
+/// and keep this session.
+fn recovery() -> ! {
+    take_terminal("ttyv0");
+    // Only smoked is checked: the real daemons with `KEYWORD: shutdown` are turned off.
+    write("/etc/rc.conf", "cron_enable=\"NO\"\nsyslogd_enable=\"NO\"\nsmoked_enable=\"YES\"\n", 0o644);
+    write("/etc/rc.d/smoked", SMOKED, 0o755);
+    log("killing init");
+    let sig: libc::c_int = libc::SIGKILL;
+    let r = unsafe {
+        sysctlbyname(
+            c"debug.kill_init".as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            (&sig as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>(),
+        )
+    };
+    check(r == 0, &format!("debug.kill_init: {}", std::io::Error::last_os_error()));
+    let until = Instant::now() + Duration::from_secs(30);
+    while count("daemon") == 0 {
+        check(Instant::now() < until, "the restarted init didn't start smoked");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Long enough for a restarted init that didn't keep this session to have started another.
+    std::thread::sleep(Duration::from_secs(3));
+    check(count("session") == 2, "the restarted init started a second session on ttyv0");
+    check(unsafe { libc::getppid() } == 1, "the session wasn't reparented to the new init");
+    let deaths = std::fs::read_to_string("/proc/initdeaths").unwrap_or_default();
+    check(deaths.lines().count() == 1 && deaths.contains(" signal 9"), &format!("/proc/initdeaths: {deaths:?}"));
+    finish(true, "init's states, ttys, restart limit, signals, utmpx and recovery");
+}
+
 /// `/proc/<pid>/stat`'s fields after the command name: state, ppid, pgrp, session, tty_nr.
 fn stat(pid: i32) -> Option<(String, Vec<i64>)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -273,7 +351,7 @@ fn main() {
                 "a USER_PROCESS record is left for ttyv0",
             );
 
-            finish(true, "init's states, ttys, restart limit and signals");
+            recovery();
         }
         "second" => {
             let starts: Vec<u128> = lines()
@@ -295,6 +373,22 @@ fn main() {
                     wait_for_hangup("second");
                 }
                 _ => wait_for_hangup("second-again"),
+            }
+        }
+        "daemon" => {
+            // rc.subr's start waits for the command, so a daemon detaches.
+            match unsafe { libc::fork() } {
+                0 => {
+                    unsafe { libc::setsid() };
+                    let me = std::process::id();
+                    write("/var/run/smoked.pid", &format!("{me}\n"), 0o644);
+                    log(&format!("daemon {me}"));
+                    loop {
+                        std::thread::sleep(Duration::from_secs(60));
+                    }
+                }
+                -1 => finish(false, "fork failed"),
+                _ => std::process::exit(0),
             }
         }
         _ => finish(false, &format!("unknown role `{role}'")),

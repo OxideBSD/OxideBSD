@@ -31,8 +31,13 @@ after it died.
 .Nm
 does not run
 .Pa /etc/rc
-again; it keeps the sessions that are still running and starts the
-missing ones.
+again.
+It logs why it was restarted, starts each enabled service with the
+.Dq shutdown
+keyword (those
+.Pa /etc/rc.shutdown
+stops) that is not running, keeps the sessions that are still running,
+and starts the missing ones.
 .El
 .Ss States
 .Bl -tag -width Ds
@@ -148,6 +153,12 @@ and starts it again with
 After three deaths within 30 seconds it runs
 .Xr emergency 8
 instead.
+Writing a signal number to the
+.Va debug.kill_init
+.Xr sysctl 8
+variable kills
+.Nm
+with that signal, to test this.
 .Sh ENVIRONMENT
 .Nm
 ignores its own environment.

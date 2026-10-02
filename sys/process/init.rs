@@ -126,6 +126,22 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
     true
 }
 
+/// `debug.kill_init` (sysctl(8)): kills pid 1 with `sig` as if the signal had been delivered to
+/// it, so that its restart in recovery mode (§9.2, §9.3) can be tested. Nothing in user space can
+/// do this otherwise: §9.1 discards every signal pid 1 has no handler for, `SIGKILL` included.
+/// `EINVAL` for a signal outside `1..=64`, `ESRCH` when pid 1 isn't supervised (a test kernel's
+/// own pid 1).
+pub(crate) fn kill_for_debug(sig: i32) -> Result<(), i64> {
+    if !(1..=64).contains(&sig) {
+        return Err(crate::syscall::EINVAL as i64);
+    }
+    if !armed() {
+        return Err(crate::syscall::ESRCH as i64);
+    }
+    lifecycle::terminate_thread_group(INIT_PID, 128 + sig);
+    Ok(())
+}
+
 /// Records a death (unless pid 1 was the emergency program, whose exit means the operator is
 /// done: the history is cleared and init gets a fresh start, §9.4). Returns the cause and
 /// whether the next pid 1 must be the emergency program.

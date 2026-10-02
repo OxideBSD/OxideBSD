@@ -598,6 +598,26 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             }),
         },
     );
+    // INIT.md §9: kill pid 1 with a signal, to exercise the kernel's restart of init.
+    add_leaf(
+        t,
+        &debug,
+        Leaf {
+            number: None,
+            name: "kill_init",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Write a signal number to kill init with it; the kernel restarts init",
+            get: || int(0),
+            set: Some(|new| {
+                if new.len() < 4 {
+                    return Err(EINVAL as i64);
+                }
+                crate::process::init::kill_for_debug(i32::from_ne_bytes([new[0], new[1], new[2], new[3]]))
+            }),
+        },
+    );
     // The read-only page cache (`memory::pagecache`, PAGECACHE.md §4).
     let pagecache = add_node(t, &vm, None, "pagecache", "Read-only file page cache");
     // Page counts are `u_int`, like `vm.stats.vm.*`; hits and misses count up forever, `u_long`.

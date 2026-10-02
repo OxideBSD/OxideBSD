@@ -7,8 +7,9 @@
 //!   each when it exits, with FreeBSD's limit on one that keeps dying (§5).
 //! - `clean-ttys` (`SIGTERM`) ends every session and goes to `single-user`. Services keep
 //!   running, so when that shell exits init goes back to `multi-user` without running `/etc/rc`.
-//! - A restart by the kernel after a death (`-R`, §9.3) is recovery: it keeps the sessions the old
-//!   init left running and starts the missing ones.
+//! - A restart by the kernel after a death (`-R`, §9.3) is recovery: it says why init died,
+//!   starts the services `/etc/rc.shutdown` would stop that aren't running, keeps the sessions the
+//!   old init left running and starts the missing ones.
 //!
 //! `SIGINT`, `SIGUSR1` and `SIGUSR2` (reboot, halt, power off, §6) shut the system down from any
 //! state as §10 says: `/etc/rc.shutdown`, then `SIGTERM` and `SIGKILL` to everything, `sync`, and
@@ -191,6 +192,12 @@ fn take_console() -> io::Result<()> {
             libc::close(fd);
         }
     }
+    Ok(())
+}
+
+/// For a child whose standard descriptors are already set up: no signals blocked.
+fn signals_only() -> io::Result<()> {
+    unblock_all();
     Ok(())
 }
 
@@ -577,6 +584,73 @@ fn runcom(autoboot: bool) -> bool {
     }
 }
 
+/// §9.3 step 3: why the kernel restarted init, from the last line of `/proc/initdeaths`
+/// (`<time> exit <status>` or `<time> signal <n> [ip <ip> [addr <addr>]]`).
+fn death_reason() -> String {
+    let text = std::fs::read_to_string("/proc/initdeaths").unwrap_or_default();
+    let Some(line) = text.lines().last() else { return "no death recorded".into() };
+    let w: Vec<&str> = line.split_whitespace().collect();
+    match &w[1.min(w.len())..] {
+        ["exit", status] => format!("it exited with status {status}"),
+        ["signal", sig, rest @ ..] => {
+            let mut why = format!("it was killed by signal {sig}");
+            if let ["ip", ip, tail @ ..] = rest {
+                why += &format!(" at ip {ip}");
+                if let ["addr", addr] = tail {
+                    why += &format!(", address {addr}");
+                }
+            }
+            why
+        }
+        _ => line.to_string(),
+    }
+}
+
+/// §9.3 step 2: starts the services that should be running and aren't. Only those
+/// `/etc/rc.shutdown` would stop (`KEYWORD: shutdown`) are checked: they are the ones with a
+/// process to look for, and one-shot scripts such as cleanvar must not run twice.
+fn restore_services() {
+    let mut scripts: Vec<String> = match std::fs::read_dir("/etc/rc.d") {
+        Ok(dir) => dir.flatten().map(|e| e.path().display().to_string()).collect(),
+        Err(e) => {
+            complain(&format!("/etc/rc.d: {e}"));
+            return;
+        }
+    };
+    scripts.sort();
+    let mut rcorder = command("/sbin/rcorder");
+    rcorder.args(["-k", "shutdown"]).args(&scripts).stdin(std::process::Stdio::null());
+    // SAFETY: signals_only is async-signal-safe.
+    unsafe { rcorder.pre_exec(signals_only) };
+    let order = match rcorder.output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) => {
+            complain(&format!("/sbin/rcorder: {e}"));
+            return;
+        }
+    };
+    for script in order.lines() {
+        // `quiet`: a disabled service answers 0 without a word.
+        let mut status = command("/sbin/init_sh");
+        status.args([script, "quietstatus"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+        // SAFETY: signals_only is async-signal-safe.
+        unsafe { status.pre_exec(signals_only) };
+        if status.status().is_ok_and(|s| s.success()) {
+            continue;
+        }
+        let name = script.rsplit('/').next().unwrap_or(script);
+        say(&format!("{name} is not running; starting it"));
+        let mut start = command("/sbin/init_sh");
+        start.args([script, "start"]);
+        // SAFETY: console_output is async-signal-safe.
+        unsafe { start.pre_exec(console_output) };
+        match run(start, script) {
+            Some(0) | None => {}
+            Some(st) => complain(&format!("{name} start failed ({})", describe(st))),
+        }
+    }
+}
+
 /// One `/etc/ttys` entry init runs a session on.
 struct Session {
     ent: ttyent::TtyEnt,
@@ -842,7 +916,8 @@ fn main() {
                 Leave::CleanTtys => State::SingleUser,
             },
             State::Recovery => {
-                say("restarted by the kernel after a death; see /proc/initdeaths");
+                log(libc::LOG_ALERT, &format!("restarted by the kernel: {}", death_reason()));
+                restore_services();
                 services_up = true;
                 match multi_user(true) {
                     Leave::CleanTtys => State::SingleUser,
