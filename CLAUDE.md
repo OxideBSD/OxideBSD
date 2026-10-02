@@ -99,7 +99,7 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `OXIDEBSD_QEMU_MONITOR`, or `scripts/qemu_sendkeys.py`. Only credential prompts and
   restart/reboot/poweroff persistence stay manual; hand those to the user.
 - **POSIX pilot** (`tests/posix_conformance_smoke.rs`, full Open POSIX Test Suite) is the main
-  conformance signal. Run with `scripts/run_posix_pilot_supervised.sh [--reset]`.
+  regression and bug-finding check; its pass rate is not a conformance measure. Run with `scripts/run_posix_pilot_supervised.sh [--reset]`.
   `POSIX_PILOT_CANARY_ONLY=1` runs the curated regression subset. When the supervisor excludes a
   file for a stall, verify it in isolation: it often blames an innocent neighbour. Current numbers
   live in `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`, never in this file.
