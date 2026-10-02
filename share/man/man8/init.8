@@ -114,6 +114,30 @@ calls
 and
 .Xr shutdown 8
 send these signals.
+.Ss Logging
+.Nm
+logs its messages with
+.Xr syslog 3
+to the
+.Dq auth
+facility; until
+.Xr syslogd 8
+is running they go to the console.
+After the first successful
+.Pa /etc/rc
+it writes a
+.Dv BOOT_TIME
+record to
+.Xr utmpx 5
+and
+.Pa /var/log/wtmpx ,
+and when shutting down, a
+.Dv SHUTDOWN_TIME
+record.
+When a session ends while its login record still shows a user logged in,
+.Nm
+closes the record with
+.Dv DEAD_PROCESS .
 .Ss Death of init
 If
 .Nm
@@ -149,14 +173,21 @@ the terminals to run sessions on
 .It Pa /proc/initdeaths
 the kernel's record of deaths of
 .Nm
+.It Pa /var/run/utmpx
+current sessions, and the last boot and shutdown
+.It Pa /var/log/wtmpx
+the history of logins, boots and shutdowns
 .El
 .Sh SEE ALSO
+.Xr syslog 3 ,
 .Xr ttys 5 ,
+.Xr utmpx 5 ,
 .Xr emergency 8 ,
 .Xr getty 8 ,
 .Xr rc 8 ,
 .Xr reboot 8 ,
-.Xr shutdown 8
+.Xr shutdown 8 ,
+.Xr syslogd 8
 .Sh HISTORY
 An
 .Nm

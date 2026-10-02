@@ -63,8 +63,27 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
+/// Opens init's log as FreeBSD's init does (`LOG_AUTH`), with `LOG_CONS`: until syslogd is
+/// running, its messages go to the console (SYSLOG.md §5.2).
+fn open_log() {
+    // SAFETY: openlog keeps the pointer to a static string.
+    unsafe { libc::openlog(c"init".as_ptr(), libc::LOG_CONS, libc::LOG_AUTH) };
+}
+
+fn log(priority: libc::c_int, msg: &str) {
+    let Ok(msg) = CString::new(msg) else { return };
+    // SAFETY: a constant format and a NUL-terminated argument.
+    unsafe { libc::syslog(priority, c"%s".as_ptr(), msg.as_ptr()) };
+}
+
+/// A state change or other news, which `syslog.conf`'s `auth.notice` puts on the console.
 fn say(msg: &str) {
-    eprintln!("init: {msg}");
+    log(libc::LOG_NOTICE, msg);
+}
+
+/// Something that went wrong.
+fn complain(msg: &str) {
+    log(libc::LOG_ERR, msg);
 }
 
 fn signal_set(sigs: &[libc::c_int]) -> libc::sigset_t {
@@ -217,7 +236,7 @@ fn run(mut cmd: Command, what: &str) -> Option<libc::c_int> {
     let child = match cmd.spawn() {
         Ok(c) => c.id() as libc::pid_t,
         Err(e) => {
-            say(&format!("{what}: {e}"));
+            complain(&format!("{what}: {e}"));
             return None;
         }
     };
@@ -296,7 +315,7 @@ fn hang_up(leaders: &[libc::pid_t]) {
         std::thread::sleep(Duration::from_millis(100));
     }
     for &p in leaders.iter().filter(|&&p| alive(p)) {
-        say(&format!("session {p} would not hang up; killing it"));
+        complain(&format!("session {p} would not hang up; killing it"));
         // SAFETY: as above.
         unsafe {
             libc::kill(-p, libc::SIGKILL);
@@ -320,6 +339,7 @@ fn shutdown(sig: libc::c_int) -> ! {
         _ => (libc::RB_AUTOBOOT, "reboot"),
     };
     say(&format!("shutting down ({what})"));
+    record_time(SHUTDOWN_TIME, "shutdown");
     // The sessions let go of their terminals, so that rc.shutdown can have the console.
     let leaders = std::mem::take(&mut *LEADERS.lock().unwrap());
     hang_up(&leaders);
@@ -329,17 +349,17 @@ fn shutdown(sig: libc::c_int) -> ! {
         Ok(c) => {
             let pid = c.id() as libc::pid_t;
             if !wait_up_to(pid, RCSHUTDOWN_TIMEOUT) {
-                say("/etc/rc.shutdown timed out; terminating it");
+                complain("/etc/rc.shutdown timed out; terminating it");
                 // SAFETY: kill with a pid init started.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
-        Err(e) => say(&format!("/etc/rc.shutdown: {e}")),
+        Err(e) => complain(&format!("/etc/rc.shutdown: {e}")),
     }
     // SAFETY: kill(-1) signals every process but init.
     unsafe { libc::kill(-1, libc::SIGTERM) };
     if !wait_up_to(-1, KILL_GRACE) {
-        say("some processes would not die; killing them");
+        complain("some processes would not die; killing them");
         unsafe { libc::kill(-1, libc::SIGKILL) };
         wait_up_to(-1, Duration::from_secs(1));
     }
@@ -348,11 +368,89 @@ fn shutdown(sig: libc::c_int) -> ! {
         libc::sync();
         libc::reboot(how);
     }
-    say(&format!("reboot: {}", io::Error::last_os_error()));
+    complain(&format!("reboot: {}", io::Error::last_os_error()));
     loop {
         // SAFETY: pause takes no arguments.
         unsafe { libc::pause() };
     }
+}
+
+unsafe extern "C" {
+    /// Appends a record to a wtmpx file (musl, `_BSD_SOURCE`); the libc crate doesn't bind it.
+    fn updwtmpx(file: *const libc::c_char, ut: *const libc::utmpx);
+}
+
+const WTMPX: &CStr = c"/var/log/wtmpx";
+/// `<utmpx.h>`'s `SHUTDOWN_TIME` (OxideBSD's musl; NetBSD's `DOWN_TIME`), which the libc crate
+/// doesn't have.
+const SHUTDOWN_TIME: libc::c_short = 11;
+
+fn now_tv() -> libc::timeval {
+    // SAFETY: gettimeofday into a local.
+    let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+    unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) };
+    tv
+}
+
+fn copy_into(dst: &mut [libc::c_char], s: &str) {
+    let room = dst.len() - 1;
+    for (d, b) in dst.iter_mut().zip(s.bytes().take(room)) {
+        *d = b as libc::c_char;
+    }
+}
+
+/// Writes `rec` to `/var/run/utmpx` and appends it to `/var/log/wtmpx` (LOGIN.md §8).
+// The libc crate marks musl's utmpx functions deprecated because stock musl stubs them;
+// OxideBSD's musl implements them.
+#[allow(deprecated)]
+fn put_record(rec: &libc::utmpx) {
+    // SAFETY: utmpx calls with a whole, initialized record.
+    unsafe {
+        libc::setutxent();
+        libc::pututxline(rec);
+        libc::endutxent();
+        updwtmpx(WTMPX.as_ptr(), rec);
+    }
+}
+
+/// A `BOOT_TIME` or `SHUTDOWN_TIME` record, named as the BSDs' wtmp names them for `last`.
+fn record_time(kind: libc::c_short, name: &str) {
+    // SAFETY: a zeroed utmpx is a valid empty record.
+    let mut ut: libc::utmpx = unsafe { std::mem::zeroed() };
+    ut.ut_type = kind;
+    copy_into(&mut ut.ut_line, "~");
+    copy_into(&mut ut.ut_user, name);
+    let tv = now_tv();
+    ut.ut_tv.tv_sec = tv.tv_sec as _;
+    ut.ut_tv.tv_usec = tv.tv_usec as _;
+    put_record(&ut);
+}
+
+/// A session on `line` ended. If its login record still says someone is logged in there (login
+/// was killed before it could write its own logout), it is closed, as FreeBSD's init does.
+#[allow(deprecated)]
+fn record_logout(line: &str) {
+    // SAFETY: a zeroed key with ut_line set; getutxline returns a static record or NULL.
+    let found = unsafe {
+        let mut key: libc::utmpx = std::mem::zeroed();
+        copy_into(&mut key.ut_line, line);
+        libc::setutxent();
+        let e = libc::getutxline(&key);
+        let found = (!e.is_null()).then(|| *e);
+        libc::endutxent();
+        found
+    };
+    let Some(old) = found else { return };
+    // SAFETY: as in record_time.
+    let mut ut: libc::utmpx = unsafe { std::mem::zeroed() };
+    ut.ut_type = libc::DEAD_PROCESS;
+    ut.ut_pid = old.ut_pid;
+    ut.ut_line = old.ut_line;
+    ut.ut_id = old.ut_id;
+    let tv = now_tv();
+    ut.ut_tv.tv_sec = tv.tv_sec as _;
+    ut.ut_tv.tv_usec = tv.tv_usec as _;
+    put_record(&ut);
 }
 
 // musl has crypt(3) in libc; a glibc host (for `cargo test`) keeps it in libcrypt.
@@ -421,7 +519,7 @@ fn single_user_password(hash: &CStr) -> bool {
 /// password prompt.
 fn single_user_child(insecure: bool) -> ! {
     if let Err(e) = take_console() {
-        say(&format!("/dev/console: {e}"));
+        complain(&format!("/dev/console: {e}"));
     }
     if insecure
         && let Some(hash) = root_hash()
@@ -431,7 +529,7 @@ fn single_user_child(insecure: bool) -> ! {
         unsafe { libc::_exit(0) };
     }
     let err = command("/bin/sh").arg0("-sh").env("PS1", PS1).exec();
-    say(&format!("/bin/sh: {err}"));
+    complain(&format!("/bin/sh: {err}"));
     // SAFETY: as above.
     unsafe { libc::_exit(1) };
 }
@@ -444,7 +542,7 @@ fn single_user() {
     // SAFETY: fork; the child never returns from single_user_child.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        say(&format!("fork: {}", io::Error::last_os_error()));
+        complain(&format!("fork: {}", io::Error::last_os_error()));
         std::thread::sleep(RESPAWN_PAUSE);
         return;
     }
@@ -472,7 +570,7 @@ fn runcom(autoboot: bool) -> bool {
     match run(rc, "/etc/rc") {
         Some(0) => true,
         Some(status) => {
-            say(&format!("/etc/rc failed ({})", describe(status)));
+            complain(&format!("/etc/rc failed ({})", describe(status)));
             false
         }
         None => false,
@@ -513,7 +611,7 @@ impl Session {
         match cmd.spawn() {
             Ok(c) => self.pid = c.id() as libc::pid_t,
             Err(e) => {
-                say(&format!("{}: {}: {e}", self.ent.name, argv[0]));
+                complain(&format!("{}: {}: {e}", self.ent.name, argv[0]));
                 self.ended();
             }
         }
@@ -528,7 +626,7 @@ impl Session {
         }
         self.quick_exits.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
         if self.quick_exits.len() >= RESPAWN_LIMIT {
-            say(&format!(
+            complain(&format!(
                 "{}: getty repeating too quickly; waiting {} seconds",
                 self.ent.name,
                 RESPAWN_PAUSE.as_secs()
@@ -567,7 +665,7 @@ fn wanted_ttys() -> Vec<ttyent::TtyEnt> {
     let entries = match ttyent::read() {
         Ok(e) => e,
         Err(e) => {
-            say(&format!("{}: {e}", ttyent::PATH));
+            complain(&format!("{}: {e}", ttyent::PATH));
             return Vec::new();
         }
     };
@@ -595,12 +693,15 @@ fn reread_ttys(sessions: &mut Vec<Session>) {
         }
         _ => {
             if s.pid > 0 {
-                dropped.push(s.pid);
+                dropped.push((s.pid, s.ent.name.clone()));
             }
             false
         }
     });
-    hang_up(&dropped);
+    hang_up(&dropped.iter().map(|d| d.0).collect::<Vec<_>>());
+    for (_, line) in &dropped {
+        record_logout(line);
+    }
     for w in wanted {
         if !sessions.iter().any(|s| s.ent.name == w.name) {
             sessions.push(Session::new(w));
@@ -620,7 +721,7 @@ fn multi_user(recovering: bool) -> Leave {
     GOT_TSTP.store(false, Ordering::Relaxed);
     let mut sessions: Vec<Session> = wanted_ttys().into_iter().map(Session::new).collect();
     if sessions.is_empty() {
-        say("no terminals in /etc/ttys are on");
+        complain("no terminals in /etc/ttys are on");
     }
     if recovering {
         for s in &mut sessions {
@@ -636,6 +737,9 @@ fn multi_user(recovering: bool) -> Leave {
             let leaders: Vec<_> = sessions.iter().map(|s| s.pid).filter(|&p| p > 0).collect();
             set_leaders(&[]);
             hang_up(&leaders);
+            for s in &sessions {
+                record_logout(&s.ent.name);
+            }
             return Leave::CleanTtys;
         }
         if GOT_HUP.swap(false, Ordering::Relaxed) {
@@ -652,6 +756,7 @@ fn multi_user(recovering: bool) -> Leave {
 
         for (pid, _) in reap_all() {
             if let Some(s) = sessions.iter_mut().find(|s| s.pid == pid) {
+                record_logout(&s.ent.name);
                 s.ended();
             }
         }
@@ -694,6 +799,7 @@ enum State {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    open_log();
     install_handlers();
     // SAFETY: umask takes no pointers.
     unsafe { libc::umask(0o022) };
@@ -711,6 +817,8 @@ fn main() {
     // Whether the services `/etc/rc` started are still running: single-user reached through
     // clean-ttys goes back to multi-user without running it again.
     let mut services_up = false;
+    // The boot's `BOOT_TIME` record is written once, by the first successful /etc/rc.
+    let mut boot_recorded = false;
 
     loop {
         state = match state {
@@ -723,6 +831,11 @@ fn main() {
                 let ok = runcom(autoboot);
                 autoboot = false;
                 services_up = ok;
+                // After /etc/rc, whose cleanvar empties /var/run (LOGIN.md §8.3).
+                if ok && !boot_recorded {
+                    record_time(libc::BOOT_TIME, "reboot");
+                    boot_recorded = true;
+                }
                 if ok { State::MultiUser } else { State::SingleUser }
             }
             State::MultiUser => match multi_user(false) {

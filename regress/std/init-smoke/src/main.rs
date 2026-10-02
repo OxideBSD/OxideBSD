@@ -10,7 +10,9 @@
 //! 3. `second ttyx0` exits at once three times; init must pause it about 30 seconds before the
 //!    fourth start. That one sends `SIGTERM`, leaving a killer behind again.
 //! 4. clean-ttys hangs up both sessions, and the killer ends the single-user shell. Init goes back
-//!    to multi-user without running `/etc/rc`, and the new `session` checks the log.
+//!    to multi-user without running `/etc/rc`, and the new `session` checks the log, and the
+//!    utmpx records: one `BOOT_TIME`, and the login record the first session left open (as a
+//!    killed login(1) would) closed by init.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -109,6 +111,47 @@ fn wait_for_hangup(who: &str) -> ! {
     }
 }
 
+/// A login record for `line`, as login(1) writes one, which this session never closes.
+#[allow(deprecated)]
+fn record_login(line: &str) {
+    let mut ut: libc::utmpx = unsafe { std::mem::zeroed() };
+    ut.ut_type = libc::USER_PROCESS;
+    ut.ut_pid = std::process::id() as libc::pid_t;
+    for (d, b) in ut.ut_line.iter_mut().zip(line.bytes()) {
+        *d = b as libc::c_char;
+    }
+    for (d, b) in ut.ut_id.iter_mut().zip(line.trim_start_matches("tty").bytes()) {
+        *d = b as libc::c_char;
+    }
+    for (d, b) in ut.ut_user.iter_mut().zip("smoke".bytes()) {
+        *d = b as libc::c_char;
+    }
+    unsafe {
+        libc::setutxent();
+        check(!libc::pututxline(&ut).is_null(), "pututxline failed");
+        libc::endutxent();
+    }
+}
+
+/// Every record in `/var/run/utmpx`: (type, line).
+#[allow(deprecated)]
+fn utmpx_records() -> Vec<(libc::c_short, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        libc::setutxent();
+        loop {
+            let e = libc::getutxent();
+            if e.is_null() {
+                break;
+            }
+            let line: String = (*e).ut_line.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect();
+            out.push(((*e).ut_type, line));
+        }
+        libc::endutxent();
+    }
+    out
+}
+
 /// `/proc/<pid>/stat`'s fields after the command name: state, ppid, pgrp, session, tty_nr.
 fn stat(pid: i32) -> Option<(String, Vec<i64>)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -202,6 +245,7 @@ fn main() {
             check(ppid == 1 && pid != 1, "the session isn't a child of pid 1");
             if n == 0 {
                 check(count("rc") == 2, "multi-user before /etc/rc succeeded");
+                record_login("ttyv0");
                 write("/etc/ttys", &ttys(true), 0o644);
                 unsafe { libc::kill(1, libc::SIGHUP) };
                 wait_for_hangup("session");
@@ -212,6 +256,23 @@ fn main() {
             check(lines().iter().any(|l| l == "hup session"), "clean-ttys didn't hang up the ttyv0 session");
             check(lines().iter().any(|l| l == "hup second"), "clean-ttys didn't hang up the ttyx0 session");
             check(lines().iter().any(|l| l == "paused ok"), "no pause before the fourth start");
+            let records = utmpx_records();
+            check(records.iter().any(|r| r.0 == libc::BOOT_TIME), "no BOOT_TIME record in /var/run/utmpx");
+            // wtmpx is history: whole records, appended. /etc/rc succeeded once, so one boot.
+            let wtmpx = std::fs::read("/var/log/wtmpx").unwrap_or_default();
+            let size = std::mem::size_of::<libc::utmpx>();
+            check(wtmpx.len() % size == 0, "/var/log/wtmpx holds a partial record");
+            let boots = wtmpx.chunks(size).filter(|r| i16::from_ne_bytes([r[0], r[1]]) == libc::BOOT_TIME).count();
+            check(boots == 1, &format!("{boots} BOOT_TIME records in /var/log/wtmpx, not 1"));
+            check(
+                records.iter().any(|r| r.0 == libc::DEAD_PROCESS && r.1 == "ttyv0"),
+                "the hung-up ttyv0 login wasn't closed with DEAD_PROCESS",
+            );
+            check(
+                !records.iter().any(|r| r.0 == libc::USER_PROCESS && r.1 == "ttyv0"),
+                "a USER_PROCESS record is left for ttyv0",
+            );
+
             finish(true, "init's states, ttys, restart limit and signals");
         }
         "second" => {
