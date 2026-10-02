@@ -117,20 +117,37 @@ fn sockaddr(name: Option<&Name>) -> SockAddr {
     out
 }
 
-/// A process's credentials as local sockets pass them (`UNIX.md` §9.1): effective IDs equal real
-/// ones, and the group list is the one group.
+/// A process's credentials as local sockets pass them (`UNIX.md` §9.1): real and effective IDs,
+/// and the groups as FreeBSD's `cr_groups` holds them, the effective group first and then the
+/// supplementary groups, at most `CMGROUP_MAX` (16).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cred {
     pid: u32,
-    uid: u32,
-    gid: u32,
+    ruid: u32,
+    euid: u32,
+    rgid: u32,
+    egid: u32,
+    ngroups: u32,
+    groups: [u32; 16],
 }
 
 fn current_cred() -> Cred {
+    let c = crate::process::identity::current_cred();
+    let mut groups = [0u32; 16];
+    groups[0] = c.egid;
+    let mut ngroups = 1;
+    for &g in c.groups.iter().take(groups.len() - 1) {
+        groups[ngroups] = g;
+        ngroups += 1;
+    }
     Cred {
         pid: crate::process::scheduler::current_tgid() as u32,
-        uid: crate::process::identity::oxidebsd_current_uid() as u32,
-        gid: crate::process::identity::oxidebsd_current_gid() as u32,
+        ruid: c.ruid,
+        euid: c.euid,
+        rgid: c.rgid,
+        egid: c.egid,
+        ngroups: ngroups as u32,
+        groups,
     }
 }
 
@@ -138,46 +155,46 @@ fn words(v: &[u32]) -> Vec<u8> {
     v.iter().flat_map(|w| w.to_ne_bytes()).collect()
 }
 
-/// `struct xucred` (`LOCAL_PEERCRED`): version, uid, `short` group count, 16 groups, and the pid
-/// in an 8-byte union at the end; 88 bytes.
+/// `struct xucred` (`LOCAL_PEERCRED`): version, effective uid, `short` group count, 16 groups,
+/// and the pid in an 8-byte union at the end; 88 bytes.
 fn xucred(c: Cred) -> Vec<u8> {
-    let mut v = words(&[0, c.uid]);
-    v.extend_from_slice(&1i16.to_ne_bytes());
+    let mut v = words(&[0, c.euid]);
+    v.extend_from_slice(&(c.ngroups as i16).to_ne_bytes());
     v.extend_from_slice(&[0; 2]);
-    let mut groups = [0u32; 16];
-    groups[0] = c.gid;
-    v.extend_from_slice(&words(&groups));
+    v.extend_from_slice(&words(&c.groups));
     v.extend_from_slice(&[0; 4]);
     v.extend_from_slice(&(c.pid as u64).to_ne_bytes());
     v
 }
 
-/// `struct ucred` (`SO_PEERCRED`, `SCM_CREDENTIALS`): pid, uid, gid.
+/// `struct ucred` (`SO_PEERCRED`, `SCM_CREDENTIALS`): pid and the effective uid and gid, as Linux
+/// reports them.
 fn ucred(c: Cred) -> Vec<u8> {
-    words(&[c.pid, c.uid, c.gid])
+    words(&[c.pid, c.euid, c.egid])
 }
 
-/// `struct cmsgcred` (`SCM_CREDS` the sender asked for): pid, uid, euid, gid, a `short` group
-/// count and 16 groups; 84 bytes.
+/// `struct cmsgcred` (`SCM_CREDS` the sender asked for): pid, real uid, effective uid, real gid,
+/// a `short` group count and 16 groups; 84 bytes.
 fn cmsgcred(c: Cred) -> Vec<u8> {
-    let mut v = words(&[c.pid, c.uid, c.uid, c.gid]);
-    v.extend_from_slice(&1i16.to_ne_bytes());
+    let mut v = words(&[c.pid, c.ruid, c.euid, c.rgid]);
+    v.extend_from_slice(&(c.ngroups as i16).to_ne_bytes());
     v.extend_from_slice(&[0; 2]);
-    let mut groups = [0u32; 16];
-    groups[0] = c.gid;
-    v.extend_from_slice(&words(&groups));
+    v.extend_from_slice(&words(&c.groups));
     v
 }
 
-/// `struct sockcred` with one group (`LOCAL_CREDS`): uid, euid, gid, egid, count, groups.
+/// `struct sockcred` (`LOCAL_CREDS`): real and effective uid and gid, the group count, the groups.
 fn sockcred(c: Cred) -> Vec<u8> {
-    words(&[c.uid, c.uid, c.gid, c.gid, 1, c.gid])
+    let mut v = words(&[c.ruid, c.euid, c.rgid, c.egid, c.ngroups]);
+    v.extend_from_slice(&words(&c.groups[..c.ngroups as usize]));
+    v
 }
 
-/// `struct sockcred2` with one group (`LOCAL_CREDS_PERSISTENT`): `sockcred` after a version and
-/// the pid.
+/// `struct sockcred2` (`LOCAL_CREDS_PERSISTENT`): `sockcred` after a version and the pid.
 fn sockcred2(c: Cred) -> Vec<u8> {
-    words(&[0, c.pid, c.uid, c.uid, c.gid, c.gid, 1, c.gid])
+    let mut v = words(&[0, c.pid]);
+    v.extend_from_slice(&sockcred(c));
+    v
 }
 
 /// What a message carries besides its bytes, as the sender gave it.
@@ -361,7 +378,7 @@ impl State {
             if let Some(c) = m.control
                 && !c.rights.is_empty()
             {
-                self.put_inflight(m.sender.uid, &c.rights);
+                self.put_inflight(m.sender.euid, &c.rights);
                 out.extend(c.rights);
             }
         }
@@ -486,9 +503,13 @@ fn parse_control(control: &[u8], me: Cred) -> Result<Option<Control>, i64> {
                     return Err(EINVAL as i64);
                 }
                 let w = |i: usize| u32::from_ne_bytes(data[i..i + 4].try_into().unwrap());
-                let given = Cred { pid: w(0), uid: w(4), gid: w(8) };
-                // Only one's own, unless root (§9.4).
-                if given != me && me.uid != 0 {
+                let (pid, uid, gid) = (w(0), w(4), w(8));
+                let mut groups = [0u32; 16];
+                groups[0] = gid;
+                let given = Cred { pid, ruid: uid, euid: uid, rgid: gid, egid: gid, ngroups: 1, groups };
+                // Only one's own (its pid, its real or effective IDs), unless root (§9.4).
+                let own = pid == me.pid && (uid == me.ruid || uid == me.euid) && (gid == me.rgid || gid == me.egid);
+                if !own && me.euid != 0 {
                     return Err(EPERM as i64);
                 }
                 c.credentials = Some(given);
@@ -564,7 +585,7 @@ fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool) -
         && !c.rights.is_empty()
     {
         let rights = core::mem::take(&mut c.rights);
-        st.put_inflight(sender.uid, &rights);
+        st.put_inflight(sender.euid, &rights);
         let left = ctl.room.saturating_sub(b.out.len());
         let fit = left.saturating_sub(CMSG_HDR) / 4;
         let n = rights.len().min(fit);
@@ -968,7 +989,7 @@ impl Protocol for Local {
         let mut st = STATE.lock();
         let rights = control.as_ref().map(|c| c.rights.clone()).unwrap_or_default();
         if !rights.is_empty() {
-            st.take_inflight(sender.uid, &rights)?;
+            st.take_inflight(sender.euid, &rights)?;
             for &r in &rights {
                 crate::fs::fd::hold(r);
             }
@@ -977,7 +998,7 @@ impl Protocol for Local {
         // Not delivered (no room, or no receiver): the descriptions go back.
         let undone = match &result {
             Err(_) if !rights.is_empty() => {
-                st.put_inflight(sender.uid, &rights);
+                st.put_inflight(sender.euid, &rights);
                 rights
             }
             _ => Vec::new(),

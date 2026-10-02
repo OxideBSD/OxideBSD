@@ -608,72 +608,69 @@ pub(crate) fn sys_getsid(pid: u64) -> Result<u64, u64> {
     crate::process::do_getsid(crate::process::scheduler::current_pid(), pid as i64)
 }
 
-/// `SYS_GETUID`/`SYS_GETEUID`/`SYS_GETGID`/`SYS_GETEGID` (`158`-`161`, registered by
-/// `sys/modules/posix_compat`, continuing on from `SYS_SETITIMER`/`SYS_GETITIMER = 156`/`157`) — all
-/// four are real zero-argument `getuid(2)`-family calls, so only the number needed remapping on
-/// the musl side. Delegate to `process::do_getuid`/`do_getgid` — see `Process::uid`'s own doc
-/// comment for why there's no distinct effective value to compute.
+/// The credential calls (`OxideBSD-doc/SUDO.md` §5.1; `process::identity`), registered by
+/// `sys/modules/posix_compat`: `getuid`/`geteuid`/`getgid`/`getegid` (158-161), `setuid`/`setgid`
+/// (162/163), `getgroups` (164), `setgroups` (178), `setreuid`/`setregid` (113/114), and
+/// `setresuid`/`getresuid`/`setresgid`/`getresgid` (499-502). Each takes plain integers and
+/// pointers; a `-1` ID means "unchanged".
+fn me() -> crate::process::Pid {
+    crate::process::scheduler::current_pid()
+}
+
 pub(crate) fn sys_getuid() -> u64 {
-    crate::process::do_getuid(crate::process::scheduler::current_pid())
+    crate::process::do_getuid(me())
 }
 
 pub(crate) fn sys_geteuid() -> u64 {
-    crate::process::do_getuid(crate::process::scheduler::current_pid())
+    crate::process::do_geteuid(me())
 }
 
 pub(crate) fn sys_getgid() -> u64 {
-    crate::process::do_getgid(crate::process::scheduler::current_pid())
+    crate::process::do_getgid(me())
 }
 
 pub(crate) fn sys_getegid() -> u64 {
-    crate::process::do_getgid(crate::process::scheduler::current_pid())
+    crate::process::do_getegid(me())
 }
 
-/// `SYS_SETUID`/`SYS_SETGID` (`162`/`163`) — real single-argument `setuid(2)`/`setgid(2)` wire
-/// format. Delegates to `process::do_setuid`/`do_setgid` for the real POSIX permission rule (root
-/// may become any uid/gid, anything else may only "become" its own current one).
 pub(crate) fn sys_setuid(uid: u64) -> Result<u64, u64> {
-    crate::process::do_setuid(crate::process::scheduler::current_pid(), uid as u32)
+    crate::process::do_setuid(me(), uid as u32)
 }
 
 pub(crate) fn sys_setgid(gid: u64) -> Result<u64, u64> {
-    crate::process::do_setgid(crate::process::scheduler::current_pid(), gid as u32)
+    crate::process::do_setgid(me(), gid as u32)
 }
 
-/// `SYS_SETRESUID` (`499` — real, unclaimed `__NR_setresuid`, see `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s
-/// numeric-collision sweep for why it isn't at its original real value `117`) — real `(ruid, euid,
-/// suid)` wire format, each a `uid_t` cast through `int`/`long` so a real `-1` ("leave unchanged")
-/// arrives sign-extended and reads back correctly as `i64`. See `process::do_setresuid`'s own doc
-/// comment for the real POSIX permission rule and why this single handler also backs `seteuid()`.
+pub(crate) fn sys_setreuid(ruid: u64, euid: u64) -> Result<u64, u64> {
+    crate::process::do_setreid(me(), ruid, euid, false)
+}
+
+pub(crate) fn sys_setregid(rgid: u64, egid: u64) -> Result<u64, u64> {
+    crate::process::do_setreid(me(), rgid, egid, true)
+}
+
 pub(crate) fn sys_setresuid(ruid: u64, euid: u64, suid: u64) -> Result<u64, u64> {
-    crate::process::do_setresuid(
-        crate::process::scheduler::current_pid(),
-        ruid as i64,
-        euid as i64,
-        suid as i64,
-    )
+    crate::process::do_setresid(me(), ruid, euid, suid, false)
 }
 
-/// `SYS_GETGROUPS` (`164`) — real `getgroups(int size, gid_t list[])` wire format, no
-/// argument-convention patch needed (a plain `(size, ptr)` pair, no string argument to mismatch).
-/// See `process::do_getgroups`'s own doc comment for why the caller's own `gid` is the complete,
-/// correct answer on a kernel with no supplementary-group concept.
+pub(crate) fn sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> Result<u64, u64> {
+    crate::process::do_setresid(me(), rgid, egid, sgid, true)
+}
+
+pub(crate) fn sys_getresuid(r: u64, e: u64, s: u64) -> Result<u64, u64> {
+    crate::process::do_getresid(me(), r, e, s, false)
+}
+
+pub(crate) fn sys_getresgid(r: u64, e: u64, s: u64) -> Result<u64, u64> {
+    crate::process::do_getresid(me(), r, e, s, true)
+}
+
 pub(crate) fn sys_getgroups(size: u64, list_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_getgroups(
-        crate::process::scheduler::current_pid(),
-        size as i64,
-        list_ptr,
-    )
+    crate::process::do_getgroups(me(), size as i64, list_ptr)
 }
 
-/// `SYS_SETGROUPS` (`178` — an *invented* number, not real Linux's own `__NR_setgroups` (`116`):
-/// that value was already independently claimed by this ABI's own `SYS_KILL`, a real collision
-/// found live — see `external/mit/musl/arch/x86_64/bits/syscall.h.in`'s own comment on this line
-/// for the full story). Real `(size, gid_list_ptr)` wire format, no argument-convention patch
-/// needed. See `process::do_setgroups`'s own doc comment for why this is a real, permission-
-/// checked no-op rather than either an unconditional success or a plain `ENOSYS`.
 pub(crate) fn sys_setgroups(count: u64, list_ptr: u64) -> Result<u64, u64> {
-    crate::process::do_setgroups(crate::process::scheduler::current_pid(), count, list_ptr)
+    crate::process::do_setgroups(me(), count, list_ptr)
 }
 
 /// `SYS_PRLIMIT64` (`478`) — real `prlimit64(2)`'s exact `(pid, resource, new_limit, old_limit)`
@@ -1780,6 +1777,26 @@ pub(crate) extern "C" fn oxidebsd_sys_setgid(gid: u64) -> i64 {
 
 pub(crate) extern "C" fn oxidebsd_sys_setresuid(ruid: u64, euid: u64, suid: u64) -> i64 {
     result_to_ffi(sys_setresuid(ruid, euid, suid))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> i64 {
+    result_to_ffi(sys_setresgid(rgid, egid, sgid))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_setreuid(ruid: u64, euid: u64) -> i64 {
+    result_to_ffi(sys_setreuid(ruid, euid))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_setregid(rgid: u64, egid: u64) -> i64 {
+    result_to_ffi(sys_setregid(rgid, egid))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_getresuid(r: u64, e: u64, s: u64) -> i64 {
+    result_to_ffi(sys_getresuid(r, e, s))
+}
+
+pub(crate) extern "C" fn oxidebsd_sys_getresgid(r: u64, e: u64, s: u64) -> i64 {
+    result_to_ffi(sys_getresgid(r, e, s))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_getgroups(size: u64, list_ptr: u64) -> i64 {

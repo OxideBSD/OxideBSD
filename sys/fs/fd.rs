@@ -817,17 +817,33 @@ pub(crate) type ContentWrite = extern "C" fn(u64, u64, u64) -> i64;
 pub(crate) type ContentSize = extern "C" fn(u64) -> i64;
 /// `content_id -> 1` if it's a POSIX shared memory object (`shm_open`), else `0`.
 pub(crate) type ContentIsShm = extern "C" fn(u64) -> i64;
+/// `(real_fd, out)`: for a file open for reading, stores its mode bits, owner and group in
+/// `out[0..3]` for `execve`'s set-user-ID and set-group-ID handling (set-ID bits cleared under a
+/// `nosuid` mount); `0`, or negative if `real_fd` isn't such a file. Keyed by descriptor, unlike
+/// the other accessors: whether the file is under a `nosuid` mount depends on how it was opened.
+pub(crate) type ContentSetId = extern "C" fn(u64, *mut u32) -> i64;
 
-static CONTENT_ACCESSORS: Mutex<Option<(ContentRead, ContentWrite, ContentSize, ContentIsShm)>> =
-    Mutex::new(None);
+type ContentAccessors = (ContentRead, ContentWrite, ContentSize, ContentIsShm, ContentSetId);
+
+static CONTENT_ACCESSORS: Mutex<Option<ContentAccessors>> = Mutex::new(None);
 
 pub(crate) extern "C" fn oxidebsd_register_content_accessors(
     read: ContentRead,
     write: ContentWrite,
     size: ContentSize,
     is_shm: ContentIsShm,
+    setid: ContentSetId,
 ) {
-    *CONTENT_ACCESSORS.lock() = Some((read, write, size, is_shm));
+    *CONTENT_ACCESSORS.lock() = Some((read, write, size, is_shm, setid));
+}
+
+/// The mode bits, owner and group of the program open on `fd`, for `execve`
+/// (`process::identity::Cred::exec`).
+pub(crate) fn exec_setid(fd: u64) -> Option<(u32, u32, u32)> {
+    let real_fd = real_fd_of(fd)?;
+    let setid = (*CONTENT_ACCESSORS.lock())?.4;
+    let mut out = [0u32; 3];
+    (setid(real_fd, out.as_mut_ptr()) == 0).then_some((out[0], out[1], out[2]))
 }
 
 /// `(content_id, offset, ptr, len) -> bytes read`, `-1` if no module ever registered content
@@ -835,7 +851,7 @@ pub(crate) extern "C" fn oxidebsd_register_content_accessors(
 /// real syscall is reachable).
 pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((read, _, _, _)) => read(content_id, offset, ptr, len),
+        Some((read, ..)) => read(content_id, offset, ptr, len),
         None => -1,
     }
 }
@@ -845,7 +861,7 @@ pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> 
 /// `OpenFile::Write` doc comment).
 pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((_, write, _, _)) => write(content_id, ptr, len),
+        Some((_, write, ..)) => write(content_id, ptr, len),
         None => -1,
     }
 }
@@ -853,7 +869,7 @@ pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
 /// Real current content length of `content_id`, in bytes.
 pub(crate) fn content_size(content_id: u64) -> i64 {
     match *CONTENT_ACCESSORS.lock() {
-        Some((_, _, size, _)) => size(content_id),
+        Some((_, _, size, ..)) => size(content_id),
         None => -1,
     }
 }
@@ -863,7 +879,7 @@ pub(crate) fn content_size(content_id: u64) -> i64 {
 /// do_mmap_file_backed`).
 pub(crate) fn content_is_shm(content_id: u64) -> bool {
     match *CONTENT_ACCESSORS.lock() {
-        Some((_, _, _, is_shm)) => is_shm(content_id) != 0,
+        Some((_, _, _, is_shm, _)) => is_shm(content_id) != 0,
         None => false,
     }
 }

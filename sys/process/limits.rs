@@ -165,15 +165,10 @@ struct RawSchedParam {
     sched_priority: i32,
 }
 
-/// Real POSIX permission rule shared by `sched_setscheduler(2)`/`sched_getscheduler(2)`/
-/// `sched_getparam(2)`: the caller must be root, or its own uid must match the target's -- same
-/// shape `process::signals::has_signal_permission` already establishes for `kill`/`sigqueue`,
-/// duplicated rather than shared across this module boundary (matches this codebase's own
-/// established precedent for this exact shape, see that function's own doc comment). Targeting
-/// self (`pid == 0`, resolved to the caller's own pid by `resolve_target_pid` before this is ever
-/// consulted) always passes trivially, since a process's own uid always equals itself.
-fn has_sched_permission(caller_uid: u32, target_uid: u32) -> bool {
-    caller_uid == 0 || caller_uid == target_uid
+/// Permission for `sched_setscheduler(2)`/`sched_getscheduler(2)`/`sched_getparam(2)` and
+/// `setpriority(2)` on another process (`Cred::may_schedule`, FreeBSD's `p_cansched`).
+fn has_sched_permission(caller: &Cred, target: &Cred) -> bool {
+    caller.may_schedule(target)
 }
 
 /// Real Linux/POSIX "appropriate privilege" rule for *raising* a real-time priority: even a
@@ -281,16 +276,16 @@ pub fn do_sched_setscheduler(
     // already has.
     let param = unsafe { *(param_ptr as *const RawSchedParam) };
     let mut table = PROCESS_TABLE.lock();
-    let caller_uid = table
+    let caller = table
         .get(&caller_pid)
         .expect("sched_setscheduler: caller process missing from table")
         .shared
         .lock()
-        .uid;
+        .cred.clone();
     let proc = table
         .get_mut(&target)
         .expect("sched_setscheduler: target process missing from table");
-    if !has_sched_permission(caller_uid, proc.shared.lock().uid) {
+    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     let (min, max) = sched_priority_range(policy);
@@ -298,7 +293,7 @@ pub fn do_sched_setscheduler(
         return Err(EINVAL);
     }
     if !sched_priority_raise_permitted(
-        caller_uid,
+        caller.euid,
         policy,
         param.sched_priority,
         proc.sched_priority,
@@ -330,16 +325,16 @@ pub fn do_sched_setparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u6
     // already has.
     let param = unsafe { *(param_ptr as *const RawSchedParam) };
     let mut table = PROCESS_TABLE.lock();
-    let caller_uid = table
+    let caller = table
         .get(&caller_pid)
         .expect("sched_setparam: caller process missing from table")
         .shared
         .lock()
-        .uid;
+        .cred.clone();
     let proc = table
         .get_mut(&target)
         .expect("sched_setparam: target process missing from table");
-    if !has_sched_permission(caller_uid, proc.shared.lock().uid) {
+    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     let (min, max) = sched_priority_range(proc.sched_policy);
@@ -347,7 +342,7 @@ pub fn do_sched_setparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u6
         return Err(EINVAL);
     }
     if !sched_priority_raise_permitted(
-        caller_uid,
+        caller.euid,
         proc.sched_policy,
         param.sched_priority,
         proc.sched_priority,
@@ -366,16 +361,16 @@ pub fn do_sched_setparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u6
 pub fn do_sched_getscheduler(caller_pid: Pid, pid: i64) -> Result<u64, u64> {
     let target = resolve_target_pid(caller_pid, pid)?;
     let table = PROCESS_TABLE.lock();
-    let caller_uid = table
+    let caller = table
         .get(&caller_pid)
         .expect("sched_getscheduler: caller process missing from table")
         .shared
         .lock()
-        .uid;
+        .cred.clone();
     let proc = table
         .get(&target)
         .expect("sched_getscheduler: target process missing from table");
-    if !has_sched_permission(caller_uid, proc.shared.lock().uid) {
+    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     Ok(proc.sched_policy as u64)
@@ -387,16 +382,16 @@ pub fn do_sched_getscheduler(caller_pid: Pid, pid: i64) -> Result<u64, u64> {
 pub fn do_sched_getparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u64, u64> {
     let target = resolve_target_pid(caller_pid, pid)?;
     let table = PROCESS_TABLE.lock();
-    let caller_uid = table
+    let caller = table
         .get(&caller_pid)
         .expect("sched_getparam: caller process missing from table")
         .shared
         .lock()
-        .uid;
+        .cred.clone();
     let proc = table
         .get(&target)
         .expect("sched_getparam: target process missing from table");
-    if !has_sched_permission(caller_uid, proc.shared.lock().uid) {
+    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     let sched_priority = proc.sched_priority;

@@ -430,6 +430,10 @@ name = "init_path_smoke"
 harness = false
 
 [[test]]
+name = "cred_syscall_smoke"
+harness = false
+
+[[test]]
 name = "sem_open_syscall_smoke"
 harness = false
 

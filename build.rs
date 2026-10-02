@@ -453,6 +453,15 @@ fn main() {
         StdLink::StaticPie,
     );
 
+    // Process credentials and set-user-ID exec -- see tests/cred_syscall_smoke.rs. Spawned by the
+    // kernel as pid 1 and seeded as /usr/tests/cred/cred-smoke; static like /bin/sh.
+    let cred_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "regress/std/cred-smoke",
+        "OXFS_CRED_SMOKE_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
     // /sbin/init's states end to end -- see tests/init_syscall_smoke.rs. Spawned by the kernel as
     // pid 1 and seeded as /usr/tests/init/init-smoke, which init runs again; static like /bin/sh.
     let init_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
@@ -923,6 +932,7 @@ fn main() {
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
         ("OXFS_TZ_SMOKE_ELF_PATH", tz_smoke_elf_path.to_str().unwrap()),
         ("OXFS_INIT_SMOKE_ELF_PATH", init_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_CRED_SMOKE_ELF_PATH", cred_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
         ("OXFS_NINJA_ELF_PATH", ninja_elf_path.to_str().unwrap()),

@@ -100,6 +100,7 @@ unsafe extern "C" {
         write: extern "C" fn(u64, u64, u64) -> i64,
         size: extern "C" fn(u64) -> i64,
         is_shm: extern "C" fn(u64) -> i64,
+        setid: extern "C" fn(u64, *mut u32) -> i64,
     );
     fn oxidebsd_close_fd(fd: u64) -> i32;
     /// Sets (`on != 0`) or clears real `FD_CLOEXEC` on `fd`, in the *current* process's own table
@@ -190,6 +191,11 @@ unsafe extern "C" {
     fn oxidebsd_fb_geometry(out: u64) -> i32;
     fn oxidebsd_current_uid() -> u64;
     fn oxidebsd_current_gid() -> u64;
+    /// The real IDs, for `access(2)`.
+    fn oxidebsd_current_ruid() -> u64;
+    fn oxidebsd_current_rgid() -> u64;
+    /// `1` if `gid` is the caller's effective (`real == 0`) or real group, or a supplementary one.
+    fn oxidebsd_current_in_group(gid: u64, real: u64) -> u64;
     fn oxidebsd_current_umask() -> u64;
     /// Real Unix epoch seconds, whole-second precision -- see `sys/cpu/rtc.rs`'s own doc comment
     /// on `oxidebsd_unix_time`. Backs real `st_mtime`/`st_ctime` (`write_inode_data`/
@@ -2053,13 +2059,20 @@ fn new_entry_gid(parent: u32) -> u32 {
 }
 
 fn check_access(inode: &Inode, uid: u64, gid: u64, want: u8) -> bool {
+    check_access_as(inode, uid, gid, false, want)
+}
+
+/// `check_access` with the group class decided by the effective group (or, for `access(2)`, the
+/// real one: `real`) and the caller's supplementary groups.
+fn check_access_as(inode: &Inode, uid: u64, gid: u64, real: bool, want: u8) -> bool {
     if uid == 0 {
         return true;
     }
     let mode = inode.mode;
+    let in_group = gid == inode.gid as u64 || unsafe { oxidebsd_current_in_group(inode.gid as u64, real as u64) } != 0;
     let bits = if uid == inode.uid as u64 {
         (mode >> 6) & 0o7
-    } else if gid == inode.gid as u64 {
+    } else if in_group {
         (mode >> 3) & 0o7
     } else {
         mode & 0o7
@@ -2394,6 +2407,9 @@ struct MountEntry {
     path_len: u8,
     source: [u8; MAX_MOUNT_PATH],
     source_len: u8,
+    /// `nosuid`: set-user-ID and set-group-ID bits of programs under this mount are ignored by
+    /// `execve` (`exec_setid`).
+    nosuid: bool,
 }
 
 impl MountEntry {
@@ -2406,6 +2422,7 @@ impl MountEntry {
         path_len: 0,
         source: [0; MAX_MOUNT_PATH],
         source_len: 0,
+        nosuid: false,
     };
 }
 
@@ -3408,6 +3425,47 @@ extern "C" fn oxfs_inode_is_shm(inode: u64) -> i64 {
     read_inode(inode as u32).shm as i64
 }
 
+/// `setid` accessor for `oxidebsd_register_content_accessors`: for a file open for reading on
+/// `real_fd` (the program `execve` is loading), its mode bits, owner and group, with `S_ISUID` and
+/// `S_ISGID` cleared when it was opened from under a `nosuid` mount.
+extern "C" fn oxfs_exec_setid(real_fd: u64, out: *mut u32) -> i64 {
+    let Some(&mut OpenFile::FileRead { inode, parent, .. }) = find_open_file(real_fd) else {
+        return -1;
+    };
+    let node = read_inode(inode);
+    let mut mode = node.mode;
+    if on_nosuid_mount(parent) {
+        mode &= !SETID_BITS;
+    }
+    // SAFETY: the kernel passes a 3-element array of its own.
+    unsafe {
+        out.write(mode as u32);
+        out.add(1).write(node.uid);
+        out.add(2).write(node.gid);
+    }
+    0
+}
+
+/// Whether directory `dir` is under a `nosuid` mount: walks up through `..` looking for one's
+/// root. A nullfs mount's root is its source directory, so a `nosuid` nullfs mount makes its
+/// source tree `nosuid` too: stricter than FreeBSD, never looser.
+fn on_nosuid_mount(dir: u32) -> bool {
+    if !mounts().iter().any(|m| m.used && m.nosuid) {
+        return false;
+    }
+    let mut d = dir;
+    for _ in 0..256 {
+        if mounts().iter().any(|m| m.used && m.nosuid && m.target_root_inode == d) {
+            return true;
+        }
+        match dir_lookup(d, b"..") {
+            Some(up) if up != d => d = up,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Whether `dir` is devfs's `/dev/shm`, where musl's `shm_open` creates its objects.
 fn is_shm_dir(dir: u32) -> bool {
     let root = devfs_root();
@@ -3631,11 +3689,12 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
         push(&m.source[..m.source_len as usize]);
         push(b" ");
         push(&m.path[..m.path_len as usize]);
-        match m.kind {
-            MountKind::Bind => push(b" nullfs rw 0 0\n"),
-            MountKind::Tmpfs => push(b" tmpfs rw 0 0\n"),
-            MountKind::Devfs => push(b" devfs rw 0 0\n"),
-        }
+        push(match m.kind {
+            MountKind::Bind => b" nullfs rw",
+            MountKind::Tmpfs => b" tmpfs rw",
+            MountKind::Devfs => b" devfs rw",
+        });
+        push(if m.nosuid { b",nosuid 0 0\n".as_slice() } else { b" 0 0\n".as_slice() });
     }
     n
 }
@@ -4597,6 +4656,7 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
     if len == 0 {
         return 0;
     }
+    clear_setid_on_write(fd);
     if let Some(OpenFile::Write {
         position,
         write_pos,
@@ -5779,7 +5839,13 @@ fn is_same_or_descendant(mut dir: u32, ancestor: u32) -> bool {
 /// uid`'s own doc comment in `sys/process.rs`). `/proc` entries have no real permission bits (see
 /// `write_proc_stat`'s own fixed-placeholder stance) -- existence alone is treated as access,
 /// matching this codebase's "don't pretend to model what isn't there" approach elsewhere.
+/// Registered for `SYS_ACCESS`: checked with the real user and group IDs (POSIX).
 extern "C" fn oxfs_access(path_ptr: u64, path_len: u64, amode: u64, _r10: u64) -> i64 {
+    access_path(path_ptr, path_len, amode, false)
+}
+
+/// `access(2)`'s check, with the effective IDs instead for `faccessat(AT_EACCESS)`.
+fn access_path(path_ptr: u64, path_len: u64, amode: u64, effective: bool) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
 
@@ -5809,12 +5875,23 @@ extern "C" fn oxfs_access(path_ptr: u64, path_len: u64, amode: u64, _r10: u64) -
         return 0;
     }
     let inode = read_inode(inode_num);
-    let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
-    if check_access(&inode, uid, gid, amode) {
+    if access_ok(&inode, amode, effective) {
         0
     } else {
         -EACCES
     }
+}
+
+fn access_ok(inode: &Inode, amode: u8, effective: bool) -> bool {
+    // SAFETY: plain kernel queries.
+    let (uid, gid) = unsafe {
+        if effective {
+            (oxidebsd_current_uid(), oxidebsd_current_gid())
+        } else {
+            (oxidebsd_current_ruid(), oxidebsd_current_rgid())
+        }
+    };
+    check_access_as(inode, uid, gid, !effective, amode)
 }
 
 /// Registered for `SYS_STAT`. Follows a final symlink component (`resolve_path`'s own default) --
@@ -6001,11 +6078,8 @@ extern "C" fn oxfs_chmod(path_ptr: u64, path_len: u64, mode: u64, _r10: u64) -> 
 /// Follows a final symlink component, matching real `chown(2)` (unlike `lchown(2)`, not
 /// implemented this pass -- no target applet in the current roster calls it). Real POSIX
 /// `(uid_t)-1`/`(gid_t)-1` "leave this field unchanged" convention (`u32::MAX` once truncated
-/// through this ABI's `u64` register), so a caller can change just one of the two. **Root-only**,
-/// unlike `chmod` above -- this kernel has no group-membership concept at all, so there's no way
-/// to support real Unix's narrower "owner may change the group to one they belong to" case; any
-/// non-root caller gets a flat `EPERM`, matching real behavior for the *ownership*-changing case
-/// specifically (real Unix restricts that to root unconditionally too).
+/// through this ABI's `u64` register), so a caller can change just one of the two. Permission:
+/// `chown_inode`.
 extern "C" fn oxfs_chown(path_ptr: u64, path_len: u64, uid: u64, gid: u64) -> i64 {
     // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
@@ -6017,19 +6091,7 @@ extern "C" fn oxfs_chown(path_ptr: u64, path_len: u64, uid: u64, gid: u64) -> i6
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
-    let caller_uid = unsafe { oxidebsd_current_uid() };
-    if caller_uid != 0 {
-        return -EPERM;
-    }
-    let mut inode = read_inode(inode_num);
-    if uid != u32::MAX as u64 {
-        inode.uid = uid as u32;
-    }
-    if gid != u32::MAX as u64 {
-        inode.gid = gid as u32;
-    }
-    write_inode(inode_num, inode);
-    0
+    chown_inode(inode_num, uid, gid)
 }
 
 /// Registered for `SYS_FCHMOD` at real Linux's own `__NR_fchmod = 91` -- unlike every other
@@ -6341,19 +6403,44 @@ fn at_empty_path_inode(dirfd: i64) -> Result<u32, i64> {
 /// `oxfs_chown`'s own rules (root-only; `-1` leaves a field unchanged), applied to an already-
 /// resolved inode -- for `lchown`/`fchown` (`fchownat` with `AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`),
 /// both of which were flat `ENOSYS` before this.
+/// `chown(2)` on an inode, with `_POSIX_CHOWN_RESTRICTED` as on the BSDs: the superuser may change
+/// either ID; the owner may only change the group, to one it belongs to. A change by anyone but
+/// the superuser clears the set-user-ID and set-group-ID bits (`OxideBSD-doc/SUDO.md` §5.1.5).
 fn chown_inode(inode_num: u32, uid: u64, gid: u64) -> i64 {
-    if unsafe { oxidebsd_current_uid() } != 0 {
-        return -EPERM;
-    }
+    let caller = unsafe { oxidebsd_current_uid() };
     let mut inode = read_inode(inode_num);
-    if uid != u32::MAX as u64 {
-        inode.uid = uid as u32;
+    let new_uid = if uid == u32::MAX as u64 { inode.uid } else { uid as u32 };
+    let new_gid = if gid == u32::MAX as u64 { inode.gid } else { gid as u32 };
+    if caller != 0 {
+        let owner = caller == inode.uid as u64 && new_uid == inode.uid;
+        let group_ok = new_gid == inode.gid || unsafe { oxidebsd_current_in_group(new_gid as u64, 0) } != 0;
+        if !owner || !group_ok {
+            return -EPERM;
+        }
+        inode.mode &= !SETID_BITS;
     }
-    if gid != u32::MAX as u64 {
-        inode.gid = gid as u32;
-    }
+    inode.uid = new_uid;
+    inode.gid = new_gid;
     write_inode(inode_num, inode);
     0
+}
+
+/// `S_ISUID | S_ISGID`.
+const SETID_BITS: u16 = 0o6000;
+
+/// A write by anyone but the superuser clears the set-user-ID and set-group-ID bits of the file
+/// written (`OxideBSD-doc/SUDO.md` §5.1.5), so a modified program can't keep running as its owner.
+fn clear_setid_on_write(fd: u64) {
+    if unsafe { oxidebsd_current_uid() } == 0 {
+        return;
+    }
+    if let Some(inode_num) = resolve_write_fd_inode(fd) {
+        let mut inode = read_inode(inode_num);
+        if inode.mode & SETID_BITS != 0 {
+            inode.mode &= !SETID_BITS;
+            write_inode(inode_num, inode);
+        }
+    }
 }
 
 /// Registered for `SYS_OPENAT`. `(at, flags, mode)`.
@@ -6527,8 +6614,8 @@ extern "C" fn oxfs_fchmodat(at_ptr: u64, mode: u64, flags: u64, _a3: u64) -> i64
     with_at(&at, || oxfs_chmod(at.ptr, at.len, mode, 0))
 }
 
-/// Registered for `SYS_FACCESSAT`. `(at, amode, flags)`. `AT_EACCESS` changes nothing: there's no
-/// separate real/effective id pair here (see CLAUDE.md's "Permission model"). With
+/// Registered for `SYS_FACCESSAT`. `(at, amode, flags)`. Checked with the real IDs, or the
+/// effective ones with `AT_EACCESS`. With
 /// `AT_SYMLINK_NOFOLLOW`, a symlink itself always passes (its own permissions are `0777`).
 extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i64 {
     if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
@@ -6543,8 +6630,7 @@ extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i
         if amode == 0 {
             return 0;
         }
-        let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
-        return if check_access(&read_inode(inode_num), uid, gid, amode as u8) {
+        return if access_ok(&read_inode(inode_num), amode as u8, flags & AT_EACCESS != 0) {
             0
         } else {
             -EACCES
@@ -6556,7 +6642,7 @@ extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i
     {
         return 0;
     }
-    with_at(&at, || oxfs_access(at.ptr, at.len, amode, 0))
+    with_at(&at, || access_path(at.ptr, at.len, amode, flags & AT_EACCESS != 0))
 }
 
 /// Registered for `SYS_UTIMENSAT_AT` -- real, dirfd-aware `utimensat(2)`: `(at, times, flags)`.
@@ -6592,7 +6678,7 @@ fn free_mount_slot() -> Option<usize> {
 /// A nullfs (bind) mount of directory `source` on directory `target`: `oxfs_nmount` with
 /// `fstype=nullfs`. Both must be directories; `source` is resolved through any mount already on
 /// it (binding from inside another mount binds the effective view, not the raw inode).
-fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
+fn mount_nullfs(source: &[u8], target: &[u8], nosuid: bool) -> i64 {
     let source_cwd = match real_cwd_for_mutation(source) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6634,6 +6720,7 @@ fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
         path_len,
         source: src_buf,
         source_len: src_len,
+        nosuid,
     };
     0
 }
@@ -6641,7 +6728,7 @@ fn mount_nullfs(source: &[u8], target: &[u8]) -> i64 {
 /// A new, empty tmpfs on directory `target`: `oxfs_nmount` with `fstype=tmpfs`. Its root comes
 /// from the tmpfs pool (`alloc_tmpfs_inode`) with real `.`/`..` records, `..` the mountpoint's own
 /// parent, so `cd ..` from inside it escapes back to the real tree with no special-casing.
-fn mount_tmpfs(target: &[u8]) -> i64 {
+fn mount_tmpfs(target: &[u8], nosuid: bool) -> i64 {
     let target_cwd = match real_cwd_for_mutation(target) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6678,6 +6765,7 @@ fn mount_tmpfs(target: &[u8]) -> i64 {
         path_len,
         source,
         source_len,
+        nosuid,
     };
     0
 }
@@ -6706,9 +6794,9 @@ fn iov_str(v: IoVec) -> &'static [u8] {
 /// Registered for `SYS_NMOUNT`: `nmount(iov, niov, flags)`, after FreeBSD's. `iov` holds
 /// `niov / 2` name/value pairs, each a `struct iovec` (a value may be empty): `fstype` (`tmpfs` or
 /// `nullfs`), `fspath` (the directory to mount on), and for nullfs `from` or `target` (the
-/// directory to mount). `errmsg`, if given, is a buffer the kernel fills with a sentence saying
-/// why the call failed. Any other option, or a non-zero `flags`, is refused with `EOPNOTSUPP`:
-/// nothing here can be mounted read-only or with other options yet. Only root may mount.
+/// directory to mount), and `nosuid` (no value; or `MNT_NOSUID` in `flags`). `errmsg`, if given,
+/// is a buffer the kernel fills with a sentence saying why the call failed. Any other option or
+/// flag is refused with `EOPNOTSUPP`. Only root may mount.
 extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
     if niov % 2 != 0 || niov > 64 {
         return -EINVAL;
@@ -6718,9 +6806,13 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
     let mut errmsg: Option<IoVec> = None;
     let (mut fstype, mut fspath, mut from): (&[u8], &[u8], &[u8]) = (&[], &[], &[]);
     let mut unknown = false;
+    // FreeBSD's MNT_NOSUID, as a flag or as the `nosuid` option.
+    const MNT_NOSUID: u64 = 0x8;
+    let mut nosuid = flags & MNT_NOSUID != 0;
     for pair in iov.chunks_exact(2) {
         let (name, value) = (iov_str(pair[0]), pair[1]);
         match name {
+            b"nosuid" => nosuid = true,
             b"fstype" => fstype = iov_str(value),
             b"fspath" => fspath = iov_str(value),
             b"from" | b"target" => from = iov_str(value),
@@ -6745,16 +6837,16 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
     if unsafe { oxidebsd_current_uid() } != 0 {
         return fail(-EPERM, b"only root may mount file systems");
     }
-    if unknown || flags != 0 {
-        return fail(-EOPNOTSUPP, b"mount options and flags aren't supported");
+    if unknown || flags & !MNT_NOSUID != 0 {
+        return fail(-EOPNOTSUPP, b"the only mount option is nosuid");
     }
     if fspath.is_empty() {
         return fail(-EINVAL, b"no fspath: the directory to mount on");
     }
     match fstype {
-        b"tmpfs" => mount_tmpfs(fspath),
+        b"tmpfs" => mount_tmpfs(fspath, nosuid),
         b"nullfs" if from.is_empty() => fail(-EINVAL, b"nullfs needs a target: the directory to mount"),
-        b"nullfs" => mount_nullfs(from, fspath),
+        b"nullfs" => mount_nullfs(from, fspath, nosuid),
         b"" => fail(-EINVAL, b"no fstype"),
         _ => fail(-ENODEV, b"unknown file system type"),
     }
@@ -6954,6 +7046,7 @@ fn mount_devfs() -> bool {
         path_len,
         source,
         source_len,
+        nosuid: false,
     };
     // SAFETY: as `devfs_root`.
     unsafe { *core::ptr::addr_of_mut!(DEVFS_ROOT) = root };
@@ -8150,6 +8243,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests_rc, b"run.sh", include_bytes!("../../../../regress/rc-syscall-smoke/run.sh"));
     let usr_tests_devfs = ensure_dir(usr_tests, b"devfs");
     ok &= seed_file(usr_tests_devfs, b"run.sh", include_bytes!("../../../../regress/devfs-syscall-smoke/run.sh"));
+    let usr_tests_cred = ensure_dir(usr_tests, b"cred");
+    ok &= seed_file(usr_tests_cred, b"cred-smoke", include_bytes!(env!("OXFS_CRED_SMOKE_ELF_PATH")));
     let usr_tests_init = ensure_dir(usr_tests, b"init");
     ok &= seed_file(usr_tests_init, b"init-smoke", include_bytes!(env!("OXFS_INIT_SMOKE_ELF_PATH")));
     let usr_tests_tz = ensure_dir(usr_tests, b"tz");
@@ -9968,6 +10063,7 @@ pub extern "C" fn module_init() -> i32 {
             oxfs_inode_content_write,
             oxfs_inode_content_size,
             oxfs_inode_is_shm,
+            oxfs_exec_setid,
         );
         oxidebsd_register_socket_nodes(oxfs_create_socket_node, oxfs_lookup_socket_node);
     }

@@ -116,7 +116,10 @@ check "umount by special" umount $T/src
 check "umount -v" [ "$(umount -v $T/m1)" = "$T/m1: unmounted" ]
 check "an unknown type is refused" status_is 1 mount -t nosuchfs x $T/m1
 check "with the kernel's reason" sh -c "mount -t nosuchfs x $T/m1 2>&1 | grep -q 'unknown file system type'"
-check "an unsupported option is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'options and flags'"
+check "an unsupported option is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'only mount option is nosuid'"
+check "nosuid is accepted" mount -t tmpfs -o nosuid tmpfs $T/m1
+check "and shown in /proc/mounts" grep -q "$T/m1 tmpfs rw,nosuid" /proc/mounts
+check "umount the nosuid tmpfs" umount $T/m1
 cp /etc/fstab $T/fstab.saved
 printf 'tmpfs %s tmpfs rw 0 0\n%s %s nullfs rw,noauto 0 0\n' $T/m1 $T/src $T/m2 >> /etc/fstab
 check "mount -a mounts fstab's entries" mount -a

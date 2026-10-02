@@ -722,8 +722,8 @@ pub struct ThreadGroupShared {
     pub cwd: u64,
     pub root_inode: u64,
     pub umask: u32,
-    pub uid: u32,
-    pub gid: u32,
+    /// Real, effective and saved IDs and supplementary groups (`identity::Cred`).
+    pub cred: identity::Cred,
     pub brk: VirtAddr,
     pub mmap_file_regions: Vec<mm::MmapFileRegion>,
     /// Real, still-live `/dev/fb0` (or any future MMIO-backed) mappings -- see `mm::MmapPhysRegion`'s
@@ -829,7 +829,7 @@ pub struct Process {
     /// bare top of the mapped stack region (`process::USER_STACK_TOP`). Handed straight to
     /// `usermode::jump_to_usermode`/`syscall::redirect_frame` as the stack pointer.
     pub user_stack_top: VirtAddr,
-    /// Real `CLONE_THREAD`-shared state: `cwd`, `root_inode`, `umask`, `uid`, `gid`, `brk`, and
+    /// Real `CLONE_THREAD`-shared state: `cwd`, `root_inode`, `umask`, `cred`, `brk`, and
     /// `mmap_file_regions` — see `ThreadGroupShared`'s own doc comment for why these seven moved
     /// out of `Process` itself and into one `Arc<Mutex<..>>` every thread in a real thread group
     /// shares. Every process today is still its own thread group of one (`spawn`/`fork` both build

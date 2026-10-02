@@ -36,6 +36,12 @@ for
 .Dq nullfs ,
 the directory to show at
 .Dv fspath .
+.It Dv nosuid
+with an empty value: ignore the set-user-ID and set-group-ID bits of
+programs on the file system.
+For
+.Dq nullfs
+this also covers the directory mounted, however it is reached.
 .It Dv errmsg
 a buffer, of the length its
 .Vt iovec
@@ -43,8 +49,11 @@ gives, which the kernel fills with a sentence saying why the call failed.
 .El
 .Pp
 .Fa flags
-must be 0: no file system can yet be mounted read-only or with other
-options.
+may hold
+.Dv MNT_NOSUID ,
+the same as the
+.Dv nosuid
+option, and nothing else: no file system can be mounted read-only yet.
 Only the superuser may mount.
 .Sh RETURN VALUES
 .Rv -std nmount
@@ -63,8 +72,8 @@ is missing.
 .It Bq Er ENODEV
 The file system type is unknown.
 .It Bq Er EOPNOTSUPP
-An option other than those above, or a non-zero
-.Fa flags ,
+An option other than those above, or a flag other than
+.Dv MNT_NOSUID ,
 was given.
 .It Bq Er ENOENT
 A directory named doesn't exist.

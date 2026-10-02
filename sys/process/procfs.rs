@@ -180,6 +180,25 @@ pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_ca
     out.extend_from_slice(b"PPid:\t");
     push_decimal(&mut out, ppid);
     out.push(b'\n');
+    // proc(5)'s order: real, effective, saved, and the filesystem ID (the effective one here).
+    let cred = proc.shared.lock().cred.clone();
+    for (name, ids) in [
+        (b"Uid:".as_slice(), [cred.ruid, cred.euid, cred.suid, cred.euid]),
+        (b"Gid:".as_slice(), [cred.rgid, cred.egid, cred.sgid, cred.egid]),
+    ] {
+        out.extend_from_slice(name);
+        for id in ids {
+            out.push(b'\t');
+            push_decimal(&mut out, id as u64);
+        }
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"Groups:");
+    for g in &cred.groups {
+        out.push(b' ');
+        push_decimal(&mut out, *g as u64);
+    }
+    out.push(b'\n');
     out.extend_from_slice(b"Threads:\t1\n");
     drop(table);
     copy_into(&out, buf_ptr, buf_cap)

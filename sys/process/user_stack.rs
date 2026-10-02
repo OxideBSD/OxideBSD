@@ -69,6 +69,7 @@ pub fn build(
     physical_memory_offset: VirtAddr,
     interp_base: Option<u64>,
     main_bias: u64,
+    secure: bool,
 ) -> VirtAddr {
     let phdr_vaddr = elf.phdr_vaddr() + main_bias;
 
@@ -144,7 +145,8 @@ pub fn build(
         image.extend_from_slice(&value.to_le_bytes());
     }
     image.extend_from_slice(&AT_SECURE.to_le_bytes());
-    image.extend_from_slice(&0u64.to_le_bytes());
+    // 1 for a set-user-ID or set-group-ID program: the C library then ignores LD_* and the like.
+    image.extend_from_slice(&(secure as u64).to_le_bytes());
     image.extend_from_slice(&AT_RANDOM.to_le_bytes());
     image.extend_from_slice(&(strings_base + random_offset as u64).to_le_bytes());
     image.extend_from_slice(&AT_NULL.to_le_bytes());

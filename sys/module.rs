@@ -993,6 +993,11 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_setresuid" => {
             Some(crate::syscall::oxidebsd_sys_setresuid as *const () as u64)
         }
+        "oxidebsd_sys_setresgid" => Some(crate::syscall::oxidebsd_sys_setresgid as *const () as u64),
+        "oxidebsd_sys_setreuid" => Some(crate::syscall::oxidebsd_sys_setreuid as *const () as u64),
+        "oxidebsd_sys_setregid" => Some(crate::syscall::oxidebsd_sys_setregid as *const () as u64),
+        "oxidebsd_sys_getresuid" => Some(crate::syscall::oxidebsd_sys_getresuid as *const () as u64),
+        "oxidebsd_sys_getresgid" => Some(crate::syscall::oxidebsd_sys_getresgid as *const () as u64),
         "oxidebsd_sys_setgid" => Some(crate::syscall::oxidebsd_sys_setgid as *const () as u64),
         "oxidebsd_sys_getgroups" => {
             Some(crate::syscall::oxidebsd_sys_getgroups as *const () as u64)
@@ -1101,6 +1106,11 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_shmctl" => Some(crate::syscall::oxidebsd_sys_shmctl as *const () as u64),
         "oxidebsd_sys_shmdt" => Some(crate::syscall::oxidebsd_sys_shmdt as *const () as u64),
         "oxidebsd_current_uid" => Some(crate::process::oxidebsd_current_uid as *const () as u64),
+        "oxidebsd_current_ruid" => Some(crate::process::oxidebsd_current_ruid as *const () as u64),
+        "oxidebsd_current_rgid" => Some(crate::process::oxidebsd_current_rgid as *const () as u64),
+        "oxidebsd_current_in_group" => {
+            Some(crate::process::oxidebsd_current_in_group as *const () as u64)
+        }
         "oxidebsd_current_gid" => Some(crate::process::oxidebsd_current_gid as *const () as u64),
         "oxidebsd_current_umask" => {
             Some(crate::process::oxidebsd_current_umask as *const () as u64)

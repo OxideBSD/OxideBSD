@@ -154,6 +154,7 @@ fn load_image<'a>(
         phys_offset,
         None,
         bias,
+        false,
     );
     Ok((elf, entry, initial_rsp))
 }
@@ -201,8 +202,7 @@ fn spawn_finish(
             cwd: 0,
             root_inode: 0,
             umask: 0o022,
-            uid: 0,
-            gid: 0,
+            cred: Cred::root(),
             brk: VirtAddr::new(elf.highest_loaded_address()),
             mmap_file_regions: Vec::new(),
             mmap_phys_regions: Vec::new(),
@@ -482,8 +482,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
                 cwd: parent_shared.cwd,
                 root_inode: parent_shared.root_inode,
                 umask: parent_shared.umask,
-                uid: parent_shared.uid,
-                gid: parent_shared.gid,
+                cred: parent_shared.cred.clone(),
                 brk: parent_shared.brk,
                 mmap_file_regions: Vec::new(),
                 mmap_phys_regions: Vec::new(),
@@ -1077,11 +1076,14 @@ struct ExecFile {
     head: Vec<u8>,
     size: u64,
     content: Option<u64>,
+    /// Mode bits, owner and group, for set-user-ID and set-group-ID (`identity::Cred::exec`);
+    /// the set-ID bits are already cleared under a `nosuid` mount. `None` off oxfs.
+    setid: Option<(u32, u32, u32)>,
 }
 
 impl ExecFile {
     fn whole(image: Vec<u8>) -> Self {
-        ExecFile { size: image.len() as u64, head: image, content: None }
+        ExecFile { size: image.len() as u64, head: image, content: None, setid: None }
     }
 }
 
@@ -1122,7 +1124,7 @@ fn read_exec_head(fd: u64, pread: bool) -> Result<ExecFile, u64> {
             head = read(end)?;
         }
     }
-    Ok(ExecFile { head, size, content: Some(content) })
+    Ok(ExecFile { head, size, content: Some(content), setid: crate::fs::fd::exec_setid(fd) })
 }
 
 /// The page cache entry for `file`'s pages, used by `space` from now on (PAGECACHE.md §3.1).
@@ -1434,6 +1436,13 @@ fn exec_image(
     // discarded, matching real Linux (the script's own path, not the caller's `argv[0]`, is what
     // ends up in the new argv, since they need not be equal -- see `RawArgvEntry`'s own doc
     // comment referenced above).
+    // Set-user-ID and set-group-ID (`OxideBSD-doc/SUDO.md` §5.1.2): only for a program executed
+    // directly; the bits on a `#!` script are ignored, as on NetBSD, OpenBSD and Linux (the file
+    // checked and the one the interpreter opens could differ).
+    let setid = if shebang_argv_prefix.is_none() { file.setid } else { None };
+    let mut new_cred = crate::process::identity::current_cred();
+    let setid_applied = new_cred.exec(setid);
+    let secure = setid_applied || new_cred.euid != new_cred.ruid || new_cred.egid != new_cred.rgid;
     let argv_owned: Vec<Vec<u8>> = if let Some(mut prefix) = shebang_argv_prefix {
         if !raw_argv.is_empty() {
             prefix.extend(raw_argv[1..].iter().cloned());
@@ -1456,6 +1465,7 @@ fn exec_image(
         phys_offset,
         interp_base,
         main_bias,
+        secure,
     );
 
     // ---- commit point: nothing above may fail past here ----
@@ -1485,6 +1495,7 @@ fn exec_image(
         {
             let mut shared = me.shared.lock();
             shared.brk = VirtAddr::new(elf.highest_loaded_address());
+            shared.cred = new_cred;
             // Real POSIX: memory locks (including a prior mlockall(MCL_FUTURE)) are automatically
             // removed on execve(2) -- see ThreadGroupShared::mlockall_future's own doc comment.
             shared.mlockall_future = false;

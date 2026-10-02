@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::process::scheduler;
-use crate::syscall::{EINVAL, EPERM, ESRCH};
+use crate::syscall::{EFAULT, EINVAL, EPERM, ESRCH};
 
 /// Real `getpid()` returns the caller's **thread-group id**, not its raw schedulable pid — see
 /// `Process::tgid`'s own doc comment. Identical today (no real thread creation exists yet), but
@@ -98,140 +98,250 @@ pub fn do_getsid(caller_pid: Pid, pid: i64) -> Result<u64, u64> {
     table.get(&target).map(|p| p.sid).ok_or(ESRCH)
 }
 
-/// `SYS_GETUID`/`SYS_GETEUID` — both echo `Process::uid` back (see that field's own doc comment
-/// for why there's no distinct effective value to report). Real `getuid(2)`/`geteuid(2)` never
-/// fail against the calling process's own table entry, which always exists while this is running.
+/// A thread group's credentials (`OxideBSD-doc/SUDO.md` §5.1): real, effective and saved user and
+/// group IDs, and the supplementary groups. Permission checks use the effective IDs and the groups;
+/// `access(2)` uses the real ones. Shared by every thread of a group (`ThreadGroupShared::cred`),
+/// copied by `fork`, changed by `execve` only for a set-user-ID or set-group-ID program.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct Cred {
+    pub ruid: u32,
+    pub euid: u32,
+    pub suid: u32,
+    pub rgid: u32,
+    pub egid: u32,
+    pub sgid: u32,
+    pub groups: Vec<u32>,
+}
+
+/// `<limits.h>`'s `NGROUPS_MAX` in OxideBSD's musl, and `kern.ngroups`.
+pub const NGROUPS_MAX: usize = 32;
+
+/// `(uid_t)-1` as a `set*id` argument: leave that ID alone. musl's `__setxid` passes `int`s, so it
+/// arrives sign-extended; a caller passing a plain `uid_t` gives `0xffff_ffff`.
+fn unchanged(v: u64) -> bool {
+    v as u32 == u32::MAX
+}
+
+impl Cred {
+    /// The superuser, as the kernel's first process starts.
+    pub fn root() -> Cred {
+        Cred::default()
+    }
+
+    pub fn privileged(&self) -> bool {
+        self.euid == 0
+    }
+
+    /// Whether `gid` is the effective (or, for `access(2)`, the real) group or a supplementary one.
+    pub fn in_group(&self, gid: u32, real: bool) -> bool {
+        (if real { self.rgid } else { self.egid }) == gid || self.groups.contains(&gid)
+    }
+
+    /// `kill(2)`'s rule (POSIX, FreeBSD's `p_cansignal`): the superuser, or a sender whose real or
+    /// effective user ID is the target's real or saved one.
+    pub fn may_signal(&self, target: &Cred) -> bool {
+        self.privileged()
+            || [self.ruid, self.euid].iter().any(|&id| id == target.ruid || id == target.suid)
+    }
+
+    /// `setpriority(2)` and the `sched_*` calls (FreeBSD's `p_cansched`): the superuser, or a caller
+    /// whose effective user ID is the target's real or effective one.
+    pub fn may_schedule(&self, target: &Cred) -> bool {
+        self.privileged() || self.euid == target.ruid || self.euid == target.euid
+    }
+
+    /// `execve` of a set-user-ID or set-group-ID file (`mode` holds `S_ISUID`/`S_ISGID`): the
+    /// effective ID becomes the file's owner or group; then, as for every `execve`, the saved IDs
+    /// take the effective ones (POSIX). Returns whether a set-ID bit took effect.
+    pub fn exec(&mut self, setid: Option<(u32, u32, u32)>) -> bool {
+        const S_ISUID: u32 = 0o4000;
+        const S_ISGID: u32 = 0o2000;
+        let mut applied = false;
+        if let Some((mode, uid, gid)) = setid {
+            if mode & S_ISUID != 0 {
+                self.euid = uid;
+                applied = true;
+            }
+            if mode & S_ISGID != 0 {
+                self.egid = gid;
+                applied = true;
+            }
+        }
+        self.suid = self.euid;
+        self.sgid = self.egid;
+        applied
+    }
+}
+
+fn with_cred<R>(caller_pid: Pid, f: impl FnOnce(&mut Cred) -> R) -> R {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&caller_pid).expect("credentials: current process missing from table");
+    let mut shared = proc.shared.lock();
+    f(&mut shared.cred)
+}
+
+/// The calling thread group's credentials; root before any process exists (oxfs's boot
+/// self-check, `scheduler::current_pid() == 0`).
+pub fn current_cred() -> Cred {
+    let pid = scheduler::current_pid();
+    if pid == 0 {
+        return Cred::root();
+    }
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.shared.lock().cred.clone()).unwrap_or_else(Cred::root)
+}
+
+/// `getuid(2)`, `geteuid(2)`, `getgid(2)`, `getegid(2)`: never fail.
 pub fn do_getuid(caller_pid: Pid) -> u64 {
-    PROCESS_TABLE
-        .lock()
-        .get(&caller_pid)
-        .map(|p| p.shared.lock().uid as u64)
-        .unwrap_or(0)
+    with_cred(caller_pid, |c| c.ruid as u64)
 }
 
-/// `SYS_GETGID`/`SYS_GETEGID` — `do_getuid`'s counterpart for `Process::gid`.
+pub fn do_geteuid(caller_pid: Pid) -> u64 {
+    with_cred(caller_pid, |c| c.euid as u64)
+}
+
 pub fn do_getgid(caller_pid: Pid) -> u64 {
-    PROCESS_TABLE
-        .lock()
-        .get(&caller_pid)
-        .map(|p| p.shared.lock().gid as u64)
-        .unwrap_or(0)
+    with_cred(caller_pid, |c| c.rgid as u64)
 }
 
-/// `SYS_SETUID`'s real logic — matches real `setuid(uid_t uid)`'s single-argument wire format and
-/// its actual POSIX permission rule: a process running as root (`uid == 0`) may become any uid;
-/// anything else may only "become" the uid it already is (a no-op success, not a privilege
-/// escalation vector) — real `setuid()` allows this specific no-op case even for a non-root caller.
-/// Any other target is `EPERM`. No saved-set-uid/real-vs-effective distinction to update beyond the
-/// single `uid` field itself (see `Process::uid`'s own doc comment).
+pub fn do_getegid(caller_pid: Pid) -> u64 {
+    with_cred(caller_pid, |c| c.egid as u64)
+}
+
+/// `setuid(2)`: the superuser sets all three user IDs; anyone else may set the effective ID to
+/// the real or saved one (POSIX with `_POSIX_SAVED_IDS`).
 pub fn do_setuid(caller_pid: Pid, uid: u32) -> Result<u64, u64> {
-    let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&caller_pid)
-        .expect("setuid: current process missing from table");
-    let mut shared = proc.shared.lock();
-    if shared.uid != 0 && uid != shared.uid {
-        return Err(EPERM);
-    }
-    shared.uid = uid;
-    Ok(0)
-}
-
-/// `SYS_SETGID`'s real logic — `do_setuid`'s counterpart for `Process::gid`, gated on the caller's
-/// own `uid` (real `setgid()` is likewise a root-only privilege, not gated on the caller's current
-/// `gid`).
-pub fn do_setgid(caller_pid: Pid, gid: u32) -> Result<u64, u64> {
-    let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&caller_pid)
-        .expect("setgid: current process missing from table");
-    let mut shared = proc.shared.lock();
-    if shared.uid != 0 && gid != shared.gid {
-        return Err(EPERM);
-    }
-    shared.gid = gid;
-    Ok(0)
-}
-
-/// `SYS_SETRESUID`'s real logic — backs both real `setresuid(3)` directly and `seteuid(2)`
-/// (musl's own `seteuid(euid)` is a thin wrapper: `setresuid(-1, euid, -1)`, confirmed against
-/// `external/mit/musl/src/unistd/seteuid.c` — both funnel through the exact same `__setxid(
-/// SYS_setresuid, ...)` call musl's own `setuid()`/`setgid()` already prove works correctly on
-/// this kernel's single-threaded model, see `do_setuid`'s own doc comment). Found live: `sem_open`
-/// conformance test `sem_open/3-1.c` (Open POSIX Test Suite) needs to drop root privilege via
-/// `seteuid()` before it can exercise its own real assertion, and reported a misleading
-/// `PTS_UNTESTED` instead — not because `sem_open` itself doesn't exist here (that's a separate,
-/// much bigger, already-tracked gap, see `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`), but because
-/// `seteuid()` itself was an `[boot] unrecognized syscall number 499` the whole time.
-///
-/// **Real `-1`-means-"leave unchanged" semantics** (each argument arrives sign-extended from a
-/// `uid_t` cast to `int` then to a 64-bit syscall register — real `-1` reads back as `i64::-1`
-/// reliably at every step of that chain, confirmed against `setxid.c`'s own call sites). **A real,
-/// documented simplification**: this kernel's `Process` has no separate real/effective/saved-uid
-/// fields to update independently (see `do_setuid`'s own doc comment) — every provided (non `-1`)
-/// value is checked against the exact same root-or-no-op `do_setuid` rule, and the *effective* one
-/// (`euid` if given, else `ruid`, else `suid`) is what actually lands in the single `Process::uid`
-/// field, matching `seteuid()`'s own real-world purpose (change what governs future permission
-/// checks) even though a real three-way split isn't tracked.
-pub fn do_setresuid(caller_pid: Pid, ruid: i64, euid: i64, suid: i64) -> Result<u64, u64> {
-    let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&caller_pid)
-        .expect("setresuid: current process missing from table");
-    let mut shared = proc.shared.lock();
-    for requested in [ruid, euid, suid] {
-        if requested != -1 && shared.uid != 0 && requested as u32 != shared.uid {
+    with_cred(caller_pid, |c| {
+        if c.privileged() {
+            (c.ruid, c.euid, c.suid) = (uid, uid, uid);
+        } else if uid == c.ruid || uid == c.suid {
+            c.euid = uid;
+        } else {
             return Err(EPERM);
         }
-    }
-    if let Some(target) = [euid, ruid, suid].into_iter().find(|&v| v != -1) {
-        shared.uid = target as u32;
+        Ok(0)
+    })
+}
+
+/// `setgid(2)`: `do_setuid` for the group IDs; the privilege is still the effective user ID's.
+pub fn do_setgid(caller_pid: Pid, gid: u32) -> Result<u64, u64> {
+    with_cred(caller_pid, |c| {
+        if c.privileged() {
+            (c.rgid, c.egid, c.sgid) = (gid, gid, gid);
+        } else if gid == c.rgid || gid == c.sgid {
+            c.egid = gid;
+        } else {
+            return Err(EPERM);
+        }
+        Ok(0)
+    })
+}
+
+/// `setreuid(2)` and `setregid(2)` (`group` picks which), FreeBSD's rules: without privilege the
+/// real ID may become the real or effective one, and the effective ID the real, effective or saved
+/// one. Setting the real ID, or the effective ID to anything but the real one, also sets the saved
+/// ID to the new effective one, so the old privilege can't be regained.
+pub fn do_setreid(caller_pid: Pid, r: u64, e: u64, group: bool) -> Result<u64, u64> {
+    with_cred(caller_pid, |c| {
+        let privileged = c.privileged();
+        let (real, eff, saved) = if group {
+            (&mut c.rgid, &mut c.egid, &mut c.sgid)
+        } else {
+            (&mut c.ruid, &mut c.euid, &mut c.suid)
+        };
+        let (r_new, e_new) = (r as u32, e as u32);
+        if !privileged
+            && ((!unchanged(r) && r_new != *real && r_new != *eff)
+                || (!unchanged(e) && e_new != *real && e_new != *eff && e_new != *saved))
+        {
+            return Err(EPERM);
+        }
+        let old_real = *real;
+        if !unchanged(e) {
+            *eff = e_new;
+        }
+        if !unchanged(r) {
+            *real = r_new;
+        }
+        if !unchanged(r) || (!unchanged(e) && e_new != old_real) {
+            *saved = *eff;
+        }
+        Ok(0)
+    })
+}
+
+/// `setresuid(2)` and `setresgid(2)` (`group` picks which); `seteuid(3)`/`setegid(3)` are
+/// `setres*id(-1, id, -1)` in musl. Without privilege each new ID must be one of the current three.
+pub fn do_setresid(caller_pid: Pid, r: u64, e: u64, s: u64, group: bool) -> Result<u64, u64> {
+    with_cred(caller_pid, |c| {
+        let privileged = c.privileged();
+        let ids = if group {
+            [&mut c.rgid, &mut c.egid, &mut c.sgid]
+        } else {
+            [&mut c.ruid, &mut c.euid, &mut c.suid]
+        };
+        let current = [*ids[0], *ids[1], *ids[2]];
+        let wanted = [r, e, s];
+        if !privileged && wanted.iter().any(|&v| !unchanged(v) && !current.contains(&(v as u32))) {
+            return Err(EPERM);
+        }
+        for (id, v) in ids.into_iter().zip(wanted) {
+            if !unchanged(v) {
+                *id = v as u32;
+            }
+        }
+        Ok(0)
+    })
+}
+
+/// `getresuid(2)` and `getresgid(2)`: the three IDs, stored through the caller's pointers.
+pub fn do_getresid(caller_pid: Pid, r_ptr: u64, e_ptr: u64, s_ptr: u64, group: bool) -> Result<u64, u64> {
+    let ids = with_cred(caller_pid, |c| if group { [c.rgid, c.egid, c.sgid] } else { [c.ruid, c.euid, c.suid] });
+    for (ptr, id) in [r_ptr, e_ptr, s_ptr].into_iter().zip(ids) {
+        if ptr == 0 {
+            return Err(EFAULT);
+        }
+        // SAFETY: the same unvalidated user-pointer write every syscall here makes (CLAUDE.md's
+        // known gaps).
+        unsafe { (ptr as *mut u32).write(id) };
     }
     Ok(0)
 }
 
-/// `SYS_GETGROUPS`'s real logic — this kernel has no supplementary-group concept at all, so the
-/// calling process's own single group (`Process::gid`) is the complete, correct group list to
-/// report, matching a real POSIX user with no supplementary groups. `size == 0` is the real
-/// POSIX "just tell me the count" query (must not touch `list_ptr`, which may be null/dangling for
-/// exactly this call shape); `size >= 1` writes that one gid and returns `1`. A `size` too small to
-/// hold the (always-one-element) real list is `EINVAL`, matching real `getgroups(2)`.
+/// `getgroups(2)`: the supplementary groups; `size == 0` asks only for their number, and a `size`
+/// too small for them is `EINVAL`. The effective group isn't added (POSIX leaves it unspecified;
+/// `initgroups(3)` puts the user's group in the list).
 pub fn do_getgroups(caller_pid: Pid, size: i64, list_ptr: u64) -> Result<u64, u64> {
+    let groups = with_cred(caller_pid, |c| c.groups.clone());
     if size == 0 {
-        return Ok(1);
+        return Ok(groups.len() as u64);
     }
-    if size < 1 {
+    if size < 0 || (size as usize) < groups.len() {
         return Err(EINVAL);
     }
-    let gid = do_getgid(caller_pid) as u32;
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- list_ptr isn't checked against the caller's actual mappings first.
-    unsafe { (list_ptr as *mut u32).write(gid) };
-    Ok(1)
+    for (i, g) in groups.iter().enumerate() {
+        // SAFETY: as in do_getresid.
+        unsafe { (list_ptr as *mut u32).add(i).write(*g) };
+    }
+    Ok(groups.len() as u64)
 }
 
-/// `SYS_SETGROUPS`'s real logic — real `setgroups(2)` requires `CAP_SYS_ADMIN`/root unconditionally
-/// (unlike `setuid`/`setgid`, there's no "become what you already are" no-op allowance for a
-/// non-root caller, since a group *list* isn't a single value to trivially compare for equality).
-/// A root caller's call is accepted as a real, honest no-op — this kernel has no supplementary-
-/// group concept to actually store the list in (see `do_getgroups`'s own doc comment), so there's
-/// nothing to do beyond confirming the caller was allowed to ask. Exists specifically so
-/// `su`/`login`'s own `initgroups()` → `setgroups()` call (always issued while still root, right
-/// before `change_identity` drops privilege) succeeds outright rather than needing BusyBox's own
-/// narrower `errno == ENOSYS && target_uid == getuid()` fallback (`libbb/change_identity.c`) to
-/// carry it — that fallback only covers "switching to the uid you already are," not a genuine
-/// `su otheruser`. Doesn't read `list_ptr` at all (nothing to do with the contents), but does
-/// require a real `EPERM` for anything a non-root caller attempts, matching real Linux's own
-/// unconditional permission check rather than silently no-op-succeeding for everyone.
-pub fn do_setgroups(caller_pid: Pid, _count: u64, _list_ptr: u64) -> Result<u64, u64> {
-    let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&caller_pid)
-        .expect("setgroups: current process missing from table");
-    if proc.shared.lock().uid != 0 {
-        return Err(EPERM);
+/// `setgroups(2)`: replaces the supplementary groups; the superuser only, at most `NGROUPS_MAX`.
+pub fn do_setgroups(caller_pid: Pid, count: u64, list_ptr: u64) -> Result<u64, u64> {
+    if count as usize > NGROUPS_MAX {
+        return Err(EINVAL);
     }
-    Ok(0)
+    let mut groups = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        // SAFETY: as in do_getresid, a read.
+        groups.push(unsafe { (list_ptr as *const u32).add(i).read() });
+    }
+    with_cred(caller_pid, |c| {
+        if !c.privileged() {
+            return Err(EPERM);
+        }
+        c.groups = groups;
+        Ok(0)
+    })
 }
 
 /// Resolves a real POSIX "`0` means the caller itself, otherwise a specific target pid" argument
@@ -251,26 +361,30 @@ pub(crate) fn resolve_target_pid(caller_pid: Pid, target: i64) -> Result<Pid, u6
         Err(ESRCH)
     }
 }
-/// Exposed to `sys/modules/oxfs` (see `sys/module.rs`'s `resolve_external_symbol`) for real permission
-/// checks on `open`/`chmod`/`chown` — same "the kernel resolves `current_pid()` itself, no pid
-/// crosses the module boundary" shape `oxidebsd_get_cwd` above already established. `pid == 0`
-/// (oxfs's own `module_init` self-check, running before any real process exists — see
-/// `BOOT_CWD`'s own doc comment) reports root (`0`), the same identity that self-check's own
-/// chmod/chown/open calls need to succeed unconditionally.
+/// Exposed to modules (`sys/module.rs`'s `resolve_external_symbol`): the calling thread group's
+/// effective user and group IDs, which permission checks use. Before any process exists (oxfs's
+/// boot self-check) the caller is root.
 pub(crate) extern "C" fn oxidebsd_current_uid() -> u64 {
-    let pid = scheduler::current_pid();
-    if pid == 0 {
-        return 0;
-    }
-    do_getuid(pid)
+    current_cred().euid as u64
 }
 
 pub(crate) extern "C" fn oxidebsd_current_gid() -> u64 {
-    let pid = scheduler::current_pid();
-    if pid == 0 {
-        return 0;
-    }
-    do_getgid(pid)
+    current_cred().egid as u64
+}
+
+/// The real IDs, for `access(2)`.
+pub(crate) extern "C" fn oxidebsd_current_ruid() -> u64 {
+    current_cred().ruid as u64
+}
+
+pub(crate) extern "C" fn oxidebsd_current_rgid() -> u64 {
+    current_cred().rgid as u64
+}
+
+/// `1` if `gid` is the caller's effective group (the real one when `real` is nonzero, for
+/// `access(2)`) or one of its supplementary groups.
+pub(crate) extern "C" fn oxidebsd_current_in_group(gid: u64, real: u64) -> u64 {
+    current_cred().in_group(gid as u32, real != 0) as u64
 }
 
 /// Exposed to `sys/modules/oxfs` the same way `oxidebsd_current_uid`/`_gid` are — real per-process

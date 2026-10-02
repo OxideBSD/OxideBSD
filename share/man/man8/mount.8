@@ -69,9 +69,19 @@ that isn't mounted, isn't marked
 .Cm noauto ,
 and isn't the root, in the order listed.
 .It Fl o Ar options
-Comma-separated mount options.
-.Cm rw
-is the only one accepted for now; the kernel refuses others.
+Comma-separated mount options:
+.Bl -tag -width nosuid
+.It Cm rw
+Read-write, the only mode there is; accepted and ignored.
+.It Cm nosuid
+Ignore the set-user-ID and set-group-ID bits of programs on the file
+system.
+On a
+.Cm nullfs
+mount this also covers the directory mounted, wherever it is reached from.
+.El
+.Pp
+The kernel refuses other options.
 .It Fl t Ar type
 The type to mount; with
 .Fl a ,
