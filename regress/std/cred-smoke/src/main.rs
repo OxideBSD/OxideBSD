@@ -104,6 +104,55 @@ fn mount_nosuid_tmpfs() {
     }
 }
 
+/// `/proc/<pid>/stat`'s start time (field 22, clock ticks since boot).
+fn start_time(pid: &str) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let rest = stat.rfind(')').map(|i| &stat[i + 1..]).unwrap_or("");
+    // After the command: state is field 3, so field 22 is the 20th word.
+    rest.split_whitespace().nth(19).and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// SUDO.md §5.2.2 and §5.3: `ttyname`, a real process start time, and Linux's `getrandom` number.
+fn sudo_prerequisites() {
+    let tty = CString::new("/dev/ttyv0").unwrap();
+    let fd = unsafe { libc::open(tty.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    if fd < 0 {
+        finish(false, "open /dev/ttyv0");
+    }
+    let mut name = [0u8; 64];
+    let r = unsafe { libc::ttyname_r(fd, name.as_mut_ptr().cast(), name.len()) };
+    let got = std::ffi::CStr::from_bytes_until_nul(&name).map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
+    if r != 0 || got != "/dev/ttyv0" {
+        finish(false, &format!("ttyname_r: {r} {got:?}"));
+    }
+    println!("cred-smoke: ok: ttyname gives /dev/ttyv0");
+    unsafe { libc::close(fd) };
+
+    let mut buf = [0u8; 16];
+    let n = unsafe { libc::syscall(318, buf.as_mut_ptr(), buf.len(), 0) };
+    if n != 16 || buf == [0u8; 16] {
+        finish(false, &format!("getrandom through 318 returned {n}"));
+    }
+    println!("cred-smoke: ok: getrandom at Linux's number");
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let parent = start_time("self");
+    match unsafe { libc::fork() } {
+        0 => {
+            let me = start_time("self");
+            std::process::exit(if me > 0 && me >= parent { 0 } else { 1 });
+        }
+        child => {
+            let mut status = 0;
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            if !(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0) {
+                finish(false, &format!("/proc start time: parent {parent}, child not later or zero"));
+            }
+        }
+    }
+    println!("cred-smoke: ok: /proc/<pid>/stat start time");
+}
+
 /// The unprivileged child (uid 1000, gid 1000, groups {20}).
 fn as_user() -> ! {
     unsafe {
@@ -226,6 +275,8 @@ fn main() {
     if mode_of(SUID) != 0o4755 {
         finish(false, &format!("chmod 4755 gave {:o}", mode_of(SUID)));
     }
+
+    sudo_prerequisites();
 
     match unsafe { libc::fork() } {
         0 => as_user(),

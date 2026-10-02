@@ -851,6 +851,10 @@ pub struct Process {
     /// whatever happened to be at that address in `hush`'s own (unrelated) address space. Starts at
     /// `0` for a freshly spawned/`execve`'d process (no TLS set up yet); a forked child inherits the
     /// parent's live value (real `fork()` semantics — TLS state is copied, not reset).
+    /// `ticks()` when this process was created (`fork`, `clone` or the kernel's `spawn`), for
+    /// `/proc/<pid>/stat`'s start time (field 22): sudo-rs ties a timestamp record to a session
+    /// leader's start time (`OxideBSD-doc/SUDO.md` §5.3.1). `execve` keeps it.
+    pub start_ticks: u64,
     pub fs_base: u64,
     /// Real `CLONE_CHILD_CLEARTID` support (`process::lifecycle::do_clone`'s own `ctid` argument)
     /// — `0` doubles as "never set", same convention `cwd`/`root_inode` already use. Real musl

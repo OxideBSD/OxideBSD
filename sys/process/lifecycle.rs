@@ -211,6 +211,7 @@ fn spawn_finish(
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
         })),
         fs_base: 0,
+        start_ticks: crate::cpu::interrupts::ticks(),
         clear_child_tid: 0,
         pending_signals: 0,
         blocked_signals: 0,
@@ -575,6 +576,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         user_stack_top: VirtAddr::zero(),
         shared: child_shared,
         fs_base: parent_fs_base,
+        start_ticks: crate::cpu::interrupts::ticks(),
         // Not inherited -- a forked child was never itself the target of a clone(2) call, see
         // Process::clear_child_tid's own doc comment.
         clear_child_tid: 0,
@@ -846,6 +848,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         // Real CLONE_SETTLS: this thread's own IA32_FS_BASE, distinct from every sibling's --
         // never copied from the caller (see Process::fs_base's own doc comment).
         fs_base: tls,
+        start_ticks: crate::cpu::interrupts::ticks(),
         // Real CLONE_CHILD_CLEARTID -- see Process::clear_child_tid's own doc comment.
         clear_child_tid: ctid,
         pending_signals: 0,

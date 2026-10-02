@@ -90,6 +90,7 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     let blocked = proc.blocked_signals;
     let state = state_char(proc.state);
     let comm = proc.comm.clone();
+    let start = proc.start_ticks;
     // The terminal layer is asked without the process table held.
     drop(table);
 
@@ -118,7 +119,9 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     // num_threads (idx 16), blocked (idx 28), exit_signal (idx 34, SIGCHLD), start_brk (idx 43).
     let fields: [u64; 49] = [
         ppid, pgid, sid, tty_nr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 4-13
-        20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 14-27 (priority, nice, num_threads, ...)
+        // priority (18), nice, num_threads, itrealvalue, starttime (22, in clock ticks since boot:
+        // the tick is 100 Hz, sysconf(_SC_CLK_TCK)), ...
+        20, 0, 1, 0, start, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         blocked, 0, 0, 0, 0, 0, // 28-33
         17, 0, 0, 0, 0, 0, 0, // 34-40 (exit_signal, processor, rt_priority, ...)
         0, 0, brk, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)

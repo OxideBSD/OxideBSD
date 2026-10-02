@@ -329,6 +329,10 @@ const SYS_TIMES: u64 = 493;
 /// existing generator) is kernel-resident, same reasoning as everything else this module only
 /// ever calls through to.
 const SYS_GETRANDOM: u64 = 526;
+/// Linux's own `getrandom` number, which Rust's `std` calls directly through `libc::syscall` with
+/// the `libc` crate's Linux table (`OxideBSD-doc/SUDO.md` §5.3.2): served by the same handler, so
+/// `std` stops falling back to `/dev/urandom`. Unclaimed (`syscall.h.in`'s note on getrandom).
+const SYS_GETRANDOM_LINUX: u64 = 318;
 /// Item 2 of `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md`'s own 28-syscall "pre-reserved ahead of
 /// implementation" batch -- same pre-claimed-before-the-handler-existed reasoning as
 /// `SYS_GETRANDOM` just above. Real logic (`sys/syscall/ffi.rs`'s `sys_sysinfo`/`RawSysinfo`) is
@@ -731,6 +735,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_GETRUSAGE, handle_getrusage);
         oxidebsd_register_syscall(SYS_TIMES, handle_times);
         oxidebsd_register_syscall(SYS_GETRANDOM, handle_getrandom);
+        oxidebsd_register_syscall(SYS_GETRANDOM_LINUX, handle_getrandom);
         oxidebsd_register_syscall(SYS_SYSINFO, handle_sysinfo);
         oxidebsd_register_syscall(SYS_MQ_OPEN, handle_mq_open);
         oxidebsd_register_syscall(SYS_MQ_UNLINK, handle_mq_unlink);
