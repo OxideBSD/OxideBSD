@@ -1,10 +1,10 @@
 #!/bin/sh
 # A real POSIX conformance baseline -- runs INSIDE OxideBSD, not on the host.
 #
-# Usage, at the hush prompt:
+# Usage, at a root shell:
 #   sh /posix_conformance.sh
 #
-# See OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md's own "Verification" section for why this exists: every
+# See OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md, section 2, for how it is run and why it exists: every
 # other doc in this tree (OxideBSD-doc/MISSING_POSIX_SYSCALLS.md, that checklist itself) is
 # self-assessment against a hand-written list. This is a real, independent conformance suite (the
 # Open POSIX Test Suite, vendored at external/gpl2/posixtestsuite) actually run against this kernel.
