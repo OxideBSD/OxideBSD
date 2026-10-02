@@ -3900,8 +3900,9 @@ fn parse_proc_pid(bytes: &[u8]) -> Option<u32> {
     parse_pid(bytes)
 }
 
-/// `/dev`'s node for character device `rdev`: its inode and name. Searches devfs, whose root a
-/// bare `dir_lookup` of `/dev` doesn't reach (it's a mount).
+/// `/dev`'s node for character device `rdev`: its inode and its name relative to `/dev`
+/// (`ttyv0`, or `pts/0` one directory down). Searches devfs, whose root a bare `dir_lookup` of
+/// `/dev` doesn't reach (it's a mount).
 fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
     let dev = if devfs_root() != u32::MAX {
         devfs_sync();
@@ -3909,7 +3910,52 @@ fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
     } else {
         dir_lookup(ROOT_INODE, b"dev")?
     };
-    let inode = read_inode(dev);
+    let mut found = None;
+    let mut subdirs: [(u32, [u8; NAME_MAX], u8); 8] = [(0, [0; NAME_MAX], 0); 8];
+    let mut nsub = 0;
+    for_each_dir_record(dev, |name, child_num| {
+        let child = read_inode(child_num);
+        if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
+            let mut buf = [0u8; NAME_MAX];
+            buf[..name.len()].copy_from_slice(name);
+            found = Some((child_num, buf, name.len() as u8));
+        } else if child.kind == InodeKind::Dir && name != b"." && name != b".." && nsub < subdirs.len() {
+            subdirs[nsub].0 = child_num;
+            subdirs[nsub].1[..name.len()].copy_from_slice(name);
+            subdirs[nsub].2 = name.len() as u8;
+            nsub += 1;
+        }
+        found.is_none()
+    });
+    if found.is_some() {
+        return found;
+    }
+    for (dir, dname, dlen) in subdirs[..nsub].iter() {
+        let prefix = &dname[..*dlen as usize];
+        for_each_dir_record(*dir, |name, child_num| {
+            let child = read_inode(child_num);
+            if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
+                let len = prefix.len() + 1 + name.len();
+                if len <= NAME_MAX {
+                    let mut buf = [0u8; NAME_MAX];
+                    buf[..prefix.len()].copy_from_slice(prefix);
+                    buf[prefix.len()] = b'/';
+                    buf[prefix.len() + 1..len].copy_from_slice(name);
+                    found = Some((child_num, buf, len as u8));
+                }
+            }
+            found.is_none()
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// Calls `f(name, inode)` for each record of directory `dir` while it returns true.
+fn for_each_dir_record(dir: u32, mut f: impl FnMut(&[u8], u32) -> bool) {
+    let inode = read_inode(dir);
     let mut i = 0;
     while let Some(blk) = inode_block_at(&inode, i) {
         let block = read_block(blk);
@@ -3917,17 +3963,12 @@ fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
             if !dir_record_used(&block, r) {
                 continue;
             }
-            let child = read_inode(dir_record_inode(&block, r));
-            if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
-                let name = dir_record_name(&block, r);
-                let mut buf = [0u8; NAME_MAX];
-                buf[..name.len()].copy_from_slice(name);
-                return Some((dir_record_inode(&block, r), buf, name.len() as u8));
+            if !f(dir_record_name(&block, r), dir_record_inode(&block, r)) {
+                return;
             }
         }
         i += 1;
     }
-    None
 }
 
 /// `stat` of a descriptor (`fstat`, and `stat` through a `/proc/<pid>/fd/<n>` link). A terminal
@@ -8865,6 +8906,7 @@ fn format_fresh_filesystem() -> bool {
     let man_man4 = ensure_dir(usr_share_man, b"man4");
     ok &= seed_file(man_man4, b"devfs.4", include_bytes!("../../../../share/man/man4/devfs.4"));
     ok &= seed_file(man_man4, b"klog.4", include_bytes!("../../../../share/man/man4/klog.4"));
+    ok &= seed_file(man_man4, b"pts.4", include_bytes!("../../../../share/man/man4/pts.4"));
     ok &= seed_file(man_man4, b"unix.4", include_bytes!("../../../../share/man/man4/unix.4"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
     ok &= seed_file(man_man5, b"devfs.conf.5", include_bytes!("../../../../share/man/man5/devfs.conf.5"));

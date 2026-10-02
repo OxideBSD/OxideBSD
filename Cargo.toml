@@ -434,6 +434,10 @@ name = "cred_syscall_smoke"
 harness = false
 
 [[test]]
+name = "pty_syscall_smoke"
+harness = false
+
+[[test]]
 name = "sem_open_syscall_smoke"
 harness = false
 

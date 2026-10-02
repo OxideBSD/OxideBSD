@@ -1,0 +1,107 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 2, 2026
+.Dt PTS 4
+.Os OxideBSD
+.Sh NAME
+.Nm pts
+.Nd pseudo-terminal driver
+.Sh SYNOPSIS
+.In stdlib.h
+.Ft int
+.Fn posix_openpt "int oflag"
+.In pty.h
+.Ft int
+.Fn openpty "int *master" "int *slave" "char *name" "const struct termios *termp" "const struct winsize *winp"
+.Sh DESCRIPTION
+A pseudo-terminal is a pair of character devices: a master, held by a
+program such as a terminal emulator,
+.Xr script 1
+or
+.Xr sudo 8 ,
+and a slave,
+.Pa /dev/pts/ Ns Ar N ,
+on which another program runs as on any terminal.
+Output written to the slave, after its output processing, is read from the
+master; data written to the master is the slave's input, edited and echoed
+by its line discipline as keyboard input is.
+.Pp
+Each open of
+.Pa /dev/ptmx
+creates a pair and returns its master.
+The slave's number
+.Ar N
+is the lowest one free, and
+.Xr ptsname 3
+gives its name.
+Its node is created owned by the opener's real user ID, mode 0600, and
+can't be opened until
+.Xr unlockpt 3 ;
+.Xr grantpt 3
+has nothing to do.
+.Xr openpty 3
+does all of this.
+.Pp
+Closing the master hangs up the slave: the session it controls gets
+.Dv SIGHUP ,
+reads of the slave return end-of-file and writes fail with
+.Er EIO .
+Once every slave descriptor is closed, reads of the master return
+end-of-file.
+The pair and its node go away when both sides are closed.
+.Pp
+On the master,
+.Dv TCGETS ,
+.Dv TCSETS
+and
+.Dv TIOCSWINSZ
+and their companions act on the slave, and these requests are
+supported:
+.Bl -tag -width TIOCSPTLCK
+.It Dv TIOCGPTN
+Store the slave's number.
+.It Dv TIOCSPTLCK
+Lock (nonzero) or unlock (zero) the slave.
+.It Dv TIOCSIG
+Send the signal given as the argument to the slave's foreground process
+group.
+.It Dv TIOCPKT
+Turn packet mode on (nonzero) or off.
+In packet mode each read returns either a zero byte followed by data, or a
+single byte of
+.Dv TIOCPKT_FLUSHREAD ,
+.Dv TIOCPKT_FLUSHWRITE ,
+.Dv TIOCPKT_STOP ,
+.Dv TIOCPKT_START ,
+.Dv TIOCPKT_NOSTOP
+and
+.Dv TIOCPKT_DOSTOP
+bits saying what happened to the slave since the last read.
+.El
+.Pp
+At most
+.Va kern.tty.pty_max
+pairs exist at once (256 by default); beyond that, opening
+.Pa /dev/ptmx
+fails with
+.Er EAGAIN .
+.Sh FILES
+.Bl -tag -width /dev/pts/N -compact
+.It Pa /dev/ptmx
+creates pairs
+.It Pa /dev/pts/ Ns Ar N
+slaves
+.El
+.Sh SEE ALSO
+.Xr openpty 3 ,
+.Xr posix_openpt 3 ,
+.Xr ptsname 3 ,
+.Xr unlockpt 3 ,
+.Xr termios 4 ,
+.Xr sysctl 8
+.Sh HISTORY
+Pseudo-terminals appeared in
+.Bx 4.2 .
+This implementation was written for OxideBSD; its device names are those of
+.Nx
+and
+.Fx .

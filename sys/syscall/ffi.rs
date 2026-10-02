@@ -872,6 +872,9 @@ struct RawFbInfo {
 /// `isatty()` is `ioctl(fd, TIOCGWINSZ)`, so this is what makes a pipe or a file not a tty.
 /// `FBIOGET_OXIDEBSD` acts on a `/dev/fb0` descriptor. Unknown requests are logged.
 pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
+    // musl's ioctl() takes the request as an int, so one with bit 31 set (`TIOCGPTN`,
+    // 0x80045430) arrives sign-extended; requests are 32 bits.
+    let request = request as u32 as u64;
     let real_fd = crate::fs::fd::real_fd_of(fd).ok_or(EBADF)?;
     if request == FBIOGET_OXIDEBSD {
         let geom = crate::fs::fd::framebuffer_geometry_of(fd).ok_or(ENOTTY)?;
@@ -886,6 +889,9 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         let on = unsafe { *(argp as *const i32) } != 0;
         crate::fs::fd::set_nonblocking(real_fd, on);
         return Ok(0);
+    }
+    if let Some(r) = crate::tty::pty::ioctl(real_fd, request, argp) {
+        return r;
     }
     let Some(tty) = crate::tty::of_real_fd(real_fd) else {
         if !matches!(request, TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TIOCSCTTY | TIOCGPGRP | TIOCSPGRP | TIOCNOTTY | TIOCGSID | FIONREAD | TCFLSH | TCXONC | TCSBRK | TIOCOUTQ) {

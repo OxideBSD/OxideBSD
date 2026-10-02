@@ -57,6 +57,7 @@ pub fn init() {
     let (ctty, console) = (super::CTTY_DEVICE, super::CONSOLE_DEVICE);
     let _ = crate::fs::devfs::make_dev("tty", ctty.0, ctty.1, 0, 0, 0o666, super::dev_open);
     let _ = crate::fs::devfs::make_dev("console", console.0, console.1, 0, 0, 0o600, super::dev_open);
+    super::pty::init();
 }
 
 /// Set while a process that mapped `/dev/fb0` owns the keyboard (§7.2): keys then go only to

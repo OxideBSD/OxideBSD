@@ -453,6 +453,14 @@ fn main() {
         StdLink::StaticPie,
     );
 
+    // Pseudo-terminals -- see tests/pty_syscall_smoke.rs. Spawned by the kernel as pid 1.
+    build_std_oxidebsd_userland_crate_with_env(
+        "regress/std/pty-smoke",
+        "PTY_SMOKE_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
     // Process credentials and set-user-ID exec -- see tests/cred_syscall_smoke.rs. Spawned by the
     // kernel as pid 1 and seeded as /usr/tests/cred/cred-smoke; static like /bin/sh.
     let cred_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(

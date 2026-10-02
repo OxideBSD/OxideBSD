@@ -80,6 +80,9 @@ fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
         let (readable, writable) = crate::tty::poll_state(tty, sid);
         return (Readiness { readable, writable, ..Default::default() }, Source::Wakeable);
     }
+    if let Some(r) = crate::tty::pty::readiness(real_fd) {
+        return (r, Source::Wakeable);
+    }
     if let Some(r) = crate::fs::pipe::readiness(real_fd) {
         return (r, Source::Wakeable);
     }

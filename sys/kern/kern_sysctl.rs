@@ -222,6 +222,9 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
             .map(|v| crate::kern::subr_msgbuf::SIZE.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
         "kern.maxproc" => parsed.filter(|v| (32..=1_000_000).contains(v)).map(|v| *MAXPROC.lock() = v as i32),
         "kern.maxfiles" => parsed.filter(|v| (64..=1_000_000).contains(v)).map(|v| *MAXFILES.lock() = v as i32),
+        "kern.tty.pty_max" => parsed
+            .filter(|v| (1..=4096).contains(v))
+            .map(|v| crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed)),
         _ => {
             crate::serial_println!("[boot] unknown tunable {}, ignored", name);
             return;
@@ -594,6 +597,32 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
                 if new.len() >= 4 && i32::from_ne_bytes([new[0], new[1], new[2], new[3]]) != 0 {
                     crate::syscall::stats::reset();
                 }
+                Ok(())
+            }),
+        },
+    );
+    // Pseudo-terminals (PTY.md §2.4).
+    let tty = add_node(t, &kern, None, "tty", "Terminals");
+    add_leaf(
+        t,
+        &tty,
+        Leaf {
+            number: None,
+            name: "pty_max",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW | CTLFLAG_TUN,
+            descr: "Maximum number of pseudo-terminals",
+            get: || int(crate::tty::pty::PTY_MAX.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                if new.len() < 4 {
+                    return Err(EINVAL as i64);
+                }
+                let v = i32::from_ne_bytes([new[0], new[1], new[2], new[3]]);
+                if !(1..=4096).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }),
         },

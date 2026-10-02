@@ -8,6 +8,7 @@
 //! console answers `ESC[6n` through its input), and signal delivery takes the process table.
 
 pub mod console;
+pub mod pty;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -148,7 +149,32 @@ pub trait Driver: Sync {
     fn configure(&self, _termios: &RawTermios) {}
     /// The last descriptor was closed with `HUPCL` set.
     fn hangup(&self) {}
+    /// Whether output can be accepted now; a writer waits while it can't (a pseudo-terminal's
+    /// master not reading, `PTY.md` §4.1).
+    fn room(&self) -> bool {
+        true
+    }
+    /// The other end is gone (a pseudo-terminal whose master was closed, `PTY.md` §3.3): reads
+    /// with nothing queued return end-of-file and writes fail with `EIO`.
+    fn hung_up(&self) -> bool {
+        false
+    }
+    /// The last descriptor was closed (whether or not `HUPCL` is set).
+    fn last_close(&self) {}
+    /// A `read` took input, so there is room for more.
+    fn drained(&self) {}
+    /// Packet-mode events (`TIOCPKT_*` bits, `PTY.md` §5.3): a flush, output stopped or
+    /// restarted, `IXON` turned off or on.
+    fn status(&self, _bits: u8) {}
 }
+
+/// `TIOCPKT_*` (`<sys/ioctl.h>`), the events `Driver::status` reports.
+pub const TIOCPKT_FLUSHREAD: u8 = 1;
+pub const TIOCPKT_FLUSHWRITE: u8 = 2;
+pub const TIOCPKT_STOP: u8 = 4;
+pub const TIOCPKT_START: u8 = 8;
+pub const TIOCPKT_NOSTOP: u8 = 16;
+pub const TIOCPKT_DOSTOP: u8 = 32;
 
 /// Most input a terminal holds before dropping further input (and ringing the bell, with
 /// `IMAXBEL`): 4.4BSD's `TTYHOG` and `MAX_CANON`.
@@ -203,6 +229,12 @@ extern "C" fn dev_open(major: u64, minor: u64, flags: u64) -> i64 {
 /// devfs makes them; login(1) gives it to the user); returns its id.
 pub fn register(name: &'static str, major: u32, minor: u32, speed: u32, winsize: Winsize, driver: &'static dyn Driver) -> TtyId {
     let _ = crate::fs::devfs::make_dev(name, major, minor, 0, TTY_GID, 0o600, dev_open);
+    register_bare(name, major, minor, speed, winsize, driver)
+}
+
+/// `register` without the device node: for a terminal whose node its driver makes itself
+/// (`pty`).
+pub fn register_bare(name: &'static str, major: u32, minor: u32, speed: u32, winsize: Winsize, driver: &'static dyn Driver) -> TtyId {
     let mut ttys = TTYS.lock();
     ttys.push(Tty {
         name,
@@ -224,6 +256,21 @@ pub fn register(name: &'static str, major: u32, minor: u32, speed: u32, winsize:
     });
     DRIVERS.lock().push(driver);
     ttys.len() - 1
+}
+
+/// Puts terminal `id` back as `register` made it, for reuse (a pseudo-terminal's number).
+pub fn reset(id: TtyId, speed: u32) {
+    with(id, |t| {
+        t.termios = default_termios(speed);
+        t.winsize = Winsize::default();
+        t.session = None;
+        t.pgrp = None;
+        t.revoked.clear();
+        t.flush_input();
+        t.stopped = false;
+        t.column = 0;
+        t.opens = 0;
+    });
 }
 
 fn driver(id: TtyId) -> &'static dyn Driver {
@@ -261,11 +308,16 @@ struct Effects {
     signal: Option<(Pid, u64)>,
     wake_readers: bool,
     wake_writers: bool,
+    /// `TIOCPKT_*` events for `Driver::status`.
+    pkt: u8,
 }
 
 fn perform(id: TtyId, fx: Effects) {
     if !fx.echo.is_empty() {
         driver(id).output(&fx.echo_raw, &fx.echo);
+    }
+    if fx.pkt != 0 {
+        driver(id).status(fx.pkt);
     }
     if let Some((pgrp, sig)) = fx.signal {
         process::signal_foreground_group(pgrp, sig);
@@ -275,7 +327,7 @@ fn perform(id: TtyId, fx: Effects) {
     }
 }
 
-fn wake(id: TtyId, readers: bool, writers: bool) {
+pub(crate) fn wake(id: TtyId, readers: bool, writers: bool) {
     let mut table = process::table().lock();
     for (&pid, p) in table.iter_mut() {
         let hit = match p.state {
@@ -438,16 +490,19 @@ impl Tty {
         if i & IXON != 0 {
             if is(VSTOP, b) {
                 self.stopped = true;
+                fx.pkt |= TIOCPKT_STOP;
                 return;
             }
             if is(VSTART, b) {
                 self.stopped = false;
                 fx.wake_writers = true;
+                fx.pkt |= TIOCPKT_START;
                 return;
             }
             if self.stopped && i & IXANY != 0 {
                 self.stopped = false;
                 fx.wake_writers = true;
+                fx.pkt |= TIOCPKT_START;
             }
         }
         match b {
@@ -704,6 +759,14 @@ fn stop_if_stopped(pid: Pid) {
 
 /// `read(2)` on a terminal.
 pub fn read(id: TtyId, buf: &mut [u8], cx: &IoContext) -> Result<usize, u64> {
+    let r = read_inner(id, buf, cx);
+    if matches!(r, Ok(n) if n > 0) {
+        driver(id).drained();
+    }
+    r
+}
+
+fn read_inner(id: TtyId, buf: &mut [u8], cx: &IoContext) -> Result<usize, u64> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -759,6 +822,9 @@ pub fn read(id: TtyId, buf: &mut [u8], cx: &IoContext) -> Result<usize, u64> {
                 }
             }
         };
+        if driver(id).hung_up() {
+            return Ok(0);
+        }
         if cx.nonblock {
             return Err(crate::syscall::EAGAIN);
         }
@@ -798,6 +864,10 @@ pub fn write(id: TtyId, bytes: &[u8], cx: &IoContext) -> Result<usize, u64> {
                 _ => {}
             }
         }
+        if driver(id).hung_up() {
+            return Err(crate::syscall::EIO);
+        }
+        let room = driver(id).room();
         let mut raw = Vec::new();
         let mut cooked = Vec::new();
         {
@@ -806,7 +876,7 @@ pub fn write(id: TtyId, bytes: &[u8], cx: &IoContext) -> Result<usize, u64> {
             if t.is_revoked(cx.sid) {
                 return Err(crate::syscall::EIO);
             }
-            if !t.stopped {
+            if !t.stopped && room {
                 raw.extend_from_slice(bytes);
                 t.cook(bytes, &mut cooked);
             }
@@ -874,6 +944,7 @@ pub fn set_termios(id: TtyId, new: RawTermios, flush: bool, cx: &IoContext) -> R
         let mut ttys = TTYS.lock();
         let t = &mut ttys[id];
         let was_canonical = t.termios.c_lflag & ICANON != 0;
+        let old_ixon = t.termios.c_iflag & IXON != 0;
         t.termios = new;
         if flush {
             t.flush_input();
@@ -888,6 +959,11 @@ pub fn set_termios(id: TtyId, new: RawTermios, flush: bool, cx: &IoContext) -> R
         if t.stopped && new.c_iflag & IXON == 0 {
             t.stopped = false;
             fx.wake_writers = true;
+        }
+        match (old_ixon, new.c_iflag & IXON != 0) {
+            (true, false) => fx.pkt |= TIOCPKT_NOSTOP,
+            (false, true) => fx.pkt |= TIOCPKT_DOSTOP,
+            _ => {}
         }
     }
     driver(id).configure(&new);
@@ -986,21 +1062,30 @@ pub fn pending_input(id: TtyId) -> usize {
 
 /// `TCFLSH`: `0` input, `1` output (nothing is ever queued), `2` both.
 pub fn flush(id: TtyId, which: u64) -> Result<(), u64> {
-    match which {
-        0 | 2 => with(id, |t| t.flush_input()),
-        1 => {}
+    let bits = match which {
+        0 => TIOCPKT_FLUSHREAD,
+        1 => TIOCPKT_FLUSHWRITE,
+        2 => TIOCPKT_FLUSHREAD | TIOCPKT_FLUSHWRITE,
         _ => return Err(crate::syscall::EINVAL),
+    };
+    if bits & TIOCPKT_FLUSHREAD != 0 {
+        with(id, |t| t.flush_input());
     }
+    driver(id).status(bits);
     Ok(())
 }
 
 /// `TCXONC`: `0` stop output, `1` restart it, `2`/`3` send STOP/START.
 pub fn flow(id: TtyId, action: u64) -> Result<(), u64> {
     match action {
-        0 => with(id, |t| t.stopped = true),
+        0 => {
+            with(id, |t| t.stopped = true);
+            driver(id).status(TIOCPKT_STOP);
+        }
         1 => {
             with(id, |t| t.stopped = false);
             wake(id, false, true);
+            driver(id).status(TIOCPKT_START);
         }
         2 | 3 => {
             let c = with(id, |t| t.termios.c_cc[if action == 2 { VSTOP } else { VSTART }]);
@@ -1042,13 +1127,71 @@ pub fn opened(id: TtyId) {
 }
 
 pub fn closed(id: TtyId) {
-    let hangup = with(id, |t| {
+    let (last, hangup) = with(id, |t| {
         t.opens = t.opens.saturating_sub(1);
-        t.opens == 0 && t.termios.c_cflag & HUPCL != 0
+        (t.opens == 0, t.opens == 0 && t.termios.c_cflag & HUPCL != 0)
     });
     if hangup {
         driver(id).hangup();
     }
+    if last {
+        driver(id).last_close();
+    }
+}
+
+/// The far end of terminal `id` went away (a pseudo-terminal's master was closed, `PTY.md`
+/// §3.3), as a modem hangup: the session it controls is revoked and gets `SIGHUP` and `SIGCONT`,
+/// in its foreground process group and its leader.
+pub fn hang_up(id: TtyId) {
+    let (session, pgrp) = with(id, |t| {
+        let s = (t.session, t.pgrp);
+        if let Some(sid) = t.session {
+            t.revoked.push(sid);
+        }
+        t.session = None;
+        t.pgrp = None;
+        t.flush_input();
+        s
+    });
+    for target in [pgrp, session].into_iter().flatten() {
+        process::signal_foreground_group(target, process::SIGHUP);
+        process::signal_foreground_group(target, process::SIGCONT);
+    }
+    wake(id, true, true);
+}
+
+/// `input` without stopping at a signal character: a pseudo-terminal master's write is data
+/// that must all arrive (`PTY.md` §4.2).
+pub fn input_all(id: TtyId, bytes: &[u8]) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let mut fx = Effects::default();
+        let used = {
+            let mut ttys = TTYS.lock();
+            let t = &mut ttys[id];
+            let mut used = 0;
+            for &b in rest {
+                t.input(b, &mut fx);
+                used += 1;
+                if fx.signal.is_some() {
+                    break;
+                }
+            }
+            used
+        };
+        perform(id, fx);
+        rest = &rest[used..];
+    }
+}
+
+/// Room left in terminal `id`'s input queue, for a pseudo-terminal's master (`PTY.md` §4.2).
+pub fn input_room(id: TtyId) -> usize {
+    with(id, |t| TTYHOG.saturating_sub(t.ready.len() + t.canon.len()))
+}
+
+/// The foreground process group of terminal `id`, for `TIOCSIG`.
+pub fn foreground(id: TtyId) -> Option<Pid> {
+    with(id, |t| t.pgrp)
 }
 
 /// With the keyboard owned by the screen's owner (`console::raw_keyboard_owned`), only the
