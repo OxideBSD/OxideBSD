@@ -1,0 +1,167 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 1, 2026
+.Dt INIT 8
+.Os OxideBSD
+.Sh NAME
+.Nm init
+.Nd process control initialization
+.Sh SYNOPSIS
+.Nm
+.Op Fl R
+.Op Fl s
+.Sh DESCRIPTION
+The
+.Nm
+program is the first process the kernel starts, with process ID 1.
+It runs the boot script, starts and supervises the login sessions on
+the terminals, collects every orphaned process, and shuts the system
+down when asked.
+It has no controlling terminal: each session it starts is a session of
+its own, so that signals from the keyboard never reach
+.Nm .
+.Pp
+The kernel passes its boot flags as arguments:
+.Bl -tag -width Ds
+.It Fl s
+Start in single-user mode.
+.It Fl R
+Recovery: the kernel restarted
+.Nm
+after it died.
+.Nm
+does not run
+.Pa /etc/rc
+again; it keeps the sessions that are still running and starts the
+missing ones.
+.El
+.Ss States
+.Bl -tag -width Ds
+.It single-user
+A root shell runs on the console.
+If
+.Xr ttys 5
+marks the
+.Dq console
+entry
+.Dq insecure ,
+root's password is asked for first;
+typing
+.Ql ^D
+at the prompt skips the shell.
+When the shell exits,
+.Nm
+goes on to run
+.Pa /etc/rc ,
+or, if single-user mode was entered from multi-user mode, returns to
+multi-user mode directly.
+.It runcom
+.Pa /etc/rc
+is run with
+.Pa /sbin/init_sh ,
+with the argument
+.Dq autoboot
+at boot only.
+If it fails,
+.Nm
+enters single-user mode.
+.It multi-user
+For each entry of
+.Xr ttys 5
+that is on and has a command,
+.Nm
+runs the command with the terminal's name appended, and
+.Ev TERM
+set to the entry's type, and starts it again whenever it exits.
+An entry whose command exits within 5 seconds of starting 3 times in a
+row is not started again for 30 seconds.
+.El
+.Ss Signals
+.Bl -tag -width SIGUSR1
+.It Dv SIGHUP
+Read
+.Xr ttys 5
+again: start sessions for new entries and hang up those whose entry
+was removed, turned off, or given a different command or type.
+Also undoes
+.Dv SIGTSTP .
+.It Dv SIGTERM
+Hang up every session and enter single-user mode.
+Services keep running.
+.It Dv SIGTSTP
+Start no new sessions; those running continue.
+.It Dv SIGINT
+Shut down and reboot.
+.It Dv SIGUSR1
+Shut down and halt.
+.It Dv SIGUSR2
+Shut down and power off.
+.El
+.Pp
+To shut down,
+.Nm
+hangs up every session, runs
+.Pa /etc/rc.shutdown
+(terminating it after 90 seconds), sends
+.Dv SIGTERM
+to every process, then
+.Dv SIGKILL
+to any still there after 5 seconds, synchronizes the file systems, and
+calls
+.Xr reboot 2 .
+.Xr reboot 8 ,
+.Xr halt 8 ,
+.Xr poweroff 8
+and
+.Xr shutdown 8
+send these signals.
+.Ss Death of init
+If
+.Nm
+dies, the kernel records why in
+.Pa /proc/initdeaths
+and starts it again with
+.Fl R .
+After three deaths within 30 seconds it runs
+.Xr emergency 8
+instead.
+.Sh ENVIRONMENT
+.Nm
+ignores its own environment.
+Its children get
+.Ev PATH
+.Pa ( /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin ) ,
+.Ev HOME
+.Pa ( / ) ,
+.Ev SHELL
+.Pa ( /bin/sh )
+and
+.Ev TERM .
+.Sh FILES
+.Bl -tag -width /etc/rc.shutdown -compact
+.It Pa /dev/console
+the console
+.It Pa /etc/rc
+the boot script
+.It Pa /etc/rc.shutdown
+the shutdown script
+.It Pa /etc/ttys
+the terminals to run sessions on
+.It Pa /proc/initdeaths
+the kernel's record of deaths of
+.Nm
+.El
+.Sh SEE ALSO
+.Xr ttys 5 ,
+.Xr emergency 8 ,
+.Xr getty 8 ,
+.Xr rc 8 ,
+.Xr reboot 8 ,
+.Xr shutdown 8
+.Sh HISTORY
+An
+.Nm
+program appeared in
+.At v1 .
+This implementation was written for OxideBSD; its states and signals
+are those of
+.Fx .

@@ -1,0 +1,6 @@
+#
+# /etc/profile: read by every login shell, before ~/.profile; see sh(1).
+#
+
+# user@host:dir$ (or # for root), in color.
+PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '

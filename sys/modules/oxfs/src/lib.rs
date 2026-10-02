@@ -8150,6 +8150,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_tests_rc, b"run.sh", include_bytes!("../../../../regress/rc-syscall-smoke/run.sh"));
     let usr_tests_devfs = ensure_dir(usr_tests, b"devfs");
     ok &= seed_file(usr_tests_devfs, b"run.sh", include_bytes!("../../../../regress/devfs-syscall-smoke/run.sh"));
+    let usr_tests_init = ensure_dir(usr_tests, b"init");
+    ok &= seed_file(usr_tests_init, b"init-smoke", include_bytes!(env!("OXFS_INIT_SMOKE_ELF_PATH")));
     let usr_tests_tz = ensure_dir(usr_tests, b"tz");
     ok &= seed_file(usr_tests_tz, b"run.sh", include_bytes!("../../../../regress/tz-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests_tz, b"tz-smoke", include_bytes!(env!("OXFS_TZ_SMOKE_ELF_PATH")));
@@ -8608,6 +8610,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(etc, b"gettytab", include_bytes!("../../../../etc/gettytab"));
     ok &= seed_file(etc, b"login.conf", include_bytes!("../../../../etc/login.conf"));
     ok &= seed_file(etc, b"motd", include_bytes!("../../../../etc/motd"));
+    // Read by every login shell (sh(1)); the prompt the console shell had before login sessions.
+    ok &= seed_file(etc, b"profile", include_bytes!("../../../../etc/profile"));
     ok &= seed_file(etc, b"man.conf", include_bytes!("../../../../etc/man.conf"));
     let pam_d = ensure_dir(etc, b"pam.d");
     ok &= seed_file(pam_d, b"login", include_bytes!("../../../../etc/pam.d/login"));
@@ -8795,6 +8799,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
     ok &= seed_file(man_man8, b"dmesg.8", include_bytes!("../../../../share/man/man8/dmesg.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
+    ok &= seed_file(man_man8, b"init.8", include_bytes!("../../../../share/man/man8/init.8"));
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));
     ok &= seed_file(man_man8, b"newsyslog.8", include_bytes!("../../../../share/man/man8/newsyslog.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));

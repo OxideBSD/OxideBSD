@@ -453,6 +453,16 @@ fn main() {
         StdLink::StaticPie,
     );
 
+    // /sbin/init's states end to end -- see tests/init_syscall_smoke.rs. Spawned by the kernel as
+    // pid 1 and seeded as /usr/tests/init/init-smoke, which init runs again; static like /bin/sh.
+    let init_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "regress/std/init-smoke",
+        "OXFS_INIT_SMOKE_ELF_PATH",
+        &musl_sysroot,
+        &[],
+        StdLink::StaticPie,
+    );
+
     let std_thread_net_signal_oxidebsd_elf_path = build_std_oxidebsd_userland_crate(
         "regress/std/std-thread-net-signal-oxidebsd",
         "OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH",
@@ -903,6 +913,7 @@ fn main() {
         ("OXFS_ZDUMP_ELF_PATH", tz.zdump.to_str().unwrap()),
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
         ("OXFS_TZ_SMOKE_ELF_PATH", tz_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_INIT_SMOKE_ELF_PATH", init_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
         ("OXFS_NINJA_ELF_PATH", ninja_elf_path.to_str().unwrap()),

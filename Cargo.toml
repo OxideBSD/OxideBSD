@@ -422,6 +422,10 @@ name = "init_respawn_smoke"
 harness = false
 
 [[test]]
+name = "init_syscall_smoke"
+harness = false
+
+[[test]]
 name = "sem_open_syscall_smoke"
 harness = false
 

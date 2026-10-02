@@ -1,0 +1,14 @@
+[package]
+name = "init-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+# Opts out of the root workspace: a std program for x86_64-unknown-oxidebsd, built by build.rs.
+[workspace]

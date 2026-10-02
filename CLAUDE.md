@@ -32,8 +32,9 @@ OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/R
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
-- Userland: pid 1 is `/sbin/init` (a first cut: `/etc/rc`, then a console shell, OxideBSD's own
-  `/bin/sh` from `lib/libsh`); 128 standalone BusyBox applets;
+- Userland: pid 1 is `/sbin/init` (`init(8)`: `/etc/rc`, then getty/login on the `/etc/ttys`
+  terminals; the console is `insecure`, so root logs in as `user` first); OxideBSD's own `/bin/sh`
+  from `lib/libsh`; 128 standalone BusyBox applets;
   native PIE utilities over `lib/oxlibc`; on-target Clang/LLVM, bmake, ninja, ncurses, nano, nvi;
   a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout: `hier(7)` (`share/man/man7/hier.7`).
 
