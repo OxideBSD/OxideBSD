@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/ping_smoke.rs`.
+//! Real-`SYSCALL` successor to `tests/ping_smoke.rs` (an in-kernel test, retired 2026-10-06).
 //!
 //! That test calls `oxidebsd_sys_socket`/`_sendto`/`_recvfrom` as plain Rust functions from its
 //! own `main()`, never through a genuine `SYSCALL` instruction. This binary drives the identical
@@ -10,7 +10,7 @@
 //! No test-only "advance a synthetic peer" syscall is needed: SLIRP genuinely answers a real echo
 //! request over the real (virtual) wire, so simply looping on real `recvfrom()` until the reply
 //! arrives (or a bounded retry count elapses) is enough -- the same reason
-//! `tests/icmp_smoke.rs`/`tests/ping_smoke.rs` never needed synthetic RX injection either.
+//! `tests/icmp_smoke.rs` and the retired `tests/ping_smoke.rs` never needed synthetic RX injection either.
 //!
 //! The syscall numbers/register convention here must match `sys/syscall.rs` in the kernel
 //! exactly -- there's no shared crate between the two, this is the ABI boundary itself.

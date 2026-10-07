@@ -223,6 +223,24 @@ fn close_direction(pipe_id: u64, dir: End) {
 /// format (a pointer to `int pipefd[2]`), since nothing about this call's shape needed inventing
 /// the way `open`/`execve` did (see `sys/syscall.rs`'s own doc comment on `sys_pipe`).
 pub(crate) fn do_pipe(fds_ptr: u64) -> Result<u64, u64> {
+    let (read_fd, write_fd) = create_pipe()?;
+    copyout_fds(read_fd, write_fd, fds_ptr)?;
+    Ok(0)
+}
+
+/// Writes a new pipe's two descriptors to `fds_ptr`; when that fails, closes them (as FreeBSD's
+/// `pipe2` does) and returns the error.
+pub(crate) fn copyout_fds(read_fd: u64, write_fd: u64, fds_ptr: u64) -> Result<(), u64> {
+    use crate::memory::usercopy::{UserPtr, copyout_val};
+    let fds = [read_fd as i32, write_fd as i32];
+    copyout_val(&fds, UserPtr::new(fds_ptr)).inspect_err(|_| {
+        let _ = crate::fs::fd::close_range(read_fd, read_fd, 0);
+        let _ = crate::fs::fd::close_range(write_fd, write_fd, 0);
+    })
+}
+
+/// Creates a pipe: its read and write ends as the caller's descriptors.
+pub(crate) fn create_pipe() -> Result<(u64, u64), u64> {
     crate::fs::fd::check_room(2).map_err(|e| e as u64)?;
     let pipe_id = new_pipe_buffer();
 
@@ -238,13 +256,7 @@ pub(crate) fn do_pipe(fds_ptr: u64) -> Result<u64, u64> {
     crate::fs::fd::set_kind(read_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
     crate::fs::fd::set_kind(write_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
 
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- fds_ptr isn't checked against the caller's actual mappings first.
-    unsafe {
-        (fds_ptr as *mut i32).write(read_user_fd as i32);
-        (fds_ptr as *mut i32).add(1).write(write_user_fd as i32);
-    }
-    Ok(0)
+    Ok((read_user_fd as u64, write_user_fd as u64))
 }
 
 extern "C" fn write_denied(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {

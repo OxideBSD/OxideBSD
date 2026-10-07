@@ -85,6 +85,32 @@ pub(crate) fn sys_pwrite(fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64
     }
 }
 
+/// A C `struct iovec { void *iov_base; size_t iov_len; }`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+// SAFETY: two u64s, no padding, any bit pattern valid.
+unsafe impl crate::memory::usercopy::Pod for IoVec {}
+
+/// `IOV_MAX` (musl's `limits.h`).
+const IOV_MAX: u64 = 1024;
+
+/// Copies a whole `iovec` array in before any I/O, as the BSDs' `copyinuio` does: a bad array
+/// fails with `EFAULT` having transferred nothing. More than `IOV_MAX` entries is `EINVAL`.
+fn copyin_iovecs(iov_ptr: u64, iovcnt: u64) -> Result<alloc::vec::Vec<IoVec>, u64> {
+    use crate::memory::usercopy::{UserPtr, copyin_val};
+    if iovcnt > IOV_MAX {
+        return Err(EINVAL);
+    }
+    (0..iovcnt)
+        .map(|i| copyin_val::<IoVec>(UserPtr::new(iov_ptr).add(i * 16)))
+        .collect()
+}
+
 /// `SYS_WRITEV = 104` — OxideBSD's own invention, added specifically because musl's *entire*
 /// stdio write path goes through `writev`, never plain `write` (see `external/mit/musl`'s
 /// `src/stdio/__stdio_write.c`) — without this, `printf` et al. silently produce no output at all.
@@ -96,17 +122,9 @@ pub(crate) fn sys_pwrite(fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64
 /// entry already succeeded, returns `Ok(total so far)` rather than propagating the failure (a
 /// later `write` call surfaces it instead); only propagates `Err` if the very first entry fails.
 pub(crate) fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64> {
-    #[repr(C)]
-    struct IoVec {
-        base: u64,
-        len: u64,
-    }
-
+    let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
     let mut total: u64 = 0;
-    for i in 0..iovcnt {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document -- iov_ptr
-        // isn't checked against the caller's actual mappings before it's dereferenced.
-        let iov = unsafe { &*(iov_ptr as *const IoVec).add(i as usize) };
+    for iov in &iovs {
         match sys_write(fd, iov.base, iov.len) {
             Ok(n) => total += n,
             Err(errno) => return if total > 0 { Ok(total) } else { Err(errno) },
@@ -147,21 +165,14 @@ pub(crate) fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64>
 /// finally failing with `EIO` instead of the `EINVAL` real POSIX requires, starving every later test
 /// in the same boot that needed to write any file at all.
 pub(crate) fn sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> Result<u64, u64> {
-    #[repr(C)]
-    struct IoVec {
-        base: u64,
-        len: u64,
-    }
-
     if ofs != u64::MAX && (ofs as i64) < 0 {
         return Err(EINVAL);
     }
 
+    let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
     let mut total: u64 = 0;
     let mut cur_ofs = ofs;
-    for i in 0..iovcnt {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        let iov = unsafe { &*(iov_ptr as *const IoVec).add(i as usize) };
+    for iov in &iovs {
         let result = if ofs == u64::MAX {
             sys_write(fd, iov.base, iov.len)
         } else {
@@ -197,17 +208,9 @@ pub(crate) fn sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> Resu
 /// iovec expecting more to somehow still be available. Same partial-success semantics as
 /// `sys_writev`: only propagates `Err` if the very first entry fails with nothing read yet.
 pub(crate) fn sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64> {
-    #[repr(C)]
-    struct IoVec {
-        base: u64,
-        len: u64,
-    }
-
+    let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
     let mut total: u64 = 0;
-    for i in 0..iovcnt {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document -- iov_ptr
-        // isn't checked against the caller's actual mappings before it's dereferenced.
-        let iov = unsafe { &*(iov_ptr as *const IoVec).add(i as usize) };
+    for iov in &iovs {
         match sys_read(fd, iov.base, iov.len) {
             Ok(n) => {
                 total += n;
@@ -239,15 +242,7 @@ pub(crate) fn sys_pipe(fds_ptr: u64) -> Result<u64, u64> {
 /// applying the same `set_cloexec`/`set_nonblocking` calls `sys_fcntl`'s own `F_SETFD`/`F_SETFL`
 /// handling above uses, directly to both ends `do_pipe` just created.
 pub(crate) fn sys_pipe2(fds_ptr: u64, flags: u64) -> Result<u64, u64> {
-    crate::fs::pipe::do_pipe(fds_ptr)?;
-    // SAFETY: do_pipe just wrote two real, freshly allocated fd numbers here (same known
-    // pointer-validation gap every other user-memory read in this file already has).
-    let (read_fd, write_fd) = unsafe {
-        (
-            (fds_ptr as *const i32).read() as u64,
-            (fds_ptr as *const i32).add(1).read() as u64,
-        )
-    };
+    let (read_fd, write_fd) = crate::fs::pipe::create_pipe()?;
     if flags & O_CLOEXEC != 0 {
         let pid = crate::process::scheduler::current_tgid();
         crate::fs::fd::set_cloexec(pid, read_fd, true);
@@ -260,6 +255,7 @@ pub(crate) fn sys_pipe2(fds_ptr: u64, flags: u64) -> Result<u64, u64> {
             }
         }
     }
+    crate::fs::pipe::copyout_fds(read_fd, write_fd, fds_ptr)?;
     Ok(0)
 }
 
@@ -978,9 +974,10 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
 pub(crate) fn sys_get_keyevent(out_ptr: u64) -> Result<u64, u64> {
     match crate::console::keyevents::pop_event() {
         Some(event) => {
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // file already has.
-            unsafe { *(out_ptr as *mut crate::console::keyevents::RawKeyEvent) = event };
+            crate::memory::usercopy::copyout_val(
+                &event,
+                crate::memory::usercopy::UserPtr::new(out_ptr),
+            )?;
             Ok(1)
         }
         None => Ok(0),
@@ -991,6 +988,7 @@ pub(crate) fn sys_get_keyevent(out_ptr: u64) -> Result<u64, u64> {
 /// NUL-padded fields, no padding between them -- same "byte-exact against the real musl layout"
 /// discipline `sys/modules/oxfs`'s `MuslStat` already follows for `stat(2)`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct RawUtsname {
     sysname: [u8; 65],
     nodename: [u8; 65],
@@ -999,6 +997,9 @@ struct RawUtsname {
     machine: [u8; 65],
     domainname: [u8; 65],
 }
+
+// SAFETY: six byte arrays, no padding.
+unsafe impl crate::memory::usercopy::Pod for RawUtsname {}
 
 /// The host name, NUL-terminated as `struct utsname` holds it; `oxidebsd` until
 /// `/etc/rc.d/hostname` sets one.
@@ -1091,9 +1092,7 @@ pub(crate) fn sys_uname(uts_ptr: u64) -> Result<u64, u64> {
         machine: utsname_field(crate::kern::kern_sysctl::MACHINE),
         domainname: *DOMAINNAME.lock(),
     };
-    // SAFETY: same known pointer-validation gap every other user-memory write in this file
-    // already has -- uts_ptr isn't checked against the caller's actual mappings first.
-    unsafe { *(uts_ptr as *mut RawUtsname) = uts };
+    crate::memory::usercopy::copyout_val(&uts, crate::memory::usercopy::UserPtr::new(uts_ptr))?;
     Ok(0)
 }
 
@@ -1625,10 +1624,8 @@ pub(crate) extern "C" fn oxidebsd_sys_exit_group(code: u64) -> ! {
     crate::process::do_exit_group(crate::process::scheduler::current_pid(), status)
 }
 
-// `pub`, not `pub(crate)` -- same "kept public for test use" precedent `oxidebsd_register_syscall`
-// already has (see `tests/fork_wait.rs`). `tests/tcp_smoke.rs` needs the real SYS_READ/SYS_WRITE
-// entry point (not a lower-level shortcut) to exercise an accepted TCP connection's fd-ops
-// callbacks the exact way a real process's read()/write() would reach them.
+// `pub` for the in-kernel `tests/tcp_smoke.rs` (retired 2026-10-06: it called handlers as Rust functions); modules import it through
+// `module.rs`'s symbol table.
 pub extern "C" fn oxidebsd_sys_read(fd: u64, ptr: u64, len: u64) -> i64 {
     result_to_ffi(sys_read(fd, ptr, len))
 }
@@ -1658,8 +1655,7 @@ pub(crate) extern "C" fn oxidebsd_sys_pwritev2(
     result_to_ffi(sys_pwritev2(fd, iov_ptr, iovcnt, ofs))
 }
 
-// `pub`, not `pub(crate)` -- same "kept public for test use" precedent above; `tests/
-// readv_smoke.rs` calls this directly.
+// `pub` for the in-kernel `tests/readv_smoke.rs` (retired 2026-10-06: it called handlers as Rust functions).
 pub extern "C" fn oxidebsd_sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> i64 {
     result_to_ffi(sys_readv(fd, iov_ptr, iovcnt))
 }
@@ -1676,8 +1672,6 @@ pub(crate) extern "C" fn oxidebsd_sys_dup2(oldfd: u64, newfd: u64) -> i64 {
     result_to_ffi(sys_dup2(oldfd, newfd))
 }
 
-// `pub`, not `pub(crate)` -- same "kept public for test use" precedent `oxidebsd_sys_read`/
-// `oxidebsd_sys_write` already have; `tests/socketpair_smoke.rs` calls this directly.
 // `pub`, not `pub(crate)` -- same "kept public for test use" precedent above.
 pub extern "C" fn oxidebsd_sys_set_tid_address(tidptr: u64) -> i64 {
     result_to_ffi(sys_set_tid_address(tidptr))

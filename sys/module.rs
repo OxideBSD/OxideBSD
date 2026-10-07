@@ -800,6 +800,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::syscall::oxidebsd_register_syscall as *const () as u64)
         }
         "oxidebsd_module_alloc_zeroed" => Some(oxidebsd_module_alloc_zeroed as *const () as u64),
+        "oxidebsd_copyin" => Some(crate::memory::usercopy::oxidebsd_copyin as *const () as u64),
+        "oxidebsd_copyout" => Some(crate::memory::usercopy::oxidebsd_copyout as *const () as u64),
         "oxidebsd_sys_exit" => Some(crate::syscall::oxidebsd_sys_exit as *const () as u64),
         "oxidebsd_sys_exit_group" => {
             Some(crate::syscall::oxidebsd_sys_exit_group as *const () as u64)

@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/tcp_smoke.rs`.
+//! Real-`SYSCALL` successor to `tests/tcp_smoke.rs` (an in-kernel test, retired 2026-10-06).
 //!
 //! That test calls `oxidebsd_sys_socket`/`_bind`/`_listen`/`_accept`/`oxidebsd_sys_read`/`_write`/
 //! `_fcntl` as plain Rust functions from its own `main()`, never through a genuine `SYSCALL`

@@ -323,6 +323,7 @@ fn main() {
         "GETRANDOM_SYSCALL_SMOKE_ELF_PATH",
     );
     build_userland_crate("sysinfo-syscall-smoke", "SYSINFO_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("usermem-syscall-smoke", "USERMEM_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "sigaltstack-syscall-smoke",
         "SIGALTSTACK_SYSCALL_SMOKE_ELF_PATH",

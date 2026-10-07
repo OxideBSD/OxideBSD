@@ -708,7 +708,7 @@ fn process_established(real_fd: u64, seq: u32, ack: u32, flags: u8, data: &[u8])
 
 /// Test-support only, not part of the real syscall ABI (same "kept `pub` for a test" precedent
 /// `syscall::oxidebsd_register_syscall` already has for `tests/fork_wait.rs`'s own
-/// `SYS_TEST_EXIT`) -- a scripted-peer test (`tests/tcp_smoke.rs`) needs to construct valid
+/// `SYS_TEST_EXIT`) -- a scripted-peer test (`tests/tcp_smoke.rs`, since retired) needs to construct valid
 /// reply segments, which means knowing sequence numbers this module generates internally
 /// (`isn()`'s output isn't predictable from outside, by design) rather than guessing them.
 pub fn debug_connection_for(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16) -> Option<u64> {

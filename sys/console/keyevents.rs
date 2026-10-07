@@ -37,6 +37,9 @@ pub struct RawKeyEvent {
     pub pressed: u8,
 }
 
+// SAFETY: two bytes, no padding, any bit pattern valid.
+unsafe impl crate::memory::usercopy::Pod for RawKeyEvent {}
+
 /// This kernel's own small, stable keycode space. ASCII passthrough covers every printable key
 /// (letters, digits, space, common punctuation); values `>= 0x80` cover keys with no ASCII
 /// representation. Chosen so a userland consumer's own translation table (e.g. to a game engine's

@@ -582,10 +582,8 @@ pub(crate) extern "C" fn oxidebsd_set_fd_pread_pwrite(
 /// created by `dup2`/`fork_inherit`) reaches zero — see this file's module doc comment. `0` on
 /// success, `-1` if the calling process has no such `fd` registered at all.
 ///
-/// `pub`, not `pub(crate)` -- same "kept public for test use" precedent `syscall::
-/// oxidebsd_sys_read`/`oxidebsd_sys_write` already have; `tests/socketpair_smoke.rs` calls this
-/// directly to exercise EOF/EPIPE-on-close without loading a real close-registering module
-/// (`sys/modules/oxfs`'s `SYS_CLOSE` handler is the only other caller).
+/// `pub` for the in-kernel `tests/socketpair_smoke.rs` (retired 2026-10-06: it called handlers as Rust functions); `sys/modules/oxfs`'s
+/// `SYS_CLOSE` handler is the other caller.
 pub extern "C" fn oxidebsd_close_fd(fd: u64) -> i32 {
     if close_one(scheduler::current_tgid(), fd) {
         0

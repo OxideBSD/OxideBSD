@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/poll_smoke.rs`.
+//! Real-`SYSCALL` successor to `tests/poll_smoke.rs` (an in-kernel test, retired 2026-10-06).
 //!
 //! That test calls `oxidebsd_sys_socket`/`_bind`/`oxidebsd_sys_poll` as plain Rust functions from
 //! its own `main()`, never through a genuine `SYSCALL` instruction. This binary drives the

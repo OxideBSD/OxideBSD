@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/udp_smoke.rs` -- see CLAUDE.md's "Real networking"
+//! Real-`SYSCALL` successor to `tests/udp_smoke.rs` (an in-kernel test, retired 2026-10-06) -- see CLAUDE.md's "Real networking"
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
@@ -47,7 +47,7 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
     oxidebsd::hlt_loop();
 }
 
-/// Same synthetic-frame technique `tests/udp_smoke.rs`/`tests/poll_smoke.rs` already established
+/// Same synthetic-frame technique the retired `tests/udp_smoke.rs`/`tests/poll_smoke.rs` established
 /// -- just built from inside a test-only syscall handler instead of `main()`'s own linear code,
 /// since `main()` never gets control back after `scheduler::start`.
 fn build_udp_frame(

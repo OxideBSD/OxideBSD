@@ -351,6 +351,13 @@ extern "x86-interrupt" fn page_fault_handler(
             return;
         }
     }
+    // A fault on user memory inside a copy routine fails the copy with EFAULT (USERMEM.md §5.2).
+    if !interrupted_ring3
+        && let Ok(addr) = Cr2::read()
+        && crate::memory::usercopy::fixup_fault(&mut stack_frame, addr.as_u64())
+    {
+        return;
+    }
     if let Ok(addr) = Cr2::read()
         && crate::memory::kstack::is_guard(addr.as_u64())
     {
@@ -422,7 +429,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
     // (`SFMASK` clears `IF`) or `schedule()` (`without_interrupts`) can't be interrupted holding
     // this lock, but kernel-context code running with interrupts on can: boot's `spawn`, or a test
     // calling a handler directly as pid 0. Spinning here would then deadlock the only core (found
-    // live: `tests/poll_smoke.rs`), so a contended tick skips this bookkeeping -- every deadline is
+    // live: `tests/poll_smoke.rs`, since retired), so a contended tick skips this bookkeeping -- every deadline is
     // `now >= deadline`, so the next tick catches up.
     if let Some(mut table) = crate::process::table().try_lock() {
         // Real per-process CPU-time accounting (`Process::cpu_ticks`, see its own doc comment) --

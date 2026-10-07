@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/socketpair_smoke.rs`.
+//! Real-`SYSCALL` successor to `tests/socketpair_smoke.rs` (an in-kernel test, retired 2026-10-06).
 //!
 //! That test calls `oxidebsd_sys_socketpair`/`_fcntl`/`_shutdown`/`_read`/`_write` as plain Rust
 //! functions from its own `main()`, never through a genuine `SYSCALL` instruction with interrupts

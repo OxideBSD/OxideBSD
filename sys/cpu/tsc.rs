@@ -7,7 +7,7 @@
 //! via a genuine `SYSCALL` -- `ticks()` is frozen at whatever value it had when the syscall began
 //! for the syscall's *entire* remaining duration.
 //!
-//! **Confirmed live, not theoretical**: converting `tests/poll_smoke.rs` (calls
+//! **Confirmed live, not theoretical**: converting `tests/poll_smoke.rs`, since retired (calls
 //! `oxidebsd_sys_poll` as a plain Rust function, interrupts enabled throughout) into
 //! `tests/poll_syscall_smoke.rs` (spawns a real ELF, drives the identical scenario through a
 //! genuine `SYSCALL`) made the second, empty-socket `poll()` call -- which should time out after

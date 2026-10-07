@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/tcp_smoke.rs` -- see CLAUDE.md's "Real networking"
+//! Real-`SYSCALL` successor to `tests/tcp_smoke.rs` (an in-kernel test, retired 2026-10-06) -- see CLAUDE.md's "Real networking"
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns
@@ -15,7 +15,7 @@
 //! reintroduce the blind spot being closed here -- `socket`/`bind`/`listen`/`accept`/`read`/
 //! `write`/`fcntl` still only ever run when the child calls them via real `SYSCALL`.
 //!
-//! Installs the same no-op `NicDriver` `tests/tcp_smoke.rs` uses (QEMU SLIRP proxies every
+//! Installs the same no-op `NicDriver` the retired `tests/tcp_smoke.rs` used (QEMU SLIRP proxies every
 //! guest-originated SYN as a real outbound connection attempt regardless of destination -- see
 //! that test's own doc comment for the full story of why no real NIC is used here at all).
 #![no_std]

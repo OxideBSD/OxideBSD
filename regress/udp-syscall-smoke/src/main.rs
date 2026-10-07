@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/udp_smoke.rs`.
+//! Real-`SYSCALL` successor to `tests/udp_smoke.rs` (an in-kernel test, retired 2026-10-06).
 //!
 //! That test calls `oxidebsd_sys_socket`/`_bind`/`_sendto`/`_recvfrom` as plain Rust functions
 //! from its own `main()`, never through a genuine `SYSCALL` instruction. This binary drives the

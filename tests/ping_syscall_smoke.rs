@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` counterpart to `tests/ping_smoke.rs` -- see CLAUDE.md's "Real networking"
+//! Real-`SYSCALL` successor to `tests/ping_smoke.rs` (an in-kernel test, retired 2026-10-06) -- see CLAUDE.md's "Real networking"
 //! section for the blind spot this closes: every existing network smoke test calls kernel
 //! handlers as plain Rust functions from its own `main()`, never through a genuine `SYSCALL` with
 //! interrupts actually masked the way a real syscall runs. This test instead spawns

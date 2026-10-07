@@ -39,6 +39,7 @@ members = [
   "regress/sa-siginfo-syscall-smoke",
   "regress/getrandom-syscall-smoke",
   "regress/sysinfo-syscall-smoke",
+  "regress/usermem-syscall-smoke",
   "regress/sigaltstack-syscall-smoke",
   "regress/pause-syscall-smoke",
   "regress/sigsuspend-syscall-smoke",
@@ -154,31 +155,7 @@ name = "icmp_smoke"
 harness = false
 
 [[test]]
-name = "udp_smoke"
-harness = false
-
-[[test]]
-name = "tcp_smoke"
-harness = false
-
-[[test]]
-name = "ping_smoke"
-harness = false
-
-[[test]]
-name = "poll_smoke"
-harness = false
-
-[[test]]
-name = "socketpair_smoke"
-harness = false
-
-[[test]]
 name = "random_smoke"
-harness = false
-
-[[test]]
-name = "readv_smoke"
 harness = false
 
 [[test]]
@@ -275,6 +252,10 @@ harness = false
 
 [[test]]
 name = "sysinfo_syscall_smoke"
+harness = false
+
+[[test]]
+name = "usermem_syscall_smoke"
 harness = false
 
 [[test]]
