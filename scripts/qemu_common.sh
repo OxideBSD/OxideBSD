@@ -41,7 +41,9 @@ if [ ! -e "$QEMU_DISK_IMAGE" ] || [ "$(stat -c %s "$QEMU_DISK_IMAGE")" -lt "$dis
     truncate -s "$disk_bytes" "$QEMU_DISK_IMAGE"
 fi
 
-set -- -accel kvm -accel tcg -serial stdio -m 8192 -nic user,model=rtl8139
+# Guest RAM in MiB: $OXIDEBSD_QEMU_MEM, default 8192. The console-install floor is 128
+# (OxideBSD-doc ROADMAP.md, v0.3.0 item 6).
+set -- -accel kvm -accel tcg -serial stdio -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
 
 # Opt-in QEMU monitor on a plain TCP port -- see qemu_runner.sh's git history/CLAUDE.md's test-
 # architecture section for the real, non-interactive use this unlocks (scripted `sendkey`).

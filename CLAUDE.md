@@ -82,6 +82,7 @@ user before large structural commitments.
   BusyBox rebuild.** Never `touch build.rs` to force rebuilds.
 - Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio`, `OXIDEBSD_DISK_IMAGE`,
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
+  `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the console-install floor is 128),
   `OXIDEBSD_REAL_HARDWARE=1` (adds `no-ata`).
 
 ## Test architecture
