@@ -88,6 +88,14 @@ SECTIONS
         *(.data.rel.ro .data.rel.ro.*)
         *(.got)
         *(.relro_padding)
+
+        /* Limine's request statics (`sys/boot/mod.rs`). Nothing answers them under Multiboot2,
+         * but code shared with the Limine path still reads them (`boot::rsdp_address`), so they
+         * must sit in the higher-half image: left as an orphan section they ended up more than
+         * 2 GiB from that code, and the link failed (R_X86_64_PC32 out of range). */
+        KEEP(*(.requests_start))
+        KEEP(*(.requests))
+        KEEP(*(.requests_end))
     } :data
 
     .bss : AT(_kernel_phys_base + (ADDR(.bss) - ADDR(.text))) {
