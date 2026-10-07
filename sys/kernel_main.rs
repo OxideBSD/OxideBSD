@@ -41,12 +41,18 @@ use crate::serial_println;
 pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     serial_println!("OxideBSD kernel booting...");
 
-    // A small, harmless easter egg -- real CMOS RTC read (`cpu::rtc::current_month`), safe this
+    // Small, harmless easter eggs -- real CMOS RTC read (`cpu::rtc::current_month`), safe this
     // early (raw port I/O only, no heap/paging/interrupt dependency yet, same reasoning
     // `unix_epoch_seconds` already establishes). Zero effect on anything real POSIX conformance
     // cares about.
-    if crate::cpu::rtc::current_month() == 6 {
-        serial_println!("Happy Pride Month!");
+    match crate::cpu::rtc::current_month() {
+        6 => {
+            serial_println!("Happy Pride Month!");
+        }
+        10 => {
+            serial_println!("It is the spooky month!");
+        }
+        _ => {}
     }
 
     let (mut mapper, mut frame_allocator) = crate::init(boot_info);

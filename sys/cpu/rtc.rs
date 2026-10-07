@@ -102,7 +102,7 @@ pub fn unix_epoch_seconds() -> i64 {
 /// same as every other function here) without needing a full `unix_epoch_seconds`-style
 /// timestamp. Safe to call before `crate::init` has run anything else: no heap/paging/interrupt
 /// dependency, identical to `unix_epoch_seconds`'s own reasoning. The one real caller today is
-/// `main.rs`'s own boot-time Pride Month greeting.
+/// `kernel_main.rs`'s boot-time seasonal greetings (Pride Month, the spooky month).
 pub fn current_month() -> u8 {
     read_datetime().1
 }
