@@ -256,8 +256,8 @@ const CARRY_FLAG: u64 = 1;
 /// Configures `SYSCALL`/`SYSRETQ`: `IA32_STAR` (from the real GDT selectors — `sys/cpu/gdt.rs`'s
 /// segment ordering exists specifically to satisfy `SYSRETQ`'s fixed-offset selector-reconstruction
 /// scheme; `Star::write` validates this and fails loudly rather than silently misprogramming it),
-/// `IA32_LSTAR` (this file's own `syscall_entry`), `IA32_SFMASK` (clears `RFLAGS::INTERRUPT_FLAG`
-/// on entry, same as the old `int 0x80` gate did), and `EFER.SCE` — without which `SYSCALL` raises
+/// `IA32_LSTAR` (this file's own `syscall_entry`), `IA32_SFMASK` (the flags cleared on entry), and
+/// `EFER.SCE` — without which `SYSCALL` raises
 /// `#UD` (handled, fatally, by `invalid_opcode_handler`), so forgetting this step fails loudly.
 pub fn init() {
     serial_println!("[boot] configuring SYSCALL/SYSRETQ (native ABI)");
@@ -275,7 +275,18 @@ pub fn init() {
 
     let entry_addr = VirtAddr::new(syscall_entry as *const () as u64);
     LStar::write(entry_addr);
-    SFMask::write(RFlags::INTERRUPT_FLAG);
+    // Clear on entry: IF (a system call runs with interrupts masked), and every flag user space
+    // could set that changes how kernel code runs, as Linux does. DF set would make the kernel's
+    // `rep movs` copies run backwards; TF would single-step the kernel; AC would make unaligned
+    // kernel accesses fault (and, with SMAP, open user memory); NT would make an `iret` a task
+    // return.
+    SFMask::write(
+        RFlags::INTERRUPT_FLAG
+            | RFlags::DIRECTION_FLAG
+            | RFlags::TRAP_FLAG
+            | RFlags::ALIGNMENT_CHECK
+            | RFlags::NESTED_TASK,
+    );
 
     // SAFETY: STAR/LSTAR/SFMASK are all configured above; enabling SCE now is what actually makes
     // SYSCALL start dispatching to syscall_entry instead of raising #UD.
