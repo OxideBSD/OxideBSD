@@ -46,6 +46,9 @@ pub fn init(
     serial_println!("[boot] kernel initialization starting");
 
     cpu::gdt::init();
+    // The temporary GDT is gone: the Multiboot2 low identity window can go too.
+    #[cfg(feature = "multiboot2")]
+    boot::multiboot2::drop_low_identity();
     // Read-only pages bind the kernel too: page cache frames (`memory::pagecache`) are mapped
     // read-only into many processes, and a system call writing into one through a user pointer
     // must fault, not change every process's copy. Limine sets this; a Multiboot2 loader may not.

@@ -335,7 +335,9 @@ pub fn do_mmap(
             .checked_add(region_len)
             .and_then(|e| e.checked_sub(1))
             .ok_or(ENOMEM)?;
-        if VirtAddr::try_new(addr_hint).is_err() || VirtAddr::try_new(end_inclusive).is_err() {
+        if addr_hint < crate::memory::usercopy::VM_MINUSER
+            || end_inclusive >= crate::memory::usercopy::VM_MAXUSER
+        {
             return Err(ENOMEM);
         }
         let _ = do_munmap(caller_pid, addr_hint, region_len);
@@ -1573,10 +1575,12 @@ pub fn do_munlockall(caller_pid: Pid) -> Result<u64, u64> {
     Ok(0)
 }
 
-/// Ceiling for `SYS_BRK`-managed heap growth — matches `module::MODULE_VA_BASE` so a growing heap
-/// can never collide with the kernel-mapped module region every address space shares. Moved
-/// 0x10000000 -> 0x20000000 alongside that constant -- see its own doc comment.
+/// Ceiling for a fixed-address (`ET_EXEC`) binary's `SYS_BRK` heap, below the mmap window and
+/// the fault trampoline. A PIE's heap starts after its biased image, inside the ASLR window
+/// (`aslr::PIE_ASLR_BASE` up), and may grow to `PIE_BRK_CEILING` instead.
 const BRK_REGION_CEILING: u64 = 0x_2000_0000;
+/// Ceiling for a PIE's `SYS_BRK` heap: the start of the SysV shared memory region.
+const PIE_BRK_CEILING: u64 = 0x_4000_0000_0000;
 /// `SYS_BRK`'s real logic. `addr == 0` queries the current value without changing it (the
 /// convention every real `sbrk(0)` already relies on). Shrinking just lowers the stored value —
 /// no unmap, same no-reclaim simplification `do_munmap` above documents. Growing maps freshly
@@ -1598,7 +1602,12 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
         shared.brk = VirtAddr::new(addr);
         return Ok(addr);
     }
-    if addr > BRK_REGION_CEILING {
+    let ceiling = if shared.brk.as_u64() >= crate::process::aslr::PIE_ASLR_BASE {
+        PIE_BRK_CEILING
+    } else {
+        BRK_REGION_CEILING
+    };
+    if addr > ceiling || shared.brk.as_u64() < crate::memory::usercopy::VM_MINUSER {
         return Err(ENOMEM);
     }
 

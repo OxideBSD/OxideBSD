@@ -104,7 +104,7 @@ fn spawn_into(
 ) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     let loaded = load_image(&address_space, elf_bytes, argv, envp);
-    let (elf, entry, initial_rsp) = match loaded {
+    let (brk, entry, initial_rsp) = match loaded {
         Ok(l) => l,
         Err(e) => {
             // SAFETY: never activated, so not the current CR3.
@@ -116,16 +116,18 @@ fn spawn_into(
         with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
         return Err(SpawnError::OutOfMemory);
     };
-    spawn_finish(address_space, kernel_stack, pid, &elf, entry, initial_rsp, parent, argv, console)
+    spawn_finish(address_space, kernel_stack, pid, brk, entry, initial_rsp, parent, argv, console)
 }
 
 /// Loads the program and builds its initial user stack in a not-yet-active address space.
-fn load_image<'a>(
+/// Returns the start of its `brk` heap (after the biased image), its entry point and its initial
+/// stack pointer.
+fn load_image(
     address_space: &AddressSpace,
-    elf_bytes: &'a [u8],
+    elf_bytes: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
-) -> Result<(Elf<'a>, VirtAddr, VirtAddr), SpawnError> {
+) -> Result<(VirtAddr, VirtAddr, VirtAddr), SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     // SAFETY: phys_offset is the bootloader's phys-memory mapping; this is the only live view of
     // address_space's own (not-yet-active) level 4 table right now.
@@ -156,14 +158,14 @@ fn load_image<'a>(
         bias,
         false,
     );
-    Ok((elf, entry, initial_rsp))
+    Ok((VirtAddr::new(bias + elf.highest_loaded_address()), entry, initial_rsp))
 }
 
 fn spawn_finish(
     address_space: AddressSpace,
     kernel_stack: KernelStack,
     pid: Option<Pid>,
-    elf: &Elf,
+    brk: VirtAddr,
     entry: VirtAddr,
     initial_rsp: VirtAddr,
     parent: Option<Pid>,
@@ -203,7 +205,7 @@ fn spawn_finish(
             root_inode: 0,
             umask: 0o022,
             cred: Cred::root(),
-            brk: VirtAddr::new(elf.highest_loaded_address()),
+            brk,
             mmap_file_regions: Vec::new(),
             mmap_phys_regions: Vec::new(),
             mlockall_future: false,
@@ -1497,7 +1499,7 @@ fn exec_image(
         me.entry_point = jump_entry;
         {
             let mut shared = me.shared.lock();
-            shared.brk = VirtAddr::new(elf.highest_loaded_address());
+            shared.brk = VirtAddr::new(main_bias + elf.highest_loaded_address());
             shared.cred = new_cred;
             // Real POSIX: memory locks (including a prior mlockall(MCL_FUTURE)) are automatically
             // removed on execve(2) -- see ThreadGroupShared::mlockall_future's own doc comment.

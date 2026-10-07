@@ -364,6 +364,12 @@ pub fn load(
         let mem_end = mem_start
             .checked_add(header.p_memsz)
             .ok_or(ElfError::SegmentOutOfBounds)?;
+        // Only the user range may hold user pages (USERMEM.md section 3.2).
+        if mem_start < crate::memory::usercopy::VM_MINUSER
+            || mem_end > crate::memory::usercopy::VM_MAXUSER
+        {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
         // The file-backed portion of the segment; anything in [file_backed_end, mem_end) is BSS.
         let file_backed_end = mem_start + header.p_filesz;
 

@@ -7,11 +7,9 @@
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{OffsetPageTable, PageTable, PageTableFlags};
 
-/// Lowest user address. Below it lies the Multiboot2 trampoline's kernel-only identity map of
-/// physical `[0, 64 MiB)` (`boot::multiboot2`), present in every address space because the boot
-/// stack lives in it. Every user load address is above it (fixed-address binaries start at
-/// `0x800_0000`).
-pub const VM_MINUSER: u64 = 0x400_0000;
+/// Lowest user address: page zero stays unmapped, so a NULL dereference faults (as on the BSDs).
+/// Fixed-address binaries load as low as `0x20_0000` (lld's default, e.g. on-target clang).
+pub const VM_MINUSER: u64 = 0x1000;
 
 /// End of the user range: the end of the canonical lower half.
 pub const VM_MAXUSER: u64 = 0x8000_0000_0000;

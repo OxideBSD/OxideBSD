@@ -125,9 +125,9 @@ unsafe extern "C" {
     /// higher-half and low-identity PDPTs Stage A already built. Both are reused as-is by
     /// `install_final_page_tables` -- their content doesn't change between the temporary and final
     /// address spaces. The low-identity window in particular is *not* optional to carry over: the
-    /// currently-executing call stack (`boot32_stack`, still in active use all the way from Stage
-    /// A through `oxidebsd::init` and beyond -- nothing switches to a "real" kernel stack this
-    /// early) lives inside it, so dropping it out from under the very stack the CPU is running on
+    /// currently-executing call stack (`boot32_stack`, in use until `enter_on_hhdm_stack` moves
+    /// to its HHDM alias; `drop_low_identity` then unmaps the window) lives inside it, so
+    /// dropping it out from under the very stack the CPU is running on
     /// faults on the first instruction (typically a `ret`) that touches the stack after `CR3` is
     /// reloaded. Found live: everything up through the `Cr3::write` call itself succeeded, but
     /// execution never returned from `install_final_page_tables` -- a real, silent triple fault
@@ -886,7 +886,8 @@ unsafe fn install_final_page_tables() {
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
     );
     // See temp_pdpt_low's own doc comment above: the low-identity window has to survive into the
-    // final tables too, since the currently-running stack lives inside it.
+    // final tables too, since the currently-running stack lives inside it, until
+    // `drop_low_identity` removes it.
     let temp_pdpt_low_phys = (&raw const temp_pdpt_low) as u64;
     final_pml4[LOW_IDENTITY_PML4_INDEX].set_addr(
         PhysAddr::new(temp_pdpt_low_phys),
@@ -903,6 +904,49 @@ unsafe fn install_final_page_tables() {
     }
 }
 
+/// Continues boot on the boot stack's HHDM alias, so that the low identity window can be
+/// unmapped (`drop_low_identity`). `boot32_stack` lies in `.boot32`, whose virtual and physical
+/// addresses are equal, so the same bytes are mapped at `MULTIBOOT2_HHDM_OFFSET + rsp`. Nothing
+/// on the old stack is used again: `f` never returns.
+pub fn enter_on_hhdm_stack(
+    boot_info: &'static BootInfo,
+    f: fn(&'static BootInfo) -> !,
+) -> ! {
+    // SAFETY: the HHDM (installed by `install_final_page_tables`) maps the boot stack's physical
+    // pages; RSP is realigned for the call, which never returns.
+    unsafe {
+        core::arch::asm!(
+            "add rsp, {offset}",
+            "and rsp, -16",
+            "call {continue_boot}",
+            "ud2",
+            offset = in(reg) MULTIBOOT2_HHDM_OFFSET,
+            continue_boot = sym continue_boot,
+            in("rdi") boot_info,
+            in("rsi") f,
+            options(noreturn),
+        )
+    }
+}
+
+extern "C" fn continue_boot(boot_info: &'static BootInfo, f: fn(&'static BootInfo) -> !) -> ! {
+    f(boot_info)
+}
+
+/// Unmaps the low identity window (PML4 slot 0), so that nothing kernel-only lies in the user
+/// range (`memory::usercopy`, USERMEM.md section 5.1). Called from `crate::init` once the kernel
+/// runs on the HHDM stack (`enter_on_hhdm_stack`) and `gdt::init` has replaced the temporary GDT,
+/// which lives in the window too.
+pub fn drop_low_identity() {
+    // SAFETY: `FINAL_PML4` is the active top-level table, written only here after boot; nothing
+    // still running uses an address in slot 0.
+    let pml4 = unsafe { &mut *(&raw mut FINAL_PML4) };
+    pml4[LOW_IDENTITY_PML4_INDEX].set_unused();
+    let (frame, flags) = Cr3::read();
+    // SAFETY: reloading the same CR3 only flushes the TLB.
+    unsafe { Cr3::write(frame, flags) };
+}
+
 /// Drop-in Multiboot2 counterpart to `limine_entry_point!` -- same two-line-per-call-site shape,
 /// same `fn(&'static BootInfo) -> !` calling convention for `$path`, so a `tests/*.rs` file's own
 /// `main` needs no changes to run under either boot path.
@@ -914,7 +958,7 @@ macro_rules! multiboot2_entry_point {
             let boot_info: &'static $crate::boot::BootInfo =
                 unsafe { $crate::boot::multiboot2::init_from_mbi(magic, mbi_phys) };
             let f: fn(&'static $crate::boot::BootInfo) -> ! = $path;
-            f(boot_info)
+            $crate::boot::multiboot2::enter_on_hhdm_stack(boot_info, f)
         }
     };
 }
