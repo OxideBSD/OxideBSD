@@ -76,6 +76,7 @@ pub fn init(
         .expect("heap initialization failed");
     kern::subr_msgbuf::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
+    memory::usercopy::check_user_range_layout(&mapper);
 
     serial_println!("[boot] kernel initialization complete");
 

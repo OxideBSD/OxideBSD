@@ -10,7 +10,10 @@ use x86_64::structures::paging::{
 
 use crate::serial_println;
 
-pub const HEAP_START: usize = 0x_4444_4444_0000;
+/// Level-4 slot 386, after the module data pool (384) and the kernel stack window (385). In the
+/// upper half so that nothing kernel-only lies in the user range (`usercopy`, USERMEM.md §5.1);
+/// it was `0x4444_4444_0000` until 2026-10-06.
+pub const HEAP_START: usize = 0xffff_c100_0000_0000;
 
 /// Floor: the original fixed heap size this kernel always used, raised from 100 KiB once
 /// `sys/process.rs`'s `KernelStack` started allocating each process's own kernel stack from this

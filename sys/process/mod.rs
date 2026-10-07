@@ -46,7 +46,7 @@ const KERNEL_STACK_SIZE_FLOOR: usize = 128 * 1024;
 /// serial output, zero response to injected keystrokes for minutes). `gdbserver`-attached, `RSP`
 /// read `0x44444472a1d4` -- mistaken at the time for a corrupted/poisoned stack pointer (a
 /// repeating-nibble pattern), which is what motivated this bump as a stack-overflow mitigation.
-/// **That reading was wrong**: `allocator::HEAP_START = 0x_4444_4444_0000` -- `0x444444...` is
+/// **That reading was wrong**: `allocator::HEAP_START` was then `0x_4444_4444_0000` -- `0x444444...` is
 /// this kernel's own real heap base address, not corruption; a `KernelStack::new`-allocated stack
 /// legitimately lands there. Re-running the *exact* same repro (with this bump still in place) hit
 /// the identical symptom again, and this time was left running far longer instead of assumed dead

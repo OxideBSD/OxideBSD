@@ -24,9 +24,10 @@
 //! 0x0000200000000000  MMAP_REGION_BASE       (process/mm.rs)
 //! 0x0000300000000000  MMAP_REGION_CEILING    (process/mm.rs)   <- this window starts here
 //! 0x0000400000000000  SHM_REGION_BASE        (fs/sysv_shm.rs)
-//! 0x0000444444440000  HEAP_START             (memory/allocator.rs)
 //! 0x0000500000000000  USER_STACK_TOP         (process/mod.rs)
 //! 0xffffc00000000000  MODULE_DATA_BASE       (module.rs)
+//! 0xffffc08000000000  kstack WINDOW_BASE     (memory/kstack.rs)
+//! 0xffffc10000000000  HEAP_START             (memory/allocator.rs)
 //! 0xffffffffa0000000  MODULE_VA_BASE         (module.rs)
 //! 0xffffffffff000000  MODULE_REGION_CEILING  (module.rs)
 //! ```

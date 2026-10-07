@@ -110,7 +110,7 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   (regenerate with dash when a script changes).
 - When a slow-I/O stretch looks like a hang, sample `RIP` several times over gdbserver before
   calling it stuck, and check whether a "corrupt" address is a named constant (`HEAP_START =
-  0x4444_4444_0000`).
+  0xffff_c100_0000_0000`).
 
 ## Target spec (`x86_64-oxidebsd.json`)
 
@@ -152,7 +152,9 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 - `BootInfoFrameAllocator` is built **before the heap exists**: no heap allocation inside it. Its
   free list is intrusive (stored in the freed frames).
 - Fresh mappings use `.ignore()` not `.flush()`.
-- Heap at fixed `allocator::HEAP_START`, size scales with RAM (clamped). Kernel stacks live in
+- Heap at fixed `allocator::HEAP_START` (L4 slot 386), size scales with RAM (clamped). **Nothing
+  kernel-only may be mapped in the user range** `[VM_MINUSER, VM_MAXUSER)` (`memory/usercopy.rs`,
+  checked at boot): copyin relies on it. Kernel stacks live in
   `memory::kstack`'s window (L4 slot 385) with guard gaps; overflow logs `KERNEL STACK OVERFLOW`.
 - **Ring-0 stacks in `gdt.rs` (and any stack like them) must be `static mut`**, or they land in
   `.rodata`.

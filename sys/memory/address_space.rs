@@ -124,13 +124,12 @@ impl AddressSpace {
     /// process's inherited one). Thin wrapper over the same recursive walk `fork` uses, just
     /// without copying user leaves at all -- see `copy_table_level`'s own doc comment for why a
     /// naive "clone everything, then zero out low addresses" approach (an earlier, broken version
-    /// of this code) doesn't work: this kernel has no clean higher-half split. Kernel code, the
-    /// heap, the phys-mem-offset window, and every user ELF's load address all coexist in the low
-    /// canonical range at different indices -- the only thing that reliably distinguishes "safe to
-    /// share" from "must be fresh" at *any* level is the `USER_ACCESSIBLE` flag itself, which the
-    /// MMU's own hierarchical walk requires to be set at *every* level down to a user page (so a
-    /// clear `USER_ACCESSIBLE` bit anywhere guarantees nothing user-facing exists beneath it, safe
-    /// to alias as-is).
+    /// of this code) doesn't work: the low canonical range is not purely user (the Multiboot2
+    /// boot path's kernel-only identity window sits below `usercopy::VM_MINUSER`) -- the only
+    /// thing that reliably distinguishes "safe to share" from "must be fresh" at *any* level is
+    /// the `USER_ACCESSIBLE` flag itself, which the MMU's own hierarchical walk requires to be set
+    /// at *every* level down to a user page (so a clear `USER_ACCESSIBLE` bit anywhere guarantees
+    /// nothing user-facing exists beneath it, safe to alias as-is).
     ///
     /// # Errors
     ///
@@ -466,8 +465,8 @@ fn free_table_level(
 ///   `child[i]` is pointed at the copy with the same flags.
 /// - A present, `USER_ACCESSIBLE` entry above the leaf level leads to *at least one* user page
 ///   somewhere beneath it (possibly alongside purely-kernel siblings under the same entry -- e.g.
-///   this kernel's own PML4 index 0 hosts both its own code and every userland ELF's load
-///   address, since it has no higher-half split). It can't be aliased *or* skipped outright:
+///   PML4 index 0 hosts both the Multiboot2 boot path's kernel-only identity window and every
+///   userland ELF's load address). It can't be aliased *or* skipped outright:
 ///   `child` gets its own fresh, zeroed next-level table, and this function recurses into it.
 ///
 /// # Errors
