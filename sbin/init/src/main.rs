@@ -872,6 +872,18 @@ enum State {
 }
 
 fn main() {
+    // Only the kernel starts init, as process 1; run from a shell it would run /etc/rc and fight
+    // the console for a single-user shell. Refused as on OpenBSD and NetBSD.
+    // SAFETY: getuid and getpid take no arguments.
+    if unsafe { libc::getuid() } != 0 {
+        eprintln!("init: Operation not permitted");
+        std::process::exit(1);
+    }
+    // SAFETY: as above.
+    if unsafe { libc::getpid() } != 1 {
+        eprintln!("init: already running");
+        std::process::exit(1);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     open_log();
     install_handlers();

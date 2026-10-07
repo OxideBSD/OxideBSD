@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 1, 2026
+.Dd October 6, 2026
 .Dt INIT 8
 .Os OxideBSD
 .Sh NAME
@@ -201,6 +201,19 @@ the kernel's record of deaths of
 current sessions, and the last boot and shutdown
 .It Pa /var/log/wtmpx
 the history of logins, boots and shutdowns
+.El
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "init: Operation not permitted"
+.Nm
+was run by a user other than the superuser.
+.It "init: already running"
+.Nm
+was run by the superuser, but not as process 1.
+Use
+.Xr shutdown 8 ,
+.Xr reboot 8
+or a signal to process 1 to change its state instead.
 .El
 .Sh SEE ALSO
 .Xr syslog 3 ,
