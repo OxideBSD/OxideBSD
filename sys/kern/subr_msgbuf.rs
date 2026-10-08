@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::Readiness;
+use crate::kern::subr_uio::Uio;
 use crate::syscall::{EAGAIN, EBADF};
 use crate::tty::ERESTART;
 
@@ -169,7 +170,10 @@ pub(crate) extern "C" fn oxidebsd_klog_open(flags: u64) -> i64 {
 
 /// Reads what the buffer holds past the reader's position, advancing it; waits when there's
 /// nothing, woken every 50 ms to look again (a kernel print can't take the locks a wakeup needs).
-extern "C" fn klog_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn klog_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    let len = uio.resid();
     loop {
         // Resumes at the oldest byte held if unread ones were overwritten (`SYSLOG.md` §4.3).
         let data = with(|m| {
@@ -177,12 +181,13 @@ extern "C" fn klog_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
             m.klog = end;
             data
         });
-        let n = data.len();
-        // SAFETY: the caller's buffer, unvalidated as for every read(2). Copied with the buffer
-        // unlocked: touching it may fault in a stack page, and the fault path prints.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, n) };
-        if n > 0 || len == 0 {
-            return n as i64;
+        // Copied with the buffer unlocked: touching the caller's memory may fault in a stack
+        // page, and the fault path prints.
+        if !data.is_empty() || len == 0 {
+            return match uio.uiomove_out(&data) {
+                Ok(n) => n as i64,
+                Err(e) => -(e as i64),
+            };
         }
         if crate::fs::fd::is_nonblocking(real_fd) {
             return -(EAGAIN as i64);
@@ -193,7 +198,7 @@ extern "C" fn klog_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
     }
 }
 
-extern "C" fn klog_write(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
+extern "C" fn klog_write(_real_fd: u64, _uio: *mut Uio, _flags: u64) -> i64 {
     -EOPNOTSUPP
 }
 

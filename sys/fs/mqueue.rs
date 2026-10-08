@@ -331,11 +331,11 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
     Ok(user_fd)
 }
 
-extern "C" fn mq_read_denied(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
+extern "C" fn mq_read_denied(_real_fd: u64, _uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
     -(EBADF as i64)
 }
 
-extern "C" fn mq_write_denied(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
+extern "C" fn mq_write_denied(_real_fd: u64, _uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
     -(EBADF as i64)
 }
 

@@ -853,9 +853,16 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_set_fd_cloexec" => {
             Some(crate::fs::fd::oxidebsd_set_fd_cloexec as *const () as u64)
         }
-        "oxidebsd_set_fd_pread_pwrite" => {
-            Some(crate::fs::fd::oxidebsd_set_fd_pread_pwrite as *const () as u64)
+        "oxidebsd_set_fd_positioned" => {
+            Some(crate::fs::fd::oxidebsd_set_fd_positioned as *const () as u64)
         }
+        "oxidebsd_uiomove" => Some(crate::kern::subr_uio::oxidebsd_uiomove as *const () as u64),
+        "oxidebsd_uio_resid" => Some(crate::kern::subr_uio::oxidebsd_uio_resid as *const () as u64),
+        "oxidebsd_uio_offset" => Some(crate::kern::subr_uio::oxidebsd_uio_offset as *const () as u64),
+        "oxidebsd_uio_kernel_new" => {
+            Some(crate::kern::subr_uio::oxidebsd_uio_kernel_new as *const () as u64)
+        }
+        "oxidebsd_uio_free" => Some(crate::kern::subr_uio::oxidebsd_uio_free as *const () as u64),
         "oxidebsd_set_fd_access_mode" => {
             Some(crate::fs::fd::oxidebsd_set_fd_access_mode as *const () as u64)
         }

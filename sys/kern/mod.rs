@@ -4,5 +4,6 @@
 pub mod kern_synch;
 pub mod kern_sysctl;
 pub mod subr_msgbuf;
+pub mod subr_uio;
 pub mod uipc_socket;
 pub mod uipc_usrreq;

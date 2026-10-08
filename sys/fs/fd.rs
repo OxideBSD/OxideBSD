@@ -50,28 +50,22 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use spin::Mutex;
 
 use crate::process::scheduler;
-use crate::syscall::ESPIPE;
+use crate::kern::subr_uio::{FOF_OFFSET, Uio};
+use crate::syscall::{EAGAIN, EINTR, ESPIPE};
+use crate::tty::ERESTART;
 
 /// Matches `syscall::SyscallHandler`'s own FFI convention (negative = `-errno`, non-negative =
 /// success value) for the same reason — see that type's doc comment. Kept as a separate type
 /// here (rather than reusing `SyscallHandler` directly) since the two represent conceptually
 /// different things — syscall-number dispatch vs. per-fd operations — even though their shapes
 /// happen to coincide.
-pub(crate) type FdReadWrite = extern "C" fn(u64, u64, u64) -> i64;
+///
+/// `read`/`write`: `(real_fd, uio, flags)` (USERMEM.md §4.4). The backend moves data with
+/// `uiomove` (`kern::subr_uio`) and returns the count transferred; `flags & FOF_OFFSET` asks for
+/// the uio's offset instead of the description's own position (`pread`/`pwrite`), which a
+/// backend with no position fails with `ESPIPE`. Modules receive the uio as an opaque pointer.
+pub(crate) type FdReadWrite = extern "C" fn(u64, *mut Uio, u64) -> i64;
 pub(crate) type FdClose = extern "C" fn(u64) -> i64;
-/// Real `pread(2)`/`pwrite(2)`: `(real_fd, ptr, len, offset)` — like `FdReadWrite` above, but with
-/// an explicit offset that (per real POSIX) neither reads nor updates the fd's own current file
-/// position, unlike plain `read`/`write`. Optional per fd kind (defaults to `no_pread_pwrite`,
-/// below) since most registered fd kinds (pipes, sockets, mqueues, devices) have no real seekable
-/// position at all — only `sys/modules/oxfs`'s own real, on-disk-backed `OpenFile` variants register
-/// real implementations (see `oxidebsd_set_fd_pread_pwrite`).
-pub(crate) type FdReadWriteAt = extern "C" fn(u64, u64, u64, u64) -> i64;
-
-/// Default `pread`/`pwrite` callback for any fd kind that never calls `oxidebsd_set_fd_pread_pwrite`
-/// — real POSIX `ESPIPE`, matching what `lseek(2)` on the same kind of fd already reports.
-extern "C" fn no_pread_pwrite(_real_fd: u64, _ptr: u64, _len: u64, _offset: u64) -> i64 {
-    -(ESPIPE as i64)
-}
 
 /// `content_id`'s shape — real Linux/POSIX has no analogous concept at the syscall boundary, this
 /// is purely internal plumbing for `crate::process::mm::do_mmap`'s fd-backed `MAP_SHARED` support:
@@ -154,9 +148,9 @@ struct FdOps {
     access_mode: FdAccessMode,
     is_append: FdIsAppend,
     fb_geometry: FdFbGeometry,
-    pread: FdReadWriteAt,
-    pwrite: FdReadWriteAt,
     kind: FdKind,
+    /// Has a file position, so `pread`/`pwrite` (`FOF_OFFSET`) make sense; `ESPIPE` otherwise.
+    positioned: bool,
 }
 
 /// What a kernel-owned description is, for `readlink("/proc/<pid>/fd/<n>")` (TTY.md §6.3) and
@@ -511,9 +505,8 @@ fn register(
         access_mode: default_access_mode,
         is_append: default_is_append,
         fb_geometry: no_fb_geometry,
-        pread: no_pread_pwrite,
-        pwrite: no_pread_pwrite,
         kind: FdKind::Module,
+        positioned: false,
     };
     {
         let mut descriptions = DESCRIPTIONS.lock();
@@ -535,9 +528,16 @@ fn register(
 }
 
 /// Overrides `real_fd`'s `access_mode` callback after the fact -- same "separate post-hoc setter,
-/// not a `register`/`oxidebsd_register_fd_ops*` parameter" shape `oxidebsd_set_fd_pread_pwrite`
-/// already establishes, for the identical reason: every existing fd-registering call site keeps the
+/// not a `register`/`oxidebsd_register_fd_ops*` parameter" shape `oxidebsd_set_fd_positioned`
+/// shares, for the identical reason: every existing fd-registering call site keeps the
 /// `default_access_mode` `register` already sets. `sys/modules/oxfs` is the one real caller today.
+/// Marks `real_fd` as having a file position, so `pread`/`pwrite` reach its backend with
+/// `FOF_OFFSET` instead of failing with `ESPIPE`. `sys/modules/oxfs` is the one caller; its
+/// unpositioned kinds (directories, `/proc`, devices) still answer `ESPIPE` themselves.
+pub(crate) extern "C" fn oxidebsd_set_fd_positioned(real_fd: u64) {
+    with_description(real_fd, |ops| ops.positioned = true);
+}
+
 pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(real_fd: u64, access_mode: FdAccessMode) {
     with_description(real_fd, |ops| ops.access_mode = access_mode);
 }
@@ -558,23 +558,6 @@ pub(crate) extern "C" fn oxidebsd_set_fd_append(real_fd: u64, is_append: FdIsApp
 /// `oxidebsd_set_fd_access_mode`'s own call site already sets).
 pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(real_fd: u64, fb_geometry: FdFbGeometry) {
     with_description(real_fd, |ops| ops.fb_geometry = fb_geometry);
-}
-
-/// Overrides `real_fd`'s `pread`/`pwrite` callbacks after the fact — a separate setter, not a
-/// parameter on `register`/`oxidebsd_register_fd_ops*`, so every existing fd-registering call site
-/// (pipes, sockets, mqueues, ttys, ...) needed zero changes; they keep the `no_pread_pwrite`
-/// default `register` already sets. Exported to modules (`crate::module`'s kernel API table) as
-/// `oxidebsd_set_fd_pread_pwrite` — `sys/modules/oxfs` is the one real caller today, right after
-/// `register_open_file` for its own real, on-disk-backed `OpenFile` variants.
-pub(crate) extern "C" fn oxidebsd_set_fd_pread_pwrite(
-    real_fd: u64,
-    pread: FdReadWriteAt,
-    pwrite: FdReadWriteAt,
-) {
-    with_description(real_fd, |ops| {
-        ops.pread = pread;
-        ops.pwrite = pwrite;
-    });
 }
 
 /// Removes the calling process's own `fd` from the registry; only actually invokes the underlying
@@ -702,57 +685,38 @@ pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, ()> {
     Ok(newfd)
 }
 
-/// Looks the calling process's own `fd` up and, if registered, calls its read callback (with
-/// `real_fd`, not `fd` — see this file's module doc comment). `None` (not any particular error
-/// value) means the calling process has no such `fd` registered — `syscall::sys_read` treats that
-/// as `EBADF`.
-/// `len == 0` short-circuits *before* reaching any registered callback, for every fd alike — a
-/// real, previously-latent bug, found only by running BusyBox's `hush` as pid 1 long enough for
-/// its own stdio layer to flush an empty buffer: real `write(fd, buf, 0)`/`read(fd, buf, 0)` is
-/// POSIX-guaranteed not to touch `buf` at all and to return `0` immediately, regardless of whether
-/// `buf` is even a valid pointer — musl's own stdio does call `write()` this way (an `fflush()` on
-/// an empty buffer, seen in practice as `write(1, NULL, 0)`). Every registered callback
-/// (`stdin_read`, `stdout_write`, `sys/modules/oxfs`'s file read/write, `src/pipe.rs`'s pipe ends) used
-/// to construct a slice via `core::slice::from_raw_parts(_mut)` unconditionally, which Rust's own
-/// safety contract requires a non-null, aligned pointer for even at length `0` — a real, not just
-/// theoretical, panic once a null pointer actually reached one. Guarding once here, centrally,
-/// covers every one of them without touching each callback individually, since `sys_read`/
-/// `sys_write` (`sys/syscall.rs`) route every fd through these two functions unconditionally.
-pub(crate) fn read(fd: u64, ptr: u64, len: u64) -> Option<i64> {
+/// `read(2)` and its vector and positioned forms on the calling process's `fd`: the backend's
+/// read operation (called with `real_fd`, see this file's module doc comment) over `uio`. `None`
+/// if the process has no such `fd` (`EBADF`). A transfer of zero bytes returns `0` without
+/// reaching the backend, whatever the buffer is, as POSIX requires (musl's stdio does
+/// `write(1, NULL, 0)`). An error after some bytes moved returns the count if it is `EINTR`,
+/// `ERESTART` or `EAGAIN`, the error otherwise (USERMEM.md §4.4).
+pub(crate) fn read(fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
     let (real_fd, ops) = lookup(fd)?;
-    if len == 0 {
-        return Some(0);
-    }
-    Some((ops.read)(real_fd, ptr, len))
+    Some(transfer(ops.read, ops.positioned, real_fd, uio, flags))
 }
 
-pub(crate) fn write(fd: u64, ptr: u64, len: u64) -> Option<i64> {
+/// `write(2)` and its forms: as `read`, through the backend's write operation.
+pub(crate) fn write(fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
     let (real_fd, ops) = lookup(fd)?;
-    if len == 0 {
-        return Some(0);
-    }
-    Some((ops.write)(real_fd, ptr, len))
+    Some(transfer(ops.write, ops.positioned, real_fd, uio, flags))
 }
 
-/// Real `pread(2)` — like `read` above, but never touches the fd's own current file position (real
-/// POSIX: `pread`/`pwrite` are independent of, and don't affect, `lseek`'s own cursor). `None` if
-/// `fd` isn't registered at all (`EBADF`, matching `read`/`write`'s own convention); `-ESPIPE` (via
-/// `no_pread_pwrite`) for any fd kind with no real seekable position.
-pub(crate) fn pread(fd: u64, ptr: u64, len: u64, offset: u64) -> Option<i64> {
-    let (real_fd, ops) = lookup(fd)?;
-    if len == 0 {
-        return Some(0);
+fn transfer(op: FdReadWrite, positioned: bool, real_fd: u64, uio: &mut Uio, flags: u64) -> i64 {
+    if flags & FOF_OFFSET != 0 && !positioned {
+        return -(ESPIPE as i64);
     }
-    Some((ops.pread)(real_fd, ptr, len, offset))
-}
-
-/// Real `pwrite(2)` — see `pread`'s own doc comment just above.
-pub(crate) fn pwrite(fd: u64, ptr: u64, len: u64, offset: u64) -> Option<i64> {
-    let (real_fd, ops) = lookup(fd)?;
+    let len = uio.resid();
     if len == 0 {
-        return Some(0);
+        return 0;
     }
-    Some((ops.pwrite)(real_fd, ptr, len, offset))
+    let r = op(real_fd, uio, flags);
+    let moved = len - uio.resid();
+    if r < 0 && moved > 0 && [EINTR, ERESTART, EAGAIN].contains(&(-r as u64)) {
+        moved as i64
+    } else {
+        r
+    }
 }
 
 /// Looks up the calling process's own `fd` and returns its `real_fd` — the underlying resource
@@ -969,9 +933,8 @@ pub fn init() {
         access_mode: default_access_mode,
         is_append: default_is_append,
         fb_geometry: no_fb_geometry,
-        pread: no_pread_pwrite,
-        pwrite: no_pread_pwrite,
         kind: FdKind::Module,
+        positioned: false,
     };
     crate::tty::console::init();
     DESCRIPTIONS.lock().insert(0, Description { ops, refs: 0 });

@@ -32,6 +32,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use spin::Mutex;
 
 use super::Readiness;
+use crate::kern::subr_uio::Uio;
 use crate::process::scheduler;
 use crate::process::{self, BlockReason, ProcState};
 use crate::syscall::{EAGAIN, EPIPE};
@@ -87,7 +88,7 @@ fn new_pipe_buffer() -> u64 {
 /// `crate::fd`'s own `O_NONBLOCK` tracking (`syscall::sys_fcntl`) so a real `fcntl(F_SETFL,
 /// O_NONBLOCK)` caller gets real `EAGAIN` instead of blocking, matching what BusyBox's `wget`
 /// (`ndelay_on`/`ndelay_off` around its own progress-bar/timeout loop) actually needs.
-fn blocking_read(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
+fn blocking_read(pipe_id: u64, uio: &mut Uio, real_fd: u64) -> i64 {
     loop {
         {
             let mut pipes = PIPES.lock();
@@ -98,15 +99,30 @@ fn blocking_read(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
                 return 0;
             };
             if !pipe.data.is_empty() {
-                let n = (len as usize).min(pipe.data.len());
-                // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-                let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n) };
-                for slot in buf.iter_mut() {
-                    *slot = pipe.data.pop_front().unwrap();
+                let n = (uio.resid() as usize).min(pipe.data.len());
+                // The ring buffer's two contiguous runs, front first.
+                let (front, back) = pipe.data.as_slices();
+                let first = n.min(front.len());
+                let mut moved = 0;
+                let mut result = uio.uiomove_out(&front[..first]);
+                if let Ok(m) = result {
+                    moved = m;
+                    if m == first && n > first {
+                        result = uio.uiomove_out(&back[..n - first]);
+                        if let Ok(m) = result {
+                            moved += m;
+                        }
+                    }
                 }
+                pipe.data.drain(..moved);
                 drop(pipes); // must drop before waking -- see process::table()'s own doc comment
-                wake_blocked_writers(pipe_id);
-                return n as i64;
+                if moved > 0 {
+                    wake_blocked_writers(pipe_id);
+                }
+                return match result {
+                    Ok(_) => moved as i64,
+                    Err(e) => -(e as i64),
+                };
             }
             if pipe.write_closed {
                 return 0; // EOF: no data, and nothing left to ever write more
@@ -131,8 +147,7 @@ fn blocking_read(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
 /// `PIPE_CAPACITY` — see this module's own doc comment for why an unbounded buffer here was a
 /// real, live bug. `real_fd` is consulted the same way `blocking_read`'s own is, for a real
 /// `O_NONBLOCK` writer.
-fn write_into(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
-    let total = len as usize;
+fn write_into(pipe_id: u64, uio: &mut Uio, real_fd: u64) -> i64 {
     let mut written = 0usize;
     loop {
         {
@@ -159,15 +174,29 @@ fn write_into(pipe_id: u64, ptr: u64, len: u64, real_fd: u64) -> i64 {
             }
             let available = PIPE_CAPACITY.saturating_sub(pipe.data.len());
             if available > 0 {
-                let n = (total - written).min(available);
-                // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-                let bytes =
-                    unsafe { core::slice::from_raw_parts((ptr as *const u8).add(written), n) };
-                pipe.data.extend(bytes.iter().copied());
-                written += n;
+                let mut left = (uio.resid() as usize).min(available);
+                let mut chunk = [0u8; 512];
+                let mut fault = None;
+                while left > 0 {
+                    let k = left.min(chunk.len());
+                    match uio.uiomove_in(&mut chunk[..k]) {
+                        Ok(m) => {
+                            pipe.data.extend(chunk[..m].iter().copied());
+                            written += m;
+                            left -= m;
+                        }
+                        Err(e) => {
+                            fault = Some(e);
+                            break;
+                        }
+                    }
+                }
                 drop(pipes); // must drop before waking -- see process::table()'s own doc comment
                 wake_blocked_readers(pipe_id);
-                if written == total {
+                if let Some(e) = fault {
+                    return -(e as i64);
+                }
+                if uio.resid() == 0 {
                     return written as i64;
                 }
                 continue; // more to write -- buffer is now full, loop back and block below
@@ -259,15 +288,15 @@ pub(crate) fn create_pipe() -> Result<(u64, u64), u64> {
     Ok((read_user_fd as u64, write_user_fd as u64))
 }
 
-extern "C" fn write_denied(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
+extern "C" fn write_denied(_real_fd: u64, _uio: *mut Uio, _flags: u64) -> i64 {
     -EBADF
 }
 
-extern "C" fn read_denied(_real_fd: u64, _ptr: u64, _len: u64) -> i64 {
+extern "C" fn read_denied(_real_fd: u64, _uio: *mut Uio, _flags: u64) -> i64 {
     -EBADF
 }
 
-extern "C" fn pipe_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn pipe_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(&(pipe_id, end)) = PIPE_ENDS.lock().get(&real_fd) else {
         return -EBADF;
     };
@@ -276,10 +305,11 @@ extern "C" fn pipe_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
         End::Read,
         "pipe_read called against a pipe's write end"
     );
-    blocking_read(pipe_id, ptr, len, real_fd)
+    // SAFETY: the fd layer passes the live transfer of this call.
+    blocking_read(pipe_id, unsafe { &mut *uio }, real_fd)
 }
 
-extern "C" fn pipe_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn pipe_write(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(&(pipe_id, end)) = PIPE_ENDS.lock().get(&real_fd) else {
         return -EBADF;
     };
@@ -288,7 +318,8 @@ extern "C" fn pipe_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
         End::Write,
         "pipe_write called against a pipe's read end"
     );
-    write_into(pipe_id, ptr, len, real_fd)
+    // SAFETY: as in pipe_read.
+    write_into(pipe_id, unsafe { &mut *uio }, real_fd)
 }
 
 extern "C" fn pipe_close(real_fd: u64) -> i64 {
@@ -505,7 +536,7 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
     fd
 }
 
-type FdOp = extern "C" fn(u64, u64, u64) -> i64;
+type FdOp = crate::fs::fd::FdReadWrite;
 
 /// Called when `pid` terminates: undoes a FIFO open it was still blocked in.
 pub(crate) fn abandon_fifo_open(pid: process::Pid) {
@@ -540,16 +571,18 @@ fn fifo_pipe(real_fd: u64) -> Option<u64> {
     Some(FIFOS.lock().get(&key)?.pipe_id)
 }
 
-extern "C" fn fifo_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn fifo_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     match fifo_pipe(real_fd) {
-        Some(pipe_id) => blocking_read(pipe_id, ptr, len, real_fd),
+        // SAFETY: as in pipe_read.
+        Some(pipe_id) => blocking_read(pipe_id, unsafe { &mut *uio }, real_fd),
         None => -EBADF,
     }
 }
 
-extern "C" fn fifo_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn fifo_write(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     match fifo_pipe(real_fd) {
-        Some(pipe_id) => write_into(pipe_id, ptr, len, real_fd),
+        // SAFETY: as in pipe_read.
+        Some(pipe_id) => write_into(pipe_id, unsafe { &mut *uio }, real_fd),
         None => -EBADF,
     }
 }

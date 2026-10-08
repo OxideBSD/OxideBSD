@@ -7,7 +7,9 @@
 //! 2. Bad pointers get `EFAULT` and the system keeps running: null, the kernel heap (and where it
 //!    used to be), the kernel image, a range past the end of the user range, a non-canonical
 //!    address, a buffer that runs from a mapped page onto an unmapped one, and a read-only page
-//!    as an output buffer. Through `uname`, `pipe2`, and the `iovec` arrays of `readv`/`writev`.
+//!    as an output buffer. Through `uname`, `pipe2`, the `iovec` arrays of `readv`/`writev`, and
+//!    the buffers of `read`/`write` on a pipe (moved by `uiomove`, USERMEM.md §4.4). `pread` on a
+//!    pipe is `ESPIPE`.
 //! 3. Good calls still work afterwards: `uname`, `writev`, and `readv` through a pipe, one write
 //!    scattered across two `iovec`s, and a short read that stops at the first partly filled one
 //!    (from the retired in-kernel `tests/readv_smoke.rs`).
@@ -18,7 +20,9 @@ use core::arch::asm;
 use core::hint::spin_loop;
 use core::panic::PanicInfo;
 
+const SYS_READ: u64 = 3;
 const SYS_WRITE: u64 = 4;
+const SYS_PREAD: u64 = 17;
 const SYS_MMAP: u64 = 100;
 const SYS_MUNMAP: u64 = 101;
 const SYS_WRITEV: u64 = 104;
@@ -30,6 +34,7 @@ const SYS_TEST_EXIT: u64 = 9999;
 
 const STDOUT: u64 = 1;
 const EFAULT: u64 = 14;
+const ESPIPE: u64 = 29;
 const PROT_READ: u64 = 0x1;
 const PROT_WRITE: u64 = 0x2;
 const MAP_PRIVATE: u64 = 0x02;
@@ -168,7 +173,19 @@ pub extern "C" fn _start() -> ! {
         (b"past the user range", 0x7fff_ffff_ff00),
         (b"non-canonical", 0x8000_0000_0000),
     ];
+    // A pipe with a byte waiting, so a read with a bad buffer fails rather than blocks. The byte
+    // stays: a failed move takes nothing.
+    let mut pfds = [0i32; 2];
+    if syscall(SYS_PIPE2, pfds.as_mut_ptr() as u64, 0, 0).is_err() {
+        fail(b"pipe2 for the read/write checks");
+    }
+    let (prd, pwr) = (pfds[0] as u64, pfds[1] as u64);
+    if syscall(SYS_WRITE, pwr, b"x".as_ptr() as u64, 1) != Ok(1) {
+        fail(b"write a byte into the pipe");
+    }
     for &(what, addr) in bad.iter() {
+        expect_efault(what, SYS_READ, prd, addr, 1);
+        expect_efault(what, SYS_WRITE, pwr, addr, 1);
         expect_efault(what, SYS_UNAME, addr, 0, 0);
         expect_efault(what, SYS_PIPE2, addr, 0, 0);
         expect_efault(what, SYS_READV, 0, addr, 1);
@@ -188,6 +205,15 @@ pub extern "C" fn _start() -> ! {
     let ro = mmap_anon(PAGE, PROT_READ);
     expect_efault(b"uname into a read-only page", SYS_UNAME, ro, 0, 0);
     expect_efault(b"pipe2 into a read-only page", SYS_PIPE2, ro, 0, 0);
+    expect_efault(b"read into a read-only page", SYS_READ, prd, ro, 1);
+    let mut one = [0u8; 1];
+    if syscall(SYS_READ, prd, one.as_mut_ptr() as u64, 1) != Ok(1) || one[0] != b'x' {
+        fail(b"the byte a failed read left in the pipe");
+    }
+    match unsafe { syscall4(SYS_PREAD, prd, one.as_mut_ptr() as u64, 1, 0) } {
+        Err(ESPIPE) => {}
+        _ => fail(b"pread on a pipe: expected ESPIPE"),
+    }
     write_bytes(b"usermem-syscall-smoke: part 2 OK (bad pointers get EFAULT)\n");
 
     // Part 3: good calls still work.

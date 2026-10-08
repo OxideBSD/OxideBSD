@@ -107,18 +107,25 @@ unsafe extern "C" {
     /// -- see `crate::fs::fd::oxidebsd_set_fd_cloexec`'s own doc comment (kernel tree). `oxfs_open`
     /// is the one caller here, right after a successful real `O_CLOEXEC` open.
     fn oxidebsd_set_fd_cloexec(fd: u64, on: u64) -> i64;
-    /// Overrides `fd`'s real `pread`/`pwrite` callbacks -- see
-    /// `crate::fs::fd::oxidebsd_set_fd_pread_pwrite`'s own doc comment (kernel tree).
-    /// `register_open_file` is the one caller here, right after every fresh fd's ordinary
-    /// `read`/`write`/`close`/`content_id` registration.
-    fn oxidebsd_set_fd_pread_pwrite(
-        fd: u64,
-        pread: extern "C" fn(u64, u64, u64, u64) -> i64,
-        pwrite: extern "C" fn(u64, u64, u64, u64) -> i64,
-    );
+    /// Marks `fd` as having a file position, so `pread`/`pwrite` reach `oxfs_read`/`oxfs_write`
+    /// with `FOF_OFFSET` (kernel tree: `crate::fs::fd::oxidebsd_set_fd_positioned`).
+    /// `register_open_file` is the one caller here.
+    fn oxidebsd_set_fd_positioned(fd: u64);
+    /// Moves up to `len` bytes between this module's buffer `kbuf` and a read or write transfer
+    /// (`uio`, opaque here; kernel tree: `crate::kern::subr_uio`, USERMEM.md §4.4). The count
+    /// moved, or `-errno`.
+    fn oxidebsd_uiomove(kbuf: *mut u8, len: u64, uio: u64) -> i64;
+    /// Bytes a transfer still has to move.
+    fn oxidebsd_uio_resid(uio: u64) -> u64;
+    /// A transfer's file offset, for `FOF_OFFSET`.
+    fn oxidebsd_uio_offset(uio: u64) -> u64;
+    /// A transfer over this module's own buffer (`rw`: `0` read, `1` write), for I/O on its own
+    /// descriptors; `0` on failure. Freed with `oxidebsd_uio_free`.
+    fn oxidebsd_uio_kernel_new(buf: *mut u8, len: u64, rw: u64) -> u64;
+    fn oxidebsd_uio_free(uio: u64);
     /// Overrides `fd`'s real `access_mode` callback -- see
     /// `crate::fs::fd::oxidebsd_set_fd_access_mode`/`FdAccessMode`'s own doc comment (kernel tree).
-    /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_pread_pwrite`.
+    /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_positioned`.
     fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: extern "C" fn(u64) -> i64);
     /// Overrides `fd`'s real `is_append` callback -- see
     /// `crate::fs::fd::oxidebsd_set_fd_append`/`FdIsAppend`'s own doc comment (kernel tree).
@@ -1755,12 +1762,36 @@ fn ensure_index_slot(ib_num: u32, slot: usize, tmpfs: bool) -> Option<u32> {
 /// stored `size` (real files only -- directories never call this, they walk raw records instead).
 /// Returns the number of bytes actually read (`0` at or past EOF).
 fn read_inode_at(inode_num: u32, position: usize, out: &mut [u8]) -> usize {
+    let mut written = 0;
+    let _ = read_inode_with(inode_num, position, out.len(), |chunk| {
+        out[written..written + chunk.len()].copy_from_slice(chunk);
+        written += chunk.len();
+        Ok(())
+    });
+    written
+}
+
+/// `read_inode_at` into a read transfer (`uio`): straight from the block pool, no buffer in
+/// between. `Ok(count)` or `Err(-errno)`.
+fn read_inode_uio(inode_num: u32, position: usize, uio: u64) -> Result<usize, i64> {
+    read_inode_with(inode_num, position, uio_resid(uio), |chunk| uio_out(uio, chunk).map(|_| ()))
+}
+
+/// The block walk `read_inode_at` and `read_inode_uio` share: hands `sink` up to `max` bytes of
+/// `inode_num`'s content from `position`, one block's worth at a time. Stops at end of file, or at
+/// a missing block. `Ok(count)`, or the first error `sink` returns.
+fn read_inode_with(
+    inode_num: u32,
+    position: usize,
+    max: usize,
+    mut sink: impl FnMut(&[u8]) -> Result<(), i64>,
+) -> Result<usize, i64> {
     let inode = read_inode(inode_num);
     let size = inode.size as usize;
     if position >= size {
-        return 0;
+        return Ok(0);
     }
-    let n = out.len().min(size - position);
+    let n = max.min(size - position);
     let mut written = 0;
     while written < n {
         let file_off = position + written;
@@ -1771,10 +1802,55 @@ fn read_inode_at(inode_num: u32, position: usize, out: &mut [u8]) -> usize {
         };
         let block = read_block(blk);
         let chunk = (n - written).min(BLOCK_SIZE - in_block_off);
-        out[written..written + chunk].copy_from_slice(&block[in_block_off..in_block_off + chunk]);
+        sink(&block[in_block_off..in_block_off + chunk])?;
         written += chunk;
     }
-    written
+    Ok(written)
+}
+
+/// `FOF_OFFSET` (kernel tree: `crate::kern::subr_uio`): `pread`/`pwrite`, at the transfer's
+/// offset instead of the descriptor's position.
+const FOF_OFFSET: u64 = 1;
+
+/// Moves `data` out to a read transfer. `Ok(count)` or `Err(-errno)`.
+fn uio_out(uio: u64, data: &[u8]) -> Result<usize, i64> {
+    // SAFETY: FFI call to a kernel-exported function; a read transfer only reads `data`.
+    let r = unsafe { oxidebsd_uiomove(data.as_ptr() as *mut u8, data.len() as u64, uio) };
+    if r < 0 { Err(r) } else { Ok(r as usize) }
+}
+
+/// Moves bytes in from a write transfer into `buf`. `Ok(count)` or `Err(-errno)`.
+fn uio_in(uio: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
+    let r = unsafe { oxidebsd_uiomove(buf.as_mut_ptr(), buf.len() as u64, uio) };
+    if r < 0 { Err(r) } else { Ok(r as usize) }
+}
+
+fn uio_resid(uio: u64) -> usize {
+    // SAFETY: FFI call to a kernel-exported function.
+    unsafe { oxidebsd_uio_resid(uio) as usize }
+}
+
+/// Fills a read transfer from `make`, a small buffer at a time (`/dev/zero`, `/dev/random`).
+fn fill_uio(uio: u64, mut make: impl FnMut(&mut [u8]) -> Result<(), i64>) -> Result<usize, i64> {
+    let mut chunk = [0u8; 256];
+    let mut total = 0;
+    loop {
+        let n = uio_resid(uio).min(chunk.len());
+        if n == 0 {
+            return Ok(total);
+        }
+        make(&mut chunk[..n])?;
+        total += uio_out(uio, &chunk[..n])?;
+    }
+}
+
+/// `Ok(count)` / `Err(-errno)` as an operation's return value.
+fn uio_ret(r: Result<usize, i64>) -> i64 {
+    match r {
+        Ok(n) => n as i64,
+        Err(e) => e,
+    }
 }
 
 /// Writes `content` as `inode_num`'s complete contents (replacing whatever was there before),
@@ -1877,10 +1953,36 @@ fn resize_inode_data(inode_num: u32, new_size: usize) -> bool {
 /// Test Suite's `aio_write`/`lio_listio` pilot -- `lio_listio/1-1.c` alone needs a real 1 MiB
 /// `pwrite()`, far past what the pooled buffer could ever hold).
 fn write_inode_at(inode_num: u32, position: usize, data: &[u8]) -> bool {
+    let mut taken = 0;
+    write_inode_with(inode_num, position, data.len(), |dst| {
+        dst.copy_from_slice(&data[taken..taken + dst.len()]);
+        taken += dst.len();
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// `write_inode_at` from a write transfer (`uio`): straight into the block pool. `Ok(count)` or
+/// `Err(-errno)`; on an error, the bytes before it are written.
+fn write_inode_uio(inode_num: u32, position: usize, uio: u64) -> Result<usize, i64> {
+    let n = uio_resid(uio);
+    write_inode_with(inode_num, position, n, |dst| uio_in(uio, dst).map(|_| ()))?;
+    Ok(n)
+}
+
+/// The block walk `write_inode_at` and `write_inode_uio` share: `fill` supplies each block's
+/// share of the `len` bytes written at `position`. `Err(-EIO)` when a block can't be allocated,
+/// or the first error `fill` returns; the size and times cover whatever was written before it.
+fn write_inode_with(
+    inode_num: u32,
+    position: usize,
+    len: usize,
+    mut fill: impl FnMut(&mut [u8]) -> Result<(), i64>,
+) -> Result<(), i64> {
     content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if position > old_size && !resize_inode_data(inode_num, position) {
-        return false;
+        return Err(-EIO);
     }
     let mut pos = position;
     let mut written = 0;
@@ -1892,17 +1994,21 @@ fn write_inode_at(inode_num: u32, position: usize, data: &[u8]) -> bool {
     // run-scan already uses.
     let mut run_start: u32 = 0;
     let mut run_len: u32 = 0;
-    while written < data.len() {
+    let mut result = Ok(());
+    while written < len {
         let block_index = pos / BLOCK_SIZE;
         let in_block_off = pos % BLOCK_SIZE;
         let Some(blk) = inode_ensure_block_at(inode_num, block_index) else {
-            persist_data_run_if_ready(run_start, run_len);
-            return false;
+            result = Err(-EIO);
+            break;
         };
         let mut block = read_block(blk);
-        let chunk = (data.len() - written).min(BLOCK_SIZE - in_block_off);
-        block[in_block_off..in_block_off + chunk]
-            .copy_from_slice(&data[written..written + chunk]);
+        let chunk = (len - written).min(BLOCK_SIZE - in_block_off);
+        // A failed fill may have half-written `block`: it isn't stored.
+        if let Err(e) = fill(&mut block[in_block_off..in_block_off + chunk]) {
+            result = Err(e);
+            break;
+        }
         // SAFETY: same as write_block's own in-memory half -- BLOCKS_PTR.add(blk) is a real,
         // in-bounds slot for any block number this module ever hands out.
         unsafe { *BLOCKS_PTR.add(blk as usize) = block };
@@ -1925,7 +2031,7 @@ fn write_inode_at(inode_num: u32, position: usize, data: &[u8]) -> bool {
     inode.mtime = now;
     inode.ctime = now;
     write_inode(inode_num, inode);
-    true
+    result
 }
 
 /// Byte-exact mirror of musl's `struct stat` for x86_64 (`arch/x86_64/bits/stat.h` in
@@ -3264,7 +3370,7 @@ fn register_open_file(open_file: OpenFile) -> i64 {
         // Always registered, unconditionally -- same "the callback itself discriminates by
         // variant" reasoning `oxfs_content_id` above already established. See `oxfs_pread`/
         // `oxfs_pwrite`'s own doc comments for what each real variant actually supports.
-        oxidebsd_set_fd_pread_pwrite(real_fd, oxfs_pread, oxfs_pwrite);
+        oxidebsd_set_fd_positioned(real_fd);
         oxidebsd_set_fd_access_mode(real_fd, oxfs_access_mode);
         oxidebsd_set_fd_append(real_fd, oxfs_is_append);
         oxidebsd_set_fd_fb_geometry(real_fd, oxfs_fb_geometry);
@@ -4554,7 +4660,10 @@ extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> 
     result
 }
 
-extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn oxfs_read(fd: u64, uio: u64, flags: u64) -> i64 {
+    if flags & FOF_OFFSET != 0 {
+        return oxfs_pread(fd, uio);
+    }
     // Real `O_RDWR` support: force an early real commit (if this fd hasn't already committed --
     // see `resolve_write_fd_inode`'s own doc comment) so this read sees whatever's been written so
     // far, then read from the real inode directly. A separate, sequential lookup rather than a
@@ -4568,9 +4677,10 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
         let Some(OpenFile::Write { position, .. }) = find_open_file(fd) else {
             return -EBADF;
         };
-        // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-        let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-        let n = read_inode_at(inode, *position, out);
+        let n = match read_inode_uio(inode, *position, uio) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
         *position += n;
         if n > 0 {
             touch_atime(inode);
@@ -4586,9 +4696,10 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
     };
     match file {
         OpenFile::FileRead { inode, position, .. } => {
-            // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-            let n = read_inode_at(*inode, *position, out);
+            let n = match read_inode_uio(*inode, *position, uio) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
             *position += n;
             // Real POSIX read(): a real data access, marked for st_atime update -- skipped for a
             // zero-byte read (at or past EOF), matching real Unix's own "no state change" behavior
@@ -4605,11 +4716,14 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
             ..
         } => {
             let remaining = *total - *position;
-            let n = remaining.min(len as usize);
-            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n) };
-            out.copy_from_slice(&content[*position..*position + n]);
-            *position += n;
-            n as i64
+            let n = remaining.min(uio_resid(uio));
+            match uio_out(uio, &content[*position..*position + n]) {
+                Ok(m) => {
+                    *position += m;
+                    m as i64
+                }
+                Err(e) => e,
+            }
         }
         OpenFile::Write { .. } => -EBADF,
         OpenFile::ProcRead {
@@ -4618,11 +4732,14 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
             position,
         } => {
             let remaining = *total - *position;
-            let n = remaining.min(len as usize);
-            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n) };
-            out.copy_from_slice(&content[*position..*position + n]);
-            *position += n;
-            n as i64
+            let n = remaining.min(uio_resid(uio));
+            match uio_out(uio, &content[*position..*position + n]) {
+                Ok(m) => {
+                    *position += m;
+                    m as i64
+                }
+                Err(e) => e,
+            }
         }
         OpenFile::ProcDir {
             content,
@@ -4631,23 +4748,25 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
             ..
         } => {
             let remaining = *total - *position;
-            let n = remaining.min(len as usize);
-            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n) };
-            out.copy_from_slice(&content[*position..*position + n]);
-            *position += n;
-            n as i64
+            let n = remaining.min(uio_resid(uio));
+            match uio_out(uio, &content[*position..*position + n]) {
+                Ok(m) => {
+                    *position += m;
+                    m as i64
+                }
+                Err(e) => e,
+            }
         }
-        OpenFile::DevRandom => {
-            // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-            unsafe { oxidebsd_random_bytes(ptr, len) }
-        }
+        OpenFile::DevRandom => uio_ret(fill_uio(uio, |chunk| {
+            // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
+            let r = unsafe { oxidebsd_random_bytes(chunk.as_mut_ptr() as u64, chunk.len() as u64) };
+            if r < 0 { Err(r) } else { Ok(()) }
+        })),
         OpenFile::DevNull => 0, // immediate EOF, matching real /dev/null's own read behavior
-        OpenFile::DevZero => {
-            // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-            out.fill(0);
-            len as i64
-        }
+        OpenFile::DevZero => uio_ret(fill_uio(uio, |chunk| {
+            chunk.fill(0);
+            Ok(())
+        })),
         // Real pixel I/O only ever happens through mmap() (process::mm::do_mmap_fb, kernel
         // tree) -- see OpenFile::Framebuffer's own doc comment.
         OpenFile::Framebuffer { .. } => -EBADF,
@@ -4679,7 +4798,11 @@ extern "C" fn oxfs_read(fd: u64, ptr: u64, len: u64) -> i64 {
 /// same `resolve_write_fd_inode`/`write_inode_at` primitives `oxfs_pwrite` already uses --
 /// deliberately bypasses `WRITE_BUFFERS` entirely, forcing an early commit of anything still
 /// buffered first so this never overwrites stale, not-yet-flushed content.
-extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn oxfs_write(fd: u64, uio: u64, flags: u64) -> i64 {
+    if flags & FOF_OFFSET != 0 {
+        return oxfs_pwrite(fd, uio);
+    }
+    let len = uio_resid(uio) as u64;
     match find_open_file(fd) {
         Some(OpenFile::Write { readonly: true, .. }) => return -EBADF,
         Some(OpenFile::Write { .. }) => {}
@@ -4711,11 +4834,10 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
             let Some(inode) = resolve_write_fd_inode(fd) else {
                 return -EIO;
             };
-            // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-            let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-            if !write_inode_at(inode, seek_pos, data) {
-                return -EIO;
-            }
+            let n = match write_inode_uio(inode, seek_pos, uio) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
             let Some(OpenFile::Write {
                 position,
                 write_pos,
@@ -4724,7 +4846,7 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
             else {
                 return -EBADF;
             };
-            *position += data.len();
+            *position += n;
             *write_pos = (*write_pos).max(*position as u64);
             return len as i64;
         }
@@ -4767,10 +4889,9 @@ extern "C" fn oxfs_write(fd: u64, ptr: u64, len: u64) -> i64 {
         let available = MAX_WRITE_BUFFER - *buf_len;
         let n = available.min(requested - written);
         let buffer = write_buffer(idx);
-        // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length, offset by what
-        // this call has already consumed.
-        let src = unsafe { core::slice::from_raw_parts((ptr as *const u8).add(written), n) };
-        buffer[*buf_len..*buf_len + n].copy_from_slice(src);
+        if let Err(e) = uio_in(uio, &mut buffer[*buf_len..*buf_len + n]) {
+            return e;
+        }
         *buf_len += n;
         *position += n;
         written += n;
@@ -7267,8 +7388,7 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
     new_pos
 }
 
-/// Registered (via `oxidebsd_set_fd_pread_pwrite`) as every oxfs fd's `pread` callback -- real
-/// `pread(2)`: like `oxfs_read`, but at an explicit `offset` that neither reads nor updates this
+/// `oxfs_read` with `FOF_OFFSET` -- real `pread(2)`: like `oxfs_read`, but at an explicit `offset` that neither reads nor updates this
 /// fd's own `position` (real POSIX: `pread`/`pwrite` are independent of `lseek`'s cursor). A plain
 /// `FileRead` fd (`O_RDONLY`, or an existing path opened `O_RDWR` -- see `oxfs_open`'s own
 /// existing-path branch) already has a real, committed inode to read directly; a `Write` fd needs
@@ -7276,7 +7396,9 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
 /// already use. Every other variant (directories, `/proc`, `/dev/*`, and a plain `O_WRONLY`
 /// `Write` fd) has no real seekable position at all -- `ESPIPE`, matching `oxfs_lseek`'s own answer
 /// for the same fd kinds.
-extern "C" fn oxfs_pread(real_fd: u64, ptr: u64, len: u64, offset: u64) -> i64 {
+fn oxfs_pread(real_fd: u64, uio: u64) -> i64 {
+    // SAFETY: FFI call to a kernel-exported function.
+    let offset = unsafe { oxidebsd_uio_offset(uio) };
     let inode = match find_open_file(real_fd) {
         Some(OpenFile::FileRead { inode, .. }) => *inode,
         Some(OpenFile::Write { readwrite: true, .. }) => match resolve_write_fd_inode(real_fd) {
@@ -7286,17 +7408,17 @@ extern "C" fn oxfs_pread(real_fd: u64, ptr: u64, len: u64, offset: u64) -> i64 {
         Some(_) => return -ESPIPE,
         None => return -EBADF,
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-    let n = read_inode_at(inode, offset as usize, out);
+    let n = match read_inode_uio(inode, offset as usize, uio) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     if n > 0 {
         touch_atime(inode);
     }
     n as i64
 }
 
-/// Registered (via `oxidebsd_set_fd_pread_pwrite`) as every oxfs fd's `pwrite` callback -- real
-/// `pwrite(2)`, writing directly into the fd's own real inode blocks via `write_inode_at` (bypassing
+/// `oxfs_write` with `FOF_OFFSET` -- real `pwrite(2)`, writing directly into the fd's own real inode blocks via `write_inode_at` (bypassing
 /// `OpenFile::Write`'s own pooled `WRITE_BUFFERS` slot and its `MAX_WRITE_BUFFER` flush-window
 /// entirely -- found live via `lio_listio/1-1.c`, the Open POSIX Test Suite pilot, which needs a
 /// real 1 MiB `pwrite()`). Unlike `oxfs_pread`, this works for **any** fd open for writing --
@@ -7307,7 +7429,9 @@ extern "C" fn oxfs_pread(real_fd: u64, ptr: u64, len: u64, offset: u64) -> i64 {
 /// `close()`/`fsync()` with no intervening plain `write()` finds nothing buffered (`len == 0`) and
 /// flushes nothing, leaving this real, already-committed content alone (see
 /// `commit_write_buffer`'s own doc comment).
-extern "C" fn oxfs_pwrite(real_fd: u64, ptr: u64, len: u64, offset: u64) -> i64 {
+fn oxfs_pwrite(real_fd: u64, uio: u64) -> i64 {
+    // SAFETY: FFI call to a kernel-exported function.
+    let offset = unsafe { oxidebsd_uio_offset(uio) };
     match find_open_file(real_fd) {
         Some(OpenFile::Write { readonly: false, .. }) => {}
         Some(_) => return -EBADF,
@@ -7316,12 +7440,7 @@ extern "C" fn oxfs_pwrite(real_fd: u64, ptr: u64, len: u64, offset: u64) -> i64 
     let Some(inode) = resolve_write_fd_inode(real_fd) else {
         return -EIO;
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    if !write_inode_at(inode, offset as usize, data) {
-        return -EIO;
-    }
-    len as i64
+    uio_ret(write_inode_uio(inode, offset as usize, uio))
 }
 
 /// Writes `value`'s decimal digits (no leading zeros; `0` prints as `"0"`) into `buf`, returning
@@ -8198,11 +8317,27 @@ include!(env!("POSIX_TEST_MANIFEST_PATH"));
 /// `oxfs_write` are per-open-file callbacks keyed by `real_fd`, and closing has to go through the
 /// kernel so the fd table entry goes too.
 fn sc_read(fd: u64, ptr: u64, len: u64) -> i64 {
-    oxfs_read(unsafe { oxidebsd_real_fd_of(fd) } as u64, ptr, len)
+    sc_io(fd, ptr, len, 0)
 }
 
 fn sc_write(fd: u64, ptr: u64, len: u64) -> i64 {
-    oxfs_write(unsafe { oxidebsd_real_fd_of(fd) } as u64, ptr, len)
+    sc_io(fd, ptr, len, 1)
+}
+
+/// `oxfs_read`/`oxfs_write` over this module's own buffer at `ptr`, through a kernel-segment
+/// transfer: the operations take a transfer, not a pointer (USERMEM.md §4.4).
+fn sc_io(fd: u64, ptr: u64, len: u64, rw: u64) -> i64 {
+    // SAFETY: FFI calls to kernel-exported functions; `ptr` is this module's own buffer.
+    unsafe {
+        let uio = oxidebsd_uio_kernel_new(ptr as *mut u8, len, rw);
+        if uio == 0 {
+            return -EINVAL;
+        }
+        let real_fd = oxidebsd_real_fd_of(fd) as u64;
+        let r = if rw == 0 { oxfs_read(real_fd, uio, 0) } else { oxfs_write(real_fd, uio, 0) };
+        oxidebsd_uio_free(uio);
+        r
+    }
 }
 
 fn sc_close(fd: u64) {

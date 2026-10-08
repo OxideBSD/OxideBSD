@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 
+use crate::kern::subr_uio::Uio;
 use crate::process::{self, BlockReason, Pid, ProcState, scheduler};
 
 // musl's (Linux's) termios bits: user space sees these through its own <termios.h>.
@@ -1236,31 +1237,73 @@ pub fn of_real_fd(real_fd: u64) -> Option<TtyId> {
     FDS.lock().get(&real_fd).map(|f| f.id)
 }
 
-fn to_ffi(r: Result<usize, u64>) -> i64 {
-    match r {
-        Ok(n) => n as i64,
-        Err(e) => -(e as i64),
-    }
-}
+/// The most one `read(2)` on a terminal returns; a longer request gets a short read, as a
+/// terminal may give.
+const READ_CHUNK: usize = 16 * 1024;
+/// How much of a `write(2)` goes to the line discipline at a time.
+const WRITE_CHUNK: usize = 4096;
 
-pub(crate) extern "C" fn fd_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+pub(crate) extern "C" fn fd_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(f) = FDS.lock().get(&real_fd).copied() else { return -(crate::syscall::EBADF as i64) };
     if !f.readable {
         return -(crate::syscall::EBADF as i64);
     }
-    // SAFETY: the unvalidated-user-pointer gap every read path has.
-    let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-    to_ffi(read(f.id, buf, &caller(crate::fs::fd::is_nonblocking(real_fd))))
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    read_uio(uio, |buf| read(f.id, buf, &caller(crate::fs::fd::is_nonblocking(real_fd))))
 }
 
-pub(crate) extern "C" fn fd_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
+pub(crate) extern "C" fn fd_write(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(f) = FDS.lock().get(&real_fd).copied() else { return -(crate::syscall::EBADF as i64) };
     if !f.writable {
         return -(crate::syscall::EBADF as i64);
     }
     // SAFETY: as fd_read.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    to_ffi(write(f.id, bytes, &caller(crate::fs::fd::is_nonblocking(real_fd))))
+    let uio = unsafe { &mut *uio };
+    write_uio(uio, |bytes| write(f.id, bytes, &caller(crate::fs::fd::is_nonblocking(real_fd))))
+}
+
+/// A terminal read into a transfer: `read` fills a kernel buffer of up to `READ_CHUNK` bytes,
+/// moved out to the caller after. Shared with the pseudo-terminal master (`pty`).
+pub(crate) fn read_uio(uio: &mut Uio, read: impl FnOnce(&mut [u8]) -> Result<usize, u64>) -> i64 {
+    let mut buf = alloc::vec![0u8; (uio.resid() as usize).min(READ_CHUNK)];
+    match read(&mut buf) {
+        Ok(n) => match uio.uiomove_out(&buf[..n]) {
+            Ok(m) => m as i64,
+            Err(e) => -(e as i64),
+        },
+        Err(e) => -(e as i64),
+    }
+}
+
+/// A terminal write from a transfer, `WRITE_CHUNK` bytes at a time; `write` takes a whole chunk or
+/// fails. A chunk not written is given back to the transfer, so the count is what was written.
+pub(crate) fn write_uio(
+    uio: &mut Uio,
+    mut write: impl FnMut(&[u8]) -> Result<usize, u64>,
+) -> i64 {
+    let mut chunk = alloc::vec![0u8; (uio.resid() as usize).min(WRITE_CHUNK)];
+    let mut total = 0usize;
+    while uio.resid() > 0 {
+        let k = match uio.uiomove_in(&mut chunk) {
+            Ok(k) => k,
+            Err(e) => return -(e as i64),
+        };
+        match write(&chunk[..k]) {
+            Ok(n) => {
+                total += n;
+                if n < k {
+                    uio.rewind((k - n) as u64);
+                    break;
+                }
+            }
+            Err(e) => {
+                uio.rewind(k as u64);
+                return -(e as i64);
+            }
+        }
+    }
+    total as i64
 }
 
 pub(crate) extern "C" fn fd_close(real_fd: u64) -> i64 {

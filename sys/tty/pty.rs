@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 use super::{Driver, TtyId, Winsize, B38400};
+use crate::kern::subr_uio::Uio;
 use crate::process::{self, scheduler, BlockReason, Pid, ProcState};
 use crate::syscall::{EAGAIN, EINTR, EINVAL, EIO, ENOTTY};
 
@@ -228,13 +229,22 @@ fn interrupted(pid: Pid) -> bool {
 }
 
 /// Reading the master: the slave's output (§4.1), in packet mode framed by a status byte (§5.3).
-extern "C" fn master_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn master_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(n) = pair_of(real_fd) else { return -(crate::syscall::EBADF as i64) };
-    if len == 0 {
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    super::read_uio(uio, |buf| ffi_result(master_read_into(real_fd, n, buf)))
+}
+
+/// `-errno` or a count, as a `Result`.
+fn ffi_result(r: i64) -> Result<usize, u64> {
+    if r < 0 { Err(-r as u64) } else { Ok(r as usize) }
+}
+
+fn master_read_into(real_fd: u64, n: usize, buf: &mut [u8]) -> i64 {
+    if buf.is_empty() {
         return 0;
     }
-    // SAFETY: the unvalidated-user-pointer gap every read path has.
-    let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
     let pid = scheduler::current_pid();
     loop {
         let (slave, slave_opened) = {
@@ -281,10 +291,14 @@ extern "C" fn master_read(real_fd: u64, ptr: u64, len: u64) -> i64 {
 }
 
 /// Writing the master: the slave's input (§4.2), as much as its input queue has room for.
-extern "C" fn master_write(real_fd: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn master_write(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(n) = pair_of(real_fd) else { return -(crate::syscall::EBADF as i64) };
     // SAFETY: as master_read.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let uio = unsafe { &mut *uio };
+    super::write_uio(uio, |bytes| ffi_result(master_write_from(real_fd, n, bytes)))
+}
+
+fn master_write_from(real_fd: u64, n: usize, bytes: &[u8]) -> i64 {
     let pid = scheduler::current_pid();
     loop {
         let (slave, slave_opened) = {

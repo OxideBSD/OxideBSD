@@ -11,6 +11,7 @@ use x86_64::VirtAddr;
 use crate::serial_println;
 
 use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, ffi_result_to_result};
+use crate::kern::subr_uio::{FOF_OFFSET, IoSeg, Uio, UioRw, UioSeg};
 use crate::process::SIGPIPE;
 
 /// Reads up to `len` bytes into `ptr` from `fd` — a pure lookup into `crate::fs::fd`'s registry now,
@@ -19,7 +20,13 @@ use crate::process::SIGPIPE;
 /// stdin's own non-blocking-ring-buffer behavior lives in that file's `stdin_read` now, not here).
 /// `EBADF` if `fd` isn't registered at all.
 pub(crate) fn sys_read(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
-    match crate::fs::fd::read(fd, ptr, len) {
+    let mut uio = Uio::user(ptr, len, UioRw::Read, 0)?;
+    do_read(fd, &mut uio, 0)
+}
+
+/// Every read-side system call ends here, with its transfer built (`kern::subr_uio`).
+fn do_read(fd: u64, uio: &mut Uio, flags: u64) -> Result<u64, u64> {
+    match crate::fs::fd::read(fd, uio, flags) {
         Some(raw) => ffi_result_to_result(raw),
         None => Err(EBADF),
     }
@@ -35,7 +42,14 @@ pub(crate) fn sys_read(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
 /// that ignores, blocks or catches it. Skipped for pid 0 (kernel context), where `kill`'s target
 /// `0` would mean a process group.
 pub(crate) fn sys_write(fd: u64, ptr: u64, len: u64) -> Result<u64, u64> {
-    match crate::fs::fd::write(fd, ptr, len) {
+    let mut uio = Uio::user(ptr, len, UioRw::Write, 0)?;
+    do_write(fd, &mut uio, 0)
+}
+
+/// Every write-side system call ends here: `EPIPE` also raises `SIGPIPE`, unless the socket has
+/// `SO_NOSIGPIPE`.
+fn do_write(fd: u64, uio: &mut Uio, flags: u64) -> Result<u64, u64> {
+    match crate::fs::fd::write(fd, uio, flags) {
         Some(raw) if raw == -(EPIPE as i64) => {
             let pid = crate::process::scheduler::current_pid();
             let quiet = crate::fs::fd::real_fd_of(fd)
@@ -69,20 +83,16 @@ pub(crate) fn sys_pread(fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64,
     if (offset as i64) < 0 {
         return Err(EINVAL);
     }
-    match crate::fs::fd::pread(fd, ptr, len, offset) {
-        Some(raw) => ffi_result_to_result(raw),
-        None => Err(EBADF),
-    }
+    let mut uio = Uio::user(ptr, len, UioRw::Read, offset)?;
+    do_read(fd, &mut uio, FOF_OFFSET)
 }
 
 pub(crate) fn sys_pwrite(fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64, u64> {
     if (offset as i64) < 0 {
         return Err(EINVAL);
     }
-    match crate::fs::fd::pwrite(fd, ptr, len, offset) {
-        Some(raw) => ffi_result_to_result(raw),
-        None => Err(EBADF),
-    }
+    let mut uio = Uio::user(ptr, len, UioRw::Write, offset)?;
+    do_write(fd, &mut uio, FOF_OFFSET)
 }
 
 /// A C `struct iovec { void *iov_base; size_t iov_len; }`.
@@ -101,13 +111,16 @@ const IOV_MAX: u64 = 1024;
 
 /// Copies a whole `iovec` array in before any I/O, as the BSDs' `copyinuio` does: a bad array
 /// fails with `EFAULT` having transferred nothing. More than `IOV_MAX` entries is `EINVAL`.
-fn copyin_iovecs(iov_ptr: u64, iovcnt: u64) -> Result<alloc::vec::Vec<IoVec>, u64> {
+fn copyin_iovecs(iov_ptr: u64, iovcnt: u64) -> Result<alloc::vec::Vec<IoSeg>, u64> {
     use crate::memory::usercopy::{UserPtr, copyin_val};
     if iovcnt > IOV_MAX {
         return Err(EINVAL);
     }
     (0..iovcnt)
-        .map(|i| copyin_val::<IoVec>(UserPtr::new(iov_ptr).add(i * 16)))
+        .map(|i| {
+            copyin_val::<IoVec>(UserPtr::new(iov_ptr).add(i * 16))
+                .map(|v| IoSeg { base: v.base, len: v.len })
+        })
         .collect()
 }
 
@@ -117,20 +130,11 @@ fn copyin_iovecs(iov_ptr: u64, iovcnt: u64) -> Result<alloc::vec::Vec<IoVec>, u6
 /// `(fd, iov_ptr, iovcnt)` matches real `writev`'s own argument positions exactly (unlike
 /// `SYS_MMAP`, nothing here needs to be dropped to fit into this ABI's argument registers). Reads
 /// `iovcnt` real C `struct iovec { void *iov_base; size_t iov_len; }` entries (16 bytes each,
-/// standard layout) from `iov_ptr`, and calls `sys_write` once per entry, accumulating the total.
-/// Matches real `writev`'s partial-write semantics: if an entry fails after at least one earlier
-/// entry already succeeded, returns `Ok(total so far)` rather than propagating the failure (a
-/// later `write` call surfaces it instead); only propagates `Err` if the very first entry fails.
+/// standard layout) from `iov_ptr`, and hands them to the backend as one transfer (a `Uio`,
+/// USERMEM.md §4.4), so a `writev` is as atomic as a `write` of the same total length.
 pub(crate) fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64> {
-    let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
-    let mut total: u64 = 0;
-    for iov in &iovs {
-        match sys_write(fd, iov.base, iov.len) {
-            Ok(n) => total += n,
-            Err(errno) => return if total > 0 { Ok(total) } else { Err(errno) },
-        }
-    }
-    Ok(total)
+    let mut uio = Uio::new(copyin_iovecs(iov_ptr, iovcnt)?, UioRw::Write, UioSeg::User, 0)?;
+    do_write(fd, &mut uio, 0)
 }
 
 /// Real, unremapped Linux `__NR_pwritev2=328`. Real `pwritev2(2)`'s wire format is 6 real
@@ -145,7 +149,7 @@ pub(crate) fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64>
 /// file position" per real `pwritev2(2)` semantics -- exactly what musl's own wrapper already
 /// special-cased for the *non*-vectored, no-flags case (`writev`) before ever reaching this
 /// syscall at all; this handler covers every other case (a genuine offset, or any nonzero `flags`)
-/// uniformly through the one real code path. Same partial-write semantics as `sys_writev` above.
+/// uniformly through the one real code path. One transfer, as `sys_writev` above.
 ///
 /// **Any other negative `ofs` is a real `EINVAL`, matching real Linux** -- only the exact `-1`
 /// sentinel means "current position"; every other negative value is a genuinely invalid offset,
@@ -168,28 +172,14 @@ pub(crate) fn sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> Resu
     if ofs != u64::MAX && (ofs as i64) < 0 {
         return Err(EINVAL);
     }
-
     let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
-    let mut total: u64 = 0;
-    let mut cur_ofs = ofs;
-    for iov in &iovs {
-        let result = if ofs == u64::MAX {
-            sys_write(fd, iov.base, iov.len)
-        } else {
-            match crate::fs::fd::pwrite(fd, iov.base, iov.len, cur_ofs) {
-                Some(raw) => ffi_result_to_result(raw),
-                None => Err(EBADF),
-            }
-        };
-        match result {
-            Ok(n) => {
-                total += n;
-                cur_ofs = cur_ofs.wrapping_add(n);
-            }
-            Err(errno) => return if total > 0 { Ok(total) } else { Err(errno) },
-        }
+    if ofs == u64::MAX {
+        let mut uio = Uio::new(iovs, UioRw::Write, UioSeg::User, 0)?;
+        do_write(fd, &mut uio, 0)
+    } else {
+        let mut uio = Uio::new(iovs, UioRw::Write, UioSeg::User, ofs)?;
+        do_write(fd, &mut uio, FOF_OFFSET)
     }
-    Ok(total)
 }
 
 /// `SYS_READV = 153` — OxideBSD's own invention, continuing the sequence past `SYS_SHUTDOWN =
@@ -202,26 +192,12 @@ pub(crate) fn sys_pwritev2(fd: u64, iov_ptr: u64, iovcnt: u64, ofs: u64) -> Resu
 /// BusyBox's `wget` actually downloaded a real file over HTTPS (confirmed live: the TLS/TCP fix
 /// chain in this file's own known-gaps entry all worked — real response bytes came through —
 /// then this surfaced on the very next buffered read). `(fd, iov_ptr, iovcnt)` matches real
-/// `readv`'s own argument positions exactly. Calls `sys_read` once per `iovec` entry, stopping at
-/// the first short read (an entry only partially filled) — matches real `readv`'s own contract: a
-/// read returning less than requested ends the whole call there, it doesn't move on to the next
-/// iovec expecting more to somehow still be available. Same partial-success semantics as
-/// `sys_writev`: only propagates `Err` if the very first entry fails with nothing read yet.
+/// `readv`'s own argument positions exactly. One transfer over every `iovec` (a `Uio`, USERMEM.md
+/// §4.4): the backend fills them in order and stops where its data does, so a short read ends the
+/// call there.
 pub(crate) fn sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, u64> {
-    let iovs = copyin_iovecs(iov_ptr, iovcnt)?;
-    let mut total: u64 = 0;
-    for iov in &iovs {
-        match sys_read(fd, iov.base, iov.len) {
-            Ok(n) => {
-                total += n;
-                if n < iov.len {
-                    break; // short read -- real readv stops here, not the next iovec
-                }
-            }
-            Err(errno) => return if total > 0 { Ok(total) } else { Err(errno) },
-        }
-    }
-    Ok(total)
+    let mut uio = Uio::new(copyin_iovecs(iov_ptr, iovcnt)?, UioRw::Read, UioSeg::User, 0)?;
+    do_read(fd, &mut uio, 0)
 }
 
 /// `SYS_PIPE` (`105`) — unlike most of this ABI's own inventions, matches real `pipe(2)`'s wire

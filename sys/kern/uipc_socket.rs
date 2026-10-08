@@ -20,6 +20,7 @@ use spin::Mutex;
 
 use crate::fs::Readiness;
 use crate::fs::fd::{self, FdKind};
+use crate::kern::subr_uio::Uio;
 use crate::process::SIGPIPE;
 use crate::syscall::{EAGAIN, EBADF, EINTR, EINVAL, EMSGSIZE, ENOTSOCK, EPIPE, EPROTONOSUPPORT};
 use crate::tty::ERESTART;
@@ -503,18 +504,55 @@ fn recv(h: &Handle, buf: &mut [u8], flags: i64, ctl_room: usize) -> Result<(usiz
     }
 }
 
-extern "C" fn so_read(so: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn so_read(so: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(h) = handle_of(so) else { return -(EBADF as i64) };
-    let result = user_slice_mut(ptr, len).and_then(|buf| recv(&h, buf, 0, 0));
-    ffi(result.map(|(n, _, _, _)| n as u64))
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    // Received into a kernel buffer, then moved out: the data was in the socket's kernel
+    // buffers anyway.
+    let mut buf = vec![0u8; (uio.resid() as usize).min(SOCKET_IO_CHUNK)];
+    match recv(&h, &mut buf, 0, 0) {
+        Ok((n, _, _, _)) => match uio.uiomove_out(&buf[..n]) {
+            Ok(m) => m as i64,
+            Err(e) => -(e as i64),
+        },
+        Err(e) => -e,
+    }
 }
+
+/// The most of a transfer a socket's `read`/`write` moves through a kernel buffer at once.
+const SOCKET_IO_CHUNK: usize = 64 * 1024;
 
 /// `write(2)` on a socket. `sys_write` raises `SIGPIPE` for `EPIPE` itself, unless
 /// `suppresses_sigpipe`, so it isn't raised here too.
-extern "C" fn so_write(so: u64, ptr: u64, len: u64) -> i64 {
+extern "C" fn so_write(so: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(h) = handle_of(so) else { return -(EBADF as i64) };
-    let result = user_slice(ptr, len).and_then(|data| send(&h, data, None, MSG_NOSIGNAL, &[]));
-    ffi(result.map(|n| n as u64))
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    // A chunk at a time, so a blocking write still sends everything; a chunk the protocol took
+    // only part of is given back to the transfer.
+    let mut chunk = vec![0u8; (uio.resid() as usize).min(SOCKET_IO_CHUNK)];
+    let mut total = 0usize;
+    while uio.resid() > 0 {
+        let k = match uio.uiomove_in(&mut chunk) {
+            Ok(k) => k,
+            Err(e) => return -(e as i64),
+        };
+        match send(&h, &chunk[..k], None, MSG_NOSIGNAL, &[]) {
+            Ok(n) => {
+                total += n;
+                if n < k {
+                    uio.rewind((k - n) as u64);
+                    break;
+                }
+            }
+            Err(e) => {
+                uio.rewind(k as u64);
+                return -e;
+            }
+        }
+    }
+    total as i64
 }
 
 extern "C" fn so_close(so: u64) -> i64 {
