@@ -1739,18 +1739,18 @@ pub fn do_wait4(
                 // The real, exact WIFCONTINUED wire value -- no other bits allowed.
                 Reported::Continued(child_pid) => (child_pid, 0xffff),
             };
+            // Copied out after the child is reaped, so a bad pointer is EFAULT with the child gone,
+            // as on FreeBSD.
             if status_ptr != 0 {
-                // SAFETY: same known pointer-validation gap sys/syscall.rs's sys_read/sys_write
-                // already document -- status_ptr isn't checked against the caller's actual
-                // mappings first. The caller's own address space is active right now (we're still
-                // running on its behalf), so a genuinely valid pointer here is really writable; an
-                // invalid one page-faults, handled safely elsewhere (log + reboot).
-                unsafe { (status_ptr as *mut i32).write(status) };
+                crate::memory::usercopy::copyout_val(
+                    &status,
+                    crate::memory::usercopy::UserPtr::new(status_ptr),
+                )?;
             }
             // No per-process CPU-time/memory-usage accounting exists anywhere in this kernel --
             // see `RawRusage`'s own doc comment (`sys/syscall.rs`) for why an honest all-zero
             // placeholder is written here rather than an invented number.
-            crate::syscall::write_zeroed_rusage(rusage_ptr);
+            crate::syscall::write_zeroed_rusage(rusage_ptr)?;
             return Ok(child_pid);
         }
 

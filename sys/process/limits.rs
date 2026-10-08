@@ -5,6 +5,7 @@ use x86_64::structures::paging::Translate;
 
 use super::*;
 use crate::memory;
+use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout, copyout_val};
 use crate::syscall::{EAGAIN, EFAULT, EINTR, EINVAL, EPERM, ETIMEDOUT};
 
 /// musl's own `struct timespec` on x86_64 -- see `sys/syscall/ffi.rs`'s/`sys/process/timers.rs`'s
@@ -26,6 +27,12 @@ struct RawRlimit {
     rlim_cur: u64,
     rlim_max: u64,
 }
+
+// SAFETY: plain integers, no padding (for these three wire structs).
+unsafe impl Pod for RawRlimit {}
+unsafe impl Pod for RawSchedParam {}
+unsafe impl Pod for RawTimespecForSchedRr {}
+unsafe impl Pod for RawTimespec {}
 
 /// Real Linux's own `RLIM_NLIMITS` -- the number of `Process::rlimits` slots that exist.
 const RLIM_NLIMITS: u64 = 16;
@@ -52,19 +59,10 @@ pub fn do_prlimit64(
         .expect("prlimit64: target process missing from table");
     if old_ptr != 0 {
         let (cur, max) = proc.rlimits[resource as usize];
-        // SAFETY: same known pointer-validation gap every other user-memory write in this
-        // codebase already has.
-        unsafe {
-            (old_ptr as *mut RawRlimit).write_unaligned(RawRlimit {
-                rlim_cur: cur,
-                rlim_max: max,
-            })
-        };
+        copyout_val(&RawRlimit { rlim_cur: cur, rlim_max: max }, UserPtr::new(old_ptr))?;
     }
     if new_ptr != 0 {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this
-        // codebase already has.
-        let new = unsafe { *(new_ptr as *const RawRlimit) };
+        let new: RawRlimit = copyin_val(UserPtr::new(new_ptr))?;
         proc.rlimits[resource as usize] = (new.rlim_cur, new.rlim_max);
     }
     Ok(0)
@@ -272,9 +270,7 @@ pub fn do_sched_setscheduler(
     if !is_known_sched_policy(policy) {
         return Err(EINVAL);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let param = unsafe { *(param_ptr as *const RawSchedParam) };
+    let param: RawSchedParam = copyin_val(UserPtr::new(param_ptr))?;
     let mut table = PROCESS_TABLE.lock();
     let caller = table
         .get(&caller_pid)
@@ -321,9 +317,7 @@ pub fn do_sched_setscheduler(
 /// `resolve_target_pid`/`has_sched_permission` calls `do_sched_setscheduler` already established.
 pub fn do_sched_setparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u64, u64> {
     let target = resolve_target_pid(caller_pid, pid)?;
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let param = unsafe { *(param_ptr as *const RawSchedParam) };
+    let param: RawSchedParam = copyin_val(UserPtr::new(param_ptr))?;
     let mut table = PROCESS_TABLE.lock();
     let caller = table
         .get(&caller_pid)
@@ -403,10 +397,7 @@ pub fn do_sched_getparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u6
     if param_ptr == 0 {
         return Err(EFAULT);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- null already ruled out above, a non-null-but-unmapped address still faults
-    // safely through the real ring-3 fault-to-signal path.
-    unsafe { (param_ptr as *mut RawSchedParam).write_unaligned(RawSchedParam { sched_priority }) };
+    copyout_val(&RawSchedParam { sched_priority }, UserPtr::new(param_ptr))?;
     Ok(0)
 }
 
@@ -428,20 +419,17 @@ pub fn do_sched_rr_get_interval(caller_pid: Pid, pid: i64, ts_ptr: u64) -> Resul
     if ts_ptr == 0 {
         return Err(EFAULT);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- null already ruled out above.
-    unsafe {
-        (ts_ptr as *mut RawTimespecForSchedRr).write_unaligned(RawTimespecForSchedRr {
-            tv_sec: 0,
-            tv_nsec: nsec as i64,
-        })
-    };
+    copyout_val(
+        &RawTimespecForSchedRr { tv_sec: 0, tv_nsec: nsec as i64 },
+        UserPtr::new(ts_ptr),
+    )?;
     Ok(0)
 }
 
 /// musl's own `struct timespec` on x86_64 -- duplicated here rather than shared, same "no shared
 /// crate across this internal ABI boundary" convention every other `Raw*` wire struct in this
 /// codebase already follows.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawTimespecForSchedRr {
     tv_sec: i64,
@@ -491,11 +479,7 @@ pub fn do_sched_getaffinity(
     let mask: u64 = 1; // single core -- bit 0 set, every other bit clear
     let to_write = (cpusetsize as usize).min(core::mem::size_of::<u64>());
     let bytes = mask.to_ne_bytes();
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mask_ptr as *mut u8, to_write);
-    }
+    copyout(&bytes[..to_write], UserPtr::new(mask_ptr))?;
     Ok(to_write as u64)
 }
 
@@ -575,11 +559,7 @@ pub fn do_futex(pid: Pid, addr: u64, op: u64, val: u64, to: u64) -> Result<u64, 
     let private = op & FUTEX_PRIVATE != 0;
 
     if base_op == FUTEX_WAIT {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-        // already has -- a bad `addr` page-faults, handled safely by the real ring-3
-        // fault-to-signal delivery machinery (see CLAUDE.md's "Real ring-3 fault-to-signal
-        // delivery" section), not a soundness hole.
-        let current = unsafe { *(addr as *const u32) };
+        let current: u32 = copyin_val(UserPtr::new(addr))?;
         if current != val as u32 {
             return Err(EAGAIN);
         }
@@ -587,8 +567,7 @@ pub fn do_futex(pid: Pid, addr: u64, op: u64, val: u64, to: u64) -> Result<u64, 
         let deadline = if to == 0 {
             u64::MAX
         } else {
-            // SAFETY: same gap as above, for `to` instead of `addr`.
-            let ts = unsafe { *(to as *const RawTimespec) };
+            let ts: RawTimespec = copyin_val(UserPtr::new(to))?;
             if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
                 return Err(EINVAL);
             }

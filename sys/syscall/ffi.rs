@@ -12,6 +12,7 @@ use crate::serial_println;
 
 use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, ffi_result_to_result};
 use crate::kern::subr_uio::{FOF_OFFSET, IoSeg, Uio, UioRw, UioSeg};
+use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout_val};
 use crate::process::SIGPIPE;
 
 /// Reads up to `len` bytes into `ptr` from `fd` — a pure lookup into `crate::fs::fd`'s registry now,
@@ -112,7 +113,6 @@ const IOV_MAX: u64 = 1024;
 /// Copies a whole `iovec` array in before any I/O, as the BSDs' `copyinuio` does: a bad array
 /// fails with `EFAULT` having transferred nothing. More than `IOV_MAX` entries is `EINVAL`.
 fn copyin_iovecs(iov_ptr: u64, iovcnt: u64) -> Result<alloc::vec::Vec<IoSeg>, u64> {
-    use crate::memory::usercopy::{UserPtr, copyin_val};
     if iovcnt > IOV_MAX {
         return Err(EINVAL);
     }
@@ -831,6 +831,7 @@ const FBIOGET_OXIDEBSD: u64 = 0x4600;
 /// `drivers::fbdev::FbGeometry`, which this mirrors exactly, minus `phys_base`/`len`: a userland
 /// caller has no use for the physical address itself, only what `mmap()` on the same fd already
 /// hands back as a virtual pointer).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawFbInfo {
     width: u32,
@@ -851,8 +852,7 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
     if request == FBIOGET_OXIDEBSD {
         let geom = crate::fs::fd::framebuffer_geometry_of(fd).ok_or(ENOTTY)?;
         let info = RawFbInfo { width: geom.width, height: geom.height, pitch: geom.pitch, bpp: geom.bpp };
-        // SAFETY: the unvalidated-user-pointer gap every ioctl argument has.
-        unsafe { *(argp as *mut RawFbInfo) = info };
+        copyout_val(&info, UserPtr::new(argp))?;
         return Ok(0);
     }
     if request == FIONBIO {
@@ -902,8 +902,7 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         TIOCNOTTY => crate::tty::release(tty, &cx).map(|()| 0),
         TIOCGPGRP => {
             let pgrp = crate::tty::pgrp(tty, &cx)?;
-            // SAFETY: as above.
-            unsafe { *(argp as *mut i32) = pgrp as i32 };
+            copyout_val(&(pgrp as i32), UserPtr::new(argp))?;
             Ok(0)
         }
         TIOCSPGRP => {
@@ -915,19 +914,16 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         }
         TIOCGSID => {
             let sid = crate::tty::session_of(tty, &cx)?;
-            // SAFETY: as above.
-            unsafe { *(argp as *mut i32) = sid as i32 };
+            copyout_val(&(sid as i32), UserPtr::new(argp))?;
             Ok(0)
         }
         FIONREAD => {
-            // SAFETY: as above.
-            unsafe { *(argp as *mut i32) = crate::tty::pending_input(tty) as i32 };
+            copyout_val(&(crate::tty::pending_input(tty) as i32), UserPtr::new(argp))?;
             Ok(0)
         }
         // Output is never queued: nothing waits in it and draining finishes at once.
         TIOCOUTQ => {
-            // SAFETY: as above.
-            unsafe { *(argp as *mut i32) = 0 };
+            copyout_val(&0i32, UserPtr::new(argp))?;
             Ok(0)
         }
         TCSBRK => Ok(0),
@@ -1075,7 +1071,7 @@ pub(crate) fn sys_uname(uts_ptr: u64) -> Result<u64, u64> {
 /// musl's own `struct timeval` on x86_64 (`external/mit/musl/include/alltypes.h.in`'s `STRUCT
 /// timeval` template): a `time_t`/`suseconds_t` pair, both 8 bytes on this arch.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct RawTimeval {
     tv_sec: i64,
     tv_usec: i64,
@@ -1090,7 +1086,7 @@ struct RawTimeval {
 /// placeholder rather than an invented number, same tier as `/proc/meminfo`'s `MemFree ==
 /// MemTotal`.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct RawRusage {
     ru_utime: RawTimeval,
     ru_stime: RawTimeval,
@@ -1103,16 +1099,11 @@ const _: () = assert!(core::mem::size_of::<RawRusage>() == 272);
 /// Writes an all-zero `RawRusage` to `ptr` if it's non-null -- shared by `sys_getrusage` and
 /// `do_wait4`'s own optional `rusage_ptr` argument (`sys/process.rs`), the same "one real helper,
 /// two call sites" shape `write_stat`-style functions elsewhere in this codebase already use.
-pub(crate) fn write_zeroed_rusage(ptr: u64) {
+pub(crate) fn write_zeroed_rusage(ptr: u64) -> Result<(), u64> {
     if ptr == 0 {
-        return;
+        return Ok(());
     }
-    // SAFETY: same known pointer-validation gap every other user-memory write in this file already
-    // has -- an arbitrary caller-supplied pointer isn't checked against the caller's actual
-    // mappings first. `write_unaligned` since a real `struct rusage*` has no alignment guarantee
-    // this kernel can rely on (unlike `RawUtsname` above, which is only ever reached from
-    // `sys_uname`'s own single, always-aligned-in-practice call site).
-    unsafe { (ptr as *mut RawRusage).write_unaligned(RawRusage::default()) };
+    copyout_val(&RawRusage::default(), UserPtr::new(ptr))
 }
 
 /// `SYS_GETRUSAGE` (registered by `sys/modules/posix_compat`, continuing on from `SYS_UMASK = 487`) --
@@ -1127,14 +1118,14 @@ pub(crate) fn write_zeroed_rusage(ptr: u64) {
 /// left as an honest all-zero placeholder, a known follow-up, not silently forgotten.
 pub(crate) fn sys_getrusage(who: u64, rusage_ptr: u64) -> Result<u64, u64> {
     let _ = who;
-    write_zeroed_rusage(rusage_ptr);
+    write_zeroed_rusage(rusage_ptr)?;
     Ok(0)
 }
 
 /// musl's own `struct tms` on x86_64 (`external/mit/musl/include/sys/times.h`): four `clock_t`
 /// (`long`, 8 bytes on this arch) fields, no padding -- 32 bytes total.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct RawTms {
     tms_utime: i64,
     tms_stime: i64,
@@ -1176,16 +1167,12 @@ pub(crate) fn sys_times(tms_ptr: u64) -> Result<u64, u64> {
             .get(&crate::process::scheduler::current_pid())
             .map(|p| (p.cpu_ticks, p.child_cpu_ticks));
         let (cpu_ticks, child_cpu_ticks) = proc.unwrap_or((0, 0));
-        // SAFETY: same known pointer-validation gap every other user-memory write in this file
-        // already has.
-        unsafe {
-            (tms_ptr as *mut RawTms).write_unaligned(RawTms {
+        copyout_val(&RawTms {
                 tms_utime: cpu_ticks as i64,
                 tms_stime: 0,
                 tms_cutime: child_cpu_ticks as i64,
                 tms_cstime: 0,
-            })
-        };
+            }, UserPtr::new(tms_ptr))?;
     }
     Ok(crate::cpu::interrupts::ticks())
 }
@@ -1217,7 +1204,16 @@ pub(crate) fn sys_getrandom(buf_ptr: u64, buflen: u64, flags: u64) -> Result<u64
     if flags & !(GRND_NONBLOCK | GRND_RANDOM) != 0 {
         return Err(EINVAL);
     }
-    Ok(crate::random::oxidebsd_random_bytes(buf_ptr, buflen) as u64)
+    // Generated a kernel chunk at a time and copied out.
+    let mut chunk = [0u8; 256];
+    let mut done = 0u64;
+    while done < buflen {
+        let n = (buflen - done).min(chunk.len() as u64) as usize;
+        crate::random::oxidebsd_random_bytes(chunk.as_mut_ptr() as u64, n as u64);
+        crate::memory::usercopy::copyout(&chunk[..n], UserPtr::new(buf_ptr).add(done))?;
+        done += n as u64;
+    }
+    Ok(buflen)
 }
 
 /// musl's own `struct sysinfo` on x86_64 (`external/mit/musl/include/sys/sysinfo.h`) -- confirmed
@@ -1227,6 +1223,7 @@ pub(crate) fn sys_getrandom(buf_ptr: u64, buflen: u64, flags: u64) -> Result<u64
 /// an off-by-a-few-bytes struct-layout bug is to get wrong silently). An 8-byte gap after
 /// `procs`/`pad` (offset 84) before `totalhigh` (offset 88) is real, natural `unsigned long`
 /// alignment padding, not a missing field.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawSysinfo {
     uptime: u64,
@@ -1239,10 +1236,15 @@ struct RawSysinfo {
     freeswap: u64,
     procs: u16,
     pad: u16,
+    /// The alignment gap before `totalhigh`, explicit so it goes out zeroed, not as whatever
+    /// kernel stack bytes were there (it did, before `copyout_val`).
+    pad_align: u32,
     totalhigh: u64,
     freehigh: u64,
     mem_unit: u32,
     reserved: [u8; 256],
+    /// Trailing alignment to 368 bytes, explicit for the same reason.
+    pad_end: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<RawSysinfo>() == 368);
@@ -1289,14 +1291,14 @@ pub(crate) fn sys_sysinfo(info_ptr: u64) -> Result<u64, u64> {
         freeswap: 0,
         procs,
         pad: 0,
+        pad_align: 0,
         totalhigh: 0,
         freehigh: 0,
         mem_unit: 1,
         reserved: [0; 256],
+        pad_end: 0,
     };
-    // SAFETY: same known pointer-validation gap every other user-memory write in this file already
-    // has -- info_ptr isn't checked against the caller's actual mappings first.
-    unsafe { (info_ptr as *mut RawSysinfo).write_unaligned(info) };
+    copyout_val(&info, UserPtr::new(info_ptr))?;
     Ok(0)
 }
 
@@ -1308,6 +1310,15 @@ struct RawTimespec {
     tv_sec: i64,
     tv_nsec: i64,
 }
+
+const _: () = assert!(core::mem::size_of::<RawSysinfo>() == 368);
+// SAFETY: integers and integer arrays, no padding (RawSysinfo's gaps are explicit fields).
+unsafe impl Pod for RawTimespec {}
+unsafe impl Pod for RawTimeval {}
+unsafe impl Pod for RawRusage {}
+unsafe impl Pod for RawTms {}
+unsafe impl Pod for RawSysinfo {}
+unsafe impl Pod for RawFbInfo {}
 
 /// Real, architecture-generic `clockid_t` values (`external/mit/musl/include/time.h`) -- not
 /// syscall numbers, so no remapping needed, unlike `SYS_clock_gettime` itself below.
@@ -1436,9 +1447,7 @@ pub(crate) fn sys_clock_gettime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
             cpu_time_ticks_to_ts(cpu_ticks)
         }
     };
-    // SAFETY: same known pointer-validation gap every other user-memory write in this file
-    // already has -- ts_ptr isn't checked against the caller's actual mappings first.
-    unsafe { *(ts_ptr as *mut RawTimespec) = ts };
+    copyout_val(&ts, UserPtr::new(ts_ptr))?;
     Ok(0)
 }
 
@@ -1484,14 +1493,10 @@ pub(crate) fn sys_clock_getres(clockid: u64, res_ptr: u64) -> Result<u64, u64> {
         } else {
             tick_res_ns
         };
-        // SAFETY: same known pointer-validation gap every other user-memory write in this file
-        // already has.
-        unsafe {
-            *(res_ptr as *mut RawTimespec) = RawTimespec {
+        copyout_val(&RawTimespec {
                 tv_sec: 0,
                 tv_nsec: res_ns,
-            }
-        };
+            }, UserPtr::new(res_ptr))?;
     }
     Ok(0)
 }
@@ -1513,9 +1518,7 @@ pub(crate) fn sys_clock_getres(clockid: u64, res_ptr: u64) -> Result<u64, u64> {
 /// `EINVAL` -- closes `clock_settime/17-1.c`. An out-of-range `tv_nsec` is `EINVAL` regardless of
 /// `clockid` (checked first) -- closes `clock_settime/19-1.c`.
 pub(crate) fn sys_clock_settime(clockid: u64, ts_ptr: u64) -> Result<u64, u64> {
-    // SAFETY: same known pointer-validation gap every other user-memory read in this file already
-    // has.
-    let ts = unsafe { *(ts_ptr as *const RawTimespec) };
+    let ts: RawTimespec = copyin_val(UserPtr::new(ts_ptr))?;
     if !(0..1_000_000_000).contains(&ts.tv_nsec) {
         return Err(EINVAL);
     }

@@ -264,8 +264,9 @@ pub(crate) fn kernel_random_u64() -> u64 {
     u64::from_le_bytes(gather_seed()[0..8].try_into().unwrap())
 }
 
-/// Fills `[ptr, ptr+len)` with real, cryptographically-mixed random bytes -- backs oxfs's
-/// synthetic `/dev/random`/`/dev/urandom` (see this module's own doc comment for the full design).
+/// Fills the **kernel** buffer `[ptr, ptr+len)` with real, cryptographically-mixed random bytes --
+/// backs oxfs's synthetic `/dev/random`/`/dev/urandom` and `AT_RANDOM` (see this module's own doc
+/// comment for the full design). `getrandom(2)` fills a kernel buffer with it and copies that out.
 ///
 /// `pub`, not `pub(crate)` -- same "kept public for test use" precedent `syscall::
 /// oxidebsd_sys_read`/`oxidebsd_sys_write` already have; `tests/random_smoke.rs` calls this
@@ -277,8 +278,7 @@ pub extern "C" fn oxidebsd_random_bytes(ptr: u64, len: u64) -> i64 {
     let nonce = [0u8; 12];
     let mut cipher = ChaCha20::new((&key).into(), (&nonce).into());
 
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has -- ptr isn't checked against the caller's actual mappings first.
+    // SAFETY: every caller passes a kernel buffer of `len` bytes.
     let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
     buf.fill(0);
     cipher.apply_keystream(buf);

@@ -6,8 +6,9 @@
 //! User segments go through `copyin`/`copyout` and fail with `EFAULT`; kernel segments are plain
 //! copies.
 //!
-//! **Never call `uiomove` holding the process table lock.** A copy can fault on a stack page not
-//! grown yet, and the page fault handler takes that lock to grow it.
+//! A copy that faults on a user stack page not grown yet grows it (`mm::try_grow_user_stack`, which
+//! takes no process table lock and only `try_lock`s the frame allocator). Copying while holding
+//! the frame allocator's lock therefore fails such a copy with `EFAULT` instead.
 
 use alloc::vec::Vec;
 

@@ -1,6 +1,7 @@
 //! nanosleep/itimer syscalls -- split out of the original process.rs.
 
 use super::*;
+use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout_val};
 use crate::syscall::{EAGAIN, EINTR, EINVAL};
 
 /// musl's own `struct timespec` on x86_64 -- see `sys/syscall.rs`'s `RawTimespec` (duplicated
@@ -56,9 +57,7 @@ struct RawTimespec {
 /// syscall-reachable loop, so it gets the same "never trust it unconditionally" treatment as every
 /// other one in this codebase). A complete no-op whenever no real HPET was found this boot.
 pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has -- req_ptr isn't checked against the caller's actual mappings first.
-    let req = unsafe { *(req_ptr as *const RawTimespec) };
+    let req: RawTimespec = copyin_val(UserPtr::new(req_ptr))?;
     if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
         return Err(EINVAL);
     }
@@ -116,14 +115,13 @@ pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
                     let remaining = deadline.saturating_sub(now);
                     drop(table);
                     if rem_ptr != 0 {
-                        // SAFETY: same known pointer-validation gap as every other user-memory
-                        // write in this codebase.
-                        unsafe {
-                            *(rem_ptr as *mut RawTimespec) = RawTimespec {
+                        copyout_val(
+                            &RawTimespec {
                                 tv_sec: (remaining / hz) as i64,
                                 tv_nsec: ((remaining % hz) * 1_000_000_000 / hz) as i64,
-                            }
-                        };
+                            },
+                            UserPtr::new(rem_ptr),
+                        )?;
                     }
                     return Err(EINTR);
                 }
@@ -134,13 +132,13 @@ pub fn do_nanosleep(pid: Pid, req_ptr: u64, rem_ptr: u64) -> Result<u64, u64> {
     }
 
     if rem_ptr != 0 {
-        // SAFETY: same known pointer-validation gap as above, for a write this time.
-        unsafe {
-            *(rem_ptr as *mut RawTimespec) = RawTimespec {
+        copyout_val(
+            &RawTimespec {
                 tv_sec: 0,
                 tv_nsec: 0,
-            }
-        };
+            },
+            UserPtr::new(rem_ptr),
+        )?;
     }
     Ok(0)
 }
@@ -205,9 +203,7 @@ pub fn do_setitimer(pid: Pid, which: u64, new_ptr: u64, old_ptr: u64) -> Result<
     if new_ptr == 0 {
         return Err(EINVAL);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let new = unsafe { *(new_ptr as *const RawItimerval) };
+    let new: RawItimerval = copyin_val(UserPtr::new(new_ptr))?;
     let value_ticks = timeval_to_ticks(new.it_value_sec, new.it_value_usec).ok_or(EINVAL)?;
     let interval_ticks =
         timeval_to_ticks(new.it_interval_sec, new.it_interval_usec).ok_or(EINVAL)?;
@@ -225,15 +221,15 @@ pub fn do_setitimer(pid: Pid, which: u64, new_ptr: u64, old_ptr: u64) -> Result<
             None => (0, 0),
         };
         let (interval_sec, interval_usec) = ticks_to_timeval(proc.real_timer_interval_ticks);
-        // SAFETY: same known pointer-validation gap as above, for a write this time.
-        unsafe {
-            (old_ptr as *mut RawItimerval).write_unaligned(RawItimerval {
+        copyout_val(
+            &RawItimerval {
                 it_interval_sec: interval_sec,
                 it_interval_usec: interval_usec,
                 it_value_sec: value_sec,
                 it_value_usec: value_usec,
-            })
-        };
+            },
+            UserPtr::new(old_ptr),
+        )?;
     }
 
     if value_ticks == 0 {
@@ -267,16 +263,15 @@ pub fn do_getitimer(pid: Pid, which: u64, old_ptr: u64) -> Result<u64, u64> {
         None => (0, 0),
     };
     let (interval_sec, interval_usec) = ticks_to_timeval(proc.real_timer_interval_ticks);
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has.
-    unsafe {
-        (old_ptr as *mut RawItimerval).write_unaligned(RawItimerval {
+    copyout_val(
+        &RawItimerval {
             it_interval_sec: interval_sec,
             it_interval_usec: interval_usec,
             it_value_sec: value_sec,
             it_value_usec: value_usec,
-        })
-    };
+        },
+        UserPtr::new(old_ptr),
+    )?;
     Ok(0)
 }
 
@@ -338,7 +333,17 @@ struct RawKSigevent {
     sigev_notify: i32,
     #[allow(dead_code)]
     sigev_tid: i32,
+    /// Explicit, so the struct has no padding (`Pod`); part of the union that follows in musl's
+    /// `struct sigevent`.
+    #[allow(dead_code)]
+    _pad: i32,
 }
+
+// SAFETY: integers only, no padding, any bit pattern valid (for these four wire structs).
+unsafe impl Pod for RawKSigevent {}
+unsafe impl Pod for RawTimespec {}
+unsafe impl Pod for RawItimerval {}
+unsafe impl Pod for RawItimerspec {}
 
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
@@ -471,9 +476,7 @@ pub fn do_timer_create(pid: Pid, clockid: u64, evp_ptr: u64, timerid_ptr: u64) -
     let signo = if evp_ptr == 0 {
         SIGALRM
     } else {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-        // already has.
-        let evp = unsafe { *(evp_ptr as *const RawKSigevent) };
+        let evp: RawKSigevent = copyin_val(UserPtr::new(evp_ptr))?;
         match evp.sigev_notify {
             SIGEV_NONE => 0,
             SIGEV_SIGNAL => {
@@ -515,8 +518,13 @@ pub fn do_timer_create(pid: Pid, clockid: u64, evp_ptr: u64, timerid_ptr: u64) -
     });
     drop(table);
 
-    // SAFETY: same known pointer-validation gap as above, for a write this time.
-    unsafe { (timerid_ptr as *mut i32).write(slot as i32) };
+    // A timer id that can't be written out leaves no timer behind (as on FreeBSD).
+    if let Err(e) = copyout_val(&(slot as i32), UserPtr::new(timerid_ptr)) {
+        if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+            proc.posix_timers[slot] = None;
+        }
+        return Err(e);
+    }
     Ok(0)
 }
 
@@ -549,9 +557,7 @@ pub fn do_timer_settime(
     }
     let timerid = timerid as usize;
 
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let new = unsafe { *(new_ptr as *const RawItimerspec) };
+    let new: RawItimerspec = copyin_val(UserPtr::new(new_ptr))?;
     let value_ticks = timespec_to_ticks(new.it_value_sec, new.it_value_nsec).ok_or(EINVAL)?;
     let interval_ticks =
         timespec_to_ticks(new.it_interval_sec, new.it_interval_nsec).ok_or(EINVAL)?;
@@ -580,15 +586,15 @@ pub fn do_timer_settime(
             None => (0, 0),
         };
         let (interval_sec, interval_nsec) = slot.interval_requested;
-        // SAFETY: same known pointer-validation gap as above, for a write this time.
-        unsafe {
-            (old_ptr as *mut RawItimerspec).write_unaligned(RawItimerspec {
+        copyout_val(
+            &RawItimerspec {
                 it_interval_sec: interval_sec,
                 it_interval_nsec: interval_nsec,
                 it_value_sec: value_sec,
                 it_value_nsec: value_nsec,
-            })
-        };
+            },
+            UserPtr::new(old_ptr),
+        )?;
     }
 
     // Computed before `slot` below takes its own mutable borrow of `proc.posix_timers` -- `proc`
@@ -679,16 +685,15 @@ pub fn do_timer_gettime(pid: Pid, timerid: u64, val_ptr: u64) -> Result<u64, u64
         (None, None) => (0, 0),
     };
     let (interval_sec, interval_nsec) = slot.interval_requested;
-    // SAFETY: same known pointer-validation gap every other user-memory write in this codebase
-    // already has.
-    unsafe {
-        (val_ptr as *mut RawItimerspec).write_unaligned(RawItimerspec {
+    copyout_val(
+        &RawItimerspec {
             it_interval_sec: interval_sec,
             it_interval_nsec: interval_nsec,
             it_value_sec: value_sec,
             it_value_nsec: value_nsec,
-        })
-    };
+        },
+        UserPtr::new(val_ptr),
+    )?;
     Ok(0)
 }
 
@@ -773,9 +778,7 @@ pub fn do_clock_nanosleep(
     if flags & !TIMER_ABSTIME != 0 {
         return Err(EINVAL);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let req = unsafe { *(req_ptr as *const RawTimespec) };
+    let req: RawTimespec = copyin_val(UserPtr::new(req_ptr))?;
     if !(0..1_000_000_000).contains(&req.tv_nsec) {
         return Err(EINVAL);
     }
@@ -809,13 +812,13 @@ pub fn do_clock_nanosleep(
                 // Real POSIX: `rem` is only ever meaningful for a *relative* request -- an
                 // absolute-mode `clock_nanosleep` never writes it back on `EINTR` either.
                 if rem_ptr != 0 && !absolute {
-                    // SAFETY: same known pointer-validation gap as above, for a write this time.
-                    unsafe {
-                        *(rem_ptr as *mut RawTimespec) = RawTimespec {
+                    copyout_val(
+                        &RawTimespec {
                             tv_sec: (remaining / hz) as i64,
                             tv_nsec: ((remaining % hz) * 1_000_000_000 / hz) as i64,
-                        }
-                    };
+                        },
+                        UserPtr::new(rem_ptr),
+                    )?;
                 }
                 return Err(EINTR);
             }
@@ -828,13 +831,13 @@ pub fn do_clock_nanosleep(
     }
 
     if rem_ptr != 0 && !absolute {
-        // SAFETY: same known pointer-validation gap as above, for a write this time.
-        unsafe {
-            *(rem_ptr as *mut RawTimespec) = RawTimespec {
+        copyout_val(
+            &RawTimespec {
                 tv_sec: 0,
                 tv_nsec: 0,
-            }
-        };
+            },
+            UserPtr::new(rem_ptr),
+        )?;
     }
     Ok(0)
 }

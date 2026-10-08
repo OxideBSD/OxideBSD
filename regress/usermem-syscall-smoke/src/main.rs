@@ -9,7 +9,8 @@
 //!    address, a buffer that runs from a mapped page onto an unmapped one, and a read-only page
 //!    as an output buffer. Through `uname`, `pipe2`, the `iovec` arrays of `readv`/`writev`, and
 //!    the buffers of `read`/`write` on a pipe (moved by `uiomove`, USERMEM.md §4.4). `pread` on a
-//!    pipe is `ESPIPE`.
+//!    pipe is `ESPIPE`. And the output (and input) structures of `getrusage`, `times`, `sysinfo`,
+//!    `getrandom`, `sched_getaffinity`, `sched_rr_get_interval` and `prlimit64`.
 //! 3. Good calls still work afterwards: `uname`, `writev`, and `readv` through a pipe, one write
 //!    scattered across two `iovec`s, and a short read that stops at the first partly filled one
 //!    (from the retired in-kernel `tests/readv_smoke.rs`).
@@ -29,6 +30,13 @@ const SYS_WRITEV: u64 = 104;
 const SYS_UNAME: u64 = 137;
 const SYS_READV: u64 = 153;
 const SYS_PIPE2: u64 = 293;
+const SYS_SCHED_GETAFFINITY: u64 = 204;
+const SYS_PRLIMIT64: u64 = 478;
+const SYS_GETRUSAGE: u64 = 491;
+const SYS_TIMES: u64 = 493;
+const SYS_SCHED_RR_GET_INTERVAL: u64 = 508;
+const SYS_GETRANDOM: u64 = 526;
+const SYS_SYSINFO: u64 = 527;
 /// Registered by `tests/usermem_syscall_smoke.rs` against a test-only handler.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -103,6 +111,15 @@ fn mmap_anon(len: u64, prot: u64) -> u64 {
 /// Expects `EFAULT` from `number(arg0, arg1, arg2)`.
 fn expect_efault(what: &[u8], number: u64, arg0: u64, arg1: u64, arg2: u64) {
     match syscall(number, arg0, arg1, arg2) {
+        Err(EFAULT) => {}
+        Err(_) => fail_two(what, b": wrong errno, expected EFAULT"),
+        Ok(_) => fail_two(what, b": succeeded, expected EFAULT"),
+    }
+}
+
+/// `expect_efault` for a four-argument call.
+fn expect_efault4(what: &[u8], number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
+    match unsafe { syscall4(number, arg0, arg1, arg2, arg3) } {
         Err(EFAULT) => {}
         Err(_) => fail_two(what, b": wrong errno, expected EFAULT"),
         Ok(_) => fail_two(what, b": succeeded, expected EFAULT"),
@@ -187,6 +204,18 @@ pub extern "C" fn _start() -> ! {
         expect_efault(what, SYS_READ, prd, addr, 1);
         expect_efault(what, SYS_WRITE, pwr, addr, 1);
         expect_efault(what, SYS_UNAME, addr, 0, 0);
+        expect_efault(what, SYS_SYSINFO, addr, 0, 0);
+        expect_efault(what, SYS_GETRANDOM, addr, 16, 0);
+        expect_efault(what, SYS_SCHED_GETAFFINITY, 0, 8, addr);
+        expect_efault(what, SYS_SCHED_RR_GET_INTERVAL, 0, addr, 0);
+        // A null pointer means "not wanted" for these.
+        if addr != 0 {
+            expect_efault(what, SYS_GETRUSAGE, 0, addr, 0);
+            expect_efault(what, SYS_TIMES, addr, 0, 0);
+            // prlimit64(0, RLIMIT_CPU, new, old): a bad new limit, then a bad place for the old.
+            expect_efault4(what, SYS_PRLIMIT64, 0, 0, addr, 0);
+            expect_efault4(what, SYS_PRLIMIT64, 0, 0, 0, addr);
+        }
         expect_efault(what, SYS_PIPE2, addr, 0, 0);
         expect_efault(what, SYS_READV, 0, addr, 1);
         expect_efault(what, SYS_WRITEV, STDOUT, addr, 1);
