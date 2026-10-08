@@ -19,6 +19,10 @@ use crate::syscall::EFAULT;
 /// Fixed-address binaries load as low as `0x20_0000` (lld's default, e.g. on-target clang).
 pub const VM_MINUSER: u64 = 0x1000;
 
+/// The longest path a system call copies in, NUL included (musl's `PATH_MAX`); longer is
+/// `ENAMETOOLONG` (USERMEM.md decision 2).
+pub const PATH_MAX: usize = 4096;
+
 /// End of the user range: the end of the canonical lower half.
 pub const VM_MAXUSER: u64 = 0x8000_0000_0000;
 

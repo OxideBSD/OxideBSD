@@ -1155,8 +1155,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
 /// }` declaration expects.
 extern "C" fn oxidebsd_log(ptr: *const u8, len: u64) {
     // SAFETY: modules only reach this via a relocated `call`, always passing a pointer/length
-    // pair the module itself owns (e.g. a `&str`'s raw parts) -- same trust boundary as
-    // sys_write's existing, documented pointer-validation gap in sys/syscall.rs.
+    // pair the module itself owns (e.g. a `&str`'s raw parts): kernel memory, not a user pointer,
+    // so not a `copyin` (USERMEM.md).
     let bytes = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
     if let Ok(s) = core::str::from_utf8(bytes) {
         serial_print!("{s}");

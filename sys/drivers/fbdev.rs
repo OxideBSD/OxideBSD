@@ -55,10 +55,8 @@ pub fn current_fb_geometry() -> Option<FbGeometry> {
 pub extern "C" fn oxidebsd_fb_geometry(out: u64) -> i32 {
     match current_fb_geometry() {
         Some(geom) => {
-            // SAFETY: same known pointer-validation gap every other module-boundary write in
-            // this codebase already has -- `out` isn't checked against the caller's actual
-            // mapping first. Callers here are always this kernel's own modules (`oxfs`), never
-            // raw userland pointers.
+            // SAFETY: `out` is the calling module's own kernel buffer (`oxfs`), never a user
+            // pointer, so not a `copyout` (USERMEM.md).
             unsafe { *(out as *mut FbGeometry) = geom };
             0
         }

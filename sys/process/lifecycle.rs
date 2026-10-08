@@ -1,5 +1,7 @@
 //! Process lifecycle: spawn/fork/execve/wait4/exit/reboot -- split out of the original process.rs.
 
+use crate::memory::usercopy::{PATH_MAX, Pod, UserPtr, copyin_val, copyin_vec, copyout_val};
+use crate::syscall::ENAMETOOLONG;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -953,11 +955,15 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
 /// of what a real caller supplied. `envp_ptr` is `R10`, the ABI's 4th argument -- see
 /// `sys/syscall.rs`'s module doc comment for why that register only became a real, read argument
 /// once this needed it.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawArgvEntry {
     ptr: u64,
     len: u64,
 }
+
+// SAFETY: two u64s, no padding.
+unsafe impl Pod for RawArgvEntry {}
 
 /// Bounded as a sanity cap against a runaway/garbage `argv_ptr`/`envp_ptr`, not a deliberate
 /// argument/environment-count limit. Raised 32 -> 256 for the real on-target Clang/LLVM port (see
@@ -985,16 +991,13 @@ fn read_ptr_len_array(ptr: u64, budget: &mut u64) -> Result<Vec<Vec<u8>>, u64> {
         return Ok(entries_out);
     }
     for i in 0..MAX_PTR_LEN_ENTRIES {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this file
-        // already has -- ptr isn't checked against the caller's actual mappings before use.
-        let entry = unsafe { &*(ptr as *const RawArgvEntry).add(i) };
+        let entry: RawArgvEntry = copyin_val(UserPtr::new(ptr).add(i as u64 * 16))?;
         if entry.ptr == 0 {
             break;
         }
         *budget = budget.checked_sub(entry.len).ok_or(E2BIG)?;
-        let bytes =
-            unsafe { core::slice::from_raw_parts(entry.ptr as *const u8, entry.len as usize) };
-        entries_out.push(bytes.to_vec());
+        // Already within `budget`, so this bound never bites.
+        entries_out.push(copyin_vec(UserPtr::new(entry.ptr), entry.len as usize, usize::MAX, E2BIG)?);
     }
     Ok(entries_out)
 }
@@ -1204,12 +1207,10 @@ pub fn do_execve(
     argv_ptr: u64,
     envp_ptr: u64,
 ) -> Result<u64, u64> {
-    // Copied out now, while the caller's own address space (where path_ptr/argv_ptr/envp_ptr are
+    // Copied in now, while the caller's own address space (where path_ptr/argv_ptr/envp_ptr are
     // valid) is still active -- used for the new program's initial stack, built further down, by
-    // which point a fresh (as-yet-unactivated) address space is what's live instead. Same known
-    // pointer-validation gap sys_write/sys_read already have for user pointers.
-    let path_bytes: Vec<u8> =
-        unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) }.to_vec();
+    // which point a fresh (as-yet-unactivated) address space is what's live instead.
+    let path_bytes = copyin_vec(UserPtr::new(path_ptr), path_len as usize, PATH_MAX, ENAMETOOLONG)?;
     exec_image(caller_pid, path_bytes, None, true, argv_ptr, envp_ptr)
 }
 
@@ -1235,13 +1236,12 @@ pub fn do_execveat(
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(EINVAL);
     }
-    // SAFETY: caller-owned pointer, same trust boundary as `path_ptr` in `do_execve`.
-    let [dirfd, path_ptr, path_len] = unsafe { (at_ptr as *const [u64; 3]).read_unaligned() };
+    let [dirfd, path_ptr, path_len]: [u64; 3] = copyin_val(UserPtr::new(at_ptr))?;
     let dirfd = dirfd as i64;
     let path_bytes: Vec<u8> = if path_ptr == 0 {
         Vec::new()
     } else {
-        unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) }.to_vec()
+        copyin_vec(UserPtr::new(path_ptr), path_len as usize, PATH_MAX, ENAMETOOLONG)?
     };
 
     if path_bytes.is_empty() {
@@ -1951,10 +1951,8 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
         table.get(&pid).map(|p| p.clear_child_tid).unwrap_or(0)
     };
     if clear_child_tid != 0 {
-        // SAFETY: same known pointer-validation gap every other user-memory write in this
-        // codebase already has -- real musl always supplies a real address here
-        // (&__thread_list_lock), never attacker-controlled in any live caller.
-        unsafe { (clear_child_tid as *mut u32).write(0) };
+        // A bad address is ignored, as on Linux: the thread is exiting either way.
+        let _ = copyout_val(&0u32, UserPtr::new(clear_child_tid));
         wake_futex(tgid, clear_child_tid, 1);
     }
     let other_thread_alive = {
