@@ -14,7 +14,7 @@
 	branch = oxidebsd
 [submodule "external/gpl2/doomgeneric"]
 	path = external/gpl2/doomgeneric
-	url = https://github.com/Pomsky2011/doomgeneric-oxidebsd.git
+	url = https://github.com/OxideBSD/doomgeneric-oxidebsd.git
 	branch = oxidebsd
 [submodule "external/mit/rust"]
 	path = external/mit/rust

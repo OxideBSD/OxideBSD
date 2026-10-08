@@ -8816,13 +8816,12 @@ fn format_fresh_filesystem() -> bool {
         b"float-smoke",
         include_bytes!(env!("OXFS_FLOAT_SMOKE_ELF_PATH")),
     );
-    // A real, playable port of Doom -- see build.rs's own build_doomgeneric doc comment.
-    // doom1.wad seeded at root (not e.g. /usr/share/) since real, unmodified doomgeneric's own
-    // d_iwad.c always searches "." first, and root's own $HOME (see /etc/passwd) is "/" -- the
-    // ordinary hush prompt's default cwd -- so a bare `doom` invocation finds it with no `-iwad`
-    // argument needed.
+    // A real, playable port of Doom -- see build.rs's own build_doomgeneric doc comment. The
+    // shareware IWAD lives where Unix ports keep IWADs, /usr/share/games/doom, which is our
+    // doomgeneric fork's FILES_DIR: found from any directory, not only from `/`.
     ok &= seed_file(usr_games, b"doom", include_bytes!(env!("OXFS_DOOM_ELF_PATH")));
-    ok &= seed_file(root, b"doom1.wad", include_bytes!(env!("OXFS_DOOM1_WAD_PATH")));
+    let doom_wads = ensure_dir(ensure_dir(ensure_dir(usr, b"share"), b"games"), b"doom");
+    ok &= seed_file(doom_wads, b"doom1.wad", include_bytes!(env!("OXFS_DOOM1_WAD_PATH")));
     // lsoxmod: a real standalone Rust userland ELF (sbin/lsoxmod/, same "freestanding,
     // raw-SYSCALL, no musl/BusyBox involved" category as regress/musl-smoke above), not a BusyBox applet
     // -- lists OxideBSD's own dynamically loaded kernel modules by reading the real /proc/modules
