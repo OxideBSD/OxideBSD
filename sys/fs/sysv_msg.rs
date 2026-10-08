@@ -54,6 +54,7 @@
 //! trust the wake reason alone" discipline every blocking primitive in this codebase already
 //! follows.
 
+use crate::memory::usercopy::{UserPtr, copyin, copyin_val, copyout, copyout_val};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
@@ -128,6 +129,7 @@ static KEYS: Mutex<BTreeMap<i32, i32>> = Mutex::new(BTreeMap::new());
 
 /// musl's own `struct msqid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/msg.h`) -- same
 /// probe-confirmed rigor as `crate::fs::sysv_ipc::RawIpcPerm` above (120 bytes total).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawMsqidDs {
     msg_perm: RawIpcPerm,
@@ -141,6 +143,10 @@ struct RawMsqidDs {
     msg_lrpid: i32,
     unused: [u64; 2],
 }
+
+const _: () = assert!(core::mem::size_of::<RawMsqidDs>() == 120);
+// SAFETY: integers only, no padding (the size assert pins the layout).
+unsafe impl crate::memory::usercopy::Pod for RawMsqidDs {}
 
 const _: () = assert!(core::mem::size_of::<RawMsqidDs>() == 120);
 
@@ -252,15 +258,17 @@ pub(crate) fn do_msgget(key: u64, flag: u64) -> Result<u64, u64> {
 /// requirement, `EINVAL` otherwise).
 pub(crate) fn do_msgsnd(q: u64, m: u64, len: u64, flag: u64) -> Result<u64, u64> {
     let msqid = q as i32;
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let mtype = unsafe { *(m as *const i64) };
+    let mtype: i64 = copyin_val(UserPtr::new(m))?;
     if mtype < 1 {
         return Err(EINVAL);
     }
     if len > SYSV_MSGMAX {
         return Err(EINVAL);
     }
+    // Copied in before any queue is touched (`len` is bounded just above): a bad buffer leaves
+    // the queue as it was.
+    let mut data = alloc::vec![0u8; len as usize];
+    copyin(UserPtr::new(m).add(8), &mut data)?;
     let uid = process::oxidebsd_current_uid() as u32;
     let gid = process::oxidebsd_current_gid() as u32;
     let caller = scheduler::current_pid();
@@ -278,12 +286,7 @@ pub(crate) fn do_msgsnd(q: u64, m: u64, len: u64, flag: u64) -> Result<u64, u64>
                 return Err(EINVAL);
             }
             if qref.cbytes() + len <= qref.qbytes {
-                // SAFETY: same known pointer-validation gap every other user-memory read in this
-                // codebase already has.
-                let data =
-                    unsafe { core::slice::from_raw_parts((m + 8) as *const u8, len as usize) }
-                        .to_vec();
-                qref.messages.push(SysvMessage { mtype, data });
+                qref.messages.push(SysvMessage { mtype, data: core::mem::take(&mut data) });
                 qref.lspid = caller;
                 qref.stime = crate::cpu::rtc::unix_epoch_now_precise().0;
                 drop(queues);
@@ -335,13 +338,12 @@ pub(crate) fn do_msgrcv(q_and_flag: u64, m: u64, len: u64, msgtyp: u64) -> Resul
                 qref.rtime = crate::cpu::rtc::unix_epoch_now_precise().0;
                 drop(queues);
                 let copy_len = (msg.data.len() as u64).min(len) as usize;
-                // SAFETY: same known pointer-validation gap every other user-memory write in
-                // this codebase already has.
-                unsafe {
-                    (m as *mut i64).write_unaligned(msg.mtype);
-                    core::ptr::copy_nonoverlapping(msg.data.as_ptr(), (m + 8) as *mut u8, copy_len);
-                }
+                // Taken off the queue first: a bad buffer loses the message, as on FreeBSD; the
+                // room it left wakes senders either way.
+                let copied = copyout_val(&msg.mtype, UserPtr::new(m))
+                    .and_then(|()| copyout(&msg.data[..copy_len], UserPtr::new(m).add(8)));
                 wake_blocked_senders(msqid);
+                copied?;
                 return Ok(copy_len as u64);
             }
             if flag & IPC_NOWAIT != 0 {
@@ -407,6 +409,7 @@ pub(crate) fn do_msgctl(q: u64, cmd: u64, buf_ptr: u64) -> Result<u64, u64> {
                     cgid: qref.cgid,
                     mode: qref.mode,
                     seq: 0,
+                    pad0: 0,
                     pad1: 0,
                     pad2: 0,
                 },
@@ -420,9 +423,7 @@ pub(crate) fn do_msgctl(q: u64, cmd: u64, buf_ptr: u64) -> Result<u64, u64> {
                 msg_lrpid: qref.lrpid as i32,
                 unused: [0; 2],
             };
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // codebase already has.
-            unsafe { (buf_ptr as *mut RawMsqidDs).write_unaligned(raw) };
+            copyout_val(&raw, UserPtr::new(buf_ptr))?;
             Ok(0)
         }
         IPC_SET => {
@@ -431,9 +432,7 @@ pub(crate) fn do_msgctl(q: u64, cmd: u64, buf_ptr: u64) -> Result<u64, u64> {
             if !is_owner_or_creator(qref, uid) {
                 return Err(EACCES);
             }
-            // SAFETY: same known pointer-validation gap every other user-memory read in this
-            // codebase already has.
-            let raw = unsafe { (buf_ptr as *const RawMsqidDs).read_unaligned() };
+            let raw: RawMsqidDs = copyin_val(UserPtr::new(buf_ptr))?;
             qref.uid = raw.msg_perm.uid;
             qref.gid = raw.msg_perm.gid;
             qref.mode = raw.msg_perm.mode & 0o777;

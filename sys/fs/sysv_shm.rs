@@ -43,6 +43,7 @@
 //! bookkeeping runs. Harmless: a `Zombie` process's address space is never freed either (no
 //! reclamation model exists), and once reaped there's nothing left to unmap from at all.
 
+use crate::memory::usercopy::{UserPtr, copyin_val, copyout_val};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
@@ -143,6 +144,7 @@ static NEXT_SHM_PAGE: spin::Mutex<u64> = spin::Mutex::new(SHM_REGION_BASE);
 /// bytes, verified via a direct `musl-gcc`/`sizeof`/`offsetof` probe against that exact field
 /// list (against this port's own patched sysroot, `toolchain/x86_64-unknown-oxidebsd`), same rigor `RawIpcPerm`/
 /// `RawMsqidDs`/`RawSemidDs` already established.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawShmidDs {
     shm_perm: RawIpcPerm,
@@ -156,6 +158,10 @@ struct RawShmidDs {
     pad1: i64,
     pad2: i64,
 }
+
+const _: () = assert!(core::mem::size_of::<RawShmidDs>() == 112);
+// SAFETY: integers only, no padding (the size assert pins the layout).
+unsafe impl crate::memory::usercopy::Pod for RawShmidDs {}
 
 const _: () = assert!(core::mem::size_of::<RawShmidDs>() == 112);
 
@@ -528,6 +534,7 @@ pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
                     cgid: s.cgid,
                     mode: s.mode,
                     seq: 0,
+                    pad0: 0,
                     pad1: 0,
                     pad2: 0,
                 },
@@ -541,9 +548,7 @@ pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
                 pad1: 0,
                 pad2: 0,
             };
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // codebase already has.
-            unsafe { (arg as *mut RawShmidDs).write_unaligned(raw) };
+            copyout_val(&raw, UserPtr::new(arg))?;
             Ok(0)
         }
         IPC_SET => {
@@ -552,9 +557,7 @@ pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
             if !is_owner_or_creator(s, uid) {
                 return Err(EACCES);
             }
-            // SAFETY: same known pointer-validation gap every other user-memory read in this
-            // codebase already has.
-            let raw = unsafe { (arg as *const RawShmidDs).read_unaligned() };
+            let raw: RawShmidDs = copyin_val(UserPtr::new(arg))?;
             s.uid = raw.shm_perm.uid;
             s.gid = raw.shm_perm.gid;
             s.mode = raw.shm_perm.mode & 0o777;

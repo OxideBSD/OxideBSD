@@ -20,6 +20,7 @@ pub(crate) const IPC_64: u64 = 0x100;
 /// bytes, verified via a direct `musl-gcc`/`sizeof`/`offsetof` probe against that exact field
 /// list, same rigor `RawSysinfo` (`sys/syscall/ffi.rs`) already established, rather than assumed
 /// from Rust `repr(C)` layout rules alone.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RawIpcPerm {
     pub key: i32,
@@ -29,9 +30,16 @@ pub(crate) struct RawIpcPerm {
     pub cgid: u32,
     pub mode: u32,
     pub seq: i32,
+    /// The alignment gap before `pad1` (musl leaves it implicit), explicit so `IPC_STAT` copies it
+    /// out zeroed rather than as whatever kernel bytes were there (it did, before `copyout_val`).
+    pub pad0: u32,
     pub pad1: i64,
     pub pad2: i64,
 }
+
+const _: () = assert!(core::mem::size_of::<RawIpcPerm>() == 48);
+// SAFETY: integers only, no padding (the gap is the explicit `pad0`).
+unsafe impl crate::memory::usercopy::Pod for RawIpcPerm {}
 
 const _: () = assert!(core::mem::size_of::<RawIpcPerm>() == 48);
 

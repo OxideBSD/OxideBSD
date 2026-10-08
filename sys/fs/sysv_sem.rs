@@ -65,6 +65,7 @@
 //! `SETS` and silently skips it, the same "re-check the real condition, a missing id is a no-op"
 //! discipline `crate::fs::sysv_msg`'s own `IPC_RMID` already established.
 
+use crate::memory::usercopy::{UserPtr, copyin_val, copyout, copyout_val};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
@@ -148,10 +149,15 @@ struct RawSembuf {
 }
 
 const _: () = assert!(core::mem::size_of::<RawSembuf>() == 6);
+// SAFETY: integers only, no padding (the size assert pins the layout).
+unsafe impl crate::memory::usercopy::Pod for RawSembuf {}
+
+const _: () = assert!(core::mem::size_of::<RawSembuf>() == 6);
 
 /// musl's own `struct semid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/sem.h`) -- same
 /// probe-confirmed rigor as `RawSembuf` above (88 bytes total: 48-byte `ipc_perm` + two 8-byte
 /// `time_t`s + a 2-byte `sem_nsems` padded out to 8 + two reserved 8-byte longs).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawSemidDs {
     sem_perm: RawIpcPerm,
@@ -162,6 +168,10 @@ struct RawSemidDs {
     unused3: i64,
     unused4: i64,
 }
+
+const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 88);
+// SAFETY: integers only, no padding (the size assert pins the layout).
+unsafe impl crate::memory::usercopy::Pod for RawSemidDs {}
 
 const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 88);
 
@@ -353,9 +363,7 @@ fn read_sembufs(sops_ptr: u64, nsops: u64) -> Result<Vec<RawSembuf>, u64> {
     }
     let mut ops = Vec::with_capacity(nsops as usize);
     for i in 0..nsops {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-        // already has.
-        let op = unsafe { *(sops_ptr as *const RawSembuf).add(i as usize) };
+        let op: RawSembuf = copyin_val(UserPtr::new(sops_ptr).add(i * 6))?;
         ops.push(op);
     }
     Ok(ops)
@@ -467,18 +475,12 @@ pub(crate) fn do_semop(id: u64, sops_ptr: u64, nsops: u64) -> Result<u64, u64> {
 /// is *not* `crate::process::abstime_to_ticks`, which is absolute-clock-based). `ts_ptr == 0`
 /// blocks indefinitely, matching real `semop()`'s own null-equivalent behavior (real
 /// `semtimedop(2)` requires a non-null `timeout`, but nothing stops a raw caller from passing null
-/// -- treated the same as "no timeout" rather than an arbitrary `EFAULT`, since this port doesn't
-/// validate pointers here anyway).
+/// -- treated the same as "no timeout", as on Linux).
 fn resolve_relative_deadline(ts_ptr: u64) -> Result<u64, u64> {
     if ts_ptr == 0 {
         return Ok(u64::MAX);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let (sec, nsec) = unsafe {
-        let ts = ts_ptr as *const i64;
-        (*ts, *ts.add(1))
-    };
+    let [sec, nsec]: [i64; 2] = copyin_val(UserPtr::new(ts_ptr))?;
     if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
         return Err(EINVAL);
     }
@@ -534,6 +536,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
                     cgid: s.cgid,
                     mode: s.mode,
                     seq: 0,
+                    pad0: 0,
                     pad1: 0,
                     pad2: 0,
                 },
@@ -544,9 +547,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
                 unused3: 0,
                 unused4: 0,
             };
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // codebase already has.
-            unsafe { (arg as *mut RawSemidDs).write_unaligned(raw) };
+            copyout_val(&raw, UserPtr::new(arg))?;
             Ok(0)
         }
         IPC_SET => {
@@ -555,9 +556,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             if !is_owner_or_creator(s, uid) {
                 return Err(EACCES);
             }
-            // SAFETY: same known pointer-validation gap every other user-memory read in this
-            // codebase already has.
-            let raw = unsafe { (arg as *const RawSemidDs).read_unaligned() };
+            let raw: RawSemidDs = copyin_val(UserPtr::new(arg))?;
             s.uid = raw.sem_perm.uid;
             s.gid = raw.sem_perm.gid;
             s.mode = raw.sem_perm.mode & 0o777;
@@ -619,11 +618,8 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             if !check_access(s, uid, gid, false) {
                 return Err(EACCES);
             }
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // codebase already has.
-            for (i, sem) in s.semas.iter().enumerate() {
-                unsafe { ((arg as *mut u16).add(i)).write_unaligned(sem.val as u16) };
-            }
+            let vals: Vec<u8> = s.semas.iter().flat_map(|sem| (sem.val as u16).to_ne_bytes()).collect();
+            copyout(&vals, UserPtr::new(arg))?;
             Ok(0)
         }
         SETALL => {
@@ -635,9 +631,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             let n = s.semas.len();
             let mut new_vals = Vec::with_capacity(n);
             for i in 0..n {
-                // SAFETY: same known pointer-validation gap every other user-memory read in this
-                // codebase already has.
-                let v = unsafe { *((arg as *const u16).add(i)) } as i32;
+                let v = copyin_val::<u16>(UserPtr::new(arg).add(i as u64 * 2))? as i32;
                 if !(0..=SEMVMX).contains(&v) {
                     return Err(ERANGE);
                 }

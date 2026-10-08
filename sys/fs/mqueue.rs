@@ -55,6 +55,7 @@
 //! "Missing, live caller confirmed" entry in `OxideBSD-doc/MISSING_POSIX_SYSCALLS.md` has: `pending_signals`
 //! is a plain bitmask with nowhere to stash a payload.
 
+use crate::memory::usercopy::{UserPtr, copyin, copyin_val, copyout, copyout_val};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -152,6 +153,7 @@ static MQ_ENDS: Mutex<BTreeMap<u64, MqEnd>> = Mutex::new(BTreeMap::new());
 
 /// musl's own `struct mq_attr` on x86_64 (`external/mit/musl/include/mqueue.h`): four `long`s plus
 /// four reserved `long`s, no padding (every field is 8 bytes on this arch) -- 64 bytes total.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawMqAttr {
     mq_flags: i64,
@@ -162,10 +164,12 @@ struct RawMqAttr {
 }
 
 const _: () = assert!(core::mem::size_of::<RawMqAttr>() == 64);
+// SAFETY: integers only, no padding (the size assert pins the layout).
+unsafe impl crate::memory::usercopy::Pod for RawMqAttr {}
 
-/// Bounded raw-pointer NUL-terminated string read -- same known pointer-validation gap every
-/// other user-memory access in this codebase already has (see `sys_read`/`sys_write`'s own doc
-/// comment). `None` if no NUL turns up within `max_len` bytes, or the bytes aren't valid UTF-8
+const _: () = assert!(core::mem::size_of::<RawMqAttr>() == 64);
+
+/// Bounded NUL-terminated string read from user memory (`copyin_val` a byte at a time). `None` if no NUL turns up within `max_len` bytes, or the bytes aren't valid UTF-8
 /// (real mqueue names are opaque bytes on Linux, but this port's own `NAMES` map is keyed by
 /// `String` -- no live caller to exercise a non-UTF-8 name today).
 /// `Err(EINVAL)` for a null pointer or invalid UTF-8; `Err(ENAMETOOLONG)` specifically when no NUL
@@ -178,9 +182,7 @@ fn read_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
     }
     let mut bytes = Vec::with_capacity(16);
     for i in 0..max_len {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-        // already has.
-        let b = unsafe { *((ptr as *const u8).add(i)) };
+        let b: u8 = copyin_val(UserPtr::new(ptr).add(i as u64))?;
         if b == 0 {
             return String::from_utf8(bytes).map_err(|_| EINVAL);
         }
@@ -238,12 +240,7 @@ fn resolve_deadline(at_ptr: u64) -> Result<u64, u64> {
     if at_ptr == 0 {
         return Ok(u64::MAX);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let (sec, nsec) = unsafe {
-        let ts = at_ptr as *const i64;
-        (*ts, *ts.add(1))
-    };
+    let [sec, nsec]: [i64; 2] = copyin_val(UserPtr::new(at_ptr))?;
     if !(0..1_000_000_000).contains(&nsec) {
         return Err(EINVAL);
     }
@@ -277,9 +274,7 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
             return Err(ENOENT);
         }
         let (max_msg, msg_size) = if attr_ptr != 0 {
-            // SAFETY: same known pointer-validation gap every other user-memory read in this
-            // codebase already has.
-            let attr = unsafe { (attr_ptr as *const RawMqAttr).read_unaligned() };
+            let attr: RawMqAttr = copyin_val(UserPtr::new(attr_ptr))?;
             (attr.mq_maxmsg, attr.mq_msgsize)
         } else {
             (MQ_DEFAULT_MAXMSG, MQ_DEFAULT_MSGSIZE)
@@ -415,6 +410,14 @@ pub(crate) fn do_mq_timedsend(
         return Err(EBADF);
     }
     let deadline = resolve_deadline(at_ptr)?;
+    // The message is copied in before the queue is touched, once its size is known to fit (so a
+    // huge `len` never becomes a huge allocation): a bad buffer leaves the queue as it was.
+    let msg_size = QUEUES.lock().get(&end.mq_id).ok_or(EBADF)?.msg_size;
+    if len > msg_size as usize {
+        return Err(EMSGSIZE);
+    }
+    let mut data = alloc::vec![0u8; len];
+    copyin(UserPtr::new(msg_ptr), &mut data)?;
 
     loop {
         let mut fire_notify = None;
@@ -428,11 +431,7 @@ pub(crate) fn do_mq_timedsend(
             }
             if (q.messages.len() as i64) < q.max_msg {
                 let was_empty = q.messages.is_empty();
-                // SAFETY: same known pointer-validation gap every other user-memory read in this
-                // codebase already has.
-                let data =
-                    unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, len) }.to_vec();
-                insert_by_priority(&mut q.messages, prio as u32, data);
+                insert_by_priority(&mut q.messages, prio as u32, core::mem::take(&mut data));
                 if was_empty {
                     fire_notify = match &q.notify {
                         Some(Notify::Signal { pid, signo }) => Some((*pid, *signo)),
@@ -550,13 +549,10 @@ pub(crate) fn do_mq_timedreceive(
             }
         }; // queues lock dropped
 
-        // SAFETY: same known pointer-validation gap every other user-memory write in this
-        // codebase already has.
-        unsafe {
-            core::ptr::copy_nonoverlapping(msg.data.as_ptr(), msg_ptr as *mut u8, msg.data.len());
-        }
+        // Taken off the queue first: a bad buffer loses the message, as on FreeBSD.
+        copyout(&msg.data, UserPtr::new(msg_ptr))?;
         if prio_ptr != 0 {
-            unsafe { (prio_ptr as *mut u32).write_unaligned(msg.priority) };
+            copyout_val(&msg.priority, UserPtr::new(prio_ptr))?;
         }
         wake_blocked_senders(end.mq_id);
         return Ok(msg.data.len() as u64);
@@ -593,10 +589,8 @@ pub(crate) fn do_mq_notify(mqd: u64, sev_ptr: u64) -> Result<u64, u64> {
 
     // `struct sigevent` (`external/mit/musl/include/signal.h`): `sigev_value` (8 bytes) at offset
     // 0, `sigev_signo`/`sigev_notify` (both `int`) at offsets 8/12.
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let sigev_signo = unsafe { *((sev_ptr + 8) as *const i32) };
-    let sigev_notify = unsafe { *((sev_ptr + 12) as *const i32) };
+    let sigev_signo: i32 = copyin_val(UserPtr::new(sev_ptr).add(8))?;
+    let sigev_notify: i32 = copyin_val(UserPtr::new(sev_ptr).add(12))?;
     const SIGEV_SIGNAL: i32 = 0;
     const SIGEV_NONE: i32 = 1;
     match sigev_notify {
@@ -653,14 +647,10 @@ pub(crate) fn do_mq_getsetattr(mqd: u64, new_ptr: u64, old_ptr: u64) -> Result<u
             mq_curmsgs: q.messages.len() as i64,
             unused: [0; 4],
         };
-        // SAFETY: same known pointer-validation gap every other user-memory write in this
-        // codebase already has.
-        unsafe { (old_ptr as *mut RawMqAttr).write_unaligned(attr) };
+        copyout_val(&attr, UserPtr::new(old_ptr))?;
     }
     if new_ptr != 0 {
-        // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-        // already has.
-        let new_flags = unsafe { (new_ptr as *const RawMqAttr).read_unaligned() }.mq_flags;
+        let new_flags = copyin_val::<RawMqAttr>(UserPtr::new(new_ptr))?.mq_flags;
         crate::fs::fd::set_nonblocking(real_fd, new_flags & O_NONBLOCK != 0);
     }
     Ok(0)
