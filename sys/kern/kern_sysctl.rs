@@ -8,6 +8,7 @@
 //! numbered from 256 up at registration (`OID_AUTO`). A leaf's value is produced by a function
 //! each time it's read, so it's always current, and set through another where it's writable.
 
+use crate::memory::usercopy::{UserPtr, copyin, copyin_val, copyout, copyout_val};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -726,17 +727,20 @@ struct Args {
     newlen: u64,
 }
 
-fn read_u64(ptr: u64) -> u64 {
-    // SAFETY: a user pointer in the current address space; unvalidated, as for read(2).
-    unsafe { core::ptr::read_unaligned(ptr as *const u64) }
-}
+/// The longest new value `sysctl(2)` takes; every node's value is far smaller.
+const MAX_NEWLEN: u64 = 4096;
 
-fn user_bytes<'a>(ptr: u64, len: u64) -> &'a [u8] {
+/// A user buffer copied in (`USERMEM.md`); empty for a null pointer or zero length.
+fn user_bytes(ptr: u64, len: u64) -> Result<Vec<u8>, i64> {
     if ptr == 0 || len == 0 {
-        return &[];
+        return Ok(Vec::new());
     }
-    // SAFETY: as `read_u64`.
-    unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) }
+    if len > MAX_NEWLEN {
+        return Err(EINVAL as i64);
+    }
+    let mut v = alloc::vec![0u8; len as usize];
+    copyin(UserPtr::new(ptr), &mut v).map_err(|e| e as i64)?;
+    Ok(v)
 }
 
 /// Hands `value` back as FreeBSD does: its size alone if `oldp` is null, else as much as fits,
@@ -745,19 +749,16 @@ fn copy_out(a: &Args, value: &[u8]) -> Result<(), i64> {
     if a.oldlenp == 0 {
         return Ok(());
     }
-    // SAFETY: as `read_u64`; `oldlenp` is a `size_t *`.
-    let lenp = a.oldlenp as *mut u64;
+    // `oldlenp` is a `size_t *`.
+    let lenp = UserPtr::new(a.oldlenp);
+    let e = |e: u64| e as i64;
     if a.oldp == 0 {
-        unsafe { lenp.write_unaligned(value.len() as u64) };
-        return Ok(());
+        return copyout_val(&(value.len() as u64), lenp).map_err(e);
     }
-    let room = unsafe { lenp.read_unaligned() } as usize;
+    let room = copyin_val::<u64>(lenp).map_err(e)? as usize;
     let n = room.min(value.len());
-    // SAFETY: as `read_u64`: `oldp` has `*oldlenp` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(value.as_ptr(), a.oldp as *mut u8, n);
-        lenp.write_unaligned(n as u64);
-    }
+    copyout(&value[..n], UserPtr::new(a.oldp)).map_err(e)?;
+    copyout_val(&(n as u64), lenp).map_err(e)?;
     if n < value.len() { Err(ENOMEM as i64) } else { Ok(()) }
 }
 
@@ -795,7 +796,8 @@ fn meta(a: &Args, name: &[i32]) -> Result<(), i64> {
             copy_out(a, &next)
         }
         NAME2OID => {
-            let wanted = new_string(user_bytes(a.newp, a.newlen));
+            let wanted_buf = user_bytes(a.newp, a.newlen)?;
+            let wanted = new_string(&wanted_buf);
             let wanted = core::str::from_utf8(wanted).map_err(|_| ENOENT as i64)?;
             let oid = oid_of(&t, wanted).ok_or(ENOENT as i64)?;
             drop(t);
@@ -822,7 +824,7 @@ fn sysctl(a: &Args) -> Result<(), i64> {
     if a.namelen < 2 || a.namelen as usize > CTL_MAXNAME || a.name == 0 {
         return Err(EINVAL as i64);
     }
-    let name: Vec<i32> = user_bytes(a.name, a.namelen * 4)
+    let name: Vec<i32> = user_bytes(a.name, a.namelen * 4)?
         .chunks_exact(4)
         .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
         .collect();
@@ -845,7 +847,7 @@ fn sysctl(a: &Args) -> Result<(), i64> {
             return Err(EPERM as i64);
         }
         let set = set.filter(|_| flags & CTLFLAG_WR != 0).ok_or(EPERM as i64)?;
-        set(user_bytes(a.newp, a.newlen))?;
+        set(&user_bytes(a.newp, a.newlen)?)?;
     }
     Ok(())
 }
@@ -855,13 +857,11 @@ pub extern "C" fn oxidebsd_sys_sysctl(args: u64) -> i64 {
     if args == 0 {
         return -(EINVAL as i64);
     }
-    let a = Args {
-        name: read_u64(args),
-        namelen: read_u64(args + 8),
-        oldp: read_u64(args + 16),
-        oldlenp: read_u64(args + 24),
-        newp: read_u64(args + 32),
-        newlen: read_u64(args + 40),
+    let a = match copyin_val::<[u64; 6]>(UserPtr::new(args)) {
+        Ok([name, namelen, oldp, oldlenp, newp, newlen]) => {
+            Args { name, namelen, oldp, oldlenp, newp, newlen }
+        }
+        Err(e) => return -(e as i64),
     };
     match sysctl(&a) {
         Ok(()) => 0,

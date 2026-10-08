@@ -1026,9 +1026,9 @@ pub(crate) fn sys_sethostname(name_ptr: u64, len: u64) -> Result<u64, u64> {
     if len > 64 {
         return Err(EINVAL);
     }
-    // SAFETY: the same unvalidated-user-pointer gap every other copy in this file has.
-    let name = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len as usize) };
-    set_hostname(name)?;
+    let mut name = [0u8; 64];
+    crate::memory::usercopy::copyin(UserPtr::new(name_ptr), &mut name[..len as usize])?;
+    set_hostname(&name[..len as usize])?;
     Ok(0)
 }
 

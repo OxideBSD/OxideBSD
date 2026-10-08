@@ -1,6 +1,7 @@
 //! uid/gid/pgid/sid syscalls -- split out of the original process.rs.
 
 use super::*;
+use crate::memory::usercopy::{UserPtr, copyin_val, copyout_val};
 use crate::process::scheduler;
 use crate::syscall::{EFAULT, EINVAL, EPERM, ESRCH};
 
@@ -300,9 +301,7 @@ pub fn do_getresid(caller_pid: Pid, r_ptr: u64, e_ptr: u64, s_ptr: u64, group: b
         if ptr == 0 {
             return Err(EFAULT);
         }
-        // SAFETY: the same unvalidated user-pointer write every syscall here makes (CLAUDE.md's
-        // known gaps).
-        unsafe { (ptr as *mut u32).write(id) };
+        copyout_val(&id, UserPtr::new(ptr))?;
     }
     Ok(0)
 }
@@ -319,8 +318,7 @@ pub fn do_getgroups(caller_pid: Pid, size: i64, list_ptr: u64) -> Result<u64, u6
         return Err(EINVAL);
     }
     for (i, g) in groups.iter().enumerate() {
-        // SAFETY: as in do_getresid.
-        unsafe { (list_ptr as *mut u32).add(i).write(*g) };
+        copyout_val(g, UserPtr::new(list_ptr).add(i as u64 * 4))?;
     }
     Ok(groups.len() as u64)
 }
@@ -331,9 +329,8 @@ pub fn do_setgroups(caller_pid: Pid, count: u64, list_ptr: u64) -> Result<u64, u
         return Err(EINVAL);
     }
     let mut groups = Vec::with_capacity(count as usize);
-    for i in 0..count as usize {
-        // SAFETY: as in do_getresid, a read.
-        groups.push(unsafe { (list_ptr as *const u32).add(i).read() });
+    for i in 0..count {
+        groups.push(copyin_val::<u32>(UserPtr::new(list_ptr).add(i * 4))?);
     }
     with_cred(caller_pid, |c| {
         if !c.privileged() {
