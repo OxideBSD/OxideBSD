@@ -66,6 +66,7 @@ pub mod stats;
 
 pub use ffi::*;
 
+use crate::memory::usercopy::{UserPtr, copyin_val, copyout_val};
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -642,14 +643,12 @@ fn do_sigreturn(frame: &mut SyscallFrame) {
                 // comment for the real bug this closes. `saved` above already covers the case
                 // where the handler never touched it (this overlay reproduces the exact same
                 // values then, since the ucontext was originally populated from `saved` itself).
-                // SAFETY: same known pointer-validation gap every other user-memory read in this
-                // file already has -- `ucontext_addr` was a real, live address on this exact
-                // process's own user stack when `deliver_pending_signal` wrote it, and a handler
-                // that corrupts/frees it before returning is the same class of real memory-safety
-                // violation as any other wild pointer a userspace program can commit.
-                let gregs = unsafe { (ucontext_addr as *const RawUcontext).read_unaligned() }
-                    .uc_mcontext
-                    .gregs;
+                // A ucontext the process unmapped or broke can't be returned through: it dies of
+                // SIGSEGV, as on Linux (USERMEM.md §5.4).
+                let gregs = match copyin_val::<RawUcontext>(UserPtr::new(ucontext_addr)) {
+                    Ok(uc) => uc.uc_mcontext.gregs,
+                    Err(_) => crate::process::do_exit_group(pid, FRAME_FAULT_EXIT),
+                };
                 frame.r8 = gregs[REG_R8] as u64;
                 frame.r9 = gregs[REG_R9] as u64;
                 frame.r10 = gregs[REG_R10] as u64;
@@ -686,12 +685,16 @@ fn do_sigreturn(frame: &mut SyscallFrame) {
 /// `SyscallFrame` below, the actual pre-signal machine state, not a placeholder. `fpregs`/
 /// `reserved1` are always `0`/`null` -- this kernel never saves FPU state anywhere (`sys/cpu/
 /// fpu.rs`'s own documented gap), so there is no real value to point at.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawMcontext {
     gregs: [i64; 23],
     fpregs: u64,
     reserved1: [u64; 8],
 }
+
+// SAFETY: integers and integer arrays, no padding.
+unsafe impl crate::memory::usercopy::Pod for RawMcontext {}
 
 const _: () = assert!(core::mem::size_of::<RawMcontext>() == 256);
 
@@ -720,6 +723,7 @@ const REG_EFL: usize = 17;
 /// `ss_size`. Only ever used for `RawUcontext::uc_stack` below, always zeroed there (a real,
 /// separate gap from `SA_ONSTACK` handler placement itself -- see `Process::altstack`'s own doc
 /// comment -- no current pilot test exercises it).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawStackT {
     ss_sp: u64,
@@ -728,11 +732,15 @@ struct RawStackT {
     ss_size: u64,
 }
 
+// SAFETY: integers and integer arrays, no padding.
+unsafe impl crate::memory::usercopy::Pod for RawStackT {}
+
 /// musl's own `ucontext_t` on x86_64 under `_GNU_SOURCE` -- `uc_flags`/`uc_link`/`uc_stack`/
 /// `uc_mcontext`/`uc_sigmask`/`__fpregs_mem` in that order, 936 bytes total. Exists so a real
 /// `SA_SIGINFO` handler that dereferences its third argument gets a correctly-sized, correctly-
 /// shaped structure with real general-purpose-register values (see `RawMcontext` above) instead of
 /// faulting on `NULL` -- the gap this whole function used to document as unfixed.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawUcontext {
     uc_flags: u64,
@@ -750,6 +758,9 @@ struct RawUcontext {
     /// `RawMcontext::fpregs` above.
     fpregs_mem: [u64; 64],
 }
+
+// SAFETY: integers and integer arrays, no padding.
+unsafe impl crate::memory::usercopy::Pod for RawUcontext {}
 
 const _: () = assert!(core::mem::size_of::<RawUcontext>() == 936);
 
@@ -797,6 +808,10 @@ const _: () = assert!(core::mem::size_of::<RawUcontext>() == 936);
 /// resuming). `false` at both of this function's non-`do_sigreturn` call sites (a completed
 /// syscall's own tail, and the fault trampoline) -- both are genuine "about to resume real
 /// userspace" points; `true` only from `do_sigreturn`'s own chained call below.
+/// The exit status of a process whose signal frame couldn't be written or read back: killed by
+/// `SIGSEGV`, encoded as a signal death (`128 + signum`, as `SignalDelivery::Terminate` carries).
+const FRAME_FAULT_EXIT: i32 = 128 + crate::process::SIGSEGV as i32;
+
 fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
     let pid = crate::process::scheduler::current_pid();
     if pid == 0 {
@@ -950,12 +965,13 @@ fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
                     si_value: delivery_siginfo.value,
                     _tail: [0; 128 - 4 * 4 - 2 * 4 - 8],
                 };
-                // SAFETY: same known pointer-validation gap every other user-memory write in this
-                // file already has -- both addresses are derived from this process's own live
-                // user_rsp, and this process's own address space is the one currently active.
-                unsafe {
-                    (ucontext_addr as *mut RawUcontext).write_unaligned(ucontext);
-                    (siginfo_addr as *mut RawSiginfo).write_unaligned(siginfo);
+                // A frame that can't be written (a bad or full stack, or alternate stack) kills
+                // the process with SIGSEGV instead of faulting the kernel (USERMEM.md §5.4).
+                if copyout_val(&ucontext, UserPtr::new(ucontext_addr))
+                    .and_then(|()| copyout_val(&siginfo, UserPtr::new(siginfo_addr)))
+                    .is_err()
+                {
+                    crate::process::do_exit_group(pid, FRAME_FAULT_EXIT);
                 }
             }
 
@@ -964,11 +980,9 @@ fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
             // RSP%16==8 at the handler's own entry, matching System V's calling convention.
             sp &= !0xF;
             sp = sp.wrapping_sub(8);
-            // SAFETY: same known pointer-validation gap every other user-memory write in this
-            // file already has -- sp is derived from this process's own live user_rsp, and this
-            // process's own address space is the one currently active (signals are only ever
-            // delivered to the process that's actually running right now).
-            unsafe { (sp as *mut u64).write(restorer) };
+            if copyout_val(&restorer, UserPtr::new(sp)).is_err() {
+                crate::process::do_exit_group(pid, FRAME_FAULT_EXIT);
+            }
 
             frame.rdi = signum;
             frame.rsi = siginfo_addr;

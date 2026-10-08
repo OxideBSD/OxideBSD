@@ -11,6 +11,9 @@
 //!    the buffers of `read`/`write` on a pipe (moved by `uiomove`, USERMEM.md §4.4). `pread` on a
 //!    pipe is `ESPIPE`. And the output (and input) structures of `getrusage`, `times`, `sysinfo`,
 //!    `getrandom`, `sched_getaffinity`, `sched_rr_get_interval` and `prlimit64`.
+//! 4. A signal whose handler's stack can't be written kills the process with `SIGSEGV`, rather
+//!    than faulting the kernel (USERMEM.md §5.4, §6.2): a child sets an alternate signal stack at
+//!    an unmapped address, catches `SIGUSR1` on it, and raises it.
 //! 3. Good calls still work afterwards: `uname`, `writev`, and `readv` through a pipe, one write
 //!    scattered across two `iovec`s, and a short read that stops at the first partly filled one
 //!    (from the retired in-kernel `tests/readv_smoke.rs`).
@@ -22,7 +25,17 @@ use core::hint::spin_loop;
 use core::panic::PanicInfo;
 
 const SYS_READ: u64 = 3;
+const SYS_EXIT: u64 = 1;
+const SYS_FORK: u64 = 2;
 const SYS_WRITE: u64 = 4;
+const SYS_WAIT4: u64 = 7;
+const SYS_GETPID: u64 = 20;
+const SYS_KILL: u64 = 116;
+const SYS_SIGACTION: u64 = 117;
+const SYS_SIGALTSTACK: u64 = 528;
+const SIGUSR1: u64 = 10;
+const SIGSEGV: u64 = 11;
+const SA_ONSTACK: u64 = 0x0800_0000;
 const SYS_PREAD: u64 = 17;
 const SYS_MMAP: u64 = 100;
 const SYS_MUNMAP: u64 = 101;
@@ -135,6 +148,44 @@ fn fail_two(a: &[u8], b: &[u8]) -> ! {
 }
 
 #[repr(C)]
+struct RawSigAction {
+    handler: u64,
+    flags: u64,
+    restorer: u64,
+    mask: u64,
+}
+
+#[repr(C)]
+struct RawSigaltstack {
+    sp: u64,
+    flags: i32,
+    pad: u32,
+    size: u64,
+}
+
+extern "C" fn never_runs(_sig: i32) {}
+
+/// Part 4's child: its `SIGUSR1` handler runs on a stack that isn't mapped.
+fn signal_on_unmapped_stack() -> ! {
+    let ss = RawSigaltstack { sp: 0x4444_4444_0000, flags: 0, pad: 0, size: 64 * 1024 };
+    let act = RawSigAction {
+        handler: never_runs as u64,
+        flags: SA_ONSTACK,
+        restorer: never_runs as u64,
+        mask: 0,
+    };
+    let _ = syscall(SYS_SIGALTSTACK, &ss as *const RawSigaltstack as u64, 0, 0);
+    let _ = unsafe { syscall4(SYS_SIGACTION, SIGUSR1, &act as *const RawSigAction as u64, 0, 8) };
+    let me = syscall(SYS_GETPID, 0, 0, 0).unwrap_or(0);
+    let _ = syscall(SYS_KILL, me, SIGUSR1, 0);
+    // Only reached if the kernel neither ran the handler nor killed this process.
+    let _ = syscall(SYS_EXIT, 0, 0, 0);
+    loop {
+        spin_loop();
+    }
+}
+
+#[repr(C)]
 struct IoVec {
     base: u64,
     len: u64,
@@ -244,6 +295,23 @@ pub extern "C" fn _start() -> ! {
         _ => fail(b"pread on a pipe: expected ESPIPE"),
     }
     write_bytes(b"usermem-syscall-smoke: part 2 OK (bad pointers get EFAULT)\n");
+
+    // Part 4: a signal frame that can't be written.
+    match syscall(SYS_FORK, 0, 0, 0) {
+        Ok(0) => signal_on_unmapped_stack(),
+        Ok(child) => {
+            let mut status: i32 = 0;
+            if syscall(SYS_WAIT4, child, &mut status as *mut i32 as u64, 0).is_err() {
+                fail(b"wait4 for the child with the unmapped signal stack");
+            }
+            // Killed by a signal (no normal-exit byte), and that signal is SIGSEGV.
+            if status & 0x7f != SIGSEGV as i32 {
+                fail(b"a signal frame on an unmapped stack: expected death by SIGSEGV");
+            }
+        }
+        Err(_) => fail(b"fork"),
+    }
+    write_bytes(b"usermem-syscall-smoke: part 4 OK (unwritable signal frame: SIGSEGV)\n");
 
     // Part 3: good calls still work.
     let good = [0u8; UTSNAME_SIZE];
