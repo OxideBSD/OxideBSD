@@ -951,6 +951,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_fd_check_room" => Some(crate::fs::fd::oxidebsd_fd_check_room as *const () as u64),
         "oxidebsd_klog_open" => Some(crate::kern::subr_msgbuf::oxidebsd_klog_open as *const () as u64),
         "oxidebsd_sys_sysctl" => Some(crate::kern::kern_sysctl::oxidebsd_sys_sysctl as *const () as u64),
+        "oxidebsd_register_kernel_open" => {
+            Some(crate::process::lifecycle::oxidebsd_register_kernel_open as *const () as u64)
+        }
         "oxidebsd_register_socket_nodes" => {
             Some(crate::kern::uipc_usrreq::oxidebsd_register_socket_nodes as *const () as u64)
         }

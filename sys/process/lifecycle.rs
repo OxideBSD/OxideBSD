@@ -27,13 +27,10 @@ use crate::syscall::{
 // open/read-loop/close against the exact same fd/fat32 machinery `stsh`'s `cat` already exercises
 // via `syscall::dispatch` directly (`dispatch` is `pub(crate)`, callable from arbitrary kernel
 // code, not just from the `SYSCALL` entry stub).
-const SYS_OPEN: u64 = 5;
-const SYS_READ: u64 = 3;
 const SYS_CLOSE: u64 = 6;
-/// `execveat`'s reads -- see `do_execveat`. OxideBSD's own numbers (`sys/modules/oxfs`'s
-/// `SYS_OPENAT`, `sys/modules/native_abi`'s `SYS_PREAD`).
+/// `execveat`'s open -- see `do_execveat`. OxideBSD's own number (`sys/modules/oxfs`'s
+/// `SYS_OPENAT`); its `RawAtPath` is the caller's own, a user pointer.
 const SYS_OPENAT: u64 = 560;
-const SYS_PREAD: u64 = 17;
 /// Builds a brand-new process from `elf_bytes`: a fresh `AddressSpace` (`AddressSpace::new`, same
 /// as the old one-shot demo path), the ELF loaded into it (`elf::load`), a mapped user stack, and
 /// a fresh kernel stack seeded (`context_switch::seed_spawn_frame`) so its first-ever run lands in
@@ -1023,17 +1020,26 @@ fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Opens a program for `exec_image` via the real `SYS_OPEN` syscall path and reads its head
-/// (`ExecFile`), given a raw `(ptr, len)` pointing at a NUL-free path string. `ptr` may point into the
-/// *caller's* own user address space (a top-level `execve` target) or into this kernel's own heap
-/// (a `#!`-line interpreter path parsed out of a script's own content, see `do_execve`'s
-/// shebang-following loop below) -- both are valid dereference targets regardless of which
-/// process's `CR3` happens to be active: kernel-heap virtual addresses are mapped identically in
-/// every address space's page table (see CLAUDE.md's own address-space section on why
-/// `AddressSpace::fork`/`new_excluding_user` still shallow-copy the kernel's own high entries).
-fn open_exec_file(path_ptr: u64, path_len: u64) -> Result<ExecFile, u64> {
-    let fd = syscall::dispatch(SYS_OPEN, path_ptr, path_len, 0, 0)?;
-    read_exec_head_and_close(fd)
+/// Opens a program for `exec_image` and reads its head (`ExecFile`), given the kernel's own copy of
+/// its path (a top-level `execve` target, or a `#!`/`PT_INTERP` interpreter parsed out of a file).
+/// oxfs's open for a path in kernel memory, `(path_ptr, path_len, flags) -> fd | -errno` (BSD's
+/// `namei` with `UIO_SYSSPACE`): `SYS_OPEN` takes a user pointer, and exec's paths are the kernel's
+/// own copies (USERMEM.md). Registered by oxfs's `module_init`.
+type KernOpenFn = extern "C" fn(u64, u64, u64) -> i64;
+static KERN_OPEN: spin::Mutex<Option<KernOpenFn>> = spin::Mutex::new(None);
+
+/// Called once by oxfs's `module_init`.
+pub(crate) extern "C" fn oxidebsd_register_kernel_open(f: KernOpenFn) {
+    *KERN_OPEN.lock() = Some(f);
+}
+
+fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
+    let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
+    let fd = open(path.as_ptr() as u64, path.len() as u64, 0);
+    if fd < 0 {
+        return Err(-fd as u64);
+    }
+    read_exec_head_and_close(fd as u64)
 }
 
 /// `open_exec_file`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
@@ -1061,12 +1067,16 @@ fn read_fd_to_end(fd: u64, pread: bool) -> Result<Vec<u8>, u64> {
         let len = bytes.len();
         bytes.reserve(EXEC_READ_CHUNK);
         let buf = bytes.spare_capacity_mut().as_mut_ptr() as u64;
-        let result = if pread {
-            syscall::dispatch(SYS_PREAD, fd, buf, EXEC_READ_CHUNK as u64, len as u64)
-        } else {
-            syscall::dispatch(SYS_READ, fd, buf, EXEC_READ_CHUNK as u64, 0)
-        };
-        let n = result? as usize;
+        // A kernel-segment transfer: the buffer is the kernel's (USERMEM.md §4.4).
+        use crate::kern::subr_uio::{FOF_OFFSET, IoSeg, Uio, UioRw, UioSeg};
+        let seg = alloc::vec![IoSeg { base: buf, len: EXEC_READ_CHUNK as u64 }];
+        let mut uio = Uio::new(seg, UioRw::Read, UioSeg::Kernel, len as u64)?;
+        let flags = if pread { FOF_OFFSET } else { 0 };
+        let raw = crate::fs::fd::read(fd, &mut uio, flags).ok_or(EBADF)?;
+        if raw < 0 {
+            return Err(-raw as u64);
+        }
+        let n = raw as usize;
         if n == 0 {
             return Ok(bytes);
         }
@@ -1313,10 +1323,7 @@ fn exec_image(
         let from_first_image = first_image.is_some();
         let file = match first_image.take() {
             Some(image) => image,
-            None => open_exec_file(
-                effective_path.as_ptr() as u64,
-                effective_path.len() as u64,
-            )?,
+            None => open_exec_file(&effective_path)?,
         };
         let bytes = &file.head;
         if bytes.len() < 2 || &bytes[0..2] != b"#!" {
@@ -1394,7 +1401,7 @@ fn exec_image(
         let mut jump_entry = entry;
         let mut interp_base: Option<u64> = None;
         if let Some(interp_path) = interp_path {
-            let interp_file = open_exec_file(interp_path.as_ptr() as u64, interp_path.len() as u64)?;
+            let interp_file = open_exec_file(&interp_path)?;
             let mut interp_elf = Elf::parse_file(&interp_file.head, interp_file.size, interp_file.content)
                 .map_err(|_| ENOEXEC)?;
             interp_elf.cache = exec_cache_entry(&interp_file, &new_address_space);

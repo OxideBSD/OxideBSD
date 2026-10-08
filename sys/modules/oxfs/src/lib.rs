@@ -123,6 +123,12 @@ unsafe extern "C" {
     /// descriptors; `0` on failure. Freed with `oxidebsd_uio_free`.
     fn oxidebsd_uio_kernel_new(buf: *mut u8, len: u64, rw: u64) -> u64;
     fn oxidebsd_uio_free(uio: u64);
+    /// Copies `len` bytes from user memory at `src` into this module's buffer `dst` (kernel tree:
+    /// `crate::memory::usercopy`). `0`, or a positive errno (`EFAULT`).
+    fn oxidebsd_copyin(src: u64, dst: *mut u8, len: usize) -> u64;
+    /// Copies `len` bytes of this module's buffer `src` to user memory at `dst`. `0`, or a
+    /// positive errno.
+    fn oxidebsd_copyout(src: *const u8, len: usize, dst: u64) -> u64;
     /// Overrides `fd`'s real `access_mode` callback -- see
     /// `crate::fs::fd::oxidebsd_set_fd_access_mode`/`FdAccessMode`'s own doc comment (kernel tree).
     /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_positioned`.
@@ -166,6 +172,9 @@ unsafe extern "C" {
     fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64;
     /// Hands the kernel's local sockets (UNIX.md §5.2) the two functions that create and look up
     /// socket files; see `oxfs_create_socket_node`. Called once, from `module_init`.
+    /// Registers `oxfs_kern_open`, the open the kernel's `execve` uses for a path in kernel
+    /// memory (kernel tree: `crate::process::lifecycle::oxidebsd_register_kernel_open`).
+    fn oxidebsd_register_kernel_open(open: extern "C" fn(u64, u64, u64) -> i64);
     fn oxidebsd_register_socket_nodes(
         create: extern "C" fn(u64, u64) -> i64,
         lookup: extern "C" fn(u64, u64) -> i64,
@@ -1853,6 +1862,120 @@ fn uio_ret(r: Result<usize, i64>) -> i64 {
     }
 }
 
+// --- User memory (`OxideBSD-doc/USERMEM.md`) ----------------------------------------------------
+//
+// A system call's pointer arguments are user addresses: never dereferenced here, only copied in
+// and out through the kernel's `oxidebsd_copyin`/`oxidebsd_copyout`, which fail with `EFAULT`
+// instead of faulting.
+
+/// Set while `module_init` formats a fresh filesystem: the format self-check calls this module's
+/// system call handlers with its own stack buffers, so for that stretch their "user" pointers are
+/// this module's memory and are copied plainly (USERMEM.md's kernel segment). No process runs then.
+static mut KERNEL_SEGMENT: bool = false;
+
+/// The start of the kernel half of the address space: the format self-check's buffers (on the
+/// kernel stack) are all above it, every user address below.
+const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
+
+fn kernel_segment() -> bool {
+    // SAFETY: single-core, syscall-serialized, as every pool here.
+    unsafe { *core::ptr::addr_of!(KERNEL_SEGMENT) }
+}
+
+/// Copies `dst.len()` bytes in from user memory at `src`. `Err(-EFAULT)` for a bad pointer.
+fn copyin_bytes(src: u64, dst: &mut [u8]) -> Result<(), i64> {
+    if dst.is_empty() {
+        return Ok(());
+    }
+    // A user-range address goes through the kernel even in kernel-segment mode, so a flag left set
+    // by mistake could never make a user pointer a raw access.
+    if kernel_segment() && src >= KERNEL_HALF {
+        // SAFETY: during the format self-check, `src` is this module's own buffer of that length.
+        unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len()) };
+        return Ok(());
+    }
+    // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
+    match unsafe { oxidebsd_copyin(src, dst.as_mut_ptr(), dst.len()) } {
+        0 => Ok(()),
+        e => Err(-(e as i64)),
+    }
+}
+
+/// Copies `src` out to user memory at `dst`. `Err(-EFAULT)` for a bad pointer.
+fn copyout_bytes(src: &[u8], dst: u64) -> Result<(), i64> {
+    if src.is_empty() {
+        return Ok(());
+    }
+    if kernel_segment() && dst >= KERNEL_HALF {
+        // SAFETY: as in `copyin_bytes`, the other way round.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
+        return Ok(());
+    }
+    // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
+    match unsafe { oxidebsd_copyout(src.as_ptr(), src.len(), dst) } {
+        0 => Ok(()),
+        e => Err(-(e as i64)),
+    }
+}
+
+/// A wire struct that can be copied to and from user memory as raw bytes.
+///
+/// # Safety
+/// The type must have no padding bytes (copying one out would leak kernel memory), and every bit
+/// pattern must be a valid value of it (it's copied in from untrusted memory).
+unsafe trait Pod: Copy {}
+
+unsafe impl Pod for [i64; 4] {}
+
+/// Copies one `T` in from user memory at `src`.
+fn copyin_val<T: Pod>(src: u64) -> Result<T, i64> {
+    let mut v = core::mem::MaybeUninit::<T>::zeroed();
+    // SAFETY: a zeroed `T`'s bytes, viewed as bytes.
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<u8>(), core::mem::size_of::<T>())
+    };
+    copyin_bytes(src, bytes)?;
+    // SAFETY: every byte is initialized, and any bit pattern is a valid `T` (`Pod`).
+    Ok(unsafe { v.assume_init() })
+}
+
+/// Copies `v` out to user memory at `dst`.
+fn copyout_val<T: Pod>(v: &T, dst: u64) -> Result<(), i64> {
+    // SAFETY: `T` is `Pod`, so it has no padding: all its bytes are initialized.
+    let bytes = unsafe {
+        core::slice::from_raw_parts((v as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    };
+    copyout_bytes(bytes, dst)
+}
+
+/// A path copied in from user memory, on the stack: this module can't allocate.
+struct UserPath {
+    buf: [u8; OXFS_PATH_MAX],
+    len: usize,
+}
+
+impl UserPath {
+    const fn empty() -> Self {
+        UserPath { buf: [0; OXFS_PATH_MAX], len: 0 }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Copies the path at `ptr` (`len` bytes: this ABI's paths are length-prefixed) in.
+/// `Err(-ENAMETOOLONG)` past `OXFS_PATH_MAX`, `Err(-EFAULT)` for a bad pointer.
+fn copyin_path(ptr: u64, len: u64) -> Result<UserPath, i64> {
+    if len > OXFS_PATH_MAX as u64 {
+        return Err(-ENAMETOOLONG);
+    }
+    let mut path = UserPath::empty();
+    path.len = len as usize;
+    copyin_bytes(ptr, &mut path.buf[..len as usize])?;
+    Ok(path)
+}
+
 /// Writes `content` as `inode_num`'s complete contents (replacing whatever was there before),
 /// allocating whatever blocks are needed and setting `size`. **No longer `OpenFile::Write`'s own
 /// commit primitive** (that path now flushes positionally/additively via `write_inode_at`, see
@@ -2042,8 +2165,11 @@ fn write_inode_with(
 /// `u32` id fields and the next `u64`). `src/stat/{stat,fstat,lstat}.c` on the `oxidebsd` musl
 /// branch write straight into this shape, bypassing musl's usual `fstatat`/`kstat` indirection
 /// entirely (same "patch the entry point, not the generic multiplexer" pattern `open()`/`chdir()`/
-/// `mkdir()` already established -- see `CLAUDE.md`'s musl section).
+/// `mkdir()` already established -- see `CLAUDE.md`'s musl section). Every field sits at its
+/// natural alignment and the size is a multiple of 8, so there are no implicit padding bytes to
+/// leak when it's copied out.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct MuslStat {
     st_dev: u64,
     st_ino: u64,
@@ -2067,6 +2193,9 @@ struct MuslStat {
 
 const _: () = assert!(core::mem::size_of::<MuslStat>() == 144);
 
+// SAFETY: integer fields only, no padding (see above).
+unsafe impl Pod for MuslStat {}
+
 /// Builds a `MuslStat` for `inode_num` and writes it into the caller's buffer at `buf_ptr` --
 /// shared by `oxfs_stat`/`oxfs_lstat` (path-based) and `oxfs_fstat` (fd-based). `st_uid`/`st_gid`
 /// and `st_mode`'s permission bits are now real, backed by the inode's own `uid`/`gid`/`mode`
@@ -2086,9 +2215,7 @@ const _: () = assert!(core::mem::size_of::<MuslStat>() == 144);
 /// subdirectory count (which would also bump its parent's linked-from count) isn't reflected
 /// either. `st_ino`/`st_size`/`st_blocks`/`st_atime`/`st_mtime`/`st_ctime` are the only other
 /// fields backed by something real (see `Inode::atime`/`Inode::mtime`'s own doc comments).
-/// `write_unaligned` since a userland `struct stat*` has no alignment guarantee this kernel can
-/// rely on (same trust boundary as every other raw user pointer here -- see the module doc
-/// comment).
+/// Copied out byte for byte, so a userland `struct stat*` needs no particular alignment.
 fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
     let inode = read_inode(inode_num);
     // `File`/`Device` report a real, tracked link count (floored at `1` -- see `Inode::nlink`'s
@@ -2133,10 +2260,10 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
         st_ctime_nsec: 0,
         __unused: [0; 3],
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer, sized by the caller's own
-    // `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly, checked above).
-    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
-    0
+    match copyout_val(&stat, buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// Real POSIX `F_OK`/`X_OK`/`W_OK`/`R_OK` `amode` bits — the exact values musl's own `<unistd.h>`
@@ -2217,10 +2344,10 @@ fn write_proc_stat(is_dir: bool, buf_ptr: u64) -> i64 {
         st_ctime_nsec: 0,
         __unused: [0; 3],
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer, sized by the caller's own
-    // `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly, checked above).
-    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
-    0
+    match copyout_val(&stat, buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// Looks up the inode number backing an already-open real fd -- `oxfs_fstat`'s own lookup, since
@@ -2249,19 +2376,19 @@ fn inode_of_open_file(real_fd: u64) -> Option<u32> {
 /// real Linux does (musl's `struct dirent` -- `arch/generic/bits/dirent.h` on the `oxidebsd` musl
 /// branch, since `x86_64` doesn't override it -- assumes 8-byte-aligned records when it casts a
 /// raw syscall buffer straight into `struct dirent*`).
-fn dirent_record_len(name_len: usize) -> usize {
+const fn dirent_record_len(name_len: usize) -> usize {
     let unpadded = 8 + 8 + 2 + 1 + name_len + 1;
     (unpadded + 7) & !7
 }
 
 /// Writes one `SYS_GETDENTS` record into `out`, whose length must already be exactly
-/// `dirent_record_len(name.len())` (`oxfs_getdents` slices its output buffer to that size before
-/// calling this). `off_cookie` becomes `d_off` -- real Linux uses this as an opaque seek cookie
-/// for `telldir`/`seekdir`; nothing in this port's ported applets calls either, so a monotonic
-/// counter (`oxfs_getdents`'s own `dirent_pos`, one-past the record just written) is honest enough
-/// without pretending to support real seeking. Padding bytes past the NUL terminator are zeroed,
-/// not left as whatever `out` already held -- `out` is caller-owned userland memory, reused across
-/// `SYS_GETDENTS` calls at the same address in `hush`/coreutils' own DIR buffer.
+/// `dirent_record_len(name.len())` (`oxfs_getdents` slices its record buffer to that size before
+/// calling this, then copies the record out). `off_cookie` becomes `d_off` -- real Linux uses this
+/// as an opaque seek cookie for `telldir`/`seekdir`; nothing in this port's ported applets calls
+/// either, so a monotonic counter (`oxfs_getdents`'s own `dirent_pos`, one-past the record just
+/// written) is honest enough without pretending to support real seeking. Padding bytes past the
+/// NUL terminator are zeroed, not left as whatever `out` already held (an earlier, longer record):
+/// the whole record goes out to user memory.
 fn write_dirent_record(out: &mut [u8], ino: u64, off_cookie: i64, dtype: u8, name: &[u8]) {
     let reclen = out.len();
     out[0..8].copy_from_slice(&ino.to_le_bytes());
@@ -3016,9 +3143,10 @@ fn proc_readlink(suffix: &[u8], buf_ptr: u64, buf_cap: u64) -> i64 {
         Ok(len) => len.min(buf_cap as usize),
         Err(e) => return e,
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf_ptr as *mut u8, len) };
-    len as i64
+    match copyout_bytes(&target[..len], buf_ptr) {
+        Ok(()) => len as i64,
+        Err(e) => e,
+    }
 }
 
 /// `stat(2)` (`follow`) or `lstat(2)` of a `/proc` path.
@@ -4121,10 +4249,10 @@ fn write_synthetic_stat(mode: u32, rdev: u64, ino: u64, buf_ptr: u64) -> i64 {
         st_ctime_nsec: 0,
         __unused: [0; 3],
     };
-    // SAFETY: same trust boundary as `write_stat` -- caller-owned pointer, sized by the caller's
-    // own `sizeof(struct stat)` (144 bytes, matching `MuslStat` exactly).
-    unsafe { (buf_ptr as *mut MuslStat).write_unaligned(stat) };
-    0
+    match copyout_val(&stat, buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// The `/proc` symlinks (TTY.md §6.3).
@@ -4426,9 +4554,25 @@ fn force_commit_pending_writes(inode: u32) {
 /// them) before falling into `resolve_parent`, which -- unlike FAT32's single-component
 /// `to_short_name` -- handles an arbitrarily deep path (`sub/inner/file.txt`) in this one call.
 extern "C" fn oxfs_open(path_ptr: u64, path_len: u64, flags: u64, mode: u64) -> i64 {
-    // SAFETY: same trust boundary as sys_write's own documented pointer-validation gap in
-    // sys/syscall.rs -- the caller (ultimately userland, via SYS_OPEN) owns this pointer/length.
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => open_path(path.as_bytes(), flags, mode),
+        Err(e) => e,
+    }
+}
+
+/// `open` for the kernel itself, with a path in kernel memory (exec's own copy of the program's
+/// path, or its interpreter's): not a user pointer, so not `copyin_path`.
+extern "C" fn oxfs_kern_open(path_ptr: u64, path_len: u64, flags: u64) -> i64 {
+    if path_len as usize > OXFS_PATH_MAX {
+        return -ENAMETOOLONG;
+    }
+    // SAFETY: the kernel passes its own buffer of `path_len` bytes.
     let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    open_path(path, flags, 0)
+}
+
+/// `oxfs_open` on a path already copied in.
+fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
     let create = flags & O_CREAT != 0;
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
@@ -5260,7 +5404,9 @@ extern "C" fn oxfs_flock(fd: u64, op: u64, _a2: u64, _a3: u64) -> i64 {
 /// arch, so this is the one and only shape `src/stat/statvfs.c`'s `__statfs`/`__fstatfs` ever
 /// build). All eight `unsigned long`/`fsblkcnt_t`/`fsfilcnt_t` fields are 8 bytes wide on this
 /// target, `fsid_t` is a 2-element `int` array -- `f_spare` pads the real kernel-reserved tail.
+/// `f_fsid` fills exactly the 8 bytes before `f_namelen`, so there's no implicit padding.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct MuslStatfs {
     f_type: u64,
     f_bsize: u64,
@@ -5277,6 +5423,9 @@ struct MuslStatfs {
 }
 
 const _: () = assert!(core::mem::size_of::<MuslStatfs>() == 120);
+
+// SAFETY: integer fields only, no padding (see above).
+unsafe impl Pod for MuslStatfs {}
 
 /// An arbitrary but recognizable magic (`"OXFS"` as big-endian ASCII bytes) -- no applet in this
 /// port's roster branches on `f_type`'s specific value, so any fixed constant would do.
@@ -5312,10 +5461,10 @@ fn write_statfs(is_tmpfs: bool, buf_ptr: u64) -> i64 {
         f_flags: 0,
         f_spare: [0; 4],
     };
-    // SAFETY: same trust boundary as `write_stat` -- caller-owned pointer, sized by the caller's
-    // own `sizeof(struct statfs)` (120 bytes, matching `MuslStatfs` exactly, checked above).
-    unsafe { (buf_ptr as *mut MuslStatfs).write_unaligned(statfs) };
-    0
+    match copyout_val(&statfs, buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// Registered for `SYS_STATFS`. No `/proc` interception (unlike `oxfs_stat`) -- `/proc` isn't a
@@ -5323,8 +5472,11 @@ fn write_statfs(is_tmpfs: bool, buf_ptr: u64) -> i64 {
 /// targets it. A synthetic-`/proc` cwd falls back to resolving from the real root for an absolute
 /// path, same as `oxfs_stat`'s own handling of that case.
 extern "C" fn oxfs_statfs(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    let path_buf = match copyin_path(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path_buf.as_bytes();
     let cwd = match current_cwd() {
         Cwd::Real(inode) => inode,
         Cwd::Proc(_) => {
@@ -5362,8 +5514,11 @@ extern "C" fn oxfs_fstatfs(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
 /// required. A *relative* target while cwd is already inside `/proc` is `proc_relative_chdir`'s
 /// job.
 extern "C" fn oxfs_chdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    let path_buf = match copyin_path(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path_buf.as_bytes();
 
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return match proc_dir_kind_for(&path[5..]) {
@@ -5409,8 +5564,11 @@ extern "C" fn oxfs_chdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
 /// pattern. See `resolve_path_impl`'s own doc comment for the actual `cd ..` containment mechanism
 /// this enables.
 extern "C" fn oxfs_chroot(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    let path_buf = match copyin_path(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path_buf.as_bytes();
     let caller_uid = unsafe { oxidebsd_current_uid() };
     if caller_uid != 0 {
         return -EPERM;
@@ -5448,11 +5606,13 @@ extern "C" fn oxfs_getcwd(buf_ptr: u64, buf_len: u64, _a2: u64, _a3: u64) -> i64
         return -ERANGE;
     }
 
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize) };
-    out[..len].copy_from_slice(&path[..len]);
-    out[len] = 0;
-    (len + 1) as i64
+    if let Err(e) = copyout_bytes(&path[..len], buf_ptr) {
+        return e;
+    }
+    match copyout_bytes(&[0], buf_ptr.wrapping_add(len as u64)) {
+        Ok(()) => (len + 1) as i64,
+        Err(e) => e,
+    }
 }
 
 /// Registered for `SYS_MKDIR`. `path` may now be multi-component (`sub/nested`, as long as `sub`
@@ -5473,8 +5633,14 @@ extern "C" fn oxfs_getcwd(buf_ptr: u64, buf_len: u64, _a2: u64, _a3: u64) -> i64
 /// on the parent -- all three used to be skipped (every directory was `0o755`, root-owned, and
 /// anyone could create one anywhere).
 extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, mode: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => mkdir_path(path.as_bytes(), mode),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_mkdir` on a path already copied in.
+fn mkdir_path(path: &[u8], mode: u64) -> i64 {
     let cwd = match real_cwd_for_mutation(path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -5529,8 +5695,14 @@ extern "C" fn oxfs_mkdir(path_ptr: u64, path_len: u64, mode: u64, _a3: u64) -> i
 /// `shm_unlink/8-1.c`/`9-1.c` (Open POSIX Test Suite pilot): a non-root, non-owning caller must get
 /// a real `EACCES` unlinking another uid's object out of the world-writable-but-sticky `/dev/shm`.
 extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => unlink_path(path.as_bytes()),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_unlink` on a path already copied in.
+fn unlink_path(path: &[u8]) -> i64 {
     let cwd = match real_cwd_for_mutation(path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -5604,10 +5776,15 @@ extern "C" fn oxfs_unlink(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i
 /// boundary with `EXDEV` -- see that constant's own doc comment for why (a tmpfs-pool inode must
 /// never gain a real, disk-persisted name).
 extern "C" fn oxfs_link(existing_ptr: u64, existing_len: u64, new_ptr: u64, new_len: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let existing_path =
-        unsafe { core::slice::from_raw_parts(existing_ptr as *const u8, existing_len as usize) };
-    let new_path = unsafe { core::slice::from_raw_parts(new_ptr as *const u8, new_len as usize) };
+    let existing_buf = match copyin_path(existing_ptr, existing_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let new_buf = match copyin_path(new_ptr, new_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (existing_path, new_path) = (existing_buf.as_bytes(), new_buf.as_bytes());
     let existing_cwd = match real_cwd_for_mutation(existing_path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -5693,8 +5870,14 @@ fn link_impl(
 /// as `oxfs_chown`); `S_IFREG`/`S_IFIFO` only need ordinary write permission on the parent, same as
 /// any other create.
 extern "C" fn oxfs_mknod(path_ptr: u64, path_len: u64, mode: u64, dev: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => mknod_path(path.as_bytes(), mode, dev),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_mknod` on a path already copied in.
+fn mknod_path(path: &[u8], mode: u64, dev: u64) -> i64 {
     let (kind, device_char) = match (mode as u32) & S_IFMT {
         S_IFREG => (InodeKind::File, false),
         S_IFCHR => (InodeKind::Device, true),
@@ -5801,8 +5984,14 @@ fn may_delete(parent: u32, target: u32, uid: u64, gid: u64) -> Result<(), i64> {
 /// Registered for `SYS_RMDIR`. Only succeeds on an empty directory (`.`/`..` excepted, via
 /// `dir_entry_count`).
 extern "C" fn oxfs_rmdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => rmdir_path(path.as_bytes()),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_rmdir` on a path already copied in.
+fn rmdir_path(path: &[u8]) -> i64 {
     let cwd = match real_cwd_for_mutation(path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -5853,9 +6042,15 @@ extern "C" fn oxfs_rmdir(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i6
 /// here); overwriting an existing directory is refused (`EISDIR`, kept simple rather than
 /// implementing real directory-replace semantics).
 extern "C" fn oxfs_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let old_path = unsafe { core::slice::from_raw_parts(old_ptr as *const u8, old_len as usize) };
-    let new_path = unsafe { core::slice::from_raw_parts(new_ptr as *const u8, new_len as usize) };
+    let old_buf = match copyin_path(old_ptr, old_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let new_buf = match copyin_path(new_ptr, new_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (old_path, new_path) = (old_buf.as_bytes(), new_buf.as_bytes());
     // Checked independently -- old/new can have different relativity (e.g. renaming a relative
     // name to an absolute destination while cwd is inside /proc must still reject the relative
     // half).
@@ -6003,14 +6198,14 @@ fn is_same_or_descendant(mut dir: u32, ancestor: u32) -> bool {
 /// matching this codebase's "don't pretend to model what isn't there" approach elsewhere.
 /// Registered for `SYS_ACCESS`: checked with the real user and group IDs (POSIX).
 extern "C" fn oxfs_access(path_ptr: u64, path_len: u64, amode: u64, _r10: u64) -> i64 {
-    access_path(path_ptr, path_len, amode, false)
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => access_path(path.as_bytes(), amode, false),
+        Err(e) => e,
+    }
 }
 
 /// `access(2)`'s check, with the effective IDs instead for `faccessat(AT_EACCESS)`.
-fn access_path(path_ptr: u64, path_len: u64, amode: u64, effective: bool) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
-
+fn access_path(path: &[u8], amode: u64, effective: bool) -> i64 {
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return match proc_kind(&path[5..]) {
             Some(_) => 0,
@@ -6063,9 +6258,14 @@ fn access_ok(inode: &Inode, amode: u8, effective: bool) -> bool {
 /// which `stat()` a path before deciding whether to list it. A relative path while cwd is inside
 /// `/proc` delegates to `proc_relative_stat`.
 extern "C" fn oxfs_stat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => stat_path(path.as_bytes(), buf_ptr),
+        Err(e) => e,
+    }
+}
 
+/// `oxfs_stat` on a path already copied in.
+fn stat_path(path: &[u8], buf_ptr: u64) -> i64 {
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return proc_stat(&path[5..], buf_ptr, true);
     }
@@ -6091,9 +6291,14 @@ extern "C" fn oxfs_stat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -
 /// the two now that symlinks exist. `/proc` has none, so its own interception is identical to
 /// `oxfs_stat`'s.
 extern "C" fn oxfs_lstat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => lstat_path(path.as_bytes(), buf_ptr),
+        Err(e) => e,
+    }
+}
 
+/// `oxfs_lstat` on a path already copied in.
+fn lstat_path(path: &[u8], buf_ptr: u64) -> i64 {
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return proc_stat(&path[5..], buf_ptr, false);
     }
@@ -6119,9 +6324,14 @@ extern "C" fn oxfs_lstat(path_ptr: u64, path_len: u64, buf_ptr: u64, _r10: u64) 
 /// here uses (see `external/mit/musl/src/unistd/readlink.c`'s own patch). Never NUL-terminates the
 /// output (real `readlink(2)` semantics) -- returns the byte count actually copied.
 extern "C" fn oxfs_readlink(path_ptr: u64, path_len: u64, buf_ptr: u64, buf_cap: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => readlink_path(path.as_bytes(), buf_ptr, buf_cap),
+        Err(e) => e,
+    }
+}
 
+/// `oxfs_readlink` on a path already copied in.
+fn readlink_path(path: &[u8], buf_ptr: u64, buf_cap: u64) -> i64 {
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         return proc_readlink(&path[5..], buf_ptr, buf_cap);
     }
@@ -6144,9 +6354,14 @@ extern "C" fn oxfs_readlink(path_ptr: u64, path_len: u64, buf_ptr: u64, buf_cap:
     if inode.kind != InodeKind::Symlink {
         return -EINVAL;
     }
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_cap as usize) };
-    read_inode_at(inode_num, 0, out) as i64
+    // A symlink's target is at most `OXFS_PATH_MAX` bytes (`oxfs_symlink` copies it in).
+    let mut target = [0u8; OXFS_PATH_MAX];
+    let cap = (buf_cap as usize).min(target.len());
+    let n = read_inode_at(inode_num, 0, &mut target[..cap]);
+    match copyout_bytes(&target[..n], buf_ptr) {
+        Ok(()) => n as i64,
+        Err(e) => e,
+    }
 }
 
 /// Registered for `SYS_SYMLINK`. `(target_ptr, target_len, linkpath_ptr, linkpath_len)` -- mirrors
@@ -6161,11 +6376,18 @@ extern "C" fn oxfs_symlink(
     linkpath_ptr: u64,
     linkpath_len: u64,
 ) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let target =
-        unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
-    let linkpath =
-        unsafe { core::slice::from_raw_parts(linkpath_ptr as *const u8, linkpath_len as usize) };
+    let target = match copyin_path(target_ptr, target_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match copyin_path(linkpath_ptr, linkpath_len) {
+        Ok(linkpath) => symlink_path(target.as_bytes(), linkpath.as_bytes()),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_symlink` on paths already copied in.
+fn symlink_path(target: &[u8], linkpath: &[u8]) -> i64 {
     let cwd = match real_cwd_for_mutation(linkpath) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6221,8 +6443,14 @@ fn set_mode(inode_num: u32, mode: u64) -> i64 {
 /// Only the inode's own owner or root may change its permission bits (`EPERM` otherwise, matching
 /// real Unix; see `set_mode`).
 extern "C" fn oxfs_chmod(path_ptr: u64, path_len: u64, mode: u64, _r10: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => chmod_path(path.as_bytes(), mode),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_chmod` on a path already copied in.
+fn chmod_path(path: &[u8], mode: u64) -> i64 {
     let cwd = match real_cwd_for_mutation(path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6243,8 +6471,14 @@ extern "C" fn oxfs_chmod(path_ptr: u64, path_len: u64, mode: u64, _r10: u64) -> 
 /// through this ABI's `u64` register), so a caller can change just one of the two. Permission:
 /// `chown_inode`.
 extern "C" fn oxfs_chown(path_ptr: u64, path_len: u64, uid: u64, gid: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => chown_path(path.as_bytes(), uid, gid),
+        Err(e) => e,
+    }
+}
+
+/// `oxfs_chown` on a path already copied in.
+fn chown_path(path: &[u8], uid: u64, gid: u64) -> i64 {
     let cwd = match real_cwd_for_mutation(path) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6328,10 +6562,14 @@ extern "C" fn oxfs_fchdir(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 /// (`EACCES` otherwise). A missing path is `ENOENT` -- the distinction BusyBox's and this
 /// project's own native `touch` use to decide whether to create the file with `open(O_CREAT)`.
 extern "C" fn oxfs_utimensat(path_ptr: u64, path_len: u64, times_ptr: u64, flags: u64) -> i64 {
+    match copyin_path(path_ptr, path_len) {
+        Ok(path) => utimensat_path(path.as_bytes(), times_ptr, flags),
+        Err(e) => e,
+    }
+}
 
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let path = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
-
+/// `oxfs_utimensat` on a path already copied in.
+fn utimensat_path(path: &[u8], times_ptr: u64, flags: u64) -> i64 {
     if path.starts_with(b"/proc") && (path.len() == 5 || path[5] == b'/') {
         // Synthetic /proc entries have no real inode to stamp -- existence check only.
         return match proc_kind(&path[5..]) {
@@ -6370,8 +6608,10 @@ fn utimens_inode(inode_num: u32, times_ptr: u64) -> i64 {
     let (mut new_atime, mut new_mtime) = (Some(now), Some(now));
     let mut explicit = false;
     if times_ptr != 0 {
-        // SAFETY: same trust boundary as elsewhere -- caller-owned pointer to two timespecs.
-        let t = unsafe { (times_ptr as *const [i64; 4]).read_unaligned() };
+        let t: [i64; 4] = match copyin_val(times_ptr) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
         let mut resolve = |sec: i64, nsec: i64| -> Result<Option<i64>, i64> {
             if nsec == UTIME_NOW {
                 Ok(Some(now))
@@ -6461,13 +6701,20 @@ struct RawAtPath {
     len: u64,
 }
 
-impl RawAtPath {
-    fn path(&self) -> &'static [u8] {
-        if self.ptr == 0 {
-            return &[];
-        }
-        // SAFETY: same trust boundary as every other path argument here -- caller-owned memory.
-        unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len as usize) }
+// SAFETY: three 8-byte integers, no padding.
+unsafe impl Pod for RawAtPath {}
+
+/// A `RawAtPath` with its path copied in.
+struct AtPath {
+    dirfd: i64,
+    /// A NULL path (`RawAtPath::ptr == 0`).
+    null: bool,
+    path: UserPath,
+}
+
+impl AtPath {
+    fn path(&self) -> &[u8] {
+        self.path.as_bytes()
     }
 
     /// Relative to `dirfd` for real, i.e. neither absolute nor `AT_FDCWD`.
@@ -6476,9 +6723,11 @@ impl RawAtPath {
     }
 }
 
-fn read_at(at_ptr: u64) -> RawAtPath {
-    // SAFETY: caller-owned pointer, same trust boundary as `execve`'s own `RawArgvEntry` array.
-    unsafe { (at_ptr as *const RawAtPath).read_unaligned() }
+/// Copies the `RawAtPath` at `at_ptr`, then its path, in.
+fn read_at(at_ptr: u64) -> Result<AtPath, i64> {
+    let raw: RawAtPath = copyin_val(at_ptr)?;
+    let path = if raw.ptr == 0 { UserPath::empty() } else { copyin_path(raw.ptr, raw.len)? };
+    Ok(AtPath { dirfd: raw.dirfd, null: raw.ptr == 0, path })
 }
 
 /// `dirfd` as a cwd-encoded base (see `decode_cwd`): a real directory fd, or a `/proc` directory
@@ -6504,7 +6753,7 @@ fn dirfd_base(dirfd: i64) -> Result<u64, i64> {
 /// Runs `f` (an ordinary path handler call on `at`'s own path) with `at.dirfd` as its base.
 /// An empty path is `ENOENT`, matching real Linux (every caller that accepts `AT_EMPTY_PATH`
 /// checks for it before getting here).
-fn with_at(at: &RawAtPath, f: impl FnOnce() -> i64) -> i64 {
+fn with_at(at: &AtPath, f: impl FnOnce() -> i64) -> i64 {
     if at.path().is_empty() {
         return -ENOENT;
     }
@@ -6521,7 +6770,7 @@ fn with_at(at: &RawAtPath, f: impl FnOnce() -> i64) -> i64 {
 }
 
 /// `real_cwd_for_mutation`, relative to `at.dirfd` -- one side of `linkat`/`renameat2`.
-fn at_cwd_for_mutation(at: &RawAtPath) -> Result<u32, i64> {
+fn at_cwd_for_mutation(at: &AtPath) -> Result<u32, i64> {
     let path = at.path();
     if path.is_empty() {
         return Err(-ENOENT);
@@ -6537,7 +6786,7 @@ fn at_cwd_for_mutation(at: &RawAtPath) -> Result<u32, i64> {
 /// Resolves `at`'s path without following a final symlink, relative to `at.dirfd` -- for the
 /// `AT_SYMLINK_NOFOLLOW` variants whose plain handler always follows (`fchownat`/`fchmodat`/
 /// `faccessat`).
-fn at_resolve_nofollow(at: &RawAtPath) -> Result<u32, i64> {
+fn at_resolve_nofollow(at: &AtPath) -> Result<u32, i64> {
     let cwd = at_cwd_for_mutation(at)?;
     resolve_path_nofollow_last(cwd, at.path()).map_err(errno_for)
 }
@@ -6607,20 +6856,29 @@ fn clear_setid_on_write(fd: u64) {
 
 /// Registered for `SYS_OPENAT`. `(at, flags, mode)`.
 extern "C" fn oxfs_openat(at_ptr: u64, flags: u64, mode: u64, _a3: u64) -> i64 {
-    let at = read_at(at_ptr);
-    with_at(&at, || oxfs_open(at.ptr, at.len, flags, mode))
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    with_at(&at, || open_path(at.path(), flags, mode))
 }
 
 /// Registered for `SYS_MKDIRAT`. `(at, mode)`.
 extern "C" fn oxfs_mkdirat(at_ptr: u64, mode: u64, _a2: u64, _a3: u64) -> i64 {
-    let at = read_at(at_ptr);
-    with_at(&at, || oxfs_mkdir(at.ptr, at.len, mode, 0))
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    with_at(&at, || mkdir_path(at.path(), mode))
 }
 
 /// Registered for `SYS_MKNODAT`. `(at, mode, dev)`.
 extern "C" fn oxfs_mknodat(at_ptr: u64, mode: u64, dev: u64, _a3: u64) -> i64 {
-    let at = read_at(at_ptr);
-    with_at(&at, || oxfs_mknod(at.ptr, at.len, mode, dev))
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    with_at(&at, || mknod_path(at.path(), mode, dev))
 }
 
 /// Registered for `SYS_FCHOWNAT`. `(at, uid, gid, flags)`. musl's `lchown` and `fchown` route
@@ -6629,7 +6887,10 @@ extern "C" fn oxfs_fchownat(at_ptr: u64, uid: u64, gid: u64, flags: u64) -> i64 
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
         return match at_empty_path_inode(at.dirfd) {
             Ok(inode) => chown_inode(inode, uid, gid),
@@ -6642,7 +6903,7 @@ extern "C" fn oxfs_fchownat(at_ptr: u64, uid: u64, gid: u64, flags: u64) -> i64 
             Err(e) => e,
         };
     }
-    with_at(&at, || oxfs_chown(at.ptr, at.len, uid, gid))
+    with_at(&at, || chown_path(at.path(), uid, gid))
 }
 
 /// Registered for `SYS_NEWFSTATAT` (musl's `SYS_fstatat`). `(at, statbuf, flags)`.
@@ -6650,10 +6911,13 @@ extern "C" fn oxfs_fstatat(at_ptr: u64, buf_ptr: u64, flags: u64, _a3: u64) -> i
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT) != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
         if at.dirfd == AT_FDCWD {
-            return oxfs_stat(b".".as_ptr() as u64, 1, buf_ptr, 0);
+            return stat_path(b".", buf_ptr);
         }
         if at.dirfd < 0 {
             return -EBADF;
@@ -6661,9 +6925,9 @@ extern "C" fn oxfs_fstatat(at_ptr: u64, buf_ptr: u64, flags: u64, _a3: u64) -> i
         return oxfs_fstat(at.dirfd as u64, buf_ptr, 0, 0);
     }
     if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        with_at(&at, || oxfs_lstat(at.ptr, at.len, buf_ptr, 0))
+        with_at(&at, || lstat_path(at.path(), buf_ptr))
     } else {
-        with_at(&at, || oxfs_stat(at.ptr, at.len, buf_ptr, 0))
+        with_at(&at, || stat_path(at.path(), buf_ptr))
     }
 }
 
@@ -6672,11 +6936,14 @@ extern "C" fn oxfs_unlinkat(at_ptr: u64, flags: u64, _a2: u64, _a3: u64) -> i64 
     if flags & !AT_REMOVEDIR != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     if flags & AT_REMOVEDIR != 0 {
-        with_at(&at, || oxfs_rmdir(at.ptr, at.len, 0, 0))
+        with_at(&at, || rmdir_path(at.path()))
     } else {
-        with_at(&at, || oxfs_unlink(at.ptr, at.len, 0, 0))
+        with_at(&at, || unlink_path(at.path()))
     }
 }
 
@@ -6689,7 +6956,14 @@ extern "C" fn oxfs_renameat2(old_at_ptr: u64, new_at_ptr: u64, flags: u64, _a3: 
     {
         return -EINVAL;
     }
-    let (old_at, new_at) = (read_at(old_at_ptr), read_at(new_at_ptr));
+    let old_at = match read_at(old_at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    let new_at = match read_at(new_at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     let old_cwd = match at_cwd_for_mutation(&old_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6719,7 +6993,14 @@ extern "C" fn oxfs_linkat(old_at_ptr: u64, new_at_ptr: u64, flags: u64, _a3: u64
     if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
-    let (old_at, new_at) = (read_at(old_at_ptr), read_at(new_at_ptr));
+    let old_at = match read_at(old_at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    let new_at = match read_at(new_at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     let old_cwd = match at_cwd_for_mutation(&old_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6740,14 +7021,24 @@ extern "C" fn oxfs_linkat(old_at_ptr: u64, new_at_ptr: u64, flags: u64, _a3: u64
 /// Registered for `SYS_SYMLINKAT`. `(target_ptr, target_len, linkpath_at)` -- the target is the
 /// link's stored content, never resolved here, so only the new link's own path is dirfd-relative.
 extern "C" fn oxfs_symlinkat(target_ptr: u64, target_len: u64, at_ptr: u64, _a3: u64) -> i64 {
-    let at = read_at(at_ptr);
-    with_at(&at, || oxfs_symlink(target_ptr, target_len, at.ptr, at.len))
+    let target = match copyin_path(target_ptr, target_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    with_at(&at, || symlink_path(target.as_bytes(), at.path()))
 }
 
 /// Registered for `SYS_READLINKAT`. `(at, buf, bufsize)`.
 extern "C" fn oxfs_readlinkat(at_ptr: u64, buf_ptr: u64, buf_cap: u64, _a3: u64) -> i64 {
-    let at = read_at(at_ptr);
-    with_at(&at, || oxfs_readlink(at.ptr, at.len, buf_ptr, buf_cap))
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    with_at(&at, || readlink_path(at.path(), buf_ptr, buf_cap))
 }
 
 /// Registered for `SYS_FCHMODAT`. `(at, mode, flags)` -- real `fchmodat2` semantics: a symlink
@@ -6756,10 +7047,13 @@ extern "C" fn oxfs_fchmodat(at_ptr: u64, mode: u64, flags: u64, _a3: u64) -> i64
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
         if at.dirfd == AT_FDCWD {
-            return oxfs_chmod(b".".as_ptr() as u64, 1, mode, 0);
+            return chmod_path(b".", mode);
         }
         if at.dirfd < 0 {
             return -EBADF;
@@ -6773,7 +7067,7 @@ extern "C" fn oxfs_fchmodat(at_ptr: u64, mode: u64, flags: u64, _a3: u64) -> i64
             Err(e) => return e,
         }
     }
-    with_at(&at, || oxfs_chmod(at.ptr, at.len, mode, 0))
+    with_at(&at, || chmod_path(at.path(), mode))
 }
 
 /// Registered for `SYS_FACCESSAT`. `(at, amode, flags)`. Checked with the real IDs, or the
@@ -6783,7 +7077,10 @@ extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i
     if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
     if at.path().is_empty() && flags & AT_EMPTY_PATH != 0 {
         let inode_num = match at_empty_path_inode(at.dirfd) {
             Ok(v) => v,
@@ -6804,7 +7101,7 @@ extern "C" fn oxfs_faccessat(at_ptr: u64, amode: u64, flags: u64, _a3: u64) -> i
     {
         return 0;
     }
-    with_at(&at, || access_path(at.ptr, at.len, amode, flags & AT_EACCESS != 0))
+    with_at(&at, || access_path(at.path(), amode, flags & AT_EACCESS != 0))
 }
 
 /// Registered for `SYS_UTIMENSAT_AT` -- real, dirfd-aware `utimensat(2)`: `(at, times, flags)`.
@@ -6815,14 +7112,17 @@ extern "C" fn oxfs_utimensat_at(at_ptr: u64, times_ptr: u64, flags: u64, _a3: u6
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
-    let at = read_at(at_ptr);
-    if at.ptr == 0 || (at.path().is_empty() && flags & AT_EMPTY_PATH != 0) {
+    let at = match read_at(at_ptr) {
+        Ok(at) => at,
+        Err(e) => return e,
+    };
+    if at.null || (at.path().is_empty() && flags & AT_EMPTY_PATH != 0) {
         return match at_empty_path_inode(at.dirfd) {
             Ok(inode) => utimens_inode(inode, times_ptr),
             Err(e) => e,
         };
     }
-    with_at(&at, || oxfs_utimensat(at.ptr, at.len, times_ptr, flags))
+    with_at(&at, || utimensat_path(at.path(), times_ptr, flags))
 }
 
 fn copy_mount_path(src: &[u8]) -> ([u8; MAX_MOUNT_PATH], u8) {
@@ -6940,17 +7240,23 @@ struct IoVec {
     len: u64,
 }
 
-/// An `nmount` option's bytes, without the terminating NUL the caller may include in its length.
-fn iov_str(v: IoVec) -> &'static [u8] {
+// SAFETY: two 8-byte integers, no padding.
+unsafe impl Pod for IoVec {}
+
+/// The most `struct iovec`s `nmount` takes (32 name/value pairs).
+const NMOUNT_MAX_IOV: usize = 64;
+
+/// Copies an `nmount` option in, without the terminating NUL the caller may include in its
+/// length. `Err(-ENAMETOOLONG)` past `OXFS_PATH_MAX`, `Err(-EFAULT)` for a bad pointer.
+fn iov_str(v: IoVec) -> Result<UserPath, i64> {
     if v.base == 0 {
-        return &[];
+        return Ok(UserPath::empty());
     }
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let s = unsafe { core::slice::from_raw_parts(v.base as *const u8, v.len as usize) };
-    match s.iter().position(|&b| b == 0) {
-        Some(n) => &s[..n],
-        None => s,
+    let mut s = copyin_path(v.base, v.len)?;
+    if let Some(n) = s.as_bytes().iter().position(|&b| b == 0) {
+        s.len = n;
     }
+    Ok(s)
 }
 
 /// Registered for `SYS_NMOUNT`: `nmount(iov, niov, flags)`, after FreeBSD's. `iov` holds
@@ -6960,44 +7266,78 @@ fn iov_str(v: IoVec) -> &'static [u8] {
 /// is a buffer the kernel fills with a sentence saying why the call failed. Any other option or
 /// flag is refused with `EOPNOTSUPP`. Only root may mount.
 extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
-    if niov % 2 != 0 || niov > 64 {
+    if niov % 2 != 0 || niov > NMOUNT_MAX_IOV as u64 {
         return -EINVAL;
     }
-    // SAFETY: same trust boundary as elsewhere -- caller-owned array of `niov` iovecs.
-    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const IoVec, niov as usize) };
+    let mut iov_buf = [IoVec { base: 0, len: 0 }; NMOUNT_MAX_IOV];
+    let iov = &mut iov_buf[..niov as usize];
+    for (i, v) in iov.iter_mut().enumerate() {
+        *v = match copyin_val(iov_ptr.wrapping_add((i * core::mem::size_of::<IoVec>()) as u64)) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    }
     let mut errmsg: Option<IoVec> = None;
-    let (mut fstype, mut fspath, mut from): (&[u8], &[u8], &[u8]) = (&[], &[], &[]);
+    let mut fstype = UserPath::empty();
+    let mut fspath = UserPath::empty();
+    let mut from = UserPath::empty();
     let mut unknown = false;
+    // The first option that couldn't be copied in, reported once `errmsg` is known.
+    let mut bad_option: Option<i64> = None;
     // FreeBSD's MNT_NOSUID, as a flag or as the `nosuid` option.
     const MNT_NOSUID: u64 = 0x8;
     let mut nosuid = flags & MNT_NOSUID != 0;
     for pair in iov.chunks_exact(2) {
-        let (name, value) = (iov_str(pair[0]), pair[1]);
-        match name {
-            b"nosuid" => nosuid = true,
-            b"fstype" => fstype = iov_str(value),
-            b"fspath" => fspath = iov_str(value),
-            b"from" | b"target" => from = iov_str(value),
-            b"errmsg" => errmsg = Some(value),
-            _ => unknown = true,
+        let name = match iov_str(pair[0]) {
+            Ok(name) => name,
+            Err(e) => {
+                bad_option.get_or_insert(e);
+                continue;
+            }
+        };
+        let value = pair[1];
+        let slot = match name.as_bytes() {
+            b"nosuid" => {
+                nosuid = true;
+                continue;
+            }
+            b"errmsg" => {
+                errmsg = Some(value);
+                continue;
+            }
+            b"fstype" => &mut fstype,
+            b"fspath" => &mut fspath,
+            b"from" | b"target" => &mut from,
+            _ => {
+                unknown = true;
+                continue;
+            }
+        };
+        match iov_str(value) {
+            Ok(v) => *slot = v,
+            Err(e) => {
+                bad_option.get_or_insert(e);
+            }
         }
     }
+    let (fstype, fspath, from) = (fstype.as_bytes(), fspath.as_bytes(), from.as_bytes());
     let fail = |errno: i64, msg: &[u8]| -> i64 {
         if let Some(buf) = errmsg
             && buf.base != 0
             && buf.len > 0
         {
+            // Best effort: the call fails with `errno` whether or not the message gets out.
             let n = msg.len().min(buf.len as usize - 1);
-            // SAFETY: the caller's own buffer, of the length it gave.
-            unsafe {
-                core::ptr::copy_nonoverlapping(msg.as_ptr(), buf.base as *mut u8, n);
-                *(buf.base as *mut u8).add(n) = 0;
-            }
+            let _ = copyout_bytes(&msg[..n], buf.base);
+            let _ = copyout_bytes(&[0], buf.base.wrapping_add(n as u64));
         }
         errno
     };
     if unsafe { oxidebsd_current_uid() } != 0 {
         return fail(-EPERM, b"only root may mount file systems");
+    }
+    if let Some(e) = bad_option {
+        return fail(e, b"an option's name or value can't be read, or is too long");
     }
     if unknown || flags & !MNT_NOSUID != 0 {
         return fail(-EOPNOTSUPP, b"the only mount option is nosuid");
@@ -7252,9 +7592,11 @@ fn register_oxfs_devices() {
 /// recently stacked mount first (real LIFO stacking). `EINVAL` if `target` isn't a currently active
 /// mountpoint, matching real `umount2(2)`.
 extern "C" fn oxfs_umount2(target_ptr: u64, target_len: u64, _flags: u64, _r10: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let target =
-        unsafe { core::slice::from_raw_parts(target_ptr as *const u8, target_len as usize) };
+    let target_buf = match copyin_path(target_ptr, target_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let target = target_buf.as_bytes();
 
     let target_cwd = match real_cwd_for_mutation(target) {
         Ok(v) => v,
@@ -7557,8 +7899,12 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
     let Some(file) = find_open_file(real_fd as u64) else {
         return -EBADF;
     };
-    // SAFETY: same trust boundary as elsewhere -- caller-owned pointer/length.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize) };
+    // Each record is built here, then copied out. A record that can't be copied out ends the
+    // call: `-EFAULT` if it was the first, else the count already copied (as Linux does), with the
+    // cursor left on that record.
+    let mut record = [0u8; dirent_record_len(NAME_MAX)];
+    let out_len = buf_len as usize;
+    let mut fault = 0i64;
     match file {
         OpenFile::DirListing {
             inode: dir_inode,
@@ -7572,7 +7918,7 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
             {
                 let name = &name[..name_len as usize];
                 let reclen = dirent_record_len(name.len());
-                if written + reclen > out.len() {
+                if written + reclen > out_len {
                     break;
                 }
                 let child = read_inode(child_inode);
@@ -7586,16 +7932,21 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                     _ => DT_REG,
                 };
                 write_dirent_record(
-                    &mut out[written..written + reclen],
+                    &mut record[..reclen],
                     child_inode as u64,
                     (*dirent_pos + 1) as i64,
                     dtype,
                     name,
                 );
+                let dst = buf_ptr.wrapping_add(written as u64);
+                if let Err(e) = copyout_bytes(&record[..reclen], dst) {
+                    fault = e;
+                    break;
+                }
                 written += reclen;
                 *dirent_pos += 1;
             }
-            written as i64
+            if written == 0 && fault != 0 { fault } else { written as i64 }
         }
         OpenFile::ProcDir {
             kind, dirent_pos, ..
@@ -7605,20 +7956,20 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
             while let Some((ino, name, name_len, dtype)) = proc_dir_nth_entry(kind, *dirent_pos) {
                 let name = &name[..name_len as usize];
                 let reclen = dirent_record_len(name.len());
-                if written + reclen > out.len() {
+                if written + reclen > out_len {
                     break;
                 }
-                write_dirent_record(
-                    &mut out[written..written + reclen],
-                    ino,
-                    (*dirent_pos + 1) as i64,
-                    dtype,
-                    name,
-                );
+                let off = (*dirent_pos + 1) as i64;
+                write_dirent_record(&mut record[..reclen], ino, off, dtype, name);
+                let dst = buf_ptr.wrapping_add(written as u64);
+                if let Err(e) = copyout_bytes(&record[..reclen], dst) {
+                    fault = e;
+                    break;
+                }
                 written += reclen;
                 *dirent_pos += 1;
             }
-            written as i64
+            if written == 0 && fault != 0 { fault } else { written as i64 }
         }
         _ => -ENOTDIR,
     }
@@ -10181,7 +10532,10 @@ pub extern "C" fn module_init() -> i32 {
         // guards against. Harmless (a no-op over already-pristine state) on the "no disk
         // attached at all" path, so this runs unconditionally rather than only when `has_disk`.
         reset_real_pool_for_fresh_format();
+        // SAFETY: single-core, before any process exists (see `KERNEL_SEGMENT`).
+        unsafe { *core::ptr::addr_of_mut!(KERNEL_SEGMENT) = true };
         let ok = format_fresh_filesystem();
+        unsafe { *core::ptr::addr_of_mut!(KERNEL_SEGMENT) = false };
         if has_disk {
             flush_all_to_disk();
         }
@@ -10265,6 +10619,7 @@ pub extern "C" fn module_init() -> i32 {
             oxfs_exec_setid,
         );
         oxidebsd_register_socket_nodes(oxfs_create_socket_node, oxfs_lookup_socket_node);
+        oxidebsd_register_kernel_open(oxfs_kern_open);
     }
 
     if ok { 0 } else { -1 }
