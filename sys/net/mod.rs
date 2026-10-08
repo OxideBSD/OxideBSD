@@ -5,6 +5,7 @@
 //! networking plan for what's still deferred.
 
 use crate::netinet::tcp;
+use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout_val};
 use crate::syscall::{EINTR, EINVAL};
 
 pub mod ethernet;
@@ -53,12 +54,16 @@ const POLLWRNORM: i16 = 0x0100;
 
 /// Real Linux/musl `struct pollfd` layout (`int fd; short events; short revents;`) -- no padding
 /// needed, already 8-byte aligned as a whole.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct PollFd {
     fd: i32,
     events: i16,
     revents: i16,
 }
+
+// SAFETY: integers only, no padding (8 bytes).
+unsafe impl Pod for PollFd {}
 
 /// How a not-yet-ready fd can become ready, which decides how `poll`/`select` wait for it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,19 +184,37 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
     if fds_ptr == 0 && nfds > 0 {
         return -(EINVAL as i64);
     }
+    // More entries than open files can exist is EINVAL (as FreeBSD bounds it), so a huge `nfds`
+    // never becomes a huge allocation.
+    if nfds > *crate::kern::kern_sysctl::MAXFILES.lock() as u64 {
+        return -(EINVAL as i64);
+    }
+    // The array is copied in whole and back out on success, as on the BSDs.
+    let mut entries = alloc::vec::Vec::with_capacity(nfds as usize);
+    for i in 0..nfds {
+        match copyin_val::<PollFd>(UserPtr::new(fds_ptr).add(i * 8)) {
+            Ok(e) => entries.push(e),
+            Err(e) => return -(e as i64),
+        }
+    }
+    let r = poll_entries(&mut entries, timeout_ms);
+    if r >= 0 {
+        for (i, e) in entries.iter().enumerate() {
+            if let Err(e) = copyout_val(e, UserPtr::new(fds_ptr).add(i as u64 * 8)) {
+                return -(e as i64);
+            }
+        }
+    }
+    r
+}
+
+/// `poll`'s loop, over the kernel's copy of the caller's `pollfd` array.
+fn poll_entries(entries: &mut [PollFd], timeout_ms: u64) -> i64 {
+    let nfds = entries.len() as u64;
     // `timeout` is a signed `int` in the real ABI (`-1` means "block forever") -- R10/RDX only
     // ever carries its raw bit pattern, so reinterpret it here rather than truncating it to an
     // always-positive u64.
     let timeout_ms = timeout_ms as i32 as i64;
-    // `poll(NULL, 0, timeout)` -- the portable-sleep idiom -- is legal and common, but a slice may
-    // never be built from a null pointer, even with length 0. Found live via `ppoll(NULL, 0, ...)`
-    // in `regress/ppoll-smoke`: the kernel panicked on this precondition check, reachable from
-    // any process through plain `poll` too.
-    let entries: &mut [PollFd] = if nfds == 0 {
-        &mut []
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds as usize) }
-    };
     let deadline = (timeout_ms >= 0)
         .then(|| crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(timeout_ms as u64));
     let deadline_tick = deadline_tick_for(timeout_ms);
@@ -245,9 +268,10 @@ pub extern "C" fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, 
     let timeout_ms: i64 = if timeout_ptr == 0 {
         -1
     } else {
-        // SAFETY: caller-owned `struct timespec { tv_sec: i64, tv_nsec: i64 }`, same trust
-        // boundary as every other user pointer here.
-        let [sec, nsec] = unsafe { (timeout_ptr as *const [i64; 2]).read_unaligned() };
+        let [sec, nsec]: [i64; 2] = match copyin_val(UserPtr::new(timeout_ptr)) {
+            Ok(ts) => ts,
+            Err(e) => return -(e as i64),
+        };
         if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
             return -(EINVAL as i64);
         }
@@ -260,7 +284,10 @@ pub extern "C" fn oxidebsd_sys_ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, 
         return oxidebsd_sys_poll(fds_ptr, nfds, timeout_ms as u64);
     }
     let pid = crate::process::scheduler::current_pid();
-    let original = crate::process::begin_temporary_sigmask(pid, mask_ptr);
+    let original = match crate::process::begin_temporary_sigmask(pid, mask_ptr) {
+        Ok(original) => original,
+        Err(e) => return -(e as i64),
+    };
     // Already deliverable under the new mask: real ppoll returns EINTR without waiting at all.
     if crate::process::has_interrupting_signal_now(pid) {
         crate::process::end_temporary_sigmask(pid, original);
@@ -289,6 +316,7 @@ const FD_SET_WORDS: usize = FD_SETSIZE / 64;
 /// here is redundant to drop). `tv_sec < 0` is this pair's own "no timeout, wait forever" sentinel
 /// (musl's own call site substitutes it whenever the caller's `tv` was `NULL`) -- real,
 /// non-negative timeouts are already range-checked musl-side before this is ever built.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawSelectRequest {
     n: i32,
@@ -300,29 +328,32 @@ struct RawSelectRequest {
     tv_usec: i64,
 }
 
-fn fd_set_bit(ptr: u64, idx: usize) -> bool {
-    if ptr == 0 {
-        return false;
+// SAFETY: integers only, no padding (the gap is the explicit `_pad`).
+unsafe impl Pod for RawSelectRequest {}
+
+/// The first `n` bits of the caller's `fd_set` at `ptr`, copied in (an empty set for `NULL`).
+/// Only the words those bits occupy are read, so a smaller set at the end of a mapping is fine.
+fn fd_set_copyin(ptr: u64, n: usize) -> Result<[u64; FD_SET_WORDS], u64> {
+    let mut words = [0u64; FD_SET_WORDS];
+    if ptr != 0 {
+        for (i, w) in words.iter_mut().enumerate().take(n.div_ceil(64)) {
+            *w = copyin_val(UserPtr::new(ptr).add(i as u64 * 8))?;
+        }
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let word = unsafe { *((ptr as *const u64).add(idx / 64)) };
-    word & (1u64 << (idx % 64)) != 0
+    Ok(words)
 }
 
-/// Writes `words` back into the real `fd_set` at `ptr` (a no-op for a `NULL` set, matching real
-/// `select()` -- a caller that never passed a given set has nothing for this to touch). Real
-/// `select()` semantics: on return, each set holds *only* the fds that turned out ready, replacing
-/// whatever the caller originally passed in.
-fn fd_set_write_back(ptr: u64, words: &[u64; FD_SET_WORDS]) {
+/// Writes the result set back over the caller's `fd_set` at `ptr` (nothing for `NULL`): only the
+/// words its first `n` bits occupy, as Linux and the BSDs do. Real `select()` semantics: on
+/// return, each set holds *only* the fds that turned out ready.
+fn fd_set_copyout(ptr: u64, n: usize, words: &[u64; FD_SET_WORDS]) -> Result<(), u64> {
     if ptr == 0 {
-        return;
+        return Ok(());
     }
-    for (i, word) in words.iter().enumerate() {
-        // SAFETY: same known pointer-validation gap every other user-memory write in this
-        // codebase already has.
-        unsafe { *((ptr as *mut u64).add(i)) = *word };
+    for (i, w) in words.iter().enumerate().take(n.div_ceil(64)) {
+        copyout_val(w, UserPtr::new(ptr).add(i as u64 * 8))?;
     }
+    Ok(())
 }
 
 /// `SYS_SELECT = 23` (registered by `sys/modules/socket`, real Linux's own unclaimed legacy `select(2)`
@@ -345,13 +376,20 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
     if req_ptr == 0 {
         return -(EINVAL as i64);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let req = unsafe { &*(req_ptr as *const RawSelectRequest) };
+    let req: RawSelectRequest = match copyin_val(UserPtr::new(req_ptr)) {
+        Ok(req) => req,
+        Err(e) => return -(e as i64),
+    };
     if !(0..=FD_SETSIZE as i32).contains(&req.n) {
         return -(EINVAL as i64);
     }
     let n = req.n as usize;
+    // The sets are copied in once, as on the BSDs.
+    let (rin, win) = match (fd_set_copyin(req.rfds, n), fd_set_copyin(req.wfds, n)) {
+        (Ok(r), Ok(w)) => (r, w),
+        (Err(e), _) | (_, Err(e)) => return -(e as i64),
+    };
+    let set = |words: &[u64; FD_SET_WORDS], fd: usize| words[fd / 64] & (1u64 << (fd % 64)) != 0;
 
     let timeout_ms = (req.tv_sec >= 0).then(|| req.tv_sec * 1000 + req.tv_usec / 1000);
     let deadline = timeout_ms
@@ -369,8 +407,8 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
         let eout = [0u64; FD_SET_WORDS];
 
         for fd in 0..n {
-            let wants_r = fd_set_bit(req.rfds, fd);
-            let wants_w = fd_set_bit(req.wfds, fd);
+            let wants_r = set(&rin, fd);
+            let wants_w = set(&win, fd);
             if !wants_r && !wants_w {
                 continue;
             }
@@ -392,10 +430,13 @@ pub extern "C" fn oxidebsd_sys_select(req_ptr: u64, _a1: u64, _a2: u64, _a3: u64
 
         let timed_out = deadline.is_some_and(|d| crate::cpu::tsc::now() >= d);
         if ready_count > 0 || timed_out {
-            fd_set_write_back(req.rfds, &rout);
-            fd_set_write_back(req.wfds, &wout);
-            fd_set_write_back(req.efds, &eout);
-            return ready_count;
+            let written = fd_set_copyout(req.rfds, n, &rout)
+                .and_then(|()| fd_set_copyout(req.wfds, n, &wout))
+                .and_then(|()| fd_set_copyout(req.efds, n, &eout));
+            return match written {
+                Ok(()) => ready_count,
+                Err(e) => -(e as i64),
+            };
         }
         if let Err(e) = wait_for_change(any_pulled, deadline_tick) {
             return e;

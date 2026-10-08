@@ -1,5 +1,6 @@
 //! Signal syscalls (kill/sigaction/sigprocmask) and delivery bookkeeping -- split out of the original process.rs.
 
+use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout_val};
 use alloc::vec::Vec;
 
 use super::*;
@@ -875,8 +876,7 @@ pub fn do_sigsuspend(pid: Pid, mask_ptr: u64) -> Result<u64, u64> {
     // SIGKILL/SIGSTOP can never be blocked -- same masking sigprocmask's SIG_SETMASK already
     // applies.
     let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
-    // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-    let requested = unsafe { (mask_ptr as *const u64).read() };
+    let requested: u64 = copyin_val(UserPtr::new(mask_ptr))?;
 
     let original_mask = {
         let mut table = PROCESS_TABLE.lock();
@@ -906,19 +906,18 @@ pub fn do_sigsuspend(pid: Pid, mask_ptr: u64) -> Result<u64, u64> {
 
 /// `ppoll(2)`'s atomic mask swap, the same one `do_sigsuspend` does: installs `*mask_ptr` (minus
 /// `SIGKILL`/`SIGSTOP`) as the blocked mask and returns the caller's original, for
-/// `end_temporary_sigmask`. Atomic for the same reason `do_sigsuspend`'s is: single core, no
+/// `end_temporary_sigmask` (`EFAULT` for a bad mask). Atomic for the same reason `do_sigsuspend`'s is: single core, no
 /// preemption inside a syscall.
-pub fn begin_temporary_sigmask(pid: Pid, mask_ptr: u64) -> u64 {
+pub fn begin_temporary_sigmask(pid: Pid, mask_ptr: u64) -> Result<u64, u64> {
     let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
-    // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-    let requested = unsafe { (mask_ptr as *const u64).read() };
+    let requested: u64 = copyin_val(UserPtr::new(mask_ptr))?;
     let mut table = PROCESS_TABLE.lock();
     let proc = table
         .get_mut(&pid)
         .expect("ppoll: current process missing from table");
     let original = proc.blocked_signals;
     proc.blocked_signals = requested & !unblockable;
-    original
+    Ok(original)
 }
 
 /// Whether a signal that will actually invoke a handler or terminate is deliverable to `pid` right
@@ -992,6 +991,7 @@ pub(crate) fn set_signal_saved_blocked_override(pid: Pid, mask: u64) {
 /// doc comment) directly at `act_ptr`/`oldact_ptr` — no translation needed, since real `SIG_DFL`/
 /// `SIG_IGN` already are `0`/`1`.
 pub fn do_sigaction(pid: Pid, sig: u64, act_ptr: u64, oldact_ptr: u64) -> Result<u64, u64> {
+    #[derive(Clone, Copy)]
     #[repr(C)]
     struct RawSigAction {
         handler: u64,
@@ -999,6 +999,8 @@ pub fn do_sigaction(pid: Pid, sig: u64, act_ptr: u64, oldact_ptr: u64) -> Result
         restorer: u64,
         mask: u64,
     }
+    // SAFETY: four u64s, no padding.
+    unsafe impl Pod for RawSigAction {}
 
     let mut table = PROCESS_TABLE.lock();
     let proc = table
@@ -1013,12 +1015,10 @@ pub fn do_sigaction(pid: Pid, sig: u64, act_ptr: u64, oldact_ptr: u64) -> Result
             restorer: old.restorer,
             mask: old.mask,
         };
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        unsafe { (oldact_ptr as *mut RawSigAction).write_unaligned(raw) };
+        copyout_val(&raw, UserPtr::new(oldact_ptr))?;
     }
     if act_ptr != 0 {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        let raw = unsafe { &*(act_ptr as *const RawSigAction) };
+        let raw: RawSigAction = copyin_val(UserPtr::new(act_ptr))?;
         proc.shared.lock().sigactions[sig as usize] = SigAction {
             handler: raw.handler,
             flags: raw.flags,
@@ -1045,12 +1045,18 @@ pub fn do_sigaction(pid: Pid, sig: u64, act_ptr: u64, oldact_ptr: u64) -> Result
 /// to this stack, and musl's own wrapper already enforces `_SC_MINSIGSTKSZ` client-side before
 /// this is ever reached.
 pub fn do_sigaltstack(pid: Pid, ss_ptr: u64, old_ptr: u64) -> Result<u64, u64> {
+    #[derive(Clone, Copy)]
     #[repr(C)]
     struct RawSigaltstack {
         sp: u64,
         flags: i32,
+        /// The alignment gap before `size` (implicit in musl's `stack_t`), explicit so the old
+        /// stack goes out zeroed there rather than as kernel bytes.
+        pad: u32,
         size: u64,
     }
+    // SAFETY: integers only, no padding (the gap is the explicit `pad`).
+    unsafe impl Pod for RawSigaltstack {}
 
     let mut table = PROCESS_TABLE.lock();
     let proc = table
@@ -1064,10 +1070,10 @@ pub fn do_sigaltstack(pid: Pid, ss_ptr: u64, old_ptr: u64) -> Result<u64, u64> {
             // this stack (`Process::on_altstack`, see `sigaltstack/6-1.c`), not always stripped.
             flags: (proc.altstack.flags & !SS_ONSTACK)
                 | if proc.on_altstack { SS_ONSTACK } else { 0 },
+            pad: 0,
             size: proc.altstack.size,
         };
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        unsafe { (old_ptr as *mut RawSigaltstack).write_unaligned(raw) };
+        copyout_val(&raw, UserPtr::new(old_ptr))?;
     }
     if ss_ptr != 0 {
         // Real POSIX: attempting to change the alt stack while a handler is currently executing on
@@ -1076,8 +1082,7 @@ pub fn do_sigaltstack(pid: Pid, ss_ptr: u64, old_ptr: u64) -> Result<u64, u64> {
         if proc.on_altstack {
             return Err(EPERM);
         }
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        let raw = unsafe { (ss_ptr as *const RawSigaltstack).read_unaligned() };
+        let raw: RawSigaltstack = copyin_val(UserPtr::new(ss_ptr))?;
         if raw.flags & !SS_DISABLE != 0 {
             return Err(EINVAL);
         }
@@ -1110,12 +1115,10 @@ pub fn do_sigprocmask(pid: Pid, how: u64, set_ptr: u64, oldset_ptr: u64) -> Resu
         .expect("sigprocmask: current process missing from table");
 
     if oldset_ptr != 0 {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        unsafe { (oldset_ptr as *mut u64).write(proc.blocked_signals) };
+        copyout_val(&proc.blocked_signals, UserPtr::new(oldset_ptr))?;
     }
     if set_ptr != 0 {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        let requested = unsafe { (set_ptr as *const u64).read() };
+        let requested: u64 = copyin_val(UserPtr::new(set_ptr))?;
         // SIGKILL/SIGSTOP can never be blocked, matching real sigprocmask()'s own silent masking.
         let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
         match how {
@@ -1138,8 +1141,7 @@ pub fn do_sigpending(pid: Pid, set_ptr: u64) -> Result<u64, u64> {
         .get(&pid)
         .expect("sigpending: current process missing from table");
     if set_ptr != 0 {
-        // SAFETY: same known pointer-validation gap sys_read/sys_write already document.
-        unsafe { (set_ptr as *mut u64).write(proc.pending_signals) };
+        copyout_val(&proc.pending_signals, UserPtr::new(set_ptr))?;
     }
     Ok(0)
 }
@@ -1365,12 +1367,7 @@ fn resolve_relative_deadline(ts_ptr: u64) -> Result<u64, u64> {
     if ts_ptr == 0 {
         return Ok(u64::MAX);
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let (sec, nsec) = unsafe {
-        let ts = ts_ptr as *const i64;
-        (*ts, *ts.add(1))
-    };
+    let [sec, nsec]: [i64; 2] = copyin_val(UserPtr::new(ts_ptr))?;
     if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
         return Err(EINVAL);
     }
@@ -1410,9 +1407,7 @@ fn resolve_relative_deadline(ts_ptr: u64) -> Result<u64, u64> {
 /// re-checks after every wake, same "avoid a lost wakeup, never trust the wake reason alone"
 /// discipline every blocking primitive in this codebase already follows.
 pub fn do_sigtimedwait(pid: Pid, mask_ptr: u64, info_ptr: u64, ts_ptr: u64) -> Result<u64, u64> {
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has.
-    let wait_set = unsafe { (mask_ptr as *const u64).read() };
+    let wait_set: u64 = copyin_val(UserPtr::new(mask_ptr))?;
     let deadline = resolve_relative_deadline(ts_ptr)?;
 
     loop {
@@ -1448,9 +1443,7 @@ pub fn do_sigtimedwait(pid: Pid, mask_ptr: u64, info_ptr: u64, ts_ptr: u64) -> R
                         si_value: info.value,
                         _tail: [0; 128 - 4 * 4 - 2 * 4 - 8],
                     };
-                    // SAFETY: same known pointer-validation gap every other user-memory write in
-                    // this codebase already has.
-                    unsafe { (info_ptr as *mut RawSiginfo).write_unaligned(raw) };
+                    copyout_val(&raw, UserPtr::new(info_ptr))?;
                 }
                 return Ok(signum);
             }
@@ -1529,10 +1522,8 @@ pub fn do_sigqueue(
             None => Err(ESRCH),
         };
     }
-    // SAFETY: same known pointer-validation gap every other user-memory read in this codebase
-    // already has; si_value sits at byte offset 24 in musl's own siginfo_t, matching RawSiginfo's
-    // field layout exactly (see this function's own doc comment).
-    let value = unsafe { *((siginfo_ptr + 24) as *const u64) };
+    // `si_value` sits at offset 24 (`RawSiginfo`).
+    let value: u64 = copyin_val(UserPtr::new(siginfo_ptr).add(24))?;
 
     // Same real thread-aware re-routing `do_kill` needed -- see `resolve_signal_recipient`'s own
     // doc comment. `target_pid` is real POSIX's own thread-group id, not necessarily the literal

@@ -401,6 +401,7 @@ pub struct QueuedSigInfo {
 /// rather than duplicated a second time, since getting a wire-format struct's exact layout right in
 /// two places independently is exactly the kind of divergence risk this codebase's own "verified
 /// via a direct probe" rigor exists to avoid.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RawSiginfo {
     pub si_signo: i32,
@@ -418,6 +419,10 @@ pub(crate) struct RawSiginfo {
     pub si_value: u64,
     pub _tail: [u8; 128 - 4 * 4 - 2 * 4 - 8],
 }
+
+const _: () = assert!(core::mem::size_of::<RawSiginfo>() == 128);
+// SAFETY: integers and a byte array, no padding (the gaps are explicit fields).
+unsafe impl crate::memory::usercopy::Pod for RawSiginfo {}
 
 const _: () = assert!(core::mem::size_of::<RawSiginfo>() == 128);
 
