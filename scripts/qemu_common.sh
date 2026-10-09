@@ -43,7 +43,19 @@ fi
 
 # Guest RAM in MiB: $OXIDEBSD_QEMU_MEM, default 8192. The console-install floor is 128
 # (OxideBSD-doc ROADMAP.md, v0.3.0 item 6).
-set -- -accel kvm -accel tcg -serial stdio -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
+set -- -accel kvm -accel tcg -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
+# Serial on stdio. A test also logs it to a file, which the stall guard below watches.
+if [ "${QEMU_HEADLESS_TEST:-0}" = 1 ]; then
+    QEMU_SERIAL_LOG=$(mktemp target/qemu_test_serial.XXXXXX)
+    set -- "$@" -chardev "stdio,id=ser0,logfile=$QEMU_SERIAL_LOG" -serial chardev:ser0
+else
+    set -- "$@" -serial stdio
+fi
+# CPU model: $OXIDEBSD_QEMU_CPU (e.g. `max`); QEMU's default (`qemu64`) has no SMEP or SMAP, so
+# exercising them (USERMEM.md section 5.3) needs one that does.
+if [ -n "${OXIDEBSD_QEMU_CPU:-}" ]; then
+    set -- "$@" -cpu "$OXIDEBSD_QEMU_CPU"
+fi
 
 # Opt-in QEMU monitor on a plain TCP port -- see qemu_runner.sh's git history/CLAUDE.md's test-
 # architecture section for the real, non-interactive use this unlocks (scripted `sendkey`).
@@ -59,7 +71,10 @@ if [ "${OXIDEBSD_QEMU_USB:-0}" = 1 ]; then
 fi
 
 if [ "${QEMU_HEADLESS_TEST:-0}" = 1 ]; then
-    set -- "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 -display none
+    # -no-reboot: a guest reset (every ring-0 fault and kernel panic reboots) ends QEMU at once,
+    # so a test fails on its first fault instead of rebooting into the same fault until it times
+    # out, burying the cause under a thousand repeats.
+    set -- "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 -display none -no-reboot
 fi
 
 # Real ATA data disk pinned explicitly to the secondary channel's master (ide.1, unit 0), boot
@@ -149,12 +164,32 @@ qemu_common_run_test_and_translate_exit() {
     # QEMU instance without pattern-matching its argv.
     echo "$qemu_pid" > target/qemu_runner.pid
 
+    # Stall guard: no new serial output for $OXIDEBSD_TEST_STALL_SECS seconds (default 600; 0
+    # turns it off) means the guest is wedged.
+    stall_secs="${OXIDEBSD_TEST_STALL_SECS:-600}"
     elapsed=0
+    quiet=0
+    last_size=-1
     while kill -0 "$qemu_pid" 2>/dev/null; do
         if [ "$elapsed" -ge "$timeout_secs" ]; then
             echo "qemu_common.sh: timed out after ${timeout_secs}s, killing QEMU (pid $qemu_pid)" >&2
             kill "$qemu_pid" 2>/dev/null || true
             wait "$qemu_pid" 2>/dev/null || true
+            rm -f "${QEMU_SERIAL_LOG:-}"
+            exit 124
+        fi
+        size=$(stat -c %s "${QEMU_SERIAL_LOG:-/dev/null}" 2>/dev/null || echo 0)
+        if [ "$size" = "$last_size" ]; then
+            quiet=$((quiet + 1))
+        else
+            quiet=0
+            last_size=$size
+        fi
+        if [ "$stall_secs" -gt 0 ] && [ "$quiet" -ge "$stall_secs" ]; then
+            echo "qemu_common.sh: HUNG: no serial output for ${stall_secs}s, killing QEMU (pid $qemu_pid; OXIDEBSD_TEST_STALL_SECS)" >&2
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            rm -f "${QEMU_SERIAL_LOG:-}"
             exit 124
         fi
         sleep 1
@@ -163,11 +198,17 @@ qemu_common_run_test_and_translate_exit() {
 
     exit_code=0
     wait "$qemu_pid" || exit_code=$?
+    rm -f "${QEMU_SERIAL_LOG:-}"
 
     # QemuExitCode::Success (0x10) -> real QEMU exit code (0x10<<1)|1 = 33; anything else is a
     # failure (QemuExitCode::Failed = 0x11 -> 35, or a genuine crash/signal exit).
     if [ "$exit_code" -eq 33 ]; then
         exit 0
+    elif [ "$exit_code" -eq 0 ]; then
+        # QEMU exits 0 when the guest resets under -no-reboot, or powers off: either way the test
+        # never reported, which is a failure, not a pass.
+        echo "qemu_common.sh: FAILED: the guest rebooted or powered off without reporting a result (a fault or panic: see the last lines above)" >&2
+        exit 1
     else
         exit "$exit_code"
     fi
