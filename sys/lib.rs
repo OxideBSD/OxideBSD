@@ -58,6 +58,7 @@ pub fn init(
         Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT));
     }
     cpu::fpu::init();
+    cpu::smap::init();
     cpu::interrupts::init_idt();
     cpu::interrupts::init_pics();
     unsafe {

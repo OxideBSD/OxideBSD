@@ -92,9 +92,18 @@ pub struct RawTermios {
     pub c_lflag: u32,
     pub c_line: u8,
     pub c_cc: [u8; 32],
+    /// The alignment gap before `c_ispeed` (implicit in musl's `struct termios`), explicit so
+    /// `TCGETS` copies it out zeroed rather than as kernel bytes.
+    pub pad: [u8; 3],
     pub c_ispeed: u32,
     pub c_ospeed: u32,
 }
+
+const _: () = assert!(core::mem::size_of::<RawTermios>() == 60);
+// SAFETY: integers and byte arrays, no padding (the gap is the explicit `pad`).
+unsafe impl crate::memory::usercopy::Pod for RawTermios {}
+// SAFETY: four u16s, no padding.
+unsafe impl crate::memory::usercopy::Pod for Winsize {}
 
 /// `struct winsize`.
 #[repr(C)]
@@ -134,6 +143,7 @@ pub const fn default_termios(speed: u32) -> RawTermios {
         c_lflag: ECHO | ICANON | ISIG | IEXTEN | ECHOE | ECHOKE | ECHOCTL,
         c_line: 0,
         c_cc: cc,
+        pad: [0; 3],
         c_ispeed: speed,
         c_ospeed: speed,
     }

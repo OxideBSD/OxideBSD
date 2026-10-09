@@ -857,8 +857,7 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
     }
     if request == FIONBIO {
         // Not terminal-specific: sets O_NONBLOCK on the description.
-        // SAFETY: as above.
-        let on = unsafe { *(argp as *const i32) } != 0;
+        let on = copyin_val::<i32>(UserPtr::new(argp))? != 0;
         crate::fs::fd::set_nonblocking(real_fd, on);
         return Ok(0);
     }
@@ -872,30 +871,23 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         return Err(ENOTTY);
     };
     let cx = crate::tty::caller(crate::fs::fd::is_nonblocking(real_fd));
-    let int_arg = || -> i32 {
-        // SAFETY: as above.
-        unsafe { *(argp as *const i32) }
-    };
+    let int_arg = || copyin_val::<i32>(UserPtr::new(argp));
     match request {
         TCGETS => {
-            // SAFETY: as above.
-            unsafe { *(argp as *mut crate::tty::RawTermios) = crate::tty::termios(tty) };
+            copyout_val(&crate::tty::termios(tty), UserPtr::new(argp))?;
             Ok(0)
         }
         TCSETS | TCSETSW | TCSETSF => {
-            // SAFETY: as above.
-            let t = unsafe { *(argp as *const crate::tty::RawTermios) };
+            let t: crate::tty::RawTermios = copyin_val(UserPtr::new(argp))?;
             // Output is written synchronously, so draining it (TCSETSW) is immediate.
             crate::tty::set_termios(tty, t, request == TCSETSF, &cx).map(|()| 0)
         }
         TIOCGWINSZ => {
-            // SAFETY: as above.
-            unsafe { *(argp as *mut crate::tty::Winsize) = crate::tty::winsize(tty) };
+            copyout_val(&crate::tty::winsize(tty), UserPtr::new(argp))?;
             Ok(0)
         }
         TIOCSWINSZ => {
-            // SAFETY: as above.
-            crate::tty::set_winsize(tty, unsafe { *(argp as *const crate::tty::Winsize) });
+            crate::tty::set_winsize(tty, copyin_val(UserPtr::new(argp))?);
             Ok(0)
         }
         TIOCSCTTY => crate::tty::set_controlling(tty, &cx).map(|()| 0),
@@ -906,7 +898,7 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
             Ok(0)
         }
         TIOCSPGRP => {
-            let pgid = int_arg();
+            let pgid = int_arg()?;
             if pgid <= 0 {
                 return Err(EINVAL);
             }

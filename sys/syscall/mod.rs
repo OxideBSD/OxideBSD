@@ -533,19 +533,20 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
             // function call has no expectation about prior `RCX` content either way, so this
             // stashed state simply survives untouched (nothing else ever reads it) until whatever
             // handler chain finishes and a genuine resume is actually due.
-            // SAFETY: same reasoning as the `RAX_SCRATCH_OFFSET` read below -- this address is
-            // mapped `PRESENT | WRITABLE` in this exact process's own currently-active address
-            // space.
-            unsafe {
-                ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
-                    + crate::process::fault_trampoline::TRUE_RESUME_RIP_OFFSET)
-                    as *mut u64)
-                    .write(rip);
-                ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
-                    + crate::process::fault_trampoline::TRUE_RFLAGS_OFFSET)
-                    as *mut u64)
-                    .write(rflags);
-            }
+            // The trampoline page is a user page: these go through copyout/copyin like any other
+            // user memory (SMAP faults otherwise). A process that unmapped or broke it can't be
+            // resumed: it dies of SIGSEGV, as for a signal frame it broke.
+            use crate::process::fault_trampoline::{
+                FAULT_TRAMPOLINE_VA, RAX_SCRATCH_OFFSET, TRUE_RESUME_RIP_OFFSET, TRUE_RFLAGS_OFFSET,
+            };
+            let stashed = copyout_val(&rip, UserPtr::new(FAULT_TRAMPOLINE_VA + TRUE_RESUME_RIP_OFFSET))
+                .and_then(|()| {
+                    copyout_val(&rflags, UserPtr::new(FAULT_TRAMPOLINE_VA + TRUE_RFLAGS_OFFSET))
+                })
+                .and_then(|()| copyin_val::<u64>(UserPtr::new(FAULT_TRAMPOLINE_VA + RAX_SCRATCH_OFFSET)));
+            let Ok(saved_rax) = stashed else {
+                crate::process::do_exit_group(crate::process::scheduler::current_pid(), FRAME_FAULT_EXIT)
+            };
             frame.rcx = crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
                 + crate::process::fault_trampoline::STUB_OFFSET;
             frame.user_rsp = rsp;
@@ -557,14 +558,7 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
             // corrupting a live computation's `RAX` with no crash to point at it -- see
             // `fault_trampoline`'s own doc comment). The trampoline stashes the real value at
             // `RAX_SCRATCH_OFFSET` before clobbering it specifically so it can be restored here.
-            // SAFETY: this address is mapped `PRESENT | WRITABLE` in every process's own address
-            // space (`fault_trampoline::map`), and `syscall_dispatch` runs with the interrupted
-            // process's own page tables still active (`SYSCALL` never switches `CR3`).
-            frame.rax = unsafe {
-                *((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
-                    + crate::process::fault_trampoline::RAX_SCRATCH_OFFSET)
-                    as *const u64)
-            };
+            frame.rax = saved_rax;
         }
         deliver_pending_signal(frame, false);
         return;

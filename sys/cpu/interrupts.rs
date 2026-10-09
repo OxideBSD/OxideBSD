@@ -76,6 +76,7 @@ macro_rules! define_irq_trampolines {
     ($( $name:ident => $irq:literal ),+ $(,)?) => {
         $(
             extern "x86-interrupt" fn $name(_stack_frame: InterruptStackFrame) {
+                crate::cpu::smap::clac();
                 let handlers = *IRQ_HANDLERS[$irq].lock();
                 for handler in handlers.into_iter().flatten() {
                     handler();
@@ -189,6 +190,7 @@ pub fn init_pics() {
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    crate::cpu::smap::clac();
     serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
@@ -199,6 +201,7 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 /// corrupted jump into non-code memory, in any userland program). Real Linux maps every userland
 /// `#UD` to `SIGILL`.
 extern "x86-interrupt" fn invalid_opcode_handler(mut stack_frame: InterruptStackFrame) {
+    crate::cpu::smap::clac();
     let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
     if interrupted_ring3 {
         let pid = crate::process::scheduler::current_pid();
@@ -238,6 +241,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    crate::cpu::smap::clac();
     let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
     if interrupted_ring3 {
         let pid = crate::process::scheduler::current_pid();
@@ -301,6 +305,9 @@ extern "x86-interrupt" fn page_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // AC cleared first, as at every entry (`cpu::smap`); a fault inside a copy routine resumes at
+    // its fault label, which clears AC itself anyway.
+    crate::cpu::smap::clac();
     // Stack growth first, for either ring -- see `mm::try_grow_user_stack`. A not-present fault
     // inside the stack reserve just gets its page and retries the instruction.
     if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
@@ -366,6 +373,19 @@ extern "x86-interrupt" fn page_fault_handler(
             crate::process::scheduler::current_pid()
         );
     }
+    // Name a SMEP or SMAP violation: kernel code ran or touched a user page outside the copy
+    // routines (a bug those protections exist to catch, USERMEM.md §5.3).
+    if !interrupted_ring3
+        && let Ok(addr) = Cr2::read()
+        && addr.as_u64() < crate::memory::usercopy::VM_MAXUSER
+        && error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+    {
+        if error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {
+            serial_println!("EXCEPTION: SMEP: the kernel executed a user page");
+        } else if crate::cpu::smap::enabled() {
+            serial_println!("EXCEPTION: SMAP: the kernel touched a user page outside the copy routines");
+        }
+    }
     serial_println!(
         "EXCEPTION: PAGE FAULT\naccessed address: {:?}\nerror code: {:?}\n{:#?}",
         Cr2::read(),
@@ -379,6 +399,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    crate::cpu::smap::clac();
     if let Ok(addr) = Cr2::read()
         && crate::memory::kstack::is_guard(addr.as_u64())
     {
@@ -421,6 +442,9 @@ pub(crate) const PREEMPT_QUANTUM_TICKS: u64 = 4;
 /// interrupt to anyone — which would freeze not just future preemption but every other
 /// `ticks()`-gated wakeup in this file (sleepers, POSIX timers, `SIGALRM`, ...) for good.
 extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    // AC cleared first, as at every entry (`cpu::smap`): this handler may switch to another
+    // process's kernel code, which must not inherit a user's AC.
+    crate::cpu::smap::clac();
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Wake any process blocked in `process::do_nanosleep` (`BlockReason::Sleeping`) whose deadline
@@ -952,6 +976,7 @@ fn handle_decoded_key(key: DecodedKey) -> bool {
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
+    crate::cpu::smap::clac();
     let mut port: Port<u8> = Port::new(0x60);
     // SAFETY: 0x60 is the PS/2 controller's data port; reading it is how a keyboard IRQ is
     // acknowledged at the hardware level, and it's only ever read here.

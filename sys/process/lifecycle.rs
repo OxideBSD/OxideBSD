@@ -917,10 +917,12 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
     // crate::fs::fd's own table is keyed by tgid, not raw pid, so every fd lookup the child ever
     // makes (via scheduler::current_tgid()) already resolves to the exact same entries the caller
     // sees, real aliasing, not a copy -- see crate::fs::fd's own module doc comment.
-    // Real CLONE_PARENT_SETTID: writes the child's real pid back through the caller's own
-    // pointer -- same "no pointer validation" convention every other user-memory write in this
-    // codebase already has.
-    unsafe { (ptid as *mut u64).write(child_pid) };
+    // CLONE_PARENT_SETTID: the child's id, a `pid_t` (4 bytes: it used to be written as 8, over
+    // whatever followed, `struct pthread`'s `errno_val` in musl's `pthread_create`), only when
+    // asked for. A bad pointer is ignored, as on Linux: the thread exists either way.
+    if flags & CLONE_PARENT_SETTID != 0 && ptid != 0 {
+        let _ = copyout_val(&(child_pid as i32), UserPtr::new(ptid));
+    }
     scheduler::enqueue_ready(child_pid);
     Ok(child_pid)
 }

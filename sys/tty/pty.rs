@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 use super::{Driver, TtyId, Winsize, B38400};
+use crate::memory::usercopy::{UserPtr, copyin_val, copyout_val};
 use crate::kern::subr_uio::Uio;
 use crate::process::{self, scheduler, BlockReason, Pid, ProcState};
 use crate::syscall::{EAGAIN, EINTR, EINVAL, EIO, ENOTTY};
@@ -375,19 +376,19 @@ pub(crate) fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64,
     const TIOCSIG: u64 = 0x4004_5436;
     let n = pair_of(real_fd)?;
     let slave = PAIRS.lock()[n].slave;
-    // SAFETY (each access through `argp`): the unvalidated-user-pointer gap every ioctl has.
-    let r = match request {
+    // `argp` is copied through `copyin`/`copyout` (USERMEM.md).
+    let r = (|| -> Result<u64, u64> { match request {
         TIOCGPTN => {
-            unsafe { *(argp as *mut u32) = n as u32 };
+            copyout_val(&(n as u32), UserPtr::new(argp))?;
             Ok(0)
         }
         TIOCSPTLCK => {
-            let lock = unsafe { *(argp as *const i32) } != 0;
+            let lock = copyin_val::<i32>(UserPtr::new(argp))? != 0;
             PAIRS.lock()[n].locked = lock;
             Ok(0)
         }
         TIOCPKT => {
-            let on = unsafe { *(argp as *const i32) } != 0;
+            let on = copyin_val::<i32>(UserPtr::new(argp))? != 0;
             let mut pairs = PAIRS.lock();
             pairs[n].packet = on;
             pairs[n].status = 0;
@@ -406,27 +407,27 @@ pub(crate) fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64,
         }
         FIONREAD => {
             let queued = PAIRS.lock()[n].out.len();
-            unsafe { *(argp as *mut i32) = queued as i32 };
+            copyout_val(&(queued as i32), UserPtr::new(argp))?;
             Ok(0)
         }
         TCGETS => {
-            unsafe { *(argp as *mut super::RawTermios) = super::termios(slave) };
+            copyout_val(&super::termios(slave), UserPtr::new(argp))?;
             Ok(0)
         }
         TCSETS | TCSETSW | TCSETSF => {
-            let t = unsafe { *(argp as *const super::RawTermios) };
+            let t: super::RawTermios = copyin_val(UserPtr::new(argp))?;
             let cx = super::caller(crate::fs::fd::is_nonblocking(real_fd));
             super::set_termios(slave, t, request == TCSETSF, &cx).map(|()| 0)
         }
         TIOCGWINSZ => {
-            unsafe { *(argp as *mut Winsize) = super::winsize(slave) };
+            copyout_val(&super::winsize(slave), UserPtr::new(argp))?;
             Ok(0)
         }
         TIOCSWINSZ => {
-            super::set_winsize(slave, unsafe { *(argp as *const Winsize) });
+            super::set_winsize(slave, copyin_val(UserPtr::new(argp))?);
             Ok(0)
         }
         _ => Err(ENOTTY),
-    };
+    } })();
     Some(r)
 }

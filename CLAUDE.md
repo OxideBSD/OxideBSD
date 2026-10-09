@@ -72,7 +72,9 @@ user before large structural commitments.
   gdb. `sysctl -n debug.syscall.stats` shows per-system-call cost (`debug.syscall.reset=1`).
 - `cargo run`: stages the ISO and boots QEMU, serial on stdio. `cargo run -- -s` (or
   `OXIDEBSD_KERNEL_CMDLINE=-s`) passes kernel boot flags.
-- `cargo test --test <name>`: each test boots its own QEMU (slow; no fast path).
+- `cargo test --test <name>`: each test boots its own QEMU (slow; no fast path). Tests run with
+  `-no-reboot` (a fault or panic fails at once) and a stall guard: no serial output for
+  `OXIDEBSD_TEST_STALL_SECS` (default 600, 0 off) kills the run as HUNG.
 - `cargo fmt -p oxidebsd`: **bare `cargo fmt` reformats the whole workspace.**
 - Root commands target only the `oxidebsd` package. `regress/*`, `usr.bin/*`, `bin/*`,
   `sys/modules/*` are workspace members that `build.rs` cross-builds. To build one directly:
@@ -83,6 +85,7 @@ user before large structural commitments.
 - Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio`, `OXIDEBSD_DISK_IMAGE`,
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
   `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the console-install floor is 128),
+  `OXIDEBSD_QEMU_CPU=max` (QEMU's default CPU has no SMEP/SMAP; set this to exercise them),
   `OXIDEBSD_REAL_HARDWARE=1` (adds `no-ata`).
 
 ## Test architecture

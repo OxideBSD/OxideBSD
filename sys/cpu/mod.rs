@@ -11,4 +11,5 @@ pub mod interrupts;
 pub mod pic;
 pub mod pit;
 pub mod rtc;
+pub mod smap;
 pub mod tsc;

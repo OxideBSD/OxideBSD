@@ -68,7 +68,8 @@ fn walk(table: &PageTable, level: u8, base: u64, offset: VirtAddr, entries: usiz
 
 // ---- The copy loop and its fault fixup -------------------------------------------------------
 //
-// `usercopy_raw(dst, src, len)` copies `len` bytes with `rep movsb` and returns 0. A page fault
+// `usercopy_raw(dst, src, len)` copies `len` bytes with `rep movsb` and returns 0, with SMAP's AC
+// flag set around the copy (`cpu::smap`). A page fault
 // while it runs (the user side is unmapped or read-only) resumes at `usercopy_fault`
 // (`fixup_fault`), which returns `EFAULT`: the routine pushes nothing, so the fault frame's
 // stack pointer still points at the caller's return address. The labels bracket only the
@@ -79,13 +80,24 @@ core::arch::global_asm!(
     "usercopy_raw:",
     "    cld",
     "    mov rcx, rdx",
+    // SMAP (`cpu::smap`): AC set for the copy only, and only where the CPU has SMAP (`stac` and
+    // `clac` are invalid instructions otherwise).
+    "    cmp byte ptr [rip + USERCOPY_SMAP], 0",
+    "    je 2f",
+    "    stac",
+    "2:",
     "usercopy_access_start:",
     "    rep movsb",
     "usercopy_access_end:",
     "    xor eax, eax",
-    "    ret",
+    "    jmp 3f",
     "usercopy_fault:",
     "    mov eax, 14", // EFAULT
+    "3:",
+    "    cmp byte ptr [rip + USERCOPY_SMAP], 0",
+    "    je 4f",
+    "    clac",
+    "4:",
     "    ret",
     ".global usercopy_access_start",
     ".global usercopy_access_end",
