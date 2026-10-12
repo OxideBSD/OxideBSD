@@ -127,7 +127,7 @@ fn map_registers(
 ) -> Option<VirtAddr> {
     let page_phys = PhysFrame::<Size4KiB>::containing_address(phys_base);
     let page_virt = phys_mem_offset + page_phys.start_address().as_u64();
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | crate::cpu::nx::no_execute();
     let page = Page::<Size4KiB>::containing_address(page_virt);
     // SAFETY: `page_phys` is the real HPET's own MMIO page (never RAM this kernel hands out for
     // anything else), and `page` is that same range's own dedicated HHDM-offset virtual address --

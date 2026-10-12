@@ -8,6 +8,7 @@ pub mod kstack;
 pub mod pagecache;
 pub mod usercopy;
 pub mod vm_meter;
+pub mod wx;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,9 +37,30 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
         physical_memory_offset
     );
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
+    no_execute_direct_map(level_4_table, physical_memory_offset);
     let mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
     serial_println!("[boot] page table mapper ready");
     mapper
+}
+
+/// First level-4 slot past the direct map: module data (384), kernel stacks (385) and the heap
+/// (386) start here.
+const DIRECT_MAP_END_SLOT: usize = 384;
+
+/// Sets `NO_EXECUTE` on every level-4 entry of the direct map (from the HHDM offset up to slot
+/// 384), so no page of physical memory is executable through it (THREAT_MODEL.md §3.3). The loader
+/// maps it writable and executable, in huge pages; the top level covers all of it, and every
+/// address space shares these entries. Nothing runs from the direct map: the kernel image and
+/// module text are in slot 511.
+fn no_execute_direct_map(level_4_table: &mut PageTable, physical_memory_offset: VirtAddr) {
+    let nx = crate::cpu::nx::no_execute();
+    let first = usize::from(physical_memory_offset.p4_index());
+    for entry in level_4_table.iter_mut().take(DIRECT_MAP_END_SLOT).skip(first) {
+        if !entry.is_unused() {
+            entry.set_flags(entry.flags() | nx);
+        }
+    }
+    x86_64::instructions::tlb::flush_all();
 }
 
 /// # Safety

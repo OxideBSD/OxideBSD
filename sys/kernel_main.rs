@@ -210,6 +210,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
+    crate::memory::wx::check_kernel(&mapper, "modules loaded");
+
     // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local
     // values from here on -- hand them over to memory's global state (moving frame_allocator by
     // value, not cloning it: BootInfoFrameAllocator's own bump-allocation state must stay singular,

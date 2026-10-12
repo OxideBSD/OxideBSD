@@ -44,7 +44,9 @@ const SHT_SYMTAB: u32 = 2;
 const SHT_RELA: u32 = 4;
 const SHT_NOBITS: u32 = 8;
 
+const SHF_WRITE: u64 = 0x1;
 const SHF_ALLOC: u64 = 0x2;
+const SHF_EXECINSTR: u64 = 0x4;
 
 const SHN_UNDEF: u16 = 0;
 
@@ -435,41 +437,43 @@ pub fn load(
     // sections themselves) lands within this module's own region, respecting each section's own
     // alignment. Section count is unpredictable and can be large (hundreds, pre-optimization) --
     // nothing here assumes a small, fixed number the way elf.rs's PT_LOAD handling can.
+    //
+    // W^X (THREAT_MODEL.md §3.3): sections are grouped by permission, each group starting on its
+    // own page -- code, then read-only data and the GOT, then writable data -- so that once
+    // relocation is done each group's pages can be mapped with exactly its own permissions.
     let mut placements: BTreeMap<usize, u64> = BTreeMap::new();
     let mut cursor: u64 = 0;
-    for (index, section) in object.sections.iter().enumerate() {
-        if section.flags & SHF_ALLOC == 0 || section.size == 0 {
-            continue;
-        }
-        cursor = align_up(cursor, section.addralign);
-        placements.insert(index, cursor);
-        cursor += section.size;
-    }
-
-    // A minimal GOT, appended after every placed section: one 8-byte slot per R_X86_64_GOTPCREL
-    // relocation (no dedup -- a module has at most a handful, not worth the bookkeeping),
-    // eagerly populated during relocation application below rather than lazily bound, since every
-    // symbol is already fully resolved at load time and there's no dynamic linker-style deferral
-    // to gain from doing otherwise. See CLAUDE.md's module-loading section for why this turned
-    // out to be a real requirement rather than the optional complexity earlier drafts of this
-    // design deliberately avoided: `core::panicking::panic_bounds_check`'s own internal message
-    // formatting references a numeric `Display::fmt` impl via GOTPCREL, unavoidably, in any module
-    // whose code does ordinary slice indexing -- essentially all of them.
-    let mut got_slots_needed: u64 = 0;
-    for rela_section in &object.rela_sections {
-        for rela in object.relocations(rela_section)? {
-            if rela.reloc_type == R_X86_64_GOTPCREL {
-                got_slots_needed += 1;
+    let mut group_ends = [0u64; 3];
+    let mut got_base = 0;
+    for (group, end) in group_ends.iter_mut().enumerate() {
+        cursor = align_up(cursor, PAGE_SIZE);
+        for (index, section) in object.sections.iter().enumerate() {
+            if section.flags & SHF_ALLOC == 0 || section.size == 0 || section_group(section.flags) != group {
+                continue;
             }
+            cursor = align_up(cursor, section.addralign);
+            placements.insert(index, cursor);
+            cursor += section.size;
         }
+        if group == GROUP_RODATA {
+            // A minimal GOT, at the end of the read-only group: one 8-byte slot per
+            // R_X86_64_GOTPCREL relocation (no dedup -- a module has at most a handful), eagerly
+            // populated during relocation below, then read-only like the rest (as with full
+            // RELRO). A real requirement, not optional complexity: `core::panicking::
+            // panic_bounds_check`'s message formatting references a numeric `Display::fmt` via
+            // GOTPCREL in any module that indexes a slice -- essentially all of them.
+            got_base = align_up(cursor, 8);
+            cursor = got_base + got_slots_needed(&object)? * 8;
+        }
+        *end = cursor;
     }
-    let got_base = align_up(cursor, 8);
-    cursor = got_base + got_slots_needed * 8;
 
     let region_size = align_up(cursor, PAGE_SIZE);
 
     let base = allocate_region(region_size)?;
-    map_region(base, region_size, mapper, frame_allocator)?;
+    // Writable and not executable while it's filled in and relocated; `protect_region` below sets
+    // the final permissions before any of it runs.
+    map_region(base, region_size, data_flags(), mapper, frame_allocator)?;
 
     // map_region zeroes every page it maps, which already satisfies SHT_NOBITS (.bss-equivalent)
     // sections; copy real (SHT_PROGBITS) section bytes in on top.
@@ -531,6 +535,18 @@ pub fn load(
             }
         }
     }
+
+    // Final permissions: code read-only and executable, read-only data and the GOT read-only, the
+    // rest writable; none of it both.
+    let text_end = align_up(group_ends[GROUP_TEXT], PAGE_SIZE);
+    let rodata_end = align_up(group_ends[GROUP_RODATA], PAGE_SIZE);
+    protect_region(base, text_end, PageTableFlags::PRESENT, mapper)?;
+    protect_region(
+        base + text_end,
+        rodata_end - text_end,
+        PageTableFlags::PRESENT | crate::cpu::nx::no_execute(),
+        mapper,
+    )?;
 
     let init_symbol = object
         .find_defined_symbol("module_init")
@@ -612,7 +628,7 @@ pub(crate) extern "C" fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64 {
         Ok(base) => base,
         Err(_) => return 0,
     };
-    match map_region(base, region_size, mapper, frame_allocator) {
+    match map_region(base, region_size, data_flags(), mapper, frame_allocator) {
         Ok(()) => base,
         Err(_) => 0,
     }
@@ -690,9 +706,68 @@ fn allocate_data_region(size: u64) -> Result<u64, ModuleError> {
     Ok(base)
 }
 
+const GROUP_TEXT: usize = 0;
+const GROUP_RODATA: usize = 1;
+const GROUP_DATA: usize = 2;
+
+/// Which permission group (`load`) a section with these `sh_flags` belongs to.
+fn section_group(flags: u64) -> usize {
+    if flags & SHF_EXECINSTR != 0 {
+        GROUP_TEXT
+    } else if flags & SHF_WRITE != 0 {
+        GROUP_DATA
+    } else {
+        GROUP_RODATA
+    }
+}
+
+/// How many GOT slots `load` needs: one per `R_X86_64_GOTPCREL` relocation.
+fn got_slots_needed(object: &Object) -> Result<u64, ModuleError> {
+    let mut slots = 0;
+    for rela_section in &object.rela_sections {
+        for rela in object.relocations(rela_section)? {
+            if rela.reloc_type == R_X86_64_GOTPCREL {
+                slots += 1;
+            }
+        }
+    }
+    Ok(slots)
+}
+
+/// Kernel data: writable, never executable.
+fn data_flags() -> PageTableFlags {
+    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | crate::cpu::nx::no_execute()
+}
+
+/// Changes the permissions of `[base, base + size)` (page-aligned, already mapped) to `flags`.
+fn protect_region(
+    base: u64,
+    size: u64,
+    flags: PageTableFlags,
+    mapper: &mut OffsetPageTable<'static>,
+) -> Result<(), ModuleError> {
+    if size == 0 {
+        return Ok(());
+    }
+    let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
+    let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + size - 1));
+    for page in Page::range_inclusive(start_page, end_page) {
+        // SAFETY: the page belongs to a module region this loader just mapped and filled; nothing
+        // writes to code or read-only data after relocation.
+        unsafe {
+            mapper
+                .update_flags(page, flags)
+                .map_err(|_| ModuleError::MappingFailed)?
+                .flush();
+        }
+    }
+    Ok(())
+}
+
 fn map_region(
     base: u64,
     size: u64,
+    flags: PageTableFlags,
     mapper: &mut OffsetPageTable<'static>,
     frame_allocator: &mut BootInfoFrameAllocator,
 ) -> Result<(), ModuleError> {
@@ -701,12 +776,8 @@ fn map_region(
     }
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + size - 1));
-    // No USER_ACCESSIBLE: module code runs only in kernel context, never executed directly by
-    // ring-3 code. Every page gets WRITABLE, including ones backing .text-equivalent sections --
-    // relocation application below must patch bytes inside them, and this kernel doesn't
-    // implement NO_EXECUTE/W^X anywhere yet (the same simplification elf.rs's own doc comment
-    // already calls out), so there's no protection benefit to a stricter per-section split today.
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    // No USER_ACCESSIBLE: module code runs only in kernel context. `flags` must be writable: the
+    // pages are zeroed (and, for a module, filled and relocated) through this mapping.
     for page in Page::range_inclusive(start_page, end_page) {
         let frame = frame_allocator
             .allocate_frame()

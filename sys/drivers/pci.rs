@@ -238,7 +238,7 @@ pub fn map_mmio(
     page_count: u64,
 ) -> VirtAddr {
     let virt_base = phys_mem_offset + phys_base.as_u64();
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | crate::cpu::nx::no_execute();
     for i in 0..page_count {
         let page = Page::<Size4KiB>::containing_address(virt_base + i * 4096);
         let frame = PhysFrame::<Size4KiB>::containing_address(phys_base + i * 4096);

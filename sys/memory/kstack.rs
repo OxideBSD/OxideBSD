@@ -48,7 +48,8 @@ pub fn reserve_window(
         .expect("no frame for the kernel stack window's level-3 table");
     // SAFETY: a freshly allocated frame, reachable through the physical-memory window.
     unsafe { (offset + frame.start_address().as_u64()).as_mut_ptr::<PageTable>().write(PageTable::new()) };
-    entry.set_frame(frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+    // The whole window is stacks: no-execute at the top level covers every page in it.
+    entry.set_frame(frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | crate::cpu::nx::no_execute());
 }
 
 /// Is `addr` in the kernel stack window but not mapped -- i.e. did something run off a stack?
@@ -90,7 +91,7 @@ impl GuardedStack {
             return Err(());
         }
         let mut mapper = active_mapper();
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | crate::cpu::nx::no_execute();
         let mapped = super::with_frame_allocator(|fa| {
             for page in stack.pages() {
                 let Some(frame) = fa.allocate_frame() else {

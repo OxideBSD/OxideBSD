@@ -8,6 +8,7 @@ pub mod fpu;
 pub mod gdt;
 pub mod hpet;
 pub mod interrupts;
+pub mod nx;
 pub mod pic;
 pub mod pit;
 pub mod rtc;

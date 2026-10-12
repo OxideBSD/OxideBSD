@@ -110,7 +110,7 @@ pub fn init_heap(
         let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | crate::cpu::nx::no_execute();
         unsafe {
             // `.ignore()`, not `.flush()`: every page in this range is being mapped for the very
             // first time (HEAP_START's own VA range is never touched by anything earlier in boot),

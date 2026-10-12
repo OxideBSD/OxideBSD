@@ -58,6 +58,7 @@ pub fn init(
         Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT));
     }
     cpu::fpu::init();
+    cpu::nx::init();
     cpu::smap::init();
     cpu::interrupts::init_idt();
     cpu::interrupts::init_pics();
@@ -81,6 +82,7 @@ pub fn init(
     kern::subr_msgbuf::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
     memory::usercopy::check_user_range_layout(&mapper);
+    memory::wx::check_kernel(&mapper, "boot");
 
     serial_println!("[boot] kernel initialization complete");
 
