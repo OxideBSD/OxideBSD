@@ -4386,8 +4386,8 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
             // relative path (`conformance/interfaces/mlockall/3-7.c`), and nothing ever seeded that
             // path, so the test's own `open()` failed `ENOENT` before ever reaching its real
             // assertion. Fixed by adding a second `POSIX_TEST_EXTRA_FILES` entry (see that array's
-            // own generation comment above) seeding the literal source text at the exact path pid
-            // 1's own root cwd resolves it against, the same convention `sigaltstack/9-1.c`'s own
+            // own generation comment above) seeding the literal source text at the exact path the
+            // pilot's cwd resolves it against, the same convention `sigaltstack/9-1.c`'s own
             // fixture already established.
             "mlockall/3-7.c",
             // `timer_getoverrun/2-2.c`: needed real sub-10ms timer resolution -- this kernel's
@@ -4712,11 +4712,10 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     // every other "-buildonly.c" file, since it's not runnable as its own standalone assertion --
     // see this function's own doc comment above), built and referenced only by `9-1.c` via a
     // literal relative path copied verbatim from the upstream suite's own build-tree convention:
-    // `conformance/interfaces/sigaltstack/9-buildonly.test`, resolved against pid 1's own root cwd
-    // at the point the pilot script runs (`/`) -- so it has to be seeded at that *exact* path, not
-    // under `/posix-tests/` like every other pilot binary. Kept in a second, separate generated
-    // array (`POSIX_TEST_EXTRA_FILES`) seeded directly at oxfs's own root rather than folded into
-    // `POSIX_TEST_FILES` above, which `sys/modules/oxfs` seeds under `/posix-tests` specifically.
+    // `conformance/interfaces/sigaltstack/9-buildonly.test`, resolved against the cwd the pilot
+    // script runs from (`/usr/tests/posix`) -- so it has to be seeded at that *exact* path, not
+    // under `bin/` like every other pilot binary. Kept in a second, separate generated array
+    // (`POSIX_TEST_EXTRA_FILES`), which `sys/modules/oxfs` seeds next to `POSIX_TEST_FILES`.
     // +0x4000000 (was 0xa7a0000) alongside every other fixed userland/BusyBox/module address --
     // see module::MODULE_VA_BASE's own doc comment.
     const SIGALTSTACK_9_BUILDONLY_LOAD_BASE: u64 = 0xe7a0000;
@@ -4745,7 +4744,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     // `mlockall/3-7.c`'s own real assertion `open()`s its *own source file* by the identical
     // upstream-relative-path convention as `sigaltstack/9-1.c` just above (the suite's own build
     // tree assumes the whole `conformance/` source tree is present alongside the compiled
-    // binaries) -- resolved against the same pid-1 root cwd (`/`) the pilot script runs from, so
+    // binaries) -- resolved against the same cwd (`/usr/tests/posix`) the pilot script runs from, so
     // it needs the literal source text (not a compiled binary -- the test only ever reads it as
     // opaque bytes to mmap, never executes it) seeded at that exact path. No other file in the
     // whole corpus does this (`grep -rl 'open("conformance/interfaces'` confirms it), so one more

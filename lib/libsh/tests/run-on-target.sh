@@ -1,4 +1,4 @@
-# On-target check for OxideBSD's shell (INIT_SH.md §8.3), seeded as /sh-smoke/run.sh next to the
+# On-target check for OxideBSD's shell (INIT_SH.md §8.3), seeded as /usr/tests/sh/run.sh next to the
 # differential scripts and the output dash gave for each on the development host.
 #
 #   run.sh SHELL   -- runs every *.sh beside run.sh under SHELL; exits 0 if all match.

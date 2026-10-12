@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for sysctl(2): `fork` + `execve` `/sysctl-smoke.elf` (a real,
+//! Real-`SYSCALL` driver for sysctl(2): `fork` + `execve` `/usr/tests/sysctl/sysctl-smoke` (a real,
 //! musl-linked C program -- `regress/sysctl-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and
 //! require exit status 0. The fixture goes through musl's `sysctl(3)` family and exits with its
 //! failure count, printing a PASS/FAIL line per check. Same shape as
@@ -152,10 +152,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"sysctl-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/sysctl-smoke.elf", &[b"sysctl-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/sysctl/sysctl-smoke", &[b"sysctl-smoke"]);
     check!(
         ok,
-        b"/sysctl-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/sysctl/sysctl-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"sysctl-syscall-smoke: PASS\n");

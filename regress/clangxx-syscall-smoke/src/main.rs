@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` smoke test for the on-target C++ toolchain: `/bin/clang++` (a symlink to
-//! `/bin/clang` -- the driver picks C++ mode off argv[0]) compiling and linking `/hello.cpp`
+//! `/bin/clang` -- the driver picks C++ mode off argv[0]) compiling and linking `/usr/share/examples/clang/hello.cpp`
 //! (`sys/modules/oxfs/src/hello.cpp`) against the seeded libc++ (`/usr/include/c++/v1`,
 //! `/usr/lib/libc++.a`), then running the result.
 //!
@@ -8,7 +8,7 @@
 //! (`LLVM_DEFAULT_TARGET_TRIPLE`) and the LLVM fork's `OxideBSD::addLibCxxIncludePaths` both
 //! doing their jobs.
 //!
-//! `/hello.cpp` self-checks STL, exceptions/RTTI, `std::thread`/`std::mutex`, and
+//! `/usr/share/examples/clang/hello.cpp` self-checks STL, exceptions/RTTI, `std::thread`/`std::mutex`, and
 //! `std::filesystem`, exiting non-zero if any check fails -- so part 2 only has to look at the
 //! exit status.
 #![no_std]
@@ -177,11 +177,11 @@ pub extern "C" fn _start() -> ! {
             b"-static",
             b"-o",
             b"/hello-cpp.elf",
-            b"/hello.cpp",
+            b"/usr/share/examples/clang/hello.cpp",
         ],
     );
     if !compiled {
-        write_bytes(b"clangxx-syscall-smoke: FAIL: clang++ -static -o /hello-cpp.elf /hello.cpp\n");
+        write_bytes(b"clangxx-syscall-smoke: FAIL: clang++ -static -o /hello-cpp.elf /usr/share/examples/clang/hello.cpp\n");
         test_exit(false);
     }
     write_bytes(b"clangxx-syscall-smoke: compile+link OK\n");

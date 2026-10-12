@@ -1,5 +1,5 @@
 //! Boots the kernel with native_abi, signal, posix_compat, clock, oxfs, socket and sysctl, and spawns
-//! `regress/pagecache-syscall-smoke/` as pid 1, which runs `/pagecache-smoke.elf` -- the read-only
+//! `regress/pagecache-syscall-smoke/` as pid 1, which runs `/usr/tests/pagecache/pagecache-smoke` -- the read-only
 //! page cache's own checks (`regress/pagecache-smoke/main.c`, OxideBSD-doc `PAGECACHE.md` §5.1),
 //! read through `vm.pagecache.*`. Same `SYS_TEST_EXIT` convention as `tests/fork_wait.rs`.
 #![no_std]

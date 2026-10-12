@@ -12,7 +12,7 @@
 //! CLAUDE.md's Test architecture section for why every syscall-shaped addition here gets this
 //! treatment. The actual pilot files (`clock_getcpuclockid/*.c`, `clock_getres/*.c`,
 //! `clock_nanosleep/*.c`, `clock_settime/*.c`) are the real scoring target and get re-verified by
-//! re-running the full pilot (`sh /posix_conformance.sh`) separately -- this crate's job is
+//! re-running the full pilot (`sh /usr/tests/posix/run.sh`) separately -- this crate's job is
 //! narrower: proving the syscall plumbing, argument convention, and (part 8 below) the one
 //! genuinely new piece of real-time-tracking machinery this batch of fixes needed, independent of
 //! musl/the pilot's own C harness.

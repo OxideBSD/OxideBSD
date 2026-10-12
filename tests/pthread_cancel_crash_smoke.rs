@@ -3,7 +3,7 @@
 //! needs), `signal` (`SYS_SIGACTION` -- real `pthread_cancel()`'s own one-time
 //! `init_cancellation()` installs a real `SIGCANCEL` handler the first time it's ever called),
 //! `posix_compat` (`SYS_FUTEX` -- what real `pthread_join` is actually built on), and `oxfs`
-//! (serving `/pthread-cancel-crash.elf` and `/bin/musl`), then spawns
+//! (serving `/usr/tests/pthread/pthread-cancel-crash` and `/bin/musl`), then spawns
 //! `regress/pthread-cancel-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
 //! the full two-part scenario this isolates: a real, expected `SIGSEGV` inside the Open POSIX Test
 //! Suite's own `pthread_cancel/5-1.c` (`regress/pthread-cancel-crash/main.c`'s own doc comment
@@ -91,7 +91,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /pthread-cancel-crash.elf and /bin/musl for the real fork+execve below.
+    // Serves /usr/tests/pthread/pthread-cancel-crash and /bin/musl for the real fork+execve below.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

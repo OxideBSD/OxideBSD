@@ -6,7 +6,7 @@
 //! but this project's own established rule (see CLAUDE.md's Test architecture section) is that
 //! anything needing live interactive keyboard input can't be scripted. Running the conformance
 //! script non-interactively needs a real driver in front of it instead: this crate `fork`s,
-//! `execve`s `/bin/sh /posix_conformance.sh` in the child (a real non-interactive script
+//! `execve`s `/bin/sh /usr/tests/posix/run.sh` in the child (a real non-interactive script
 //! invocation -- BusyBox hush skips its own interactive job-control startup whenever it's given a
 //! script argument, so this needs no controlling-tty setup this test's module list doesn't already
 //! provide), and `wait4`s in the parent.
@@ -148,11 +148,11 @@ fn wait4(pid: u64, status: &mut i32) -> Result<u64, u64> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    write_bytes(b"posix-conformance-driver: spawning sh /posix_conformance.sh\n");
+    write_bytes(b"posix-conformance-driver: spawning sh /usr/tests/posix/run.sh\n");
 
     match fork() {
         Ok(0) => {
-            let _ = execve(b"/bin/sh", &[b"sh", b"/posix_conformance.sh"]);
+            let _ = execve(b"/bin/sh", &[b"sh", b"/usr/tests/posix/run.sh"]);
             write_bytes(b"posix-conformance-driver: execve(/bin/sh) failed\n");
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);

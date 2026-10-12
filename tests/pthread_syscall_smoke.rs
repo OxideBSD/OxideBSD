@@ -4,7 +4,7 @@
 //! unconditionally calls `rt_sigprocmask` to set up each new thread's own signal mask, and once,
 //! process-wide, to unblock its internal `SIGPT_SET` the first time any thread is ever created),
 //! `posix_compat` (`SYS_FUTEX` -- what real `pthread_join` is actually built on), and `oxfs`
-//! (serving `/pthread-smoke.elf`), then spawns `regress/pthread-syscall-smoke/` as pid 1 -- see
+//! (serving `/usr/tests/pthread/pthread-smoke`), then spawns `regress/pthread-syscall-smoke/` as pid 1 -- see
 //! that crate's own module doc comment for the full fork+execve+wait4 scenario, and
 //! `regress/pthread-smoke/main.c`'s own doc comment for what the executed fixture itself proves
 //! (a real, unmodified musl `pthread_create()`/`pthread_join()` round trip -- "Real threading"
@@ -91,7 +91,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /pthread-smoke.elf for the real fork+execve below.
+    // Serves /usr/tests/pthread/pthread-smoke for the real fork+execve below.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for `ppoll(2)`: `fork` + `execve` `/ppoll-smoke.elf` (a real musl-linked
+//! Real-`SYSCALL` driver for `ppoll(2)`: `fork` + `execve` `/usr/tests/poll/ppoll-smoke` (a real musl-linked
 //! C program -- `regress/ppoll-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and require
 //! exit status 0. Same shape as `regress/at-syscall-smoke/`.
 #![no_std]
@@ -150,10 +150,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"ppoll-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/ppoll-smoke.elf", &[b"ppoll-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/poll/ppoll-smoke", &[b"ppoll-smoke"]);
     check!(
         ok,
-        b"/ppoll-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/poll/ppoll-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"ppoll-syscall-smoke: PASS\n");

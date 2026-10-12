@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` driver for terminal devices and descriptors: `fork` + `execve`
-//! `/tty-smoke.elf` (a real musl-linked C program -- `regress/tty-smoke/main.c`, seeded by
+//! `/usr/tests/tty/tty-smoke` (a real musl-linked C program -- `regress/tty-smoke/main.c`, seeded by
 //! `sys/modules/oxfs`), `wait4`, and require exit status 0. Same shape as `regress/at-syscall-smoke/`.
 #![no_std]
 #![no_main]
@@ -150,10 +150,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"tty-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/tty-smoke.elf", &[b"tty-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/tty/tty-smoke", &[b"tty-smoke"]);
     check!(
         ok,
-        b"/tty-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/tty/tty-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"tty-syscall-smoke: PASS\n");

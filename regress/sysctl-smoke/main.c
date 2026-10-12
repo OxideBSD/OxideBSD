@@ -1,5 +1,5 @@
 /* sysctl(2) and the C library's sysctl(3)/sysctlbyname(3)/sysctlnametomib(3) (OxideBSD-doc
- * SYSCTL.md §§3-5, 11.1), seeded at /sysctl-smoke.elf and run by regress/sysctl-syscall-smoke via
+ * SYSCTL.md §§3-5, 11.1), seeded at /usr/tests/sysctl/sysctl-smoke and run by regress/sysctl-syscall-smoke via
  * tests/sysctl_syscall_smoke.rs.
  *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */

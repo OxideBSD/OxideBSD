@@ -1,6 +1,6 @@
 //! Boots the full kernel with the same module set as `tests/clang_syscall_smoke.rs` (native_abi,
 //! posix_compat, signal, oxfs) and spawns `regress/clangxx-syscall-smoke/` as pid 1: a bare
-//! on-target `clang++ -static -o /hello-cpp.elf /hello.cpp` against the seeded libc++, then
+//! on-target `clang++ -static -o /hello-cpp.elf /usr/share/examples/clang/hello.cpp` against the seeded libc++, then
 //! running the result (which self-checks STL, exceptions/RTTI, std::thread, std::filesystem).
 //! Same `SYS_TEST_EXIT` convention as `tests/fork_wait.rs`.
 #![no_std]

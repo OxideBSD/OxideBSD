@@ -1,5 +1,5 @@
 /* The socket layer through musl's own API (OxideBSD-doc UNIX.md §§3-11), seeded at
- * /socket-smoke.elf and run by regress/socket-syscall-smoke via
+ * /usr/tests/net/socket-smoke and run by regress/socket-syscall-smoke via
  * tests/socket_syscall_smoke.rs. Internet sockets: what needs no peer (there is no loopback
  * interface), plus a connection refused by QEMU's gateway. Local sockets: naming, permissions,
  * each type's semantics, shutdown and close, descriptor passing and its garbage collection, and

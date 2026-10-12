@@ -1,10 +1,10 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write -- everything the
 //! test harness itself needs -- plus `SYS_MPROTECT`, which the dynamic linker's own RELRO step
 //! calls even in this single-interpreter case), `posix_compat` (ioctl/fcntl, for musl's
-//! `isatty()`-style probes), and `oxfs` (open/close/stat/getdents -- serving `/dynlink-smoke.elf`
+//! `isatty()`-style probes), and `oxfs` (open/close/stat/getdents -- serving `/usr/tests/dynlink/dynlink-smoke`
 //! and its real `PT_INTERP` interpreter, `/lib/ld-musl-x86_64.so.1` -> `/usr/lib/libc.so`), then
 //! spawns `regress/dynlink-syscall-smoke/` as pid 1 -- see that crate's own module doc comment
-//! for the full scenario (a real `fork`+`execve` of `/dynlink-smoke.elf` through a genuine
+//! for the full scenario (a real `fork`+`execve` of `/usr/tests/dynlink/dynlink-smoke` through a genuine
 //! `PT_INTERP` load).
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/

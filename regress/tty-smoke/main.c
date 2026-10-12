@@ -1,5 +1,5 @@
 /* Terminal device nodes and descriptors (TTY.md §6 in OxideBSD-doc) on OxideBSD (seeded at
- * /tty-smoke.elf, run by regress/tty-syscall-smoke via tests/tty_syscall_smoke.rs).
+ * /usr/tests/tty/tty-smoke, run by regress/tty-syscall-smoke via tests/tty_syscall_smoke.rs).
  *
  * Runs in pid 1's session, whose controlling terminal is ttyv0, with fds 0-2 on it. Checks:
  * /dev/ttyv0, /dev/tty and /dev/console open the kernel's terminal; fstat on a terminal descriptor

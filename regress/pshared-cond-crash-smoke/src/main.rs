@@ -4,7 +4,7 @@
 //! `PTHREAD_PROCESS_SHARED` mutex/cond in a real file-backed `MAP_SHARED` region, not up to
 //! `MAX_PROCESS_CHILDREN = 200`).
 //!
-//! `fork`+`execve`s `/pshared-cond-crash.elf` and `wait4`s for it. If the real bug reproduces at
+//! `fork`+`execve`s `/usr/tests/pthread/pshared-cond-crash` and `wait4`s for it. If the real bug reproduces at
 //! this narrower scale, that `wait4` call itself never returns -- this test's own real `cargo
 //! test` timeout is what would actually surface that, not a clean FAIL report.
 //!
@@ -137,7 +137,7 @@ pub extern "C" fn _start() -> ! {
 
     let child = match fork() {
         Ok(0) => {
-            let _ = execve(b"/pshared-cond-crash.elf", &[b"pshared-cond-crash.elf"]);
+            let _ = execve(b"/usr/tests/pthread/pshared-cond-crash", &[b"pshared-cond-crash"]);
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);
             }
@@ -151,16 +151,16 @@ pub extern "C" fn _start() -> ! {
             test_exit(false);
         }
     };
-    write_bytes(b"pshared-cond-crash-smoke: waiting for /pshared-cond-crash.elf\n");
+    write_bytes(b"pshared-cond-crash-smoke: waiting for /usr/tests/pthread/pshared-cond-crash\n");
     let mut status: i32 = -1;
     let waited = wait4(child, &mut status);
     check!(
         waited == Ok(child),
-        b"wait4 for pshared-cond-crash.elf didn't return the right pid"
+        b"wait4 for pshared-cond-crash didn't return the right pid"
     );
     check!(
         status == 0,
-        b"pshared-cond-crash.elf didn't exit cleanly"
+        b"pshared-cond-crash didn't exit cleanly"
     );
 
     write_bytes(b"pshared-cond-crash-smoke: PASS\n");

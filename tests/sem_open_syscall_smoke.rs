@@ -4,7 +4,7 @@
 //! `clock_gettime`, and this fixture's own `usleep()` rendezvous needs real `nanosleep`), `signal`
 //! (`SYS_SIGPROCMASK` -- real `fork()` unconditionally blocks/restores signals around the fork
 //! transition), `posix_compat` (`SYS_FUTEX` -- what real `sem_wait`/`sem_post` are actually built
-//! on), and `oxfs` (serving `/sem-open-smoke.elf` and real `/dev/shm`), then spawns
+//! on), and `oxfs` (serving `/usr/tests/ipc/sem-open-smoke` and real `/dev/shm`), then spawns
 //! `regress/sem-open-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
 //! full fork+execve+wait4 scenario, and `regress/sem-open-smoke/main.c`'s own doc comment for
 //! what the executed fixture itself proves: real cross-process named-semaphore coordination
@@ -107,7 +107,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /sem-open-smoke.elf and real /dev/shm for the real fork+execve below.
+    // Serves /usr/tests/ipc/sem-open-smoke and real /dev/shm for the real fork+execve below.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

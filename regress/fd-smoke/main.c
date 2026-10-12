@@ -1,4 +1,4 @@
-/* File descriptor numbering and named pipes (FIFOs) on OxideBSD (seeded at /fd-smoke.elf, run by
+/* File descriptor numbering and named pipes (FIFOs) on OxideBSD (seeded at /usr/tests/fd/fd-smoke, run by
  * regress/fd-syscall-smoke via tests/fd_syscall_smoke.rs).
  *
  * POSIX: open()/pipe()/dup()/socket() return the lowest fd the process doesn't have open, and

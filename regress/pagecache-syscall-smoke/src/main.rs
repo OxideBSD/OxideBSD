@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for the read-only page cache: `fork` + `execve` `/pagecache-smoke.elf`
+//! Real-`SYSCALL` driver for the read-only page cache: `fork` + `execve` `/usr/tests/pagecache/pagecache-smoke`
 //! (`regress/pagecache-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and require exit
 //! status 0. Same shape as `regress/pagecache-syscall-smoke/`.
 #![no_std]
@@ -150,10 +150,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"pagecache-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/pagecache-smoke.elf", &[b"pagecache-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/pagecache/pagecache-smoke", &[b"pagecache-smoke"]);
     check!(
         ok,
-        b"/pagecache-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/pagecache/pagecache-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"pagecache-syscall-smoke: PASS\n");

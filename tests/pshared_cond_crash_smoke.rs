@@ -4,7 +4,7 @@
 //! `clock_gettime`, same as `sem_open()` does), `signal` (`SYS_SIGPROCMASK` -- real `fork()`
 //! unconditionally blocks/restores signals around the fork transition), `posix_compat`
 //! (`SYS_FUTEX` -- what real `pthread_mutex`/`pthread_cond` are actually built on), and `oxfs`
-//! (serving `/pshared-cond-crash.elf` and real `/tmp`), then spawns
+//! (serving `/usr/tests/pthread/pshared-cond-crash` and real `/tmp`), then spawns
 //! `regress/pshared-cond-crash-smoke/` as pid 1 -- see that crate's own module doc comment for
 //! the fork+execve+wait4 scenario, and `regress/pshared-cond-crash/main.c`'s own doc comment for
 //! what the executed fixture itself isolates: a real cross-process `PTHREAD_PROCESS_SHARED`
@@ -106,7 +106,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /pshared-cond-crash.elf and real /tmp for the real fork+execve below.
+    // Serves /usr/tests/pthread/pshared-cond-crash and real /tmp for the real fork+execve below.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

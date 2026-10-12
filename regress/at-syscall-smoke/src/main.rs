@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for the `*at()` family: `fork` + `execve` `/at-smoke.elf` (a real,
+//! Real-`SYSCALL` driver for the `*at()` family: `fork` + `execve` `/usr/tests/at/at-smoke` (a real,
 //! musl-linked C program -- `regress/at-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and
 //! require exit status 0. The fixture checks every `*at()` call through musl's own public wrappers
 //! and exits with its failure count, printing a PASS/FAIL line per check. Same shape as
@@ -152,10 +152,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"at-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/at-smoke.elf", &[b"at-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/at/at-smoke", &[b"at-smoke"]);
     check!(
         ok,
-        b"/at-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/at/at-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"at-syscall-smoke: PASS\n");

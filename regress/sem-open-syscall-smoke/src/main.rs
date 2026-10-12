@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` driver for real cross-process named-semaphore coordination
-//! (`sem_open()`+`fork()`): confirms `/sem-open-smoke.elf` (a real, genuinely-unmodified musl
+//! (`sem_open()`+`fork()`): confirms `/usr/tests/ipc/sem-open-smoke` (a real, genuinely-unmodified musl
 //! fixture, seeded by `sys/modules/oxfs`'s `format_fresh_filesystem` -- see `build.rs`'s
 //! `build_sem_open_smoke` and `regress/sem-open-smoke/main.c`'s own doc comment) actually runs to
 //! completion. This is the scenario `process::limits::futex_key` (`sys/process/limits.rs`) exists
@@ -10,7 +10,7 @@
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- same reasoning every other real-`SYSCALL` smoke
 //! test in this codebase documents. One part, via `tests/sem_open_syscall_smoke.rs` spawning this
-//! binary as pid 1: `fork` + `execve` `/sem-open-smoke.elf` (no argv/envp needed), `wait4` for a
+//! binary as pid 1: `fork` + `execve` `/usr/tests/ipc/sem-open-smoke` (no argv/envp needed), `wait4` for a
 //! clean exit -- exactly the same shape `regress/pthread-syscall-smoke/` already established for
 //! driving a real musl fixture.
 #![no_std]
@@ -162,10 +162,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"sem-open-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/sem-open-smoke.elf", &[b"sem-open-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/ipc/sem-open-smoke", &[b"sem-open-smoke"]);
     check!(
         ok,
-        b"running /sem-open-smoke.elf (real sem_open/fork/sem_post/sem_wait) failed"
+        b"running /usr/tests/ipc/sem-open-smoke (real sem_open/fork/sem_post/sem_wait) failed"
     );
 
     write_bytes(b"sem-open-syscall-smoke: PASS\n");

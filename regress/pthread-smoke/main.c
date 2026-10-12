@@ -12,7 +12,7 @@
  * Built via `build_pthread_smoke` in build.rs (same `musl-gcc -static` recipe `build_musl_smoke`
  * already established for `regress/musl-smoke/`, against the existing static sysroot -- no need
  * for `build_musl_sysroot_shared`'s separate -fPIC build; threading needs no dynamic linking),
- * seeded into oxfs as `/pthread-smoke.elf`, and `fork`+`execve`'d by
+ * seeded into oxfs as `/usr/tests/pthread/pthread-smoke`, and `fork`+`execve`'d by
  * `regress/pthread-syscall-smoke/` (a small Rust driver, the same shape
  * `regress/dynlink-syscall-smoke/` already uses to drive a real musl fixture through a genuine
  * `SYSCALL`/`SYSRETQ` round trip).

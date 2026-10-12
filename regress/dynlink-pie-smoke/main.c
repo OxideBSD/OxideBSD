@@ -1,6 +1,6 @@
 /* A dynamically linked PIE main binary: ET_DYN *with* a PT_INTERP, the shape every ordinary
  * dynamically linked program has (OpenSSL's `openssl`, for one). Run by
- * regress/dynlink-syscall-smoke, next to the fixed-address /dynlink-smoke.elf.
+ * regress/dynlink-syscall-smoke, next to the fixed-address /usr/tests/dynlink/dynlink-smoke.
  *
  * Checks that the kernel gave this image a real load bias in the PIE ASLR window
  * (sys/process/aslr.rs) rather than loading it at its link address 0, that libc.so came in at the

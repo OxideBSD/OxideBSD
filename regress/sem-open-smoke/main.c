@@ -12,7 +12,7 @@
  * end" approach.
  *
  * Built via `build_sem_open_smoke` in build.rs (same `musl-gcc -static` recipe `build_musl_smoke`/
- * `build_pthread_smoke` already established), seeded into oxfs as `/sem-open-smoke.elf`, and
+ * `build_pthread_smoke` already established), seeded into oxfs as `/usr/tests/ipc/sem-open-smoke`, and
  * `fork`+`execve`'d by `regress/sem-open-syscall-smoke/` (a small Rust driver, the same shape
  * `regress/pthread-syscall-smoke/` already uses to drive a real musl fixture through a genuine
  * `SYSCALL`/`SYSRETQ` round trip).

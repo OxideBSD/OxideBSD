@@ -1,4 +1,4 @@
-# Seeded at /ninja-demo: `ninja -C /ninja-demo` compiles two C files and links them with the
+# Seeded at /usr/share/examples/ninja: `ninja` there compiles two C files and links them with the
 # on-target clang (tests/ninja_syscall_smoke.rs), so ninja walks a real dependency graph and
 # runs its jobs through /bin/sh.
 cc = clang

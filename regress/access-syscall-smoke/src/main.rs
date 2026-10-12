@@ -9,7 +9,7 @@
 //! every call).
 //!
 //! Three parts, all through `tests/access_syscall_smoke.rs` spawning this binary as pid 1:
-//! 1. As root: `F_OK`/`R_OK` (singly and combined with `W_OK`/`X_OK`) against `/hello.txt` (a
+//! 1. As root: `F_OK`/`R_OK` (singly and combined with `W_OK`/`X_OK`) against `/usr/tests/oxfs/hello.txt` (a
 //!    real seeded data file, mode `0o644`) all succeed -- root bypasses every bit, `X_OK` included. `F_OK` against a
 //!    nonexistent path fails real `ENOENT`.
 //! 2. Still as root: create `/accesstest`, `chmod` it to `0o600`, `chown` it to uid `99`.
@@ -112,17 +112,17 @@ fn access(path: &[u8], amode: u64) -> Result<u64, u64> {
 /// Part 1 -- see this file's own module doc comment. Returns `false` (without exiting) on any
 /// failed check.
 fn check_root_access() -> bool {
-    let hello = b"/hello.txt";
+    let hello = b"/usr/tests/oxfs/hello.txt";
     if access(hello, F_OK) != Ok(0) {
-        write_bytes(b"access-syscall-smoke: F_OK against /hello.txt failed\n");
+        write_bytes(b"access-syscall-smoke: F_OK against /usr/tests/oxfs/hello.txt failed\n");
         return false;
     }
     if access(hello, R_OK) != Ok(0) {
-        write_bytes(b"access-syscall-smoke: R_OK against /hello.txt failed\n");
+        write_bytes(b"access-syscall-smoke: R_OK against /usr/tests/oxfs/hello.txt failed\n");
         return false;
     }
     if access(hello, R_OK | W_OK | X_OK) != Ok(0) {
-        write_bytes(b"access-syscall-smoke: R_OK|W_OK|X_OK against /hello.txt failed\n");
+        write_bytes(b"access-syscall-smoke: R_OK|W_OK|X_OK against /usr/tests/oxfs/hello.txt failed\n");
         return false;
     }
     if access(b"/does-not-exist-xyz", F_OK) != Err(ENOENT) {

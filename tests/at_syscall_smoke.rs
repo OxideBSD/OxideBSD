@@ -1,6 +1,6 @@
 //! Boots the full kernel with the same module set as `tests/pthread_syscall_smoke.rs` (native_abi,
 //! signal, posix_compat, oxfs) and spawns `regress/at-syscall-smoke/` as pid 1, which runs
-//! `/at-smoke.elf` -- real musl-linked coverage of the whole `*at()` family (see
+//! `/usr/tests/at/at-smoke` -- real musl-linked coverage of the whole `*at()` family (see
 //! `regress/at-smoke/main.c`). Same `SYS_TEST_EXIT` convention as `tests/fork_wait.rs`.
 #![no_std]
 #![no_main]
@@ -79,7 +79,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /at-smoke.elf and every *at() call it makes.
+    // Serves /usr/tests/at/at-smoke and every *at() call it makes.
     // Populates SYS_CLOCK_GETTIME -- tmpnam()/tmpfile()'s random names are seeded from it.
     const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
     const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");

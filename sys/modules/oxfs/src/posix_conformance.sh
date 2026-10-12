@@ -2,22 +2,22 @@
 # A real POSIX conformance baseline -- runs INSIDE OxideBSD, not on the host.
 #
 # Usage, at a root shell:
-#   sh /posix_conformance.sh
+#   sh /usr/tests/posix/run.sh
 #
 # See OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md, section 2, for how it is run and why it exists: every
 # other doc in this tree (OxideBSD-doc/MISSING_POSIX_SYSCALLS.md, that checklist itself) is
 # self-assessment against a hand-written list. This is a real, independent conformance suite (the
 # Open POSIX Test Suite, vendored at external/gpl2/posixtestsuite) actually run against this kernel.
 #
-# What this script does, for each `relative/path.c` line in `/posix-tests/manifest.txt` (a curated
+# What this script does, for each `relative/path.c` line in `/usr/tests/posix/manifest.txt` (a curated
 # pilot subset -- see build.rs's `write_posix_test_manifest` for exactly which files and why; NOT
 # the whole suite, which is ~1750 files in `conformance/interfaces` alone):
-#   1. Run `/posix-tests/bin/<relative/path.c>` (a real ELF, pre-compiled on the host with
+#   1. Run `/usr/tests/posix/bin/<relative/path.c>` (a real ELF, pre-compiled on the host with
 #      `musl-gcc` -- see `write_posix_test_manifest`'s own doc comment for why on-target `tcc`
 #      compilation was tried first and abandoned: a real `tcc` GOT/PLT linker bug produced binaries
 #      that null-pointer-faulted calling into specific musl functions -- `sigaction`/`fflush`
 #      confirmed -- found live investigating exactly this pilot's own early crashes) through
-#      `/posix-tests/t0` (the suite's own real timeout-wrapper utility, also pre-compiled) with a
+#      `/usr/tests/posix/t0` (the suite's own real timeout-wrapper utility, also pre-compiled) with a
 #      real bounded timeout -- load-bearing, not a nicety: this kernel has no preemption, so a test
 #      that blocks forever on something genuinely unimplemented (a `sem_wait` that can never wake
 #      without real `futex(2)`, say) would otherwise hang this whole script -- and the shell
@@ -41,9 +41,13 @@ UNTESTED=0
 TIMEOUT=0
 CRASH=0
 
+# The tests run from the corpus's own directory: sigaltstack/9-1.c execl()s a cwd-relative path
+# (conformance/interfaces/sigaltstack/9-buildonly.test, from the suite's build tree), seeded here.
+cd /usr/tests/posix || exit 1
+
 echo "=== posix conformance pilot: running ==="
-for rel in $(cat /posix-tests/manifest.txt); do
-    bin="/posix-tests/bin/$rel"
+for rel in $(cat /usr/tests/posix/manifest.txt); do
+    bin="/usr/tests/posix/bin/$rel"
 
     # 40s, not 5s: nanosleep/10000-1.c alone legitimately sleeps through ~27 real seconds of valid
     # durations (0+1+1+2+10+13s) before it even reaches its invalid-parameter checks -- a real,
@@ -51,7 +55,7 @@ for rel in $(cat /posix-tests/manifest.txt); do
     # timed it out and misclassified a passing test as TIMEOUT.
     #
     # A handful of pilot files self-skip (`PTS_UNTESTED`) whenever `getuid() == 0`, since this
-    # whole pilot otherwise always runs as root (`su`'s own child, in turn `sh /posix_conformance.sh`,
+    # whole pilot otherwise always runs as root (`su`'s own child, in turn `sh /usr/tests/posix/run.sh`,
     # is invoked directly by `posix-conformance-driver`, itself pid 1 -- see that crate's own doc
     # comment). Most such files (`sem_open/3-1.c`, `sigqueue/3-1.c,12-1.c`, `sched_getparam/6-1.c`,
     # `sched_getscheduler/7-1.c`, `sched_setscheduler/20-1.c`, `shm_open/32-1.c,34-1.c`) already call
@@ -76,10 +80,10 @@ for rel in $(cat /posix-tests/manifest.txt); do
     # against root-owned pid 1 -- expects `EPERM`) instead of ever hitting the early bailout.
     case "$rel" in
         sched_setparam/26-1.c)
-            su user -c "/posix-tests/t0 40 $bin" >/posix-tests/run-out.txt 2>&1
+            su user -c "/usr/tests/posix/t0 40 $bin" >/usr/tests/posix/run-out.txt 2>&1
             ;;
         *)
-            /posix-tests/t0 40 "$bin" >/posix-tests/run-out.txt 2>&1
+            /usr/tests/posix/t0 40 "$bin" >/usr/tests/posix/run-out.txt 2>&1
             ;;
     esac
     status=$?

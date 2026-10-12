@@ -1,4 +1,4 @@
-/* Real musl ppoll() coverage on OxideBSD (seeded at /ppoll-smoke.elf, run by
+/* Real musl ppoll() coverage on OxideBSD (seeded at /usr/tests/poll/ppoll-smoke, run by
  * regress/ppoll-syscall-smoke via tests/ppoll_syscall_smoke.rs). The mask checks are the ones
  * ninja's subprocess loop depends on: a blocked-but-pending signal interrupts a ppoll() whose mask
  * unblocks it, its handler runs, and the caller's original mask is back afterwards. The pipe

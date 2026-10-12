@@ -1,5 +1,5 @@
 //! Real-`SYSCALL` driver for "Real threading" phases 1-5's own finish line: confirms
-//! `/pthread-smoke.elf` (a real, genuinely-unmodified musl `pthread_create()`/`pthread_join()`
+//! `/usr/tests/pthread/pthread-smoke` (a real, genuinely-unmodified musl `pthread_create()`/`pthread_join()`
 //! program, seeded by `sys/modules/oxfs`'s `format_fresh_filesystem` -- see `build.rs`'s
 //! `build_pthread_smoke` and `regress/pthread-smoke/main.c`'s own doc comment) actually runs to
 //! completion -- not `clone-syscall-smoke`'s own raw-syscall proof of the kernel primitive alone,
@@ -8,7 +8,7 @@
 //! Deliberately a real spawned ELF driven through genuine `SYSCALL`/`SYSRETQ`, not a plain Rust
 //! function call from a test's own `main()` -- same reasoning every other real-`SYSCALL` smoke
 //! test in this codebase documents. One part, via `tests/pthread_syscall_smoke.rs` spawning this
-//! binary as pid 1: `fork` + `execve` `/pthread-smoke.elf` (no argv/envp needed), `wait4` for a
+//! binary as pid 1: `fork` + `execve` `/usr/tests/pthread/pthread-smoke` (no argv/envp needed), `wait4` for a
 //! clean exit -- exactly the same shape `regress/dynlink-syscall-smoke/` already established for
 //! driving a real musl fixture.
 #![no_std]
@@ -160,10 +160,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"pthread-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/pthread-smoke.elf", &[b"pthread-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/pthread/pthread-smoke", &[b"pthread-smoke"]);
     check!(
         ok,
-        b"running /pthread-smoke.elf (real pthread_create/pthread_join) failed"
+        b"running /usr/tests/pthread/pthread-smoke (real pthread_create/pthread_join) failed"
     );
 
     write_bytes(b"pthread-syscall-smoke: PASS\n");

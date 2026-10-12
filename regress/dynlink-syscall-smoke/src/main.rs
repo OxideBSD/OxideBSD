@@ -1,6 +1,6 @@
 //! Real-`SYSCALL` smoke test for PT_INTERP / dynamic-linking milestone 1 (see the plan this was
 //! built from, and once it exists, CLAUDE.md's own "Dynamic linking" section): confirms
-//! `/dynlink-smoke.elf`, a real dynamically-linked musl binary seeded by `sys/modules/oxfs`'s
+//! `/usr/tests/dynlink/dynlink-smoke`, a real dynamically-linked musl binary seeded by `sys/modules/oxfs`'s
 //! `format_fresh_filesystem` (see `build.rs`'s `build_musl_sysroot`/`build_dynlink_smoke`),
 //! actually runs to completion through a real `PT_INTERP` load -- not just that the kernel accepts
 //! the file.
@@ -13,7 +13,7 @@
 //! main binary's, exactly the class of thing worth exercising through the genuine ring-3 path.
 //!
 //! One part, via `tests/dynlink_syscall_smoke.rs` spawning this binary as pid 1: `fork` + `execve`
-//! `/dynlink-smoke.elf` (no argv/envp needed -- it just calls `write()` once and returns), `wait4`
+//! `/usr/tests/dynlink/dynlink-smoke` (no argv/envp needed -- it just calls `write()` once and returns), `wait4`
 //! for a clean exit.
 #![no_std]
 #![no_main]
@@ -164,11 +164,11 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"dynlink-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/dynlink-smoke.elf", &[b"dynlink-smoke.elf"]);
-    check!(ok, b"running /dynlink-smoke.elf via a real PT_INTERP exec failed");
+    let ok = run_and_wait(b"/usr/tests/dynlink/dynlink-smoke", &[b"dynlink-smoke"]);
+    check!(ok, b"running /usr/tests/dynlink/dynlink-smoke via a real PT_INTERP exec failed");
 
-    let ok = run_and_wait(b"/dynlink-pie-smoke.elf", &[b"dynlink-pie-smoke.elf"]);
-    check!(ok, b"running the dynamically linked PIE /dynlink-pie-smoke.elf failed");
+    let ok = run_and_wait(b"/usr/tests/dynlink/dynlink-pie-smoke", &[b"dynlink-pie-smoke"]);
+    check!(ok, b"running the dynamically linked PIE /usr/tests/dynlink/dynlink-pie-smoke failed");
 
     write_bytes(b"dynlink-syscall-smoke: PASS\n");
     test_exit(true);

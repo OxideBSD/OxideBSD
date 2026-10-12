@@ -1,6 +1,6 @@
 //! Boots the kernel with `tests/ppoll_syscall_smoke.rs`'s module set (`net` registers the
 //! `SYS_PPOLL` ninja's subprocess loop needs) and spawns `regress/ninja-syscall-smoke/` as pid 1:
-//! on-target ninja building `/ninja-demo` with the on-target clang, then running the result.
+//! on-target ninja building `/usr/share/examples/ninja` with the on-target clang, then running the result.
 #![no_std]
 #![no_main]
 
@@ -78,7 +78,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /usr/bin/ninja, /bin/clang, /ninja-demo and everything the builds read and write.
+    // Serves /usr/bin/ninja, /bin/clang, /usr/share/examples/ninja and everything the builds read and write.
     // Populates SYS_CLOCK_GETTIME -- tmpnam()/tmpfile()'s random names are seeded from it.
     const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
     const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");

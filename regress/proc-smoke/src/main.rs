@@ -289,11 +289,11 @@ pub extern "C" fn _start() -> ! {
         write_bytes(b"proc-smoke: chdir / failed\n");
         test_exit(false);
     }
-    let real_path = b"/hello.txt";
+    let real_path = b"/usr/tests/oxfs/hello.txt";
     let Ok(real_fd) =
         (unsafe { syscall(SYS_OPEN, real_path.as_ptr() as u64, real_path.len() as u64, 0) })
     else {
-        write_bytes(b"proc-smoke: real open /hello.txt after leaving /proc failed\n");
+        write_bytes(b"proc-smoke: real open /usr/tests/oxfs/hello.txt after leaving /proc failed\n");
         test_exit(false);
     };
     let _ = unsafe { syscall(SYS_CLOSE, real_fd, 0, 0) };

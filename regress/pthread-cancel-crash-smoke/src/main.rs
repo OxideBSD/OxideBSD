@@ -6,7 +6,7 @@
 //! rest of that boot -- see CLAUDE.md's own write-up.
 //!
 //! This driver isolates exactly that shape in a controlled, two-part scenario:
-//!  1. `fork`+`execve` `/pthread-cancel-crash.elf`, `wait4` for it, and confirm it was genuinely
+//!  1. `fork`+`execve` `/usr/tests/pthread/pthread-cancel-crash`, `wait4` for it, and confirm it was genuinely
 //!     killed by `SIGSEGV` (the *expected* part -- not itself the bug under investigation).
 //!  2. Immediately afterward, `fork`+`execve` `/bin/musl` (a real, already-proven-working musl
 //!     binary, `regress/musl-smoke/main.c`) and `wait4` for *that* to confirm the system is still
@@ -157,8 +157,8 @@ pub extern "C" fn _start() -> ! {
     let child = match fork() {
         Ok(0) => {
             let _ = execve(
-                b"/pthread-cancel-crash.elf",
-                &[b"pthread-cancel-crash.elf"],
+                b"/usr/tests/pthread/pthread-cancel-crash",
+                &[b"pthread-cancel-crash"],
             );
             unsafe {
                 let _ = syscall(SYS_EXIT, 127, 0, 0);
@@ -177,11 +177,11 @@ pub extern "C" fn _start() -> ! {
     let waited = wait4(child, &mut status);
     check!(
         waited == Ok(child),
-        b"wait4 for pthread-cancel-crash.elf didn't return the right pid"
+        b"wait4 for pthread-cancel-crash didn't return the right pid"
     );
     check!(
         wtermsig(status) == Some(SIGSEGV),
-        b"pthread-cancel-crash.elf wasn't killed by a real SIGSEGV as expected"
+        b"pthread-cancel-crash wasn't killed by a real SIGSEGV as expected"
     );
     write_bytes(b"pthread-cancel-crash-smoke: part 1 (real SIGSEGV as expected) OK\n");
 

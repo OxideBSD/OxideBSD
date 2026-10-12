@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for the socket layer: `fork` + `execve` `/socket-smoke.elf` (a real,
+//! Real-`SYSCALL` driver for the socket layer: `fork` + `execve` `/usr/tests/net/socket-smoke` (a real,
 //! musl-linked C program -- `regress/socket-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and
 //! require exit status 0. The fixture checks every `*at()` call through musl's own public wrappers
 //! and exits with its failure count, printing a PASS/FAIL line per check. Same shape as
@@ -152,10 +152,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"socket-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/socket-smoke.elf", &[b"socket-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/net/socket-smoke", &[b"socket-smoke"]);
     check!(
         ok,
-        b"/socket-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/net/socket-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"socket-syscall-smoke: PASS\n");

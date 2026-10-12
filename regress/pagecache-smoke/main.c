@@ -1,4 +1,4 @@
-/* The read-only page cache (OxideBSD-doc PAGECACHE.md §5.1), seeded at /pagecache-smoke.elf and
+/* The read-only page cache (OxideBSD-doc PAGECACHE.md §5.1), seeded at /usr/tests/pagecache/pagecache-smoke and
  * run by regress/pagecache-syscall-smoke via tests/pagecache_syscall_smoke.rs:
  *
  * - a second exec of a program maps its pages from the cache (hits rise, misses don't);
@@ -90,8 +90,8 @@ int main(int argc, char **argv)
 
 	/* A copy of this program, which the test then changes. */
 	size_t size;
-	char *image = slurp("/pagecache-smoke.elf", &size);
-	CHECK(image != 0, "read /pagecache-smoke.elf");
+	char *image = slurp("/usr/tests/pagecache/pagecache-smoke", &size);
+	CHECK(image != 0, "read /usr/tests/pagecache/pagecache-smoke");
 	if (!image) return 1;
 	int fd = open(PROG, O_WRONLY | O_CREAT | O_TRUNC, 0755);
 	CHECK(fd >= 0 && write(fd, image, size) == (ssize_t)size, "write " PROG);

@@ -1,5 +1,5 @@
 //! Boots the kernel with native_abi, signal, posix_compat, clock, oxfs, socket and sysctl, and spawns
-//! `regress/sysctl-syscall-smoke/` as pid 1, which runs `/sysctl-smoke.elf` -- `sysctl(2)` through
+//! `regress/sysctl-syscall-smoke/` as pid 1, which runs `/usr/tests/sysctl/sysctl-smoke` -- `sysctl(2)` through
 //! musl's `sysctl(3)` family (`regress/sysctl-smoke/main.c`, OxideBSD-doc `SYSCTL.md` §11.1). Same
 //! `SYS_TEST_EXIT` convention as `tests/fork_wait.rs`.
 #![no_std]

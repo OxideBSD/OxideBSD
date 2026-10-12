@@ -195,6 +195,17 @@ The certificate authorities the system ships, from Mozilla's list, in
 .Pa trusted/
 and
 .Pa untrusted/ .
+.It Pa examples/
+Sample programs:
+.Pa clang/
+for Clang and
+.Pa ninja/
+for ninja.
+.It Pa games/
+Data for the programs in
+.Pa /usr/games :
+.Pa doom/
+holds Doom's shareware IWAD.
 .It Pa man/
 Manual pages, and their index
 .Pa oxdoc.db ;
@@ -245,10 +256,3 @@ A
 manual page appeared in
 .At v7 .
 OxideBSD's is modelled on the BSDs'.
-.Sh CAVEATS
-The root directory also holds files for the test suites
-.Pf ( Pa /posix-tests , /sh-smoke , /ninja-demo
-and a few sources).
-They belong in
-.Pa /usr/tests
-and will move there.

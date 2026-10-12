@@ -6,7 +6,7 @@
 //! musl's own `isatty()`-style startup probes), `net` (just so `SYS_SOCKET` is a real registered
 //! syscall -- see that module's own loading comment below for why: musl's `initgroups()` needs a
 //! real `EAFNOSUPPORT`, not a generic `ENOSYS`, to fall back to parsing `/etc/group`), and `oxfs`
-//! (the filesystem -- `/bin/sh` and the whole `/posix-tests` tree this pilot runs
+//! (the filesystem -- `/bin/sh` and the whole `/usr/tests/posix` tree this pilot runs
 //! against), then spawns
 //! `regress/posix-conformance-driver/` as pid 1 -- see that crate's own module doc comment for
 //! why a dedicated driver exists instead of just spawning `sh` directly (this project's own
@@ -14,7 +14,7 @@
 //! architecture section -- and hush is normally pid 1 and interactive).
 //!
 //! Deliberately not a strict pass/fail assertion over the pilot's own tally (see that crate's own
-//! doc comment) -- read `/posix_conformance.sh`'s own `=== summary ===` block from this test's
+//! doc comment) -- read `/usr/tests/posix/run.sh`'s own `=== summary ===` block from this test's
 //! serial output for the actual, real baseline numbers.
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/

@@ -527,7 +527,7 @@ pub extern "C" fn _start() -> ! {
             b"-rwxr-xr-x",
             b"seeded #! script is 0755",
         ),
-        (b"/hello.txt", b"-rw-r--r--", b"seeded data file is 0644"),
+        (b"/usr/tests/oxfs/hello.txt", b"-rw-r--r--", b"seeded data file is 0644"),
         (b"/etc/passwd", b"-rw-r--r--", b"seeded /etc/passwd is 0644"),
         (
             b"/usr/lib/crt1.o",

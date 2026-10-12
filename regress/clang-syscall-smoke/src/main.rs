@@ -11,7 +11,7 @@
 //! function call from a test's own `main()` -- same reasoning `tests/fork_wait.rs` documents.
 //!
 //! Two parts, both through `tests/clang_syscall_smoke.rs` spawning this binary as pid 1:
-//! 1. `fork` + `execve` `/bin/clang -static -o /hello.elf /hello.c` (`/hello.c` seeded by oxfs's
+//! 1. `fork` + `execve` `/bin/clang -static -o /hello.elf /usr/share/examples/clang/hello.c` (`/usr/share/examples/clang/hello.c` seeded by oxfs's
 //!    own `format_fresh_filesystem`, a real `printf`, not a bare `return`), `wait4` for a clean
 //!    exit. Internally: `clang` forks `clang -cc1`
 //!    to produce an object file, then forks `ld.lld` to link it against the compiler-rt builtins
@@ -232,7 +232,7 @@ fn check_compile_object_only() -> bool {
             b"-c",
             b"-o",
             b"/hello.o",
-            b"/hello.c",
+            b"/usr/share/examples/clang/hello.c",
         ],
     );
     write_bytes(if ok {
@@ -367,13 +367,13 @@ fn check_compile() -> bool {
             b"-static",
             b"-o",
             b"/hello.elf",
-            b"/hello.c",
+            b"/usr/share/examples/clang/hello.c",
         ],
     );
     if ok {
         write_bytes(b"clang-syscall-smoke: compile OK\n");
     } else {
-        write_bytes(b"clang-syscall-smoke: clang -static -o /hello.elf /hello.c failed\n");
+        write_bytes(b"clang-syscall-smoke: clang -static -o /hello.elf /usr/share/examples/clang/hello.c failed\n");
     }
     ok
 }

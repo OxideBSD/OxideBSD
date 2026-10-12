@@ -1,4 +1,4 @@
-//! Real-`SYSCALL` driver for fd numbering and FIFOs: `fork` + `execve` `/fd-smoke.elf` (a real
+//! Real-`SYSCALL` driver for fd numbering and FIFOs: `fork` + `execve` `/usr/tests/fd/fd-smoke` (a real
 //! musl-linked C program -- `regress/fd-smoke/main.c`, seeded by `sys/modules/oxfs`), `wait4`, and require
 //! exit status 0. Same shape as `regress/at-syscall-smoke/`.
 #![no_std]
@@ -150,10 +150,10 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
 pub extern "C" fn _start() -> ! {
     write_bytes(b"fd-syscall-smoke: starting\n");
 
-    let ok = run_and_wait(b"/fd-smoke.elf", &[b"fd-smoke.elf"]);
+    let ok = run_and_wait(b"/usr/tests/fd/fd-smoke", &[b"fd-smoke"]);
     check!(
         ok,
-        b"/fd-smoke.elf reported failures (see its PASS/FAIL lines above)"
+        b"/usr/tests/fd/fd-smoke reported failures (see its PASS/FAIL lines above)"
     );
 
     write_bytes(b"fd-syscall-smoke: PASS\n");

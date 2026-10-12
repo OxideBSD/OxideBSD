@@ -2,9 +2,9 @@
 //! mmap/brk/set_fs_base -- everything musl's own runtime needs for a real `clang` invocation:
 //! malloc via brk/mmap, stdio via writev, TLS via set_fs_base), `posix_compat` (ioctl/fcntl, for
 //! musl's `isatty()`-style probes), and `oxfs` (open/close/stat/getdents/mkdir -- `clang`'s own
-//! `/usr/include`/`/usr/lib`/`/lib/clang/23` tree, plus `/hello.c`/`/hello.elf`), then spawns
+//! `/usr/include`/`/usr/lib`/`/lib/clang/23` tree, plus `/usr/share/examples/clang/hello.c`/`/hello.elf`), then spawns
 //! `regress/clang-syscall-smoke/` as pid 1 -- see that crate's own module doc comment for the
-//! full scenario (a real `clang -static -o /hello.elf /hello.c`, then running the result).
+//! full scenario (a real `clang -static -o /hello.elf /usr/share/examples/clang/hello.c`, then running the result).
 //!
 //! Same `SYS_TEST_EXIT` convention `tests/fork_wait.rs` established: `scheduler::start`/
 //! `process::do_exit` never return control to this file's own `main`, so the child reports

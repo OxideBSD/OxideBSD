@@ -1,4 +1,4 @@
-/* Real, unmodified-musl-API coverage of the *at() family on OxideBSD (seeded at /at-smoke.elf,
+/* Real, unmodified-musl-API coverage of the *at() family on OxideBSD (seeded at /usr/tests/at/at-smoke,
  * run by regress/at-syscall-smoke via tests/at_syscall_smoke.rs). Every call goes through musl's
  * own public wrapper -- the same code any ported program links -- except execveat, which musl
  * doesn't export, so it's issued through syscall() with the same struct the wrappers build.
@@ -132,7 +132,7 @@ int main(void)
 	mkdir("/at-test", 0755);
 	int dfd = open("/at-test", O_RDONLY | O_DIRECTORY);
 	CHECK(dfd >= 0, "open(O_DIRECTORY) on a directory");
-	CHECK_ERR(open("/hello.c", O_RDONLY | O_DIRECTORY), ENOTDIR, "open(O_DIRECTORY) on a file");
+	CHECK_ERR(open("/usr/tests/oxfs/hello.txt", O_RDONLY | O_DIRECTORY), ENOTDIR, "open(O_DIRECTORY) on a file");
 
 	/* mkdirat / openat / fstatat */
 	CHECK(mkdirat(dfd, "sub", 0755) == 0, "mkdirat");

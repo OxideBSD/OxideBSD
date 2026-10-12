@@ -1,5 +1,5 @@
 //! Boots the full kernel, loads `native_abi` (fork/exit/wait4/execve/read/write) and `oxfs`
-//! (open/close/stat/getdents -- serving `/pie-aslr-probe.elf`), then spawns
+//! (open/close/stat/getdents -- serving `/usr/tests/aslr/pie-aslr-probe`), then spawns
 //! `regress/pie-aslr-driver/` as pid 1 -- see that crate's own module doc comment, and
 //! `regress/pie-aslr-smoke/src/main.rs`'s, for the full scenario: two real `fork`+`execve` runs of
 //! a genuine no-`PT_INTERP` PIE main binary, proving `process::aslr::pick_bias()`'s real per-exec

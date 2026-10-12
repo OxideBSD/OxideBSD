@@ -1,5 +1,5 @@
 //! Boots the kernel with `tests/ppoll_syscall_smoke.rs`'s module set and spawns
-//! `regress/fd-syscall-smoke/` as pid 1, which runs `/fd-smoke.elf` -- lowest-free fd numbering
+//! `regress/fd-syscall-smoke/` as pid 1, which runs `/usr/tests/fd/fd-smoke` -- lowest-free fd numbering
 //! and FIFOs through real musl (see `regress/fd-smoke/main.c`).
 #![no_std]
 #![no_main]
@@ -78,7 +78,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /fd-smoke.elf.
+    // Serves /usr/tests/fd/fd-smoke.
     // Populates SYS_CLOCK_GETTIME -- tmpnam()/tmpfile()'s random names are seeded from it.
     const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
     const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");

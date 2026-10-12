@@ -1,7 +1,7 @@
 //! Real-`SYSCALL` smoke test for on-target ninja (`/usr/bin/ninja`, build.rs's `build_ninja`):
-//! `ninja --version`, then `ninja -C /ninja-demo` -- a real build graph (two `clang -c` jobs, then
+//! `ninja --version`, then `ninja -C /usr/share/examples/ninja` -- a real build graph (two `clang -c` jobs, then
 //! a link) that ninja runs through `/bin/sh` and waits on with `ppoll` -- then the program it
-//! produced. `/ninja-demo` is seeded by `sys/modules/oxfs` (`src/ninja-demo/`).
+//! produced. `/usr/share/examples/ninja` is seeded by `sys/modules/oxfs` (`src/ninja-demo/`).
 #![no_std]
 #![no_main]
 
@@ -162,13 +162,13 @@ pub extern "C" fn _start() -> ! {
         write_bytes(b"ninja-syscall-smoke: FAIL: ninja --version\n");
         test_exit(false);
     }
-    if !run_and_wait(b"/usr/bin/ninja", &[b"ninja", b"-C", b"/ninja-demo"]) {
-        write_bytes(b"ninja-syscall-smoke: FAIL: ninja -C /ninja-demo\n");
+    if !run_and_wait(b"/usr/bin/ninja", &[b"ninja", b"-C", b"/usr/share/examples/ninja"]) {
+        write_bytes(b"ninja-syscall-smoke: FAIL: ninja -C /usr/share/examples/ninja\n");
         test_exit(false);
     }
     write_bytes(b"ninja-syscall-smoke: ninja build OK\n");
-    if !run_and_wait(b"/ninja-demo/hello", &[b"hello"]) {
-        write_bytes(b"ninja-syscall-smoke: FAIL: running /ninja-demo/hello\n");
+    if !run_and_wait(b"/usr/share/examples/ninja/hello", &[b"hello"]) {
+        write_bytes(b"ninja-syscall-smoke: FAIL: running /usr/share/examples/ninja/hello\n");
         test_exit(false);
     }
     write_bytes(b"ninja-syscall-smoke: PASS\n");

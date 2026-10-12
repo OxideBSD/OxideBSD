@@ -21,7 +21,7 @@ const STDOUT: u64 = 1;
 /// every other real-`SYSCALL` smoke test in this codebase uses.
 const SYS_TEST_EXIT: u64 = 9999;
 
-const PROBE_PATH: &[u8] = b"/pie-aslr-probe.elf";
+const PROBE_PATH: &[u8] = b"/usr/tests/aslr/pie-aslr-probe";
 
 #[repr(C)]
 #[derive(Clone, Copy)]

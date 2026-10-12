@@ -1,5 +1,5 @@
 //! Boots the kernel with `tests/ppoll_syscall_smoke.rs`'s module set and spawns
-//! `regress/tty-syscall-smoke/` as pid 1, which runs `/tty-smoke.elf` -- terminal device nodes,
+//! `regress/tty-syscall-smoke/` as pid 1, which runs `/usr/tests/tty/tty-smoke` -- terminal device nodes,
 //! `ttyname(3)`, `/proc/self` and the `/proc/<pid>/fd` links through real musl (see
 //! `regress/tty-smoke/main.c`).
 #![no_std]
@@ -79,7 +79,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Serves /tty-smoke.elf.
+    // Serves /usr/tests/tty/tty-smoke.
     // Populates SYS_CLOCK_GETTIME -- tmpnam()/tmpfile()'s random names are seeded from it.
     const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
     const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");

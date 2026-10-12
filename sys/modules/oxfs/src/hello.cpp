@@ -1,6 +1,7 @@
-// Seeded at /hello.cpp -- the on-target C++ proof: `clang++ -static -o /hello-cpp.elf /hello.cpp`,
-// by hand at the hush prompt or via tests/clangxx_syscall_smoke.rs. Each section checks itself;
-// any failure flips the exit status, so the smoke test only has to look at that.
+// Seeded at /usr/share/examples/clang/hello.cpp -- the on-target C++ proof:
+// `clang++ -static -o hello-cpp hello.cpp`, by hand or via tests/clangxx_syscall_smoke.rs. Each
+// section checks itself; any failure flips the exit status, so the smoke test only has to look at
+// that.
 #include <algorithm>
 #include <filesystem>
 #include <fstream>

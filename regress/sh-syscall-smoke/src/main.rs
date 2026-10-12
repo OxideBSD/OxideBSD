@@ -1,7 +1,7 @@
 //! Real-`SYSCALL` smoke test for OxideBSD's own shell (`lib/libsh`): `/bin/sh -c`, then the
-//! host differential corpus (`lib/libsh/tests/diff/*.sh`, seeded at `/sh-smoke/` with the output
+//! host differential corpus (`lib/libsh/tests/diff/*.sh`, seeded at `/usr/tests/sh/` with the output
 //! dash gave for each on the development host) under both `/bin/sh` and `/sbin/init_sh`, via
-//! `/sh-smoke/run.sh`.
+//! `/usr/tests/sh/run.sh`.
 #![no_std]
 #![no_main]
 
@@ -166,8 +166,8 @@ pub extern "C" fn _start() -> ! {
     // The differential corpus under /bin/sh, then under /sbin/init_sh (the runner itself runs
     // under the shell being tested, too).
     for (shell, name) in [(&b"/bin/sh"[..], &b"sh"[..]), (&b"/sbin/init_sh"[..], &b"init_sh"[..])] {
-        if !run_and_wait(shell, &[name, b"/sh-smoke/run.sh", shell]) {
-            write_bytes(b"sh-syscall-smoke: FAIL: /sh-smoke/run.sh under ");
+        if !run_and_wait(shell, &[name, b"/usr/tests/sh/run.sh", shell]) {
+            write_bytes(b"sh-syscall-smoke: FAIL: /usr/tests/sh/run.sh under ");
             write_bytes(shell);
             write_bytes(b"\n");
             test_exit(false);
