@@ -10,7 +10,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use x86_64::VirtAddr;
-use x86_64::structures::idt::InterruptStackFrame;
 use x86_64::structures::paging::{OffsetPageTable, PageTable, PageTableFlags};
 
 use crate::syscall::EFAULT;
@@ -115,17 +114,16 @@ unsafe extern "C" {
 /// Called by the page fault handler for a fault in ring 0 that stack growth didn't resolve:
 /// when it happened inside a copy routine, on a user address, the routine resumes at its fault
 /// label and returns `EFAULT`. Returns whether it did.
-pub fn fixup_fault(frame: &mut InterruptStackFrame, fault_addr: u64) -> bool {
-    let rip = frame.instruction_pointer.as_u64();
+pub fn fixup_fault(frame: &mut crate::cpu::trap::TrapFrame, fault_addr: u64) -> bool {
+    let rip = frame.rip;
     let start = (&raw const usercopy_access_start) as u64;
     let end = (&raw const usercopy_access_end) as u64;
     if !(start..end).contains(&rip) || fault_addr >= VM_MAXUSER {
         return false;
     }
-    let fault = VirtAddr::new((&raw const usercopy_fault) as u64);
-    // SAFETY: only the resume address changes, to the copy routine's own fault label, which
-    // returns from the routine with the stack exactly as the faulting instruction left it.
-    unsafe { frame.as_mut().update(|f| f.instruction_pointer = fault) };
+    // Only the resume address changes, to the copy routine's own fault label, which returns from
+    // the routine with the stack exactly as the faulting instruction left it.
+    frame.rip = (&raw const usercopy_fault) as u64;
     true
 }
 

@@ -2,14 +2,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use pc_keyboard::layouts::Us104Key;
 use pc_keyboard::{DecodedKey, HandleControl, KeyCode, PS2Keyboard, ScancodeSet1};
-use spin::{Lazy, Mutex};
-use x86_64::VirtAddr;
+use spin::Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::registers::control::Cr2;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::structures::idt::PageFaultErrorCode;
 
-use crate::cpu::gdt::DOUBLE_FAULT_IST_INDEX;
 use crate::cpu::pic::{self, PIC_1_OFFSET, PIC_2_OFFSET};
+use crate::cpu::trap::{self, SPURIOUS_VECTOR, TrapFrame};
 use crate::reboot::reboot;
 use crate::serial_println;
 
@@ -65,51 +64,17 @@ pub fn register_irq_handler(irq: u8, handler: fn()) {
     *free = Some(handler);
 }
 
-/// Defines one `extern "x86-interrupt"` trampoline per listed IRQ line (each must be a distinct
-/// function item -- a handler installed into the IDT can't be parameterized by IRQ number at
-/// runtime) plus `install_irq_trampolines`, which wires all of them into a `Lazy<IDT>` under
-/// construction. Each trampoline dispatches through `IRQ_HANDLERS`, doing nothing but the EOI if
-/// that line has no registered handler (a spurious or not-yet-claimed IRQ) -- and always sends
-/// the EOI regardless, since skipping it leaves the line masked at the controller forever, not
-/// just for this one interrupt.
-macro_rules! define_irq_trampolines {
-    ($( $name:ident => $irq:literal ),+ $(,)?) => {
-        $(
-            extern "x86-interrupt" fn $name(_stack_frame: InterruptStackFrame) {
-                crate::cpu::smap::clac();
-                let handlers = *IRQ_HANDLERS[$irq].lock();
-                for handler in handlers.into_iter().flatten() {
-                    handler();
-                }
-                unsafe {
-                    pic::notify_end_of_interrupt(PIC_1_OFFSET + $irq);
-                }
-            }
-        )+
-
-        fn install_irq_trampolines(idt: &mut InterruptDescriptorTable) {
-            $(
-                idt[PIC_1_OFFSET + $irq].set_handler_fn($name);
-            )+
-        }
-    };
-}
-
-define_irq_trampolines! {
-    irq2_trampoline => 2,
-    irq3_trampoline => 3,
-    irq4_trampoline => 4,
-    irq5_trampoline => 5,
-    irq6_trampoline => 6,
-    irq7_trampoline => 7,
-    irq8_trampoline => 8,
-    irq9_trampoline => 9,
-    irq10_trampoline => 10,
-    irq11_trampoline => 11,
-    irq12_trampoline => 12,
-    irq13_trampoline => 13,
-    irq14_trampoline => 14,
-    irq15_trampoline => 15,
+/// IRQ lines 2-15: dispatched through `IRQ_HANDLERS`, doing nothing but the EOI if the line has
+/// no registered handler (a spurious or not-yet-claimed IRQ) -- and always sending the EOI, since
+/// skipping it leaves the line masked at the controller forever, not just for this one interrupt.
+fn irq(line: u8) {
+    let handlers = *IRQ_HANDLERS[line as usize].lock();
+    for handler in handlers.into_iter().flatten() {
+        handler();
+    }
+    unsafe {
+        pic::notify_end_of_interrupt(PIC_1_OFFSET + line);
+    }
 }
 
 // MapLettersToUnicode (not Ignore) so Ctrl+<letter> decodes to the corresponding C0 control code
@@ -121,43 +86,16 @@ static KEYBOARD: Mutex<PS2Keyboard<Us104Key, ScancodeSet1>> = Mutex::new(PS2Keyb
     HandleControl::MapLettersToUnicode,
 ));
 
-static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
-    let mut idt = InterruptDescriptorTable::new();
-
-    // DPL 3 so ring-3 code can hit this via `int3` directly: interrupt gates default to DPL 0,
-    // and a *software*-invoked interrupt (unlike a hardware exception) additionally requires
-    // CPL <= gate DPL, so leaving this at the default causes int3-from-ring-3 to fault with a
-    // #GP on the gate itself instead of ever reaching this handler.
-    idt.breakpoint
-        .set_handler_fn(breakpoint_handler)
-        .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
-    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-    idt.general_protection_fault
-        .set_handler_fn(general_protection_fault_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
-    unsafe {
-        idt.double_fault
-            .set_handler_fn(double_fault_handler)
-            .set_stack_index(DOUBLE_FAULT_IST_INDEX);
-    }
-    idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
-    idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
-    install_irq_trampolines(&mut idt);
-
-    idt
-});
-
 pub fn init_idt() {
     serial_println!(
-        "[boot] loading IDT: breakpoint, invalid_opcode, general_protection_fault, page_fault, \
-         double_fault, timer (vector {:#x}), keyboard (vector {:#x}), IRQ2-15 trampolines \
-         (vectors {:#x}-{:#x}, unclaimed until a driver calls register_irq_handler)",
+        "[boot] loading IDT: exceptions 0-31, timer (vector {:#x}), keyboard (vector {:#x}), \
+         IRQ2-15 (vectors {:#x}-{:#x}, unclaimed until a driver calls register_irq_handler)",
         InterruptIndex::Timer.as_u8(),
         InterruptIndex::Keyboard.as_u8(),
         PIC_1_OFFSET + 2,
         PIC_1_OFFSET + 15,
     );
-    IDT.load();
+    trap::init();
     serial_println!("[boot] IDT loaded");
 }
 
@@ -189,125 +127,140 @@ pub fn init_pics() {
     serial_println!("[boot] PICs initialized and unmasked");
 }
 
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    crate::cpu::smap::clac();
-    serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+/// Every trap, by vector (`cpu::trap` built the frame).
+pub(crate) fn dispatch(frame: &mut TrapFrame) {
+    const TIMER: u64 = InterruptIndex::Timer as u64;
+    const KEYBOARD: u64 = InterruptIndex::Keyboard as u64;
+    const IRQ_LAST: u64 = PIC_1_OFFSET as u64 + 15;
+    match frame.vector {
+        14 => page_fault_handler(frame),
+        8 => double_fault_handler(frame),
+        2 => {
+            serial_println!("[trap] NMI at ip {:#x}", frame.rip);
+        }
+        // `int3` in the kernel: a debugging aid, logged and resumed.
+        3 if !frame.from_user() => {
+            serial_println!("EXCEPTION: BREAKPOINT\n{:#x?}", frame);
+        }
+        0..32 => exception(frame),
+        TIMER => timer_interrupt_handler(frame),
+        KEYBOARD => keyboard_interrupt_handler(frame),
+        34..=IRQ_LAST => irq((frame.vector - PIC_1_OFFSET as u64) as u8),
+        SPURIOUS_VECTOR => {
+            serial_println!("[trap] spurious interrupt at ip {:#x}", frame.rip);
+        }
+        _ => unreachable!("trap vector {} has no stub", frame.vector),
+    }
 }
 
-/// Ring-3 `#UD`s get the same fault-to-signal treatment `general_protection_fault_handler` below
-/// already documents in full -- found auditing this file for the same gap after `page_fault_handler`/
-/// `general_protection_fault_handler` had already been fixed: this handler still rebooted the whole
-/// VM unconditionally on *any* invalid-opcode fault, ring-3 included (a real `ud2`, or a genuinely
-/// corrupted jump into non-code memory, in any userland program). Real Linux maps every userland
-/// `#UD` to `SIGILL`.
-extern "x86-interrupt" fn invalid_opcode_handler(mut stack_frame: InterruptStackFrame) {
-    crate::cpu::smap::clac();
-    let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
-    if interrupted_ring3 {
-        let pid = crate::process::scheduler::current_pid();
-        if pid != 0 {
-            // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
-            // comment for why a plain `do_kill` self-signal isn't safe here.
-            crate::process::init::note_fault(pid, stack_frame.instruction_pointer.as_u64(), None);
-            crate::process::signals::force_fault_signal(pid, crate::process::SIGILL);
-            // SAFETY: see page_fault_handler's own identical redirect.
-            unsafe {
-                stack_frame.as_mut().update(|f| {
-                    f.instruction_pointer =
-                        VirtAddr::new(crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA);
-                });
-            }
-            return;
-        }
+/// The exceptions every vector below 32 can raise: name and the signal ring 3 gets for it. The
+/// signals are the BSD and Linux ones: `#DE`/`#MF`/`#XM` are arithmetic (`SIGFPE`), `#DB`/`#BP`
+/// are traps for a debugger (`SIGTRAP`), `#UD` is `SIGILL`, a segment or alignment fault is
+/// `SIGBUS`, and everything else ring 3 can cause is a protection fault (`SIGSEGV`). Reserved
+/// vectors are listed for the log; nothing raises them.
+const EXCEPTIONS: [(&str, u64); 32] = {
+    use crate::process::{SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
+    [
+        ("#DE divide error", SIGFPE),
+        ("#DB debug", SIGTRAP),
+        ("NMI", 0),
+        ("#BP breakpoint", SIGTRAP),
+        ("#OF overflow", SIGSEGV),
+        ("#BR bound range exceeded", SIGSEGV),
+        ("#UD invalid opcode", SIGILL),
+        ("#NM device not available", SIGFPE),
+        ("#DF double fault", 0),
+        ("coprocessor segment overrun", SIGFPE),
+        ("#TS invalid TSS", SIGSEGV),
+        ("#NP segment not present", SIGBUS),
+        ("#SS stack-segment fault", SIGBUS),
+        ("#GP general protection fault", SIGSEGV),
+        ("#PF page fault", SIGSEGV),
+        ("reserved (15)", SIGSEGV),
+        ("#MF x87 floating-point error", SIGFPE),
+        ("#AC alignment check", SIGBUS),
+        ("#MC machine check", 0),
+        ("#XM SIMD floating-point error", SIGFPE),
+        ("#VE virtualization exception", SIGSEGV),
+        ("#CP control protection", SIGSEGV),
+        ("reserved (22)", SIGSEGV),
+        ("reserved (23)", SIGSEGV),
+        ("reserved (24)", SIGSEGV),
+        ("reserved (25)", SIGSEGV),
+        ("reserved (26)", SIGSEGV),
+        ("reserved (27)", SIGSEGV),
+        ("#HV hypervisor injection", SIGSEGV),
+        ("#VC VMM communication", SIGSEGV),
+        ("#SX security exception", SIGSEGV),
+        ("reserved (31)", SIGSEGV),
+    ]
+};
+
+/// Every exception without a handler of its own. In ring 3 it's the offending process's problem:
+/// it gets `EXCEPTIONS`' signal. In the kernel it's a kernel bug: reboot. Before these all had
+/// gates, a ring-3 divide by zero found vector 0 not present, which escalated to a double fault
+/// and rebooted the machine.
+fn exception(frame: &mut TrapFrame) {
+    let (name, signal) = EXCEPTIONS[frame.vector as usize];
+    if frame.from_user() && signal != 0 && user_fault(frame, name, signal, None) {
+        return;
     }
-    serial_println!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+    serial_println!("EXCEPTION: {} (error code {:#x})\n{:#x?}", name, frame.error_code, frame);
     reboot();
 }
 
-/// Ring-3 `#GP`s get the same fault-to-signal treatment `page_fault_handler` below already
-/// documents in full (see that function's own doc comment for the trampoline mechanism and why a
-/// direct handler call isn't possible from an `extern "x86-interrupt" fn`) -- found live, not
-/// preemptively: the expanded POSIX conformance pilot's own `strftime/2-1.c` has a real stack-
-/// buffer overflow (an upstream test bug -- it declares `char text[20]` but passes `256` as
-/// `strftime`'s own max-length argument), correctly caught by musl's stack-protector, whose
-/// `__stack_chk_fail` on this target is a bare `hlt; ret` (`hlt` is a privileged, ring-0-only
-/// instruction) -- executing it from ring 3 raises exactly this fault. Before this fix, *any*
-/// ring-3 `#GP` (a real stack-smashing catch, a bad segment reference, any other privileged-
-/// instruction misuse) rebooted the whole VM instead of just terminating the one offending
-/// process, a real robustness gap independent of this one test file. No fault-specific signal
-/// distinction is needed the way `page_fault_handler`'s `SIGBUS`-vs-`SIGSEGV` split is: real Linux
-/// maps every userland `#GP` to `SIGSEGV` uniformly, so this does too.
-extern "x86-interrupt" fn general_protection_fault_handler(
-    mut stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
-    crate::cpu::smap::clac();
-    let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
-    if interrupted_ring3 {
-        let pid = crate::process::scheduler::current_pid();
-        if pid != 0 {
-            // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
-            // comment for why a plain `do_kill` self-signal (which respects the target's own
-            // blocked-signal mask, correct for an ordinary async `kill()`) isn't safe here: this
-            // signal is synchronously generated by a real fault, which can't simply be "left
-            // pending" if it happens to be blocked.
-            serial_println!(
-                "[fault] pid {} ring-3 #GP (error {:#x}) ip {:#x} -> SIGSEGV",
-                pid,
-                error_code,
-                stack_frame.instruction_pointer.as_u64()
-            );
-            crate::process::init::note_fault(pid, stack_frame.instruction_pointer.as_u64(), None);
-            crate::process::signals::force_fault_signal(pid, crate::process::SIGSEGV);
-            // SAFETY: see page_fault_handler's own identical redirect.
-            unsafe {
-                stack_frame.as_mut().update(|f| {
-                    f.instruction_pointer =
-                        VirtAddr::new(crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA);
-                });
-            }
-            return;
-        }
+/// Sends the current process `signal` for a fault it took in ring 3, and resumes it in the fault
+/// trampoline, which delivers the signal from a real system call (`process::fault_trampoline`).
+/// False when there's no process to blame (pid 0, at boot).
+fn user_fault(frame: &mut TrapFrame, name: &str, signal: u64, fault_addr: Option<u64>) -> bool {
+    let pid = crate::process::scheduler::current_pid();
+    if pid == 0 {
+        return false;
     }
-    serial_println!(
-        "EXCEPTION: GENERAL PROTECTION FAULT (error code: {:#x})\n{:#?}",
-        error_code,
-        stack_frame
-    );
-    reboot();
+    // Real Linux logs "segfault at ADDR ip IP" for the same reason: without it a ring-3 crash is
+    // just an exit status. Added chasing ninja's first on-target SIGSEGV.
+    if let Some(addr) = fault_addr {
+        serial_println!(
+            "[fault] pid {} ring-3 {} at {:#x} ip {:#x} (error {:#x}) -> signal {}",
+            pid,
+            name,
+            addr,
+            frame.rip,
+            frame.error_code,
+            signal
+        );
+    } else {
+        serial_println!(
+            "[fault] pid {} ring-3 {} ip {:#x} (error {:#x}) -> signal {}",
+            pid,
+            name,
+            frame.rip,
+            frame.error_code,
+            signal
+        );
+    }
+    crate::process::init::note_fault(pid, frame.rip, fault_addr);
+    // Force-delivered: see `signals::force_fault_signal`'s own doc comment for why a plain
+    // `do_kill` self-signal (which respects the blocked mask, right for an async `kill()`) isn't
+    // safe for a signal a fault generated synchronously. Safe from here for the same reason
+    // `timer_interrupt_handler`'s calls into `process::table()` are: interrupt gates run with IF
+    // clear, on one core.
+    crate::process::signals::force_fault_signal(pid, signal);
+    // Only the resume RIP changes, to a kernel-authored, user-executable trampoline page. RSP,
+    // RFLAGS and the selectors stay as they were: the process's own, still valid.
+    frame.rip = crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA;
+    true
 }
 
-/// Ring-3 faults no longer reboot the whole kernel — they terminate (or, if a real handler is
-/// installed, signal) just the one offending process. A kernel-mode fault (a real bug in this
-/// kernel itself) is unchanged: still an unconditional reboot, the same safety net as before.
-///
-/// **Why this can't just invoke the process's own handler directly, right here**: unlike
-/// `syscall::SyscallFrame` (built by hand, every GPR an explicit mutable field),
-/// `extern "x86-interrupt"`'s compiler-generated entry/exit leaves the interrupted GPRs
-/// (`RDI`/`RSI`/`RDX`/...) completely inaccessible to this function — only
-/// `InterruptStackFrame`'s handful of fields (`instruction_pointer`, `stack_pointer`, `cpu_flags`,
-/// the segment selectors) can be read or changed via its own `as_mut()`. A real, argument-correct
-/// handler call needs to set `RDI = signum` (and `RSI`/`RDX` for `SA_SIGINFO`) directly, which this
-/// function has no way to do. See `process::fault_trampoline`'s own module doc comment for the real
-/// fix: record the signal as pending, then redirect `instruction_pointer` to a tiny kernel-authored
-/// trampoline page that forces the process straight back through a real `SYSCALL` instruction,
-/// landing in the already-correct, GPR-complete `syscall::deliver_pending_signal` machinery
-/// instead.
+/// A ring-3 page fault terminates (or, if it has a handler, signals) just the offending process;
+/// a kernel-mode one, a real kernel bug, reboots.
 ///
 /// `signal_for_user_fault` decides `SIGBUS` (a reference into a real fd-backed mapping's own
 /// reserved-but-unbacked tail — `mmap/11-2.c`/`11-3.c` in the conformance pilot) vs. `SIGSEGV`
-/// (every other unmapped/invalid ring-3 reference) — either way, `do_kill`'s own self-signal path
-/// (just sets the pending bit, doesn't act on it) is reused rather than hand-rolling a second
-/// "record this signal" path; `deliver_pending_signal`, reached via the trampoline, resolves the
-/// real disposition (terminate, by default — a real fix in its own right, replacing a full reboot
-/// — or a genuine handler invocation).
-extern "x86-interrupt" fn page_fault_handler(
-    mut stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
-    // AC cleared first, as at every entry (`cpu::smap`); a fault inside a copy routine resumes at
-    // its fault label, which clears AC itself anyway.
-    crate::cpu::smap::clac();
+/// (every other unmapped/invalid ring-3 reference); `deliver_pending_signal`, reached via the
+/// trampoline, resolves the real disposition.
+fn page_fault_handler(frame: &mut TrapFrame) {
+    let error_code = PageFaultErrorCode::from_bits_truncate(frame.error_code);
     // Stack growth first, for either ring -- see `mm::try_grow_user_stack`. A not-present fault
     // inside the stack reserve just gets its page and retries the instruction.
     if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
@@ -316,52 +269,20 @@ extern "x86-interrupt" fn page_fault_handler(
     {
         return;
     }
-    let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
+    let interrupted_ring3 = frame.from_user();
     if interrupted_ring3 && let Ok(fault_addr) = Cr2::read() {
         let pid = crate::process::scheduler::current_pid();
         if pid != 0 {
             let sig = crate::process::signal_for_user_fault(pid, fault_addr.as_u64());
-            // Real Linux logs "segfault at ADDR ip IP" for the same reason: without it a ring-3
-            // crash is just an exit status. Added chasing ninja's first on-target SIGSEGV.
-            serial_println!(
-                "[fault] pid {} ring-3 page fault at {:#x} ip {:#x} ({:?}) -> signal {}",
-                pid,
-                fault_addr.as_u64(),
-                stack_frame.instruction_pointer.as_u64(),
-                error_code,
-                sig
-            );
-            // Real, force-delivered self-signal -- see `signals::force_fault_signal`'s own doc
-            // comment for why a plain `do_kill` self-signal (which respects the target's own
-            // blocked-signal mask, correct for an ordinary async `kill()`) isn't safe here: this
-            // signal is synchronously generated by a real fault, which can't simply be "left
-            // pending" if it happens to be blocked. Safe to call from here for the identical
-            // reason `timer_interrupt_handler`'s own calls into `process::table()`/`scheduler`
-            // already are (this interrupt gate runs with IF cleared, same single-core
-            // non-reentrancy this whole file already relies on).
-            crate::process::init::note_fault(
-                pid,
-                stack_frame.instruction_pointer.as_u64(),
-                Some(fault_addr.as_u64()),
-            );
-            crate::process::signals::force_fault_signal(pid, sig);
-            // SAFETY: only the resume RIP is changed -- redirecting straight into a real,
-            // kernel-mapped, user-executable trampoline page (see its own module doc comment).
-            // RSP/RFLAGS/the segment selectors are left exactly as they were; this process has
-            // exactly one ring-3 code/data selector pair, already correct.
-            unsafe {
-                stack_frame.as_mut().update(|f| {
-                    f.instruction_pointer =
-                        VirtAddr::new(crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA);
-                });
+            if user_fault(frame, "page fault", sig, Some(fault_addr.as_u64())) {
+                return;
             }
-            return;
         }
     }
     // A fault on user memory inside a copy routine fails the copy with EFAULT (USERMEM.md §5.2).
     if !interrupted_ring3
         && let Ok(addr) = Cr2::read()
-        && crate::memory::usercopy::fixup_fault(&mut stack_frame, addr.as_u64())
+        && crate::memory::usercopy::fixup_fault(frame, addr.as_u64())
     {
         return;
     }
@@ -387,19 +308,15 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
     serial_println!(
-        "EXCEPTION: PAGE FAULT\naccessed address: {:?}\nerror code: {:?}\n{:#?}",
+        "EXCEPTION: PAGE FAULT\naccessed address: {:?}\nerror code: {:?}\n{:#x?}",
         Cr2::read(),
         error_code,
-        stack_frame
+        frame
     );
     reboot();
 }
 
-extern "x86-interrupt" fn double_fault_handler(
-    stack_frame: InterruptStackFrame,
-    _error_code: u64,
-) -> ! {
-    crate::cpu::smap::clac();
+fn double_fault_handler(frame: &mut TrapFrame) -> ! {
     if let Ok(addr) = Cr2::read()
         && crate::memory::kstack::is_guard(addr.as_u64())
     {
@@ -409,7 +326,7 @@ extern "x86-interrupt" fn double_fault_handler(
             addr
         );
     }
-    serial_println!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+    serial_println!("EXCEPTION: DOUBLE FAULT\n{:#x?}", frame);
     reboot();
 }
 
@@ -422,7 +339,7 @@ pub(crate) const PREEMPT_QUANTUM_TICKS: u64 = 4;
 /// Real preemption lives here: on top of the tick/sleeper-wake bookkeeping this handler has always
 /// done, it now also decides whether to force a reschedule.
 ///
-/// **Deliberately scoped to ring-3 only** — checked via `stack_frame.code_segment`'s RPL bits (the
+/// **Deliberately scoped to ring-3 only** — checked via the saved `CS`'s RPL bits (the
 /// CPU's own record of what was interrupted, not anything this handler has to track itself): a
 /// hardware interrupt gate automatically switches onto `TSS.RSP0` (this process's own kernel
 /// stack, kept in sync by `gdt::set_kernel_stack` on every context switch) whenever it catches
@@ -432,7 +349,7 @@ pub(crate) const PREEMPT_QUANTUM_TICKS: u64 = 4;
 /// not just "not implemented yet": user-mode code never holds a kernel `spin::Mutex` or touches
 /// module static state, so scoping preemption to ring-3 sidesteps auditing every critical section
 /// in this codebase for preemption-safety. See `scheduler.rs`'s own module doc comment for why
-/// calling `schedule()` directly from this `extern "x86-interrupt" fn` is sound even though it may
+/// calling `schedule()` directly from this trap handler is sound even though it may
 /// not return for an arbitrary stretch of wall-clock time.
 ///
 /// **EOI is sent before the possible `schedule()` call, not after** — load-bearing, not stylistic.
@@ -441,10 +358,7 @@ pub(crate) const PREEMPT_QUANTUM_TICKS: u64 = 4;
 /// is sent, the PIC still considers IRQ0 "in service" and won't deliver *any* further timer
 /// interrupt to anyone — which would freeze not just future preemption but every other
 /// `ticks()`-gated wakeup in this file (sleepers, POSIX timers, `SIGALRM`, ...) for good.
-extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
-    // AC cleared first, as at every entry (`cpu::smap`): this handler may switch to another
-    // process's kernel code, which must not inherit a user's AC.
-    crate::cpu::smap::clac();
+fn timer_interrupt_handler(frame: &mut TrapFrame) {
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Wake any process blocked in `process::do_nanosleep` (`BlockReason::Sleeping`) whose deadline
@@ -727,7 +641,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
 
     // Ring check via the CPU's own saved CS RPL bits (`& 0x3`), not e.g. `scheduler::current_pid()`
     // state -- see this function's own doc comment for why ring-3-only is the deliberate scope.
-    let interrupted_ring3 = stack_frame.code_segment.0 & 0x3 == 3;
+    let interrupted_ring3 = frame.from_user();
     // A thread caught mid-`fault_trampoline` (its own store into the *shared-per-address-space*
     // `RAX_SCRATCH_OFFSET` cell, immediately followed by the `syscall` that reads it back) must
     // never be preempted -- doing so lets a sibling `CLONE_THREAD` thread interleave its own pass
@@ -739,7 +653,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
     // stub at `STUB_OFFSET` -- it reads/consumes the same shared scratch cells (now also
     // `RCX_SCRATCH_OFFSET`/`R11_SCRATCH_OFFSET`/`TRUE_RFLAGS_OFFSET`/`TRUE_RESUME_RIP_OFFSET`, not
     // just `RAX_SCRATCH_OFFSET`) and is exposed to the identical interleaving risk.
-    let ip = stack_frame.instruction_pointer.as_u64();
+    let ip = frame.rip;
     let mid_fault_trampoline = interrupted_ring3
         && ((crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
             ..crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA
@@ -793,7 +707,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
         // any caller (or `sigwait`-ing sibling thread) that depends on it. Checked on every tick,
         // independent of the preemption decision above (real signal delivery isn't gated by
         // scheduling quantum) -- by the time execution reaches here, whether or not `schedule()`
-        // was just called, `current_pid()` always names the exact process `stack_frame` belongs to
+        // was just called, `current_pid()` always names the exact process `frame` belongs to
         // (a preempted process's own call into `schedule()` above only "returns" once *that same*
         // process is re-selected -- see `scheduler.rs`'s own module doc comment).
         //
@@ -803,8 +717,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
         // means a real handler invocation or a real default-disposition resolution (including
         // `Terminate`) is waiting. Reuses the exact same real, kernel-authored trampoline page
         // `page_fault_handler`'s own fault-to-signal redirect already established (see
-        // `fault_trampoline`'s own module doc comment for why a raw `extern "x86-interrupt" fn`
-        // can't build a real handler-invocation frame itself) -- but stashes the real, true
+        // `fault_trampoline`'s own module doc comment for why signals are delivered from a
+        // system call) -- but stashes the real, true
         // interrupted `(rip, rsp, rflags)` first (`Process::preempted_resume`), unlike the
         // page-fault case: a page fault's own "resume" point is the faulting instruction itself
         // (real POSIX doesn't define resuming past an unhandled fault as portable anyway), but
@@ -847,11 +761,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
                 let deliverable =
                     p.pending_signals & !p.blocked_signals != 0 && p.signal_stack.is_empty();
                 if deliverable && p.preempted_resume.is_none() {
-                    p.preempted_resume = Some((
-                        stack_frame.instruction_pointer.as_u64(),
-                        stack_frame.stack_pointer.as_u64(),
-                        stack_frame.cpu_flags.bits(),
-                    ));
+                    p.preempted_resume = Some((frame.rip, frame.rsp, frame.rflags));
                     true
                 } else {
                     false
@@ -859,16 +769,10 @@ extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStac
             })
         };
         if should_redirect {
-            // SAFETY: only the resume RIP is changed -- redirecting straight into a real,
-            // kernel-mapped, user-executable trampoline page. RSP/RFLAGS/the segment selectors are
-            // left exactly as they were; this process has exactly one ring-3 code/data selector
-            // pair, already correct. Same technique `page_fault_handler` already uses.
-            unsafe {
-                stack_frame.as_mut().update(|f| {
-                    f.instruction_pointer =
-                        VirtAddr::new(crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA);
-                });
-            }
+            // Only the resume RIP changes, into a kernel-authored, user-executable trampoline
+            // page. RSP/RFLAGS/the segment selectors are left exactly as they were. Same
+            // technique `user_fault` uses.
+            frame.rip = crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA;
         }
     }
 }
@@ -975,8 +879,7 @@ fn handle_decoded_key(key: DecodedKey) -> bool {
     }
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
-    crate::cpu::smap::clac();
+fn keyboard_interrupt_handler(frame: &mut TrapFrame) {
     let mut port: Port<u8> = Port::new(0x60);
     // SAFETY: 0x60 is the PS/2 controller's data port; reading it is how a keyboard IRQ is
     // acknowledged at the hardware level, and it's only ever read here.
@@ -1019,7 +922,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
     // it. That nested call would take the next runnable process and return into the idle loop,
     // which then halts with a process marked Running that never runs (found live: the shell
     // hung after Ctrl+D ended a `cat`). The idle loop picks up whatever became runnable itself.
-    if must_reschedule && stack_frame.code_segment.0 & 0x3 == 3 {
+    if must_reschedule && frame.from_user() {
         crate::process::scheduler::schedule();
     }
 }

@@ -345,7 +345,8 @@ Polling xHCI + HID boot keyboard (Surface target has no PS/2). BARs are mapped e
 
 ## Dependencies
 
-- `x86_64`: `default-features = false, features = ["instructions", "abi_x86_interrupt"]`.
+- `x86_64`: `default-features = false, features = ["instructions"]`. No `extern "x86-interrupt"`:
+  every IDT vector enters through `cpu::trap`'s asm stubs and gets a `&mut TrapFrame`.
 - `linked_list_allocator`: `default-features = false`, wrapped in local `Locked<T>` over `spin`.
 - `pc-keyboard` 0.9: `PS2Keyboard<L, S>`; `add_byte` then `process_keyevent` on one guard.
 - `pic8259`/`uart_16550` are deliberately not dependencies.

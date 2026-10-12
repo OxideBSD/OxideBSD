@@ -2,15 +2,12 @@
 //! process's own address space, purely to make real signal-handler invocation from a hardware
 //! page fault possible.
 //!
-//! **Why this exists at all**: `interrupts::page_fault_handler` runs as `extern "x86-interrupt"`,
-//! whose compiler-generated entry/exit saves and restores every clobbered register itself, with no
-//! Rust-visible field for them -- unlike `syscall::SyscallFrame`, which the `SYSCALL` entry stub
-//! (`syscall_entry`) builds by hand, with every GPR as an explicit, mutable field.
-//! `syscall::deliver_pending_signal` already knows how to redirect a live `SyscallFrame` into a
-//! real, argument-correct handler invocation (`rdi`/`rsi`/`rdx`/`rcx`/`user_rsp` all set directly)
-//! -- but a page fault has no `SyscallFrame` to redirect, only an `InterruptStackFrame` whose only
-//! mutable fields are `instruction_pointer`/`stack_pointer`/`cpu_flags`/the segment selectors, not
-//! GPRs.
+//! **Why this exists at all**: `syscall::deliver_pending_signal` knows how to redirect a live
+//! `syscall::SyscallFrame` into a real, argument-correct handler invocation (`rdi`/`rsi`/`rdx`/
+//! `rcx`/`user_rsp` all set directly) -- but a page fault has no `SyscallFrame` to redirect, only a
+//! `cpu::trap::TrapFrame`. (Until the trap entry was rewritten, the fault handlers were
+//! `extern "x86-interrupt"` functions that couldn't see the interrupted GPRs at all; a `TrapFrame`
+//! has them, so delivering from it directly is now possible, but this path predates that.)
 //!
 //! The fix: don't try to invoke the handler directly from the fault. Instead, `page_fault_handler`
 //! records the real signal as pending on the faulting process (`process::do_kill`'s own
@@ -39,9 +36,8 @@
 //! the page-fault one, genuinely needs the interrupted instruction to resume *transparently* --
 //! but `mov eax, SYS_FAULT_PUMP` unavoidably clobbers the live, real `RAX` the interrupted code was
 //! relying on (the `SYSCALL` ABI leaves no other register to carry the syscall number in, and
-//! `timer_interrupt_handler`'s own `extern "x86-interrupt"` entry has no Rust-visible GPR fields to
-//! save it from beforehand -- the exact same limitation this module's own doc comment above already
-//! explains for why this trampoline exists at all). Found live: an earlier version of this redirect
+//! `timer_interrupt_handler`'s old `extern "x86-interrupt"` entry had no Rust-visible GPR fields
+//! to save it from beforehand). Found live: an earlier version of this redirect
 //! didn't account for this, and a stray default-disposition signal (e.g. `SIGCHLD`) landing on
 //! `hush` mid-instruction silently stomped a live computation's `RAX`, corrupting real control flow
 //! with no crash to point at it. Fixed by having the trampoline itself stash the real `RAX` to

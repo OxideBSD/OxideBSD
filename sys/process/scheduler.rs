@@ -9,8 +9,8 @@
 //! this exact same `schedule()` directly, once a time quantum elapsed. No raw-asm timer-entry
 //! conversion needed (an earlier version of this comment predicted one would be) — `schedule()`
 //! itself is just a stack-pointer-swap primitive (`switch_context`) agnostic to *why* the caller
-//! is yielding, so calling it from inside the existing `extern "x86-interrupt" fn` works
-//! unmodified: the preempted process's own compiler-generated interrupt-return sequence sits
+//! is yielding, so calling it from inside a trap handler (`cpu::trap`) works
+//! unmodified: the preempted process's own `trap_common` return sequence sits
 //! dormant on its own kernel stack (below wherever `switch_context`'s `ret` suspended it) until
 //! this exact same pid is picked again, at which point unwinding back up through `schedule()` and
 //! this file's own call site reaches that dormant `iretq` naturally. **Deliberately scoped to
