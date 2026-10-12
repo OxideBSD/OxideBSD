@@ -1,8 +1,7 @@
 //! A minimal flag/positional-argument scanner -- not full `getopt` (no `--long=value`), but short
 //! flags may be clustered (`-rf`, `-la`), since that's how these utilities actually get invoked
-//! (`sys/modules/oxfs/src/test_busybox.sh` itself runs `rm -rf`). `argv[0]` (the program's own
-//! invoked name) is always skipped; it's never itself a real argument. A literal `--` ends flag
-//! parsing for both helpers below.
+//! (`rm -rf`, `ls -la`). `argv[0]` (the program's own invoked name) is always skipped; it's never
+//! itself a real argument. A literal `--` ends flag parsing for both helpers below.
 
 /// `true` if `argv` contains `short` inside a short-flag cluster (`-r`, `-rf`, ...) or, when
 /// `long` is `Some`, a `--<long>` entry. `long: None` for a flag with no real long form -- a

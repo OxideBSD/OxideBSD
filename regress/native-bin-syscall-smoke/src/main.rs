@@ -523,7 +523,7 @@ pub extern "C" fn _start() -> ! {
             b"seeded shared object is 0755",
         ),
         (
-            b"/test_busybox.sh",
+            b"/etc/rc",
             b"-rwxr-xr-x",
             b"seeded #! script is 0755",
         ),

@@ -288,10 +288,6 @@ fn main() {
     build_userland_crate("clang-syscall-smoke", "CLANG_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("clangxx-syscall-smoke", "CLANGXX_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
-        "std-hello-syscall-smoke",
-        "STD_HELLO_SYSCALL_SMOKE_ELF_PATH",
-    );
-    build_userland_crate(
         "std-hello-oxidebsd-syscall-smoke",
         "STD_HELLO_OXIDEBSD_SYSCALL_SMOKE_ELF_PATH",
     );
@@ -411,16 +407,13 @@ fn main() {
     let llvm_host_build = build_llvm_host_toolchain();
     build_llvm_target_runtimes(&llvm_host_build, &musl_sysroot);
     let libgcc_s_path = build_libgcc_s(&musl_sysroot, &llvm_host_build);
+    install_libunwind_in_sysroot(&musl_sysroot, &llvm_host_build);
     write_toolchain_bin(&musl_sysroot, &llvm_host_build);
     let libc_so_path = musl_sysroot.join("lib/libc.so");
 
     // musl-smoke is a first real (patched) musl static binary -- see CLAUDE.md's musl section.
     // Also embedded into oxfs below.
     let musl_smoke_elf_path = build_c_pie(&musl_sysroot, "musl-smoke");
-
-    // Real Rust `std` target proof of concept -- see `regress/std/std-hello/src/main.rs`'s own
-    // doc comment. Also embedded into oxfs below.
-    let std_hello_elf_path = build_std_hello_spike(&musl_sysroot);
 
     // The real thing: OxideBSD's own x86_64-unknown-oxidebsd target (genuinely reports
     // target_os = "oxidebsd", not borrowed Linux identity) -- see `regress/std/
@@ -855,10 +848,6 @@ fn main() {
         ),
         ("OXFS_MUSL_ELF_PATH", musl_smoke_elf_path.to_str().unwrap()),
         (
-            "OXFS_STD_HELLO_ELF_PATH",
-            std_hello_elf_path.to_str().unwrap(),
-        ),
-        (
             "OXFS_STD_HELLO_OXIDEBSD_ELF_PATH",
             std_hello_oxidebsd_elf_path.to_str().unwrap(),
         ),
@@ -1268,128 +1257,19 @@ fn build_libgcc_s(musl_sysroot: &Path, llvm_host_build: &Path) -> PathBuf {
     out
 }
 
-/// Ensures `libunwind.a` exists in *our own* musl sysroot, copied from the pinned nightly's own
-/// bundled self-contained object set for `x86_64-unknown-linux-musl`. musl itself has no unwind
-/// library; `std`'s prebuilt `.rlib`s for this target hard-depend on `-lunwind` regardless of
-/// `-C panic=abort` (confirmed live: `std`'s own backtrace machinery links it unconditionally).
-/// **Deliberately not done via an extra `-L <rustup self-contained dir>` linker flag** — that was
-/// tried first and found to silently win `-lc` resolution too (GCC's `%{L*}` spec expansion
-/// collects *every* `-L` argument, wherever it appears on the command line, ahead of
-/// `musl-gcc.specs`'s own injected `-L`), producing a binary statically linked against the
-/// *unpatched* bundled musl instead of ours — confirmed via disassembly, `open()` came back
-/// byte-identical to the bundled copy, not this project's own patched (path_ptr, path_len, flags,
-/// mode)-over-R10 implementation. Copying just this one file in means our own sysroot's `-L`
-/// (already correctly prioritized by `musl-gcc.specs`) is the only one on the command line at all.
-fn ensure_libunwind_in_sysroot(sysroot: &Path) {
-    let dest = sysroot.join("lib/libunwind.a");
-    if dest.exists() {
-        return;
+/// Installs `libunwind.a` in the musl sysroot: musl has no unwinder, and std's `unwind` crate
+/// links `-lunwind` statically under `crt-static` (the static `/bin` and `/sbin` programs), even
+/// with `panic=abort`. The same LLVM libunwind as `/lib/libgcc_s.so.1` (`build_libgcc_s`). Copied
+/// in rather than found through an extra `-L`, because GCC's spec expansion puts every `-L` ahead
+/// of `musl-gcc.specs`'s own, and a foreign directory there can win `-lc` too.
+fn install_libunwind_in_sysroot(musl_sysroot: &Path, llvm_host_build: &Path) {
+    let src = llvm_host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libunwind.a"));
+    let dest = musl_sysroot.join("lib/libunwind.a");
+    if std::fs::read(&dest).ok() != std::fs::read(&src).ok() {
+        std::fs::copy(&src, &dest).unwrap_or_else(|e| {
+            panic!("failed to copy {} to {}: {e}", src.display(), dest.display())
+        });
     }
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let rustc_sysroot = Command::new(&rustc)
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .unwrap_or_else(|e| panic!("failed to query rustc sysroot: {e}"));
-    let rustc_sysroot = String::from_utf8(rustc_sysroot.stdout)
-        .expect("rustc --print sysroot produced non-UTF8 output")
-        .trim()
-        .to_string();
-    let src = Path::new(&rustc_sysroot)
-        .join("lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/libunwind.a");
-    std::fs::copy(&src, &dest).unwrap_or_else(|e| {
-        panic!(
-            "failed to copy {} to {}: {e}",
-            src.display(),
-            dest.display()
-        )
-    });
-}
-
-/// Real `std` on OxideBSD (see `regress/std/std-hello/src/main.rs`'s own doc comment for the
-/// full rationale). Built via a direct `rustc` invocation, not `cargo build` -- **not just a
-/// Phase-0 shortcut, a confirmed-necessary choice**: `regress/std/std-hello` has its own real
-/// `Cargo.toml` + `regress/std/.cargo/config.toml` (`target = "x86_64-unknown-linux-musl"`,
-/// `[unstable] build-std = []`), but `cargo build` from that crate still pulls in the *repo
-/// root's* `.cargo/config.toml` `[unstable] build-std = ["core","alloc","compiler_builtins"]`
-/// regardless -- confirmed via `cargo -Z unstable-options config get unstable.build-std` --
-/// because cargo's config-file directory-tree walk-up is unconditional (there's no boundary a
-/// nested `.cargo/config.toml` or an empty `[workspace]` table stops it at), **and array-typed
-/// config keys merge across every discovered file instead of a closer file overriding a farther
-/// one** -- confirmed three ways: an explicit empty array in the closer file, `--config
-/// 'unstable.build-std=[]'` on the CLI (docs claim CLI config has the highest priority; still
-/// merged), and `CARGO_UNSTABLE_BUILD_STD=""` as an env var (also merged, and a `"[]"`-string
-/// value got appended as a literal element rather than parsed as an empty list). Scalar keys
-/// (`build.target`) *do* cleanly override across the same files -- only the array case is stuck.
-/// Net effect if this used `cargo build`: `core`/`alloc`/`compiler_builtins` would silently
-/// rebuild from `rust-src` for `x86_64-unknown-linux-musl` instead of using the real prebuilt
-/// ones this target already ships -- wasteful at best, a real divergence risk at worst. A direct
-/// `rustc` invocation has no directory-tree config-discovery mechanism at all, sidestepping the
-/// whole problem. (The crate's own `Cargo.toml`/`regress/std/.cargo/config.toml` are still real
-/// and useful for local iteration -- `cd regress/std/std-hello && cargo build` works today, just
-/// slower than it should be from the redundant core/alloc rebuild; not what this function uses
-/// for the actual embedded artifact.) If a future `regress/std/*` crate needs genuine Cargo
-/// dependencies (breaking the "single `rustc`-compiled file" model this function assumes), the
-/// known escape hatch -- not yet implemented -- is to have `build.rs` copy that crate's source to
-/// a location outside this repo's directory tree entirely (e.g. under the OS temp dir) before
-/// invoking `cargo build` from there, so the walk-up never reaches this repo's root config.
-///
-/// Flags, each verified individually against a real linked+disassembled binary before trusting it
-/// (see the plan this spike came from):
-/// - `-C target-feature=+crt-static -C link-self-contained=no -C linker=<our musl-gcc>`: forces
-///   the link to go through *our own* sysroot's `musl-gcc` wrapper (its `musl-gcc.specs` already
-///   points `-L`/crt startfile/endfile paths at the toolchain sysroot), rather than rustc silently
-///   linking its own bundled self-contained musl objects.
-/// - `-C panic=abort`: matches every other binary in this project; also required in practice --
-///   without it, rustc still tries to pull in `libpanic_unwind`/`-lunwind` regardless (see
-///   `ensure_libunwind_in_sysroot` above for why `-lunwind` needs to exist in *our* sysroot at all).
-/// - `-C link-arg=-no-pie -C link-arg=-Wl,-Ttext-segment=<addr>`: fixed-address `ET_EXEC`, same
-///   convention as the other fixed-address programs (BusyBox, bmake, ...).
-fn build_std_hello_spike(sysroot: &Path) -> PathBuf {
-    ensure_libunwind_in_sysroot(sysroot);
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src = Path::new(manifest_dir).join("regress/std/std-hello/src/main.rs");
-    let target_dir = Path::new(manifest_dir).join("target/std-hello");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/std-hello");
-    let out = target_dir.join("std-hello");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    let musl_gcc = sysroot.join("bin/musl-gcc");
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    // 0x14000000 -- next free slot past every currently-claimed userland load address (the
-    // musl-gcc/C family's own highest, doomgeneric's 0x13000000, as of this spike's own
-    // addition), with real headroom (this binary statically links the whole of Rust `std`, ~4.3
-    // MiB as of this addition -- re-derive via `readelf -l target/x86_64-oxidebsd/debug/oxidebsd
-    // | grep -A1 LOAD` plus this binary's own size before trusting this if either has grown.
-    let status = Command::new(&rustc)
-        .arg("--target")
-        .arg("x86_64-unknown-linux-musl")
-        .arg("-C")
-        .arg("panic=abort")
-        .arg("-C")
-        .arg("target-feature=+crt-static")
-        .arg("-C")
-        .arg("link-self-contained=no")
-        .arg("-C")
-        .arg(format!("linker={}", musl_gcc.display()))
-        .arg("-C")
-        .arg("link-arg=-no-pie")
-        .arg("-C")
-        .arg("link-arg=-Wl,-Ttext-segment=0x14000000")
-        .arg("-O")
-        .arg("-o")
-        .arg(&out)
-        .arg(&src)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env("RUSTFLAGS", "")
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run rustc for std-hello spike: {e}"));
-    if !status.success() {
-        panic!("building the std-hello spike failed: {status}");
-    }
-    out
 }
 
 /// Constructs (idempotently -- cheap, just symlinks, safe to call every build) a hybrid rustc
@@ -1531,8 +1411,7 @@ fn write_oxidebsd_rustc_wrapper(sysroot: &Path) -> PathBuf {
 
 /// Builds a real userland crate against OxideBSD's own `x86_64-unknown-oxidebsd` target (see
 /// `x86_64-unknown-oxidebsd.json` and `external/mit/rust`'s `oxidebsd` branch) -- the genuine
-/// target-identity path, as opposed to `build_std_hello_spike`'s cheaper
-/// `x86_64-unknown-linux-musl` one. **Real, permanent, disclosed cost**: every build here
+/// target-identity path. **Real, permanent, disclosed cost**: every build here
 /// genuinely recompiles `std`/`core`/`alloc`/`panic_abort` from source via `-Z
 /// build-std=std,core,alloc,panic_abort,panic_unwind` (~40s observed) -- there is no prebuilt `std` for a
 /// brand-new custom target the way there is for a real Tier-1/2 one. `crate_name` must name a

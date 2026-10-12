@@ -16,7 +16,7 @@
 //! showing up as real failures, not a bug in this test). Only a genuine infrastructure failure
 //! (the shell itself couldn't be spawned/exec'd, or exited some way `wait4` can't even observe)
 //! fails this test -- the tally itself is read from this test's own serial output by whoever ran
-//! it, same as `test_busybox.sh`'s established "hand-read the PASS/FAIL summary" pattern.
+//! it.
 #![no_std]
 #![no_main]
 

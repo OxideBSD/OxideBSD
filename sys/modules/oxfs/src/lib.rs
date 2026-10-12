@@ -8727,14 +8727,6 @@ fn format_fresh_filesystem() -> bool {
     }
     ok &= seed_file(root, b"big.txt", &big);
 
-    // A real applet self-test, meant to be run by hand at a shell prompt (`ash /test_busybox.sh`)
-    // -- see that file's own header comment for why it's written the way it is: this kernel's
-    // actual `sh` build has HUSH_IF/HUSH_LOOPS/HUSH_CASE/HUSH_FUNCTIONS/HUSH_TICK all off (checked
-    // against the real generated target/busybox-sh/.config, not assumed from BusyBox's own
-    // Kconfig defaults), so it's a flat sequence of real applet invocations using only
-    // redirection/pipes/`&&`/`||`, not an if/for-based test harness.
-    ok &= seed_file(root, b"test_busybox.sh", include_bytes!("test_busybox.sh"));
-
     // The real POSIX conformance pilot's own runner, meant to be run by hand at a shell prompt
     // (`sh /posix_conformance.sh`) -- see that file's own header comment. Runs each seeded, real
     // pre-built `/posix-tests/bin/**` ELF (cross-compiled host-side with musl-gcc -- see
@@ -8791,11 +8783,6 @@ fn format_fresh_filesystem() -> bool {
     let usr_tests_cron = ensure_dir(usr_tests, b"cron");
     ok &= seed_file(usr_tests_cron, b"run.sh", include_bytes!("../../../../regress/cron-syscall-smoke/run.sh"));
     ok &= seed_file(usr_tests, b"musl", include_bytes!(env!("OXFS_MUSL_ELF_PATH")));
-    ok &= seed_file(
-        usr_tests,
-        b"std-hello",
-        include_bytes!(env!("OXFS_STD_HELLO_ELF_PATH")),
-    );
     ok &= seed_file(
         usr_tests,
         b"std-hello-oxidebsd",

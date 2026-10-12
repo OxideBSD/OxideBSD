@@ -82,18 +82,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // once now and used by `reboot::poweroff`. Not fatal either way, like the probes above.
     crate::acpi::init(physical_memory_offset.as_u64());
 
-    const HELLO_MOD: &[u8] = include_bytes!(env!("HELLO_MOD_PATH"));
-    const HELLO_PANIC_SYMBOL: &str = env!("HELLO_MOD_PANIC_SYMBOL");
-    crate::module::load(
-        "hello",
-        HELLO_MOD,
-        HELLO_PANIC_SYMBOL,
-        false,
-        &mut mapper,
-        &mut frame_allocator,
-    )
-    .unwrap_or_else(|e| panic!("failed to load the hello module: {e:?}"));
-
     // Populates sys/syscall.rs's dispatch table (SYS_EXIT/SYS_READ/SYS_WRITE/SYS_FORK/SYS_WAIT4/
     // SYS_EXECVE/SYS_GETPID) -- must load before pid 1, below, is spawned, since its syscalls
     // resolve through that table.

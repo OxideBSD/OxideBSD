@@ -79,7 +79,6 @@ members = [
   "regress/keyevent-syscall-smoke",
   "regress/posix-conformance-driver",
   "sbin/lsoxmod",
-  "regress/std-hello-syscall-smoke",
   "regress/std-hello-oxidebsd-syscall-smoke",
   "regress/std-process-fs-oxidebsd-syscall-smoke",
   "regress/std-thread-net-signal-oxidebsd-syscall-smoke",
@@ -444,10 +443,6 @@ harness = false
 
 [[test]]
 name = "keyevent_syscall_smoke"
-harness = false
-
-[[test]]
-name = "std_hello_syscall_smoke"
 harness = false
 
 [[test]]

@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Deliberately empty -- opts this crate OUT of the root repo's `[workspace]`, same reasoning as
-# regress/std/std-hello/Cargo.toml.
+# Deliberately empty -- opts this crate OUT of the root repo's `[workspace]`: built by build.rs
+# with its own target and flags, never as part of the kernel's workspace.
 [workspace]

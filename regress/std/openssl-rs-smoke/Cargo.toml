@@ -12,5 +12,5 @@ openssl = "0.10"
 [patch.crates-io]
 libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
 
-# Opts out of the root workspace, as regress/std/std-hello/Cargo.toml.
+# Opts out of the root workspace, as regress/std/std-hello-oxidebsd/Cargo.toml.
 [workspace]
