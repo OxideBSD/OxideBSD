@@ -71,7 +71,7 @@ pub fn build(
     main_bias: u64,
     secure: bool,
 ) -> VirtAddr {
-    let phdr_vaddr = elf.phdr_vaddr() + main_bias;
+    let phdr_vaddr = elf.phdr_vaddr().wrapping_add(main_bias);
 
     // 16 fresh bytes per exec: musl seeds its stack-protector canary (and Rust std its hashmap
     // keys) from these, so a fixed value would make every canary on the system predictable.
@@ -105,7 +105,7 @@ pub fn build(
         (AT_PHNUM, elf.phnum()),
         (AT_PAGESZ, PAGE_SIZE),
         (AT_BASE, interp_base.unwrap_or(0)),
-        (AT_ENTRY, elf.entry_point().as_u64() + main_bias),
+        (AT_ENTRY, elf.entry_point().wrapping_add(main_bias)),
         (AT_UID, 0),
         (AT_EUID, 0),
         (AT_GID, 0),

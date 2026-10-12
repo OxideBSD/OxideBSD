@@ -64,6 +64,8 @@ pub enum ElfError {
     SegmentOutOfBounds,
     OutOfMemory,
     MappingFailed,
+    /// The entry point, after the load bias, isn't a user address.
+    BadEntry,
 }
 
 /// A parsed view over an ELF64 executable's header and program headers: either a whole image in
@@ -156,8 +158,10 @@ impl<'a> Elf<'a> {
         })
     }
 
-    pub fn entry_point(&self) -> VirtAddr {
-        VirtAddr::new(self.entry)
+    /// The header's `e_entry`, unbiased and unchecked: `load` refuses an image whose biased entry
+    /// isn't a user address.
+    pub fn entry_point(&self) -> u64 {
+        self.entry
     }
 
     /// `true` for a real `ET_DYN` image — either a `PT_INTERP` interpreter or a no-`PT_INTERP`
@@ -200,7 +204,9 @@ impl<'a> Elf<'a> {
         self.program_headers()
             .filter(|h| h.p_type == PT_LOAD)
             .min_by_key(|h| h.p_offset)
-            .map(|h| (h.p_vaddr - h.p_offset) + self.phoff as u64)
+            // Wrapping: nothing makes a crafted header keep `p_vaddr >= p_offset`, and a wrong
+            // `AT_PHDR` only misleads the program that lied.
+            .map(|h| h.p_vaddr.wrapping_sub(h.p_offset).wrapping_add(self.phoff as u64))
             .unwrap_or(0)
     }
 
@@ -354,6 +360,14 @@ pub fn load(
     physical_memory_offset: VirtAddr,
     bias: u64,
 ) -> Result<VirtAddr, ElfError> {
+    // Checked before anything is mapped. The first `iretq`/`sysretq` jumps here, and either one
+    // faults in ring 0 on a non-canonical address.
+    use crate::memory::usercopy::{VM_MAXUSER, VM_MINUSER};
+    let entry = elf
+        .entry_point()
+        .checked_add(bias)
+        .filter(|entry| (VM_MINUSER..VM_MAXUSER).contains(entry))
+        .ok_or(ElfError::BadEntry)?;
     // Tiny binaries routinely have multiple PT_LOAD segments (e.g. `.text` then `.rodata`)
     // sharing a page, since segments aren't aligned to each other, just each internally aligned
     // to `p_align`. Track which pages this call has already mapped so a later segment reuses the
@@ -487,7 +501,7 @@ pub fn load(
         }
     }
 
-    Ok(VirtAddr::new(elf.entry_point().as_u64().wrapping_add(bias)))
+    Ok(VirtAddr::new(entry))
 }
 
 // pub(crate), not private: sys/module.rs's ET_REL parser reads the same little-endian ELF64

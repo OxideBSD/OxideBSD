@@ -493,7 +493,23 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
     // SAFETY: frame points at syscall_entry's just-pushed register block, on the current
     // process's own kernel stack, valid and exclusively ours for the duration of this call.
     let frame = unsafe { &mut *frame };
+    handle_syscall(frame);
+    check_resume_rip(frame);
+}
 
+/// The last thing before `syscall_return_tail`'s `sysretq`, which takes the resume `RIP` from
+/// `rcx`. Several paths put a user-chosen value there: `sigreturn` (the handler may rewrite
+/// `REG_RIP`), signal delivery (the handler address `sigaction` was given), and a restarted call.
+/// `SYSRETQ` with a non-canonical `rcx` raises `#GP` *in ring 0* on Intel CPUs, on the user's
+/// stack pointer (CVE-2012-0217's class), so a resume address outside the user range never gets
+/// there: the process dies of `SIGSEGV`, as for a signal frame it broke.
+fn check_resume_rip(frame: &SyscallFrame) {
+    if frame.rcx >= crate::memory::usercopy::VM_MAXUSER {
+        crate::process::do_exit_group(crate::process::scheduler::current_pid(), FRAME_FAULT_EXIT)
+    }
+}
+
+fn handle_syscall(frame: &mut SyscallFrame) {
     // A real, narrow exception, not routed through the normal table/Ok-Err machinery below:
     // sigreturn must restore the interrupted context's own saved carry flag (in `r11`) bit for
     // bit, but the normal `Ok(value)`/`Err(errno)` convention can only ever force that bit to one
@@ -663,8 +679,13 @@ fn do_sigreturn(frame: &mut SyscallFrame) {
                 // read back from REG_RIP/REG_EFL specifically, not REG_RCX/REG_R11, matching
                 // real Linux's own sigreturn (a handler redirects resume execution by writing
                 // MC_PC, i.e. gregs[REG_RIP] -- exactly what musl's own pthread_cancel() does).
+                // `check_resume_rip` vets the new RIP before `sysretq`. RFLAGS is vetted here:
+                // `SYSRETQ` loads `r11` into RFLAGS whole, so IOPL, IF or NT straight from the
+                // ucontext would reach ring 3 (IOPL 3 hands it `in`/`out`/`cli`; IF clear makes
+                // it unpreemptable).
                 frame.rcx = gregs[REG_RIP] as u64;
-                frame.r11 = gregs[REG_EFL] as u64;
+                frame.r11 = (gregs[REG_EFL] as u64 & USER_SETTABLE_RFLAGS)
+                    | crate::process::usermode::USER_RFLAGS;
             }
             deliver_pending_signal(frame, true);
         }
@@ -674,6 +695,19 @@ fn do_sigreturn(frame: &mut SyscallFrame) {
         }
     }
 }
+
+/// The RFLAGS bits a `sigreturn` may change, Linux's `FIX_EFLAGS`: the arithmetic flags, `TF`,
+/// `DF` and `AC`, everything ring 3 could set for itself with `popfq` anyway. `RF` is left out
+/// since `SYSRETQ` clears it.
+const USER_SETTABLE_RFLAGS: u64 = 0x1 // CF
+    | 0x4 // PF
+    | 0x10 // AF
+    | 0x40 // ZF
+    | 0x80 // SF
+    | 0x100 // TF
+    | 0x400 // DF
+    | 0x800 // OF
+    | 0x4_0000; // AC
 
 /// musl's own `mcontext_t` on x86_64 under `_GNU_SOURCE` (`external/mit/musl/arch/x86_64/bits/
 /// signal.h`) -- the layout this kernel's actual userland (BusyBox, built with `-D_GNU_SOURCE`)
