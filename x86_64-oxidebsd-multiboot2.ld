@@ -77,12 +77,15 @@ SECTIONS
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
+    /* Section boundaries for `boot::multiboot2::protect_kernel_image` (W^X). */
+    _kernel_rodata_start = .;
     .rodata : AT(_kernel_phys_base + (ADDR(.rodata) - ADDR(.text))) {
         *(.rodata .rodata.*)
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
+    _kernel_data_start = .;
     .data : AT(_kernel_phys_base + (ADDR(.data) - ADDR(.text))) {
         *(.data .data.*)
         *(.data.rel.ro .data.rel.ro.*)

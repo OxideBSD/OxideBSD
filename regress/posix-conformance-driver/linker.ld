@@ -13,6 +13,9 @@ SECTIONS
         *(.text*)
     }
 
+    /* W^X: code, read-only data and writable data never share a page. */
+    . = ALIGN(4096);
+
     .rodata : {
         *(.rodata*)
     }

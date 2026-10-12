@@ -121,6 +121,13 @@ unsafe extern "C" {
     /// the classic "linker symbol as an opaque address marker" idiom.
     static _kernel_phys_start: u8;
     static _kernel_phys_end: u8;
+    /// Provided by the same script: where `.rodata` and `.data` start (virtual, page-aligned), for
+    /// `protect_kernel_image`.
+    static _kernel_rodata_start: u8;
+    static _kernel_data_start: u8;
+    /// Stage A's kernel higher-half page directory (the `global_asm!` block below): 2 MiB pages
+    /// mapping the kernel image, until `protect_kernel_image` splits them.
+    static mut temp_pd_high: x86_64::structures::paging::PageTable;
     /// Defined in the `global_asm!` block below: the physical addresses of the temporary kernel
     /// higher-half and low-identity PDPTs Stage A already built. Both are reused as-is by
     /// `install_final_page_tables` -- their content doesn't change between the temporary and final
@@ -931,6 +938,52 @@ pub fn enter_on_hhdm_stack(
 
 extern "C" fn continue_boot(boot_info: &'static BootInfo, f: fn(&'static BootInfo) -> !) -> ! {
     f(boot_info)
+}
+
+/// Maps the kernel image with per-section permissions (W^X, THREAT_MODEL.md §3.3): `.text`
+/// read-only and executable, `.rodata` read-only, `.data` and `.bss` writable, neither of those
+/// executable. Stage A maps the image with writable and executable 2 MiB pages (`temp_pd_high`);
+/// each becomes a page table of 4 KiB pages over the same physical memory. Limine already maps
+/// the image this way, from its program headers. Called from `crate::init` once frames can be
+/// allocated and NX is on.
+pub fn protect_kernel_image(
+    mapper: &mut x86_64::structures::paging::OffsetPageTable<'static>,
+    frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<x86_64::structures::paging::Size4KiB>,
+) {
+    let nx = crate::cpu::nx::no_execute();
+    let rodata = (&raw const _kernel_rodata_start) as u64;
+    let data = (&raw const _kernel_data_start) as u64;
+    let phys_offset = mapper.phys_offset();
+    // SAFETY: `temp_pd_high` is the live kernel page directory, written only here after boot (one
+    // core, before any process exists); it's in `.boot32`, where virtual and physical addresses
+    // are equal, so it is reached through the direct map now that the identity window is gone.
+    let pd = unsafe {
+        &mut *(phys_offset + (&raw mut temp_pd_high) as u64).as_mut_ptr::<PageTable>()
+    };
+    for (i, entry) in pd.iter_mut().enumerate() {
+        let flags = entry.flags();
+        if !flags.contains(PageTableFlags::PRESENT | PageTableFlags::HUGE_PAGE) {
+            continue;
+        }
+        let va = KERNEL_HIGHER_HALF_BASE + i as u64 * HUGE_PAGE_SIZE;
+        let phys = entry.addr().as_u64();
+        let frame = frame_allocator.allocate_frame().expect("no frame for a kernel image page table");
+        // SAFETY: a frame just allocated, through the direct map.
+        let pt = unsafe { &mut *(phys_offset + frame.start_address().as_u64()).as_mut_ptr::<PageTable>() };
+        for (j, pte) in pt.iter_mut().enumerate() {
+            let page = va + j as u64 * 4096;
+            let page_flags = if page < rodata {
+                PageTableFlags::PRESENT
+            } else if page < data {
+                PageTableFlags::PRESENT | nx
+            } else {
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | nx
+            };
+            pte.set_addr(PhysAddr::new(phys + j as u64 * 4096), page_flags);
+        }
+        entry.set_addr(frame.start_address(), PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+    }
+    x86_64::instructions::tlb::flush_all();
 }
 
 /// Unmaps the low identity window (PML4 slot 0), so that nothing kernel-only lies in the user
