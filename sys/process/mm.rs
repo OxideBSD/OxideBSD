@@ -50,8 +50,12 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
     let mut mapper =
         unsafe { x86_64::structures::paging::OffsetPageTable::new(&mut *l4_ptr, phys_offset) };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(fault_addr));
-    if mapper.translate_page(page).is_ok() {
-        return false; // already mapped: a real protection fault, not growth
+    // Anything in the slot already (a mapped page, or a PROT_NONE one, which `translate` doesn't
+    // see) makes this a real fault, not growth -- checked before a frame is taken for it.
+    if memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
+        .is_some_and(|e| !e.is_unused())
+    {
+        return false;
     }
     let parent = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     // Executable only if the stack exec mapped at exec is (`lifecycle::map_user_stack`, from the
@@ -1199,6 +1203,20 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         // same as `AddressSpace::teardown`'s own walk -- that content is owned by
         // `MMAP_FILE_CACHE`, released via `release_mmap_file_ref` below instead, never by this
         // per-page free.
+        // A PROT_NONE page isn't present, so `translate` doesn't see it: remove it here.
+        if let Some(entry) =
+            memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
+            && memory::address_space::is_prot_none(entry)
+        {
+            let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
+            let shared = entry.flags().contains(memory::address_space::SHARED_LEAF);
+            entry.set_unused();
+            if !shared {
+                // SAFETY: a private PROT_NONE leaf, just removed: no page table maps it now.
+                with_frame_allocator(|fa| unsafe { fa.deallocate_frame(frame) });
+            }
+            continue;
+        }
         let translated = mapper.translate(page.start_address());
         let (is_user_page, is_shared_leaf) = match translated {
             TranslateResult::Mapped { flags, .. } => (
@@ -1418,8 +1436,8 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     }
 
     let writable = prot & PROT_WRITE != 0;
-    // `PROT_NONE` keeps the page present but out of ring 3's reach.
-    let leaf_flags = if prot_accessible(prot) { prot_leaf_flags(prot) } else { PageTableFlags::PRESENT };
+    let accessible = prot_accessible(prot);
+    let leaf_flags = prot_leaf_flags(prot);
     // The bits `mprotect` owns on an existing leaf; every other bit (`SHARED_LEAF`, ...) is kept.
     let prot_bits = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
     // Always fully open -- see do_mmap_anon's identical reasoning.
@@ -1443,7 +1461,27 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_inclusive));
     with_frame_allocator(|fa| -> Result<(), u64> {
         for page in Page::range_inclusive(start_page, end_page) {
-            match mapper.translate(page.start_address()) {
+            let va = page.start_address();
+            // A PROT_NONE page (`PROT_NONE_LEAF`) comes back present, with the flags it had,
+            // before the permissions below are applied; one staying PROT_NONE is left alone.
+            if let Some(entry) = memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, va)
+                && memory::address_space::is_prot_none(entry)
+            {
+                if !accessible {
+                    continue;
+                }
+                let flags = (entry.flags() - memory::address_space::PROT_NONE_LEAF) | PageTableFlags::PRESENT;
+                entry.set_addr(entry.addr(), flags);
+            }
+            match mapper.translate(va) {
+                TranslateResult::Mapped { flags: old_flags, .. } if !accessible => {
+                    // To PROT_NONE: not present, keeping its frame and flags (`PROT_NONE_LEAF`).
+                    let entry = memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, va)
+                        .expect("a mapped page has a leaf entry");
+                    let flags = (old_flags - PageTableFlags::PRESENT) | memory::address_space::PROT_NONE_LEAF;
+                    entry.set_addr(entry.addr(), flags);
+                    x86_64::instructions::tlb::flush(va);
+                }
                 TranslateResult::Mapped {
                     frame: old_frame,
                     flags: old_flags,
@@ -1481,6 +1519,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                             .flush();
                     }
                 }
+                _ if !accessible => {}
                 _ => {
                     // Not yet backed -- a still-PROT_NONE guard sub-range being widened for the
                     // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill

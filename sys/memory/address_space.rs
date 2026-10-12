@@ -5,6 +5,7 @@ use spin::Mutex;
 
 use x86_64::VirtAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame,
     Size4KiB,
@@ -48,6 +49,40 @@ pub const SHARED_LEAF: PageTableFlags = PageTableFlags::BIT_9;
 /// `process::mm::do_mprotect` replaces such a page with a private copy before making it writable,
 /// where a `MAP_SHARED` or SysV leaf is shared on purpose and made writable in place.
 pub const CACHED_LEAF: PageTableFlags = PageTableFlags::BIT_10;
+
+/// Marks a `PROT_NONE` user page (`process::mm::do_mprotect`): the entry is not present, so ring 3
+/// and the kernel's copy routines fault on it, but it keeps its frame and its other flags for
+/// `mprotect` to restore. Owned like any other user leaf: copied by `fork`, freed by teardown and
+/// `munmap`. The hardware ignores every bit of a non-present entry.
+///
+/// `PROT_NONE` used to be a *present* leaf without `USER_ACCESSIBLE`, which every walk here takes
+/// for kernel-owned: `fork` shared the frame with the child instead of copying it, and whichever
+/// side made it accessible again and exited freed a frame the other still mapped.
+pub const PROT_NONE_LEAF: PageTableFlags = PageTableFlags::BIT_11;
+
+/// Whether `entry` is a `PROT_NONE` user page (`PROT_NONE_LEAF`).
+pub fn is_prot_none(entry: &PageTableEntry) -> bool {
+    let flags = entry.flags();
+    !flags.contains(PageTableFlags::PRESENT) && flags.contains(PROT_NONE_LEAF)
+}
+
+/// The level-1 entry for `va` in the tables under `l4`, present or not, if the tables leading to
+/// it exist (and none is a huge page).
+pub fn leaf_entry(l4: &mut PageTable, physical_memory_offset: VirtAddr, va: VirtAddr) -> Option<&mut PageTableEntry> {
+    let indexes = [va.p4_index(), va.p3_index(), va.p2_index()];
+    let mut table = l4;
+    for index in indexes {
+        let flags = table[index].flags();
+        if !flags.contains(PageTableFlags::PRESENT) || flags.contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        let frame = table[index].frame().ok()?;
+        // SAFETY: a present, non-huge entry points at a live page table, reachable through the
+        // physical-memory window; the caller's `&mut` to `l4` stands for the whole tree.
+        table = unsafe { frame_to_page_table(frame, physical_memory_offset) };
+    }
+    Some(&mut table[va.p1_index()])
+}
 
 /// A separate top-level page table — a distinct virtual address space from the kernel's own.
 ///
@@ -379,6 +414,12 @@ fn count_table_level(table: &PageTable, level: u8, pmo: VirtAddr, shared: &mut B
     let mut n = 0;
     for entry in table.iter() {
         let flags = entry.flags();
+        if level == 1 && is_prot_none(entry) {
+            if !flags.contains(SHARED_LEAF) || shared.insert(entry.addr().as_u64()) {
+                n += 1;
+            }
+            continue;
+        }
         if !flags.contains(PageTableFlags::PRESENT) || !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
             continue;
         }
@@ -409,6 +450,13 @@ fn free_table_level(
 ) {
     for i in 0..512usize {
         let entry = &table[i];
+        if level == 1 && is_prot_none(entry) {
+            if !entry.flags().contains(SHARED_LEAF) {
+                // SAFETY: a private PROT_NONE leaf, owned like any other private leaf.
+                unsafe { frame_allocator.deallocate_frame(PhysFrame::<Size4KiB>::containing_address(entry.addr())) };
+            }
+            continue;
+        }
         if !entry.flags().contains(PageTableFlags::PRESENT)
             || !entry.flags().contains(PageTableFlags::USER_ACCESSIBLE)
         {
@@ -487,6 +535,26 @@ fn copy_table_level(
 ) -> Result<(), ()> {
     for i in 0..512usize {
         let entry = &parent[i];
+        if level == 1 && is_prot_none(entry) {
+            // A PROT_NONE user page: copied (or, if shared, aliased) like the present ones below,
+            // and still PROT_NONE in the child.
+            if !copy_user_leaves {
+                continue;
+            }
+            let src_frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
+            if entry.flags().contains(SHARED_LEAF) {
+                child[i].set_addr(src_frame.start_address(), entry.flags());
+                continue;
+            }
+            let new_frame = frame_allocator.allocate_frame().ok_or(())?;
+            let src = (physical_memory_offset + src_frame.start_address().as_u64()).as_ptr::<u8>();
+            let dst = (physical_memory_offset + new_frame.start_address().as_u64()).as_mut_ptr::<u8>();
+            // SAFETY: the parent's own frame and a frame just allocated, both through the
+            // physical-memory window.
+            unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+            child[i].set_addr(new_frame.start_address(), entry.flags());
+            continue;
+        }
         if !entry.flags().contains(PageTableFlags::PRESENT) {
             continue;
         }
