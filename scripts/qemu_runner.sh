@@ -129,16 +129,16 @@ QEMU_HEADLESS_TEST="$IS_TEST"
 . "$REPO_ROOT/scripts/qemu_common.sh"
 
 # A `cargo run` invocation gets a real display by default (this kernel has a real VGA console);
-# a `cargo test` binary always forces `-display none` above regardless. `scripts/test_busybox.sh`
-# wants a headless `cargo run`-shaped boot for its own automated boot-log check, hence this
-# separate override rather than folding headlessness into the test/run split above.
+# a `cargo test` binary always forces `-display none` above regardless. This override gives a
+# headless `cargo run`-shaped boot (scripted runs, a machine without a display), separately from
+# the test/run split above.
 if [ -n "${OXIDEBSD_QEMU_DISPLAY:-}" ]; then
     set -- "$@" -display "$OXIDEBSD_QEMU_DISPLAY"
 fi
 
 if [ "$IS_TEST" = 0 ]; then
-    # Real PID (exec keeps it) -- lets a host-side script (e.g. scripts/test_busybox.sh, or a
-    # human) find and kill this exact QEMU instance without pattern-matching its argv.
+    # Real PID (exec keeps it) -- lets a host-side script (or a human) find and kill this exact
+    # QEMU instance without pattern-matching its argv.
     echo "$$" > target/qemu_runner.pid
     exec qemu-system-x86_64 "$@"
 fi

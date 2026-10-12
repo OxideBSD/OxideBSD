@@ -160,8 +160,8 @@ qemu_common_run_test_and_translate_exit() {
 
     qemu-system-x86_64 "$@" &
     qemu_pid=$!
-    # Lets a host-side script (e.g. scripts/test_busybox.sh, or a human) find and kill this exact
-    # QEMU instance without pattern-matching its argv.
+    # Lets a host-side script (or a human) find and kill this exact QEMU instance without
+    # pattern-matching its argv.
     echo "$qemu_pid" > target/qemu_runner.pid
 
     # Stall guard: no new serial output for $OXIDEBSD_TEST_STALL_SECS seconds (default 600; 0
