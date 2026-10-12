@@ -133,6 +133,8 @@ pub(crate) const ENOTTY: u64 = 25;
 /// `sys/netinet/udp.rs`'s own local copy of this constant (previously `43`, following this file's now-
 /// corrected mistake) needs the same fix.
 pub(crate) const EPROTONOSUPPORT: u64 = 93;
+/// `ENOTSUP`/`EOPNOTSUPP` (musl: the same value).
+pub(crate) const ENOTSUP: u64 = 95;
 /// Returned by `crate::fs::pipe`'s `blocking_read` for a real `O_NONBLOCK` fd (`sys_fcntl`) with
 /// nothing to read yet. `11`, matching musl's own compiled-in value (`EWOULDBLOCK` is the same
 /// value there too) -- same "must match musl's macro, not real-BSD numbering" reasoning as
@@ -533,17 +535,17 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) {
             // function call has no expectation about prior `RCX` content either way, so this
             // stashed state simply survives untouched (nothing else ever reads it) until whatever
             // handler chain finishes and a genuine resume is actually due.
-            // The trampoline page is a user page: these go through copyout/copyin like any other
+            // The trampoline's scratch page is a user page: these go through copyout/copyin like any other
             // user memory (SMAP faults otherwise). A process that unmapped or broke it can't be
             // resumed: it dies of SIGSEGV, as for a signal frame it broke.
             use crate::process::fault_trampoline::{
-                FAULT_TRAMPOLINE_VA, RAX_SCRATCH_OFFSET, TRUE_RESUME_RIP_OFFSET, TRUE_RFLAGS_OFFSET,
+                FAULT_SCRATCH_VA, RAX_SCRATCH_OFFSET, TRUE_RESUME_RIP_OFFSET, TRUE_RFLAGS_OFFSET,
             };
-            let stashed = copyout_val(&rip, UserPtr::new(FAULT_TRAMPOLINE_VA + TRUE_RESUME_RIP_OFFSET))
+            let stashed = copyout_val(&rip, UserPtr::new(FAULT_SCRATCH_VA + TRUE_RESUME_RIP_OFFSET))
                 .and_then(|()| {
-                    copyout_val(&rflags, UserPtr::new(FAULT_TRAMPOLINE_VA + TRUE_RFLAGS_OFFSET))
+                    copyout_val(&rflags, UserPtr::new(FAULT_SCRATCH_VA + TRUE_RFLAGS_OFFSET))
                 })
-                .and_then(|()| copyin_val::<u64>(UserPtr::new(FAULT_TRAMPOLINE_VA + RAX_SCRATCH_OFFSET)));
+                .and_then(|()| copyin_val::<u64>(UserPtr::new(FAULT_SCRATCH_VA + RAX_SCRATCH_OFFSET)));
             let Ok(saved_rax) = stashed else {
                 crate::process::do_exit_group(crate::process::scheduler::current_pid(), FRAME_FAULT_EXIT)
             };

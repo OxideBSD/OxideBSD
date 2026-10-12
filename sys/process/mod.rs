@@ -754,6 +754,9 @@ pub struct ThreadGroupShared {
     /// against `mlockall(MCL_FUTURE)`'s own implicit one. Same fork/execve treatment as
     /// `mlockall_future` above.
     pub locked_bytes: u64,
+    /// Whether this program may map pages writable and executable at once (`mm::check_wx`): a
+    /// `wxneeded` program run from a `wxallowed` mount. Set by `execve`, kept across `fork`.
+    pub wx_allowed: bool,
     /// Indexed `1..=64` (index `0` unused) -- see `SigAction`'s own doc comment. **Lives here, not
     /// on `Process`, because real POSIX signal disposition is a property of the whole process,
     /// shared by every thread** -- `sigaction()` called on any one `CLONE_THREAD` sibling must be

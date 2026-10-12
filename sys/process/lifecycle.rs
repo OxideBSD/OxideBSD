@@ -143,7 +143,7 @@ fn load_image(
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
     let mapped_pages =
-        map_user_stack(&mut mapper, stack_top, user_stack_pages()).map_err(|()| SpawnError::OutOfMemory)?;
+        map_user_stack(&mut mapper, stack_top, user_stack_pages(), elf.exec_stack()).map_err(|()| SpawnError::OutOfMemory)?;
     crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|()| SpawnError::OutOfMemory)?;
     let initial_rsp = crate::process::user_stack::build(
         &elf,
@@ -209,6 +209,7 @@ fn spawn_finish(
             mmap_phys_regions: Vec::new(),
             mlockall_future: false,
             locked_bytes: 0,
+            wx_allowed: false,
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
         })),
         fs_base: 0,
@@ -300,10 +301,24 @@ fn map_user_stack(
     mapper: &mut impl Mapper<Size4KiB>,
     stack_top: VirtAddr,
     pages: u64,
+    exec: bool,
 ) -> Result<BTreeMap<Page<Size4KiB>, PhysFrame<Size4KiB>>, ()> {
     let stack_bottom_page = Page::containing_address(stack_top - pages * 4096);
     let stack_top_page = Page::containing_address(stack_top - 1u64);
     let phys_offset = memory::phys_mem_offset();
+    // Not executable unless the program's `PT_GNU_STACK` asks for it (`Elf::exec_stack`); pages
+    // the stack grows into later copy this (`mm::try_grow_user_stack`).
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    if exec {
+        if crate::cpu::nx::enabled() {
+            crate::serial_println!(
+                "[wx] pid {}: executable stack (PT_GNU_STACK)",
+                crate::process::scheduler::current_pid()
+            );
+        }
+    } else {
+        flags |= crate::cpu::nx::no_execute();
+    }
     with_frame_allocator(|fa| {
         let mut mapped_pages = BTreeMap::new();
         for page in Page::range_inclusive(stack_bottom_page, stack_top_page) {
@@ -311,14 +326,7 @@ fn map_user_stack(
             // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's contract),
             // and page falls in this address space's own, not-yet-active range.
             let flush = unsafe {
-                mapper.map_to(
-                    page,
-                    frame,
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE,
-                    fa,
-                )
+                mapper.map_to(page, frame, flags, fa)
             };
             match flush {
                 // Real, resource-exhaustion-triggerable: map_to's own internal page-table-
@@ -492,6 +500,8 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
                 // POSIX mlockall()/fork() semantics).
                 mlockall_future: false,
                 locked_bytes: 0,
+                // The same program in the same address space.
+                wx_allowed: parent_shared.wx_allowed,
                 // Real fork() semantics: signal disposition is copied (see ThreadGroupShared::
                 // sigactions's own doc comment for why this field lives here, not on Process).
                 sigactions: parent_shared.sigactions,
@@ -1425,7 +1435,7 @@ fn exec_image(
             .sum();
         let stack_pages = user_stack_eager_pages(arg_bytes);
         let mapped_pages =
-            map_user_stack(&mut mapper, stack_top, stack_pages).map_err(|_| ENOMEM)?;
+            map_user_stack(&mut mapper, stack_top, stack_pages, elf.exec_stack()).map_err(|_| ENOMEM)?;
         crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
         Ok((main_bias, jump_entry, interp_base, stack_top, stack_pages, mapped_pages))
     })();
@@ -1514,6 +1524,7 @@ fn exec_image(
             // removed on execve(2) -- see ThreadGroupShared::mlockall_future's own doc comment.
             shared.mlockall_future = false;
             shared.locked_bytes = 0;
+            shared.wx_allowed = false;
         }
         // effective_path is whichever path actually got loaded as the real ELF above -- the
         // caller's own original path_bytes when there was no `#!` to follow, or the final

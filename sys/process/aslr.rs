@@ -20,6 +20,7 @@
 //! ```text
 //! 0x0000000010000000  INTERP_LOAD_BASE       (process/lifecycle.rs)
 //! 0x0000000020000000  BRK_REGION_CEILING     (process/mm.rs)
+//! 0x00001fffffffe000  FAULT_SCRATCH_VA       (process/fault_trampoline.rs)
 //! 0x00001ffffffff000  FAULT_TRAMPOLINE_VA    (process/fault_trampoline.rs)
 //! 0x0000200000000000  MMAP_REGION_BASE       (process/mm.rs)
 //! 0x0000300000000000  MMAP_REGION_CEILING    (process/mm.rs)   <- this window starts here

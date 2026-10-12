@@ -39,6 +39,9 @@ const MACHINE_X86_64: u16 = 62;
 
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
+/// The stack's permissions (GNU): executable if it has `PF_X`.
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PF_EXEC: u32 = 1 << 0;
 const PF_WRITE: u32 = 1 << 1;
 
 const EHDR_SIZE: usize = 64;
@@ -197,6 +200,13 @@ impl<'a> Elf<'a> {
             .unwrap_or(0)
     }
 
+    /// Whether the program asks for an executable stack: a `PT_GNU_STACK` with `PF_X`. No
+    /// `PT_GNU_STACK` at all means a non-executable stack (unlike Linux's legacy default).
+    pub fn exec_stack(&self) -> bool {
+        self.program_headers()
+            .any(|h| h.p_type == PT_GNU_STACK && h.p_flags & PF_EXEC != 0)
+    }
+
     /// The highest virtual address any `PT_LOAD` segment reaches (`p_vaddr + p_memsz`, page-aligned
     /// up) — where a fresh heap should start growing from. `0` if there are no `PT_LOAD` segments
     /// at all (never true in practice for a real `ET_EXEC`, but a harmless base case).
@@ -340,7 +350,10 @@ pub fn load(
     // to `p_align`. Track which pages this call has already mapped so a later segment reuses the
     // same frame instead of re-mapping (which fails: the page is already present) or re-zeroing
     // it (which would wipe out an earlier segment's bytes already written there).
-    let mut mapped_pages: BTreeMap<Page<Size4KiB>, PhysFrame<Size4KiB>> = BTreeMap::new();
+    // A shared page gets the union of its segments' permissions (W^X, THREAT_MODEL.md §3.3):
+    // writable if either is, executable if either is. A page that ends up both is mapped that way
+    // so the program still runs, and logged: its linker script should page-align the segments.
+    let mut mapped_pages: BTreeMap<Page<Size4KiB>, (PhysFrame<Size4KiB>, PageTableFlags)> = BTreeMap::new();
 
     for (index, header) in elf.program_headers().enumerate() {
         if header.p_type != PT_LOAD {
@@ -378,13 +391,13 @@ pub fn load(
             mem_end.saturating_sub(1).max(mem_start),
         ));
 
-        let flags = PageTableFlags::PRESENT
-            | PageTableFlags::USER_ACCESSIBLE
-            | if header.p_flags & PF_WRITE != 0 {
-                PageTableFlags::WRITABLE
-            } else {
-                PageTableFlags::empty()
-            };
+        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if header.p_flags & PF_WRITE != 0 {
+            flags |= PageTableFlags::WRITABLE;
+        }
+        if header.p_flags & PF_EXEC == 0 {
+            flags |= crate::cpu::nx::no_execute();
+        }
 
         for page in Page::range_inclusive(start_page, end_page) {
             // Shared with every other process running this file, read-only. No other segment
@@ -404,8 +417,29 @@ pub fn load(
                 }
                 continue;
             }
-            let frame = match mapped_pages.get(&page) {
-                Some(&frame) => frame,
+            let frame = match mapped_pages.get_mut(&page) {
+                Some((frame, old_flags)) => {
+                    let union = (*old_flags | flags) & !PageTableFlags::NO_EXECUTE
+                        | (*old_flags & flags & PageTableFlags::NO_EXECUTE);
+                    if union != *old_flags {
+                        // SAFETY: a page this call mapped above, in an address space that isn't
+                        // active yet; only its permissions change.
+                        unsafe {
+                            mapper.update_flags(page, union).map_err(|_| ElfError::MappingFailed)?.ignore();
+                        }
+                        *old_flags = union;
+                        if union.contains(PageTableFlags::WRITABLE) && !union.contains(PageTableFlags::NO_EXECUTE)
+                            && crate::cpu::nx::enabled()
+                        {
+                            crate::serial_println!(
+                                "[wx] pid {}: ELF segments share a writable and executable page at {:#x}",
+                                crate::process::scheduler::current_pid(),
+                                page.start_address().as_u64()
+                            );
+                        }
+                    }
+                    *frame
+                }
                 None => {
                     let frame = frame_allocator
                         .allocate_frame()
@@ -423,7 +457,7 @@ pub fn load(
                         .as_mut_ptr::<u8>();
                     unsafe { core::ptr::write_bytes(frame_ptr, 0, PAGE_SIZE as usize) };
 
-                    mapped_pages.insert(page, frame);
+                    mapped_pages.insert(page, (frame, flags));
                     frame
                 }
             };

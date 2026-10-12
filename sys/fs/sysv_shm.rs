@@ -66,8 +66,8 @@ const IPC_EXCL: u64 = 0o2000;
 /// is always ignored (this kernel always picks the address itself, same simplification
 /// `crate::process::mm::do_mmap` already applies to its own `addr_hint`), so `SHM_RND`'s rounding
 /// has nothing to round; `SHM_REMAP` has no prior mapping at a caller-chosen address to replace;
-/// `SHM_EXEC` has no meaning since this kernel maps every user page executable already (no
-/// `NO_EXECUTE`/`EFER.NXE` anywhere yet, a known gap CLAUDE.md's own user-mode section documents).
+/// `SHM_EXEC` (Linux-only) is ignored: segments are never executable, as on the BSDs (W^X,
+/// THREAT_MODEL.md §3.3).
 const SHM_RDONLY: u64 = 0o10000;
 
 /// A small, sane per-segment cap -- no privileged-override/`rlimit`-driven `SHMMAX` ceiling exists
@@ -325,7 +325,8 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
     // segment or a still-attached other process. See `SHARED_LEAF`'s own doc comment.
     let mut flags = PageTableFlags::PRESENT
         | PageTableFlags::USER_ACCESSIBLE
-        | memory::address_space::SHARED_LEAF;
+        | memory::address_space::SHARED_LEAF
+        | crate::cpu::nx::no_execute();
     if want_write {
         flags |= PageTableFlags::WRITABLE;
     }

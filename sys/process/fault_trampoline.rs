@@ -64,6 +64,10 @@ use crate::memory::with_frame_allocator;
 /// `lifecycle::INTERP_LOAD_BASE`, `fs::sysv_shm::SHM_REGION_BASE`).
 pub const FAULT_TRAMPOLINE_VA: u64 = 0x_1FFF_FFFF_F000;
 
+/// The trampoline's data: the page just below its code, writable and not executable (W^X,
+/// THREAT_MODEL.md §3.3), where the `*_OFFSET` cells below live. The code page itself is read-only.
+pub const FAULT_SCRATCH_VA: u64 = FAULT_TRAMPOLINE_VA - 0x1000;
+
 /// Real length, in bytes, of the trampoline's own instruction sequence (`map`'s own `code` array
 /// below) -- `interrupts::timer_interrupt_handler` uses this to recognize "currently mid-trampoline"
 /// and defer preemption/redirect decisions until the thread has actually left this tiny window; see
@@ -80,9 +84,8 @@ pub const STUB_OFFSET: u64 = 0x40;
 /// Real length, in bytes, of the restore stub at `STUB_OFFSET`.
 pub const STUB_LEN: u64 = 27;
 
-/// Offset within the trampoline's own page where the real, pre-clobber `RAX` is stashed -- well
-/// past the ~19 bytes of real code, arbitrary otherwise (nothing else ever lives on this page).
-/// One frame per address space, so no cross-*process* race is possible.
+/// Offset within the scratch page (`FAULT_SCRATCH_VA`) where the real, pre-clobber `RAX` is
+/// stashed. One frame per address space, so no cross-*process* race is possible.
 ///
 /// **Was documented (wrongly, once real threading landed) as also race-free across threads** --
 /// "single-core, so no cross-thread race is possible". True only while every `AddressSpace` was
@@ -194,13 +197,11 @@ pub const TRUE_RFLAGS_OFFSET: u64 = 0x118;
 /// genuine resume is actually due).
 pub const TRUE_RESUME_RIP_OFFSET: u64 = 0x120;
 
-/// Maps `FAULT_TRAMPOLINE_VA` into `mapper`'s own (not-yet-active) address space with real
-/// `mov [FAULT_TRAMPOLINE_VA + RAX_SCRATCH_OFFSET], rax; mov eax, SYS_FAULT_PUMP; syscall; ud2`
-/// bytes -- called once per fresh address space (`process::spawn` at boot, `do_execve` on every
-/// exec; a forked child gets its own copy for free, same as every other user page, via
-/// `AddressSpace::fork`'s existing full eager copy of `USER_ACCESSIBLE` content). **Now real
-/// `WRITABLE`** -- the leading `RAX`-stashing store needs it (this kernel has no W^X enforcement
-/// anywhere regardless, see CLAUDE.md's own note on `elf::load`, so this costs nothing).
+/// Maps the trampoline into `mapper`'s own (not-yet-active) address space: its code at
+/// `FAULT_TRAMPOLINE_VA`, read-only and executable, and its zeroed scratch page at
+/// `FAULT_SCRATCH_VA`, writable and not executable. Called once per fresh address space
+/// (`process::spawn` at boot, `do_execve` on every exec); a forked child gets its own copy for
+/// free, same as every other user page, via `AddressSpace::fork`'s eager copy.
 ///
 /// # Errors
 ///
@@ -211,105 +212,107 @@ pub const TRUE_RESUME_RIP_OFFSET: u64 = 0x120;
 /// allocation site).
 #[allow(clippy::result_unit_err)] // see AddressSpace::new's own identical allow.
 pub fn map(mapper: &mut impl Mapper<Size4KiB>, phys_offset: VirtAddr) -> Result<(), ()> {
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(FAULT_TRAMPOLINE_VA));
+    let code_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    let scratch_flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::USER_ACCESSIBLE
+        | crate::cpu::nx::no_execute();
+    let code_frame = map_page(mapper, FAULT_TRAMPOLINE_VA, code_flags)?;
+    map_page(mapper, FAULT_SCRATCH_VA, scratch_flags)?;
+
+    let frame_ptr = (phys_offset + code_frame).as_mut_ptr::<u8>();
+    let imm = (crate::syscall::SYS_FAULT_PUMP as u32).to_le_bytes();
+    let scratch_addr = (FAULT_SCRATCH_VA + RAX_SCRATCH_OFFSET).to_le_bytes();
+    // RIP-relative displacements: the byte offset from "the address of the instruction right
+    // after this one" (an offset into the code page) to a scratch cell (an offset into the
+    // scratch page, one page below). Verified against a real assembler (`as`/`objdump`) before
+    // landing, not hand-encoded from memory alone.
+    let disp = |instr_end_offset: u64, scratch_offset: u64| -> [u8; 4] {
+        let target = scratch_offset as i64 - (FAULT_TRAMPOLINE_VA - FAULT_SCRATCH_VA) as i64;
+        ((target - instr_end_offset as i64) as i32).to_le_bytes()
+    };
+    let d_rcx_store = disp(0x11, RCX_SCRATCH_OFFSET); // mov [rip+d], rcx -- entry, ends at 0x11
+    let d_r11_store = disp(0x18, R11_SCRATCH_OFFSET); // mov [rip+d], r11 -- entry, ends at 0x18
+    #[rustfmt::skip]
+    let code: [u8; CODE_LEN as usize] = [
+        0x48, 0xA3, scratch_addr[0], scratch_addr[1], scratch_addr[2], scratch_addr[3],
+                    scratch_addr[4], scratch_addr[5], scratch_addr[6], scratch_addr[7],
+                                          // mov [FAULT_SCRATCH_VA + RAX_SCRATCH_OFFSET], rax --
+                                          // see this module's own doc comment
+        0x48, 0x89, 0x0D, d_rcx_store[0], d_rcx_store[1], d_rcx_store[2], d_rcx_store[3],
+                                          // mov [rip+d], rcx -- see RCX_SCRATCH_OFFSET's doc
+        0x4C, 0x89, 0x1D, d_r11_store[0], d_r11_store[1], d_r11_store[2], d_r11_store[3],
+                                          // mov [rip+d], r11 -- see R11_SCRATCH_OFFSET's doc
+        0xB8, imm[0], imm[1], imm[2], imm[3], // mov eax, imm32
+        0x0F, 0x05,                           // syscall
+        0x0F, 0x0B,                           // ud2 -- see this module's own doc comment
+    ];
+    assert_eq!(
+        code.len() as u64,
+        CODE_LEN,
+        "CODE_LEN drifted from the real trampoline encoding"
+    );
+
+    // The restore stub (`STUB_OFFSET`'s own doc comment): reached via an ordinary `SYSRETQ`
+    // when `syscall_dispatch`'s `SYS_FAULT_PUMP` handling decides nothing further needs
+    // delivering and it's time to genuinely resume -- restores the true `rcx`/`r11`/`rflags`
+    // this trampoline's own entry sequence stashed, then jumps to the true resume `rip`,
+    // entirely bypassing `SYSRETQ`'s own `RIP := RCX` coupling for this final hop.
+    let d_rcx_load = disp(STUB_OFFSET + 0x07, RCX_SCRATCH_OFFSET); // mov rcx,[rip+d]
+    let d_r11_load = disp(STUB_OFFSET + 0x0E, R11_SCRATCH_OFFSET); // mov r11,[rip+d]
+    let d_rflags = disp(STUB_OFFSET + 0x14, TRUE_RFLAGS_OFFSET); // push [rip+d]
+    let d_resume_rip = disp(STUB_OFFSET + 0x1B, TRUE_RESUME_RIP_OFFSET); // jmp [rip+d]
+    #[rustfmt::skip]
+    let stub: [u8; STUB_LEN as usize] = [
+        0x48, 0x8B, 0x0D, d_rcx_load[0], d_rcx_load[1], d_rcx_load[2], d_rcx_load[3],
+                                          // mov rcx, [rip+d]
+        0x4C, 0x8B, 0x1D, d_r11_load[0], d_r11_load[1], d_r11_load[2], d_r11_load[3],
+                                          // mov r11, [rip+d]
+        0xFF, 0x35, d_rflags[0], d_rflags[1], d_rflags[2], d_rflags[3],
+                                          // push QWORD PTR [rip+d]
+        0x9D,                             // popfq
+        0xFF, 0x25, d_resume_rip[0], d_resume_rip[1], d_resume_rip[2], d_resume_rip[3],
+                                          // jmp QWORD PTR [rip+d]
+    ];
+    assert_eq!(
+        stub.len() as u64,
+        STUB_LEN,
+        "STUB_LEN drifted from the real stub encoding"
+    );
+
+    // SAFETY: frame_ptr points at the whole code frame, just allocated and zeroed by `map_page`,
+    // in an address space that isn't active yet.
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), frame_ptr, code.len());
+        core::ptr::copy_nonoverlapping(stub.as_ptr(), frame_ptr.add(STUB_OFFSET as usize), stub.len());
+    }
+    Ok(())
+}
+
+/// Maps one fresh, zeroed frame at `va` with `flags`; returns its physical address.
+fn map_page(mapper: &mut impl Mapper<Size4KiB>, va: u64, flags: PageTableFlags) -> Result<u64, ()> {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+    let phys_offset = crate::memory::phys_mem_offset();
     with_frame_allocator(|fa| {
         let frame = fa.allocate_frame().ok_or(())?;
         // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's contract), and
         // page falls in this address space's own, not-yet-active, otherwise-unused VA range.
-        let flush = unsafe {
-            mapper.map_to(
-                page,
-                frame,
-                PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::USER_ACCESSIBLE,
-                fa,
-            )
-        };
+        let flush = unsafe { mapper.map_to(page, frame, flags, fa) };
         match flush {
             // Real, resource-exhaustion-triggerable: map_to's own internal page-table-structure
-            // allocation (for this page's not-yet-existing PT/PD/PDPT entries) can hit the exact
-            // same frame exhaustion this whole function exists to report as a real ENOMEM, not a
-            // kernel panic -- same reasoning as the leaf frame allocation just above.
+            // allocation can hit the same frame exhaustion as the leaf allocation just above.
             Err(x86_64::structures::paging::mapper::MapToError::FrameAllocationFailed) => {
                 return Err(());
             }
             // Anything else (ParentEntryHugePage/PageAlreadyMapped) is a real logic-invariant
             // violation, not a resource limit -- this VA is always fresh in a brand-new address
-            // space, so hitting either means a future change broke that assumption, worth a loud
-            // panic rather than a silently-wrong ENOMEM.
+            // space.
             Err(e) => panic!("failed to map the fault trampoline page: {e:?}"),
             Ok(flush) => flush.flush(),
         }
         let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-        let imm = (crate::syscall::SYS_FAULT_PUMP as u32).to_le_bytes();
-        let scratch_addr = (FAULT_TRAMPOLINE_VA + RAX_SCRATCH_OFFSET).to_le_bytes();
-        // RIP-relative displacements: the byte offset from "the address of the instruction right
-        // after this one" to the target -- independent of `FAULT_TRAMPOLINE_VA`'s own actual
-        // value, since both ends of the subtraction share it. `verified against a real assembler
-        // (`as`/`objdump`) before landing, not hand-encoded from memory alone.
-        let disp = |instr_end_offset: u64, target_offset: u64| -> [u8; 4] {
-            ((target_offset as i64 - instr_end_offset as i64) as i32).to_le_bytes()
-        };
-        let d_rcx_store = disp(0x11, RCX_SCRATCH_OFFSET); // mov [rip+d], rcx -- entry, ends at 0x11
-        let d_r11_store = disp(0x18, R11_SCRATCH_OFFSET); // mov [rip+d], r11 -- entry, ends at 0x18
-        #[rustfmt::skip]
-        let code: [u8; CODE_LEN as usize] = [
-            0x48, 0xA3, scratch_addr[0], scratch_addr[1], scratch_addr[2], scratch_addr[3],
-                        scratch_addr[4], scratch_addr[5], scratch_addr[6], scratch_addr[7],
-                                              // mov [RAX_SCRATCH_OFFSET], rax -- see this
-                                              // module's own doc comment
-            0x48, 0x89, 0x0D, d_rcx_store[0], d_rcx_store[1], d_rcx_store[2], d_rcx_store[3],
-                                              // mov [rip+d], rcx -- see RCX_SCRATCH_OFFSET's doc
-            0x4C, 0x89, 0x1D, d_r11_store[0], d_r11_store[1], d_r11_store[2], d_r11_store[3],
-                                              // mov [rip+d], r11 -- see R11_SCRATCH_OFFSET's doc
-            0xB8, imm[0], imm[1], imm[2], imm[3], // mov eax, imm32
-            0x0F, 0x05,                           // syscall
-            0x0F, 0x0B,                           // ud2 -- see this module's own doc comment
-        ];
-        assert_eq!(
-            code.len() as u64,
-            CODE_LEN,
-            "CODE_LEN drifted from the real trampoline encoding"
-        );
-
-        // The restore stub (`STUB_OFFSET`'s own doc comment): reached via an ordinary `SYSRETQ`
-        // when `syscall_dispatch`'s `SYS_FAULT_PUMP` handling decides nothing further needs
-        // delivering and it's time to genuinely resume -- restores the true `rcx`/`r11`/`rflags`
-        // this trampoline's own entry sequence stashed, then jumps to the true resume `rip`,
-        // entirely bypassing `SYSRETQ`'s own `RIP := RCX` coupling for this final hop.
-        let d_rcx_load = disp(STUB_OFFSET + 0x07, RCX_SCRATCH_OFFSET); // mov rcx,[rip+d]
-        let d_r11_load = disp(STUB_OFFSET + 0x0E, R11_SCRATCH_OFFSET); // mov r11,[rip+d]
-        let d_rflags = disp(STUB_OFFSET + 0x14, TRUE_RFLAGS_OFFSET); // push [rip+d]
-        let d_resume_rip = disp(STUB_OFFSET + 0x1B, TRUE_RESUME_RIP_OFFSET); // jmp [rip+d]
-        #[rustfmt::skip]
-        let stub: [u8; STUB_LEN as usize] = [
-            0x48, 0x8B, 0x0D, d_rcx_load[0], d_rcx_load[1], d_rcx_load[2], d_rcx_load[3],
-                                              // mov rcx, [rip+d]
-            0x4C, 0x8B, 0x1D, d_r11_load[0], d_r11_load[1], d_r11_load[2], d_r11_load[3],
-                                              // mov r11, [rip+d]
-            0xFF, 0x35, d_rflags[0], d_rflags[1], d_rflags[2], d_rflags[3],
-                                              // push QWORD PTR [rip+d]
-            0x9D,                             // popfq
-            0xFF, 0x25, d_resume_rip[0], d_resume_rip[1], d_resume_rip[2], d_resume_rip[3],
-                                              // jmp QWORD PTR [rip+d]
-        ];
-        assert_eq!(
-            stub.len() as u64,
-            STUB_LEN,
-            "STUB_LEN drifted from the real stub encoding"
-        );
-
-        // SAFETY: frame_ptr points at the whole, just-allocated, not-yet-active 4096-byte frame.
-        unsafe {
-            core::ptr::write_bytes(frame_ptr, 0, 4096);
-            core::ptr::copy_nonoverlapping(code.as_ptr(), frame_ptr, code.len());
-            core::ptr::copy_nonoverlapping(
-                stub.as_ptr(),
-                frame_ptr.add(STUB_OFFSET as usize),
-                stub.len(),
-            );
-        }
-        Ok(())
+        // SAFETY: the whole, just-allocated 4096-byte frame.
+        unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+        Ok(frame.start_address().as_u64())
     })
 }

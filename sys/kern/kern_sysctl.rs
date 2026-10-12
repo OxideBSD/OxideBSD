@@ -437,6 +437,20 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
         },
         Leaf {
             number: None,
+            name: "wxabort",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Send SIGABRT on a W^X violation",
+            get: || int(crate::process::mm::WXABORT.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                crate::process::mm::WXABORT.store(v != 0, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+        Leaf {
+            number: None,
             name: "hz",
             kind: CTLTYPE_INT,
             fmt: "I",

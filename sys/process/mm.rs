@@ -12,7 +12,7 @@ use x86_64::structures::paging::{
 
 use super::*;
 use crate::memory::{self, with_frame_allocator};
-use crate::syscall::{EACCES, EAGAIN, EBADF, EBUSY, EINVAL, ENODEV, ENOMEM, ENXIO, EOVERFLOW};
+use crate::syscall::{EACCES, EAGAIN, EBADF, EBUSY, EINVAL, ENODEV, ENOMEM, ENOTSUP, ENXIO, EOVERFLOW};
 
 /// Fixed VA window for anonymous `SYS_MMAP` allocations — a fresh region, not reused from
 /// `module::MODULE_VA_BASE` (that one's kernel-mapped and shared across every address space; an
@@ -53,7 +53,16 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
     if mapper.translate_page(page).is_ok() {
         return false; // already mapped: a real protection fault, not growth
     }
-    let leaf = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let parent = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    // Executable only if the stack exec mapped at exec is (`lifecycle::map_user_stack`, from the
+    // program's `PT_GNU_STACK`): read from the stack's top page rather than the process table,
+    // which this fault may have interrupted the kernel holding.
+    let top = Page::<Size4KiB>::containing_address(VirtAddr::new(USER_STACK_TOP - 1));
+    let exec = matches!(
+        mapper.translate(top.start_address()),
+        TranslateResult::Mapped { flags, .. } if !flags.contains(PageTableFlags::NO_EXECUTE)
+    );
+    let leaf = parent | if exec { PageTableFlags::empty() } else { crate::cpu::nx::no_execute() };
     memory::try_with_frame_allocator(|fa| {
         let Some(frame) = fa.allocate_frame() else {
             return false;
@@ -62,7 +71,7 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
         // SAFETY: a freshly allocated, unused frame; stack pages must start zeroed.
         unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
         // SAFETY: `page` is unmapped (checked above) and inside this process's own stack reserve.
-        unsafe { mapper.map_to_with_table_flags(page, frame, leaf, leaf, fa) }
+        unsafe { mapper.map_to_with_table_flags(page, frame, leaf, parent, fa) }
             .map(|flush| flush.flush())
             .is_ok()
     })
@@ -100,6 +109,58 @@ const MAX_MMAP_FILE_REGIONS: usize = 65530;
 /// machinery (`mmap/6-2.c`).
 const PROT_READ: u64 = 0x1;
 const PROT_WRITE: u64 = 0x2;
+/// `PROT_EXEC`: the page is mapped without `NO_EXECUTE` (THREAT_MODEL.md §3.3); every other user
+/// page is not executable. Implies read access, as on all x86 hardware.
+const PROT_EXEC: u64 = 0x4;
+
+/// Whether `prot` grants any access at all (anything but `PROT_NONE`).
+fn prot_accessible(prot: u64) -> bool {
+    prot & (PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+}
+
+/// The leaf flags for an accessible user page with protection `prot`: writable only with
+/// `PROT_WRITE`, executable only with `PROT_EXEC`.
+pub(crate) fn prot_leaf_flags(prot: u64) -> PageTableFlags {
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if prot & PROT_WRITE != 0 {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        flags |= crate::cpu::nx::no_execute();
+    }
+    flags
+}
+
+/// `kern.wxabort`: a W^X violation (`check_wx`) also sends the process `SIGABRT`, for finding
+/// the caller in a debugger or core dump. Off by default, as on OpenBSD.
+pub(crate) static WXABORT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// W^X (THREAT_MODEL.md §3.3, OpenBSD's policy): no mapping may be writable and executable at
+/// once. `mmap`/`mprotect` asking for both fail with `ENOTSUP` and are logged, unless the process
+/// is a marked `wxneeded` program run from a `wxallowed` mount (`ThreadGroupShared::wx_allowed`).
+fn check_wx(caller_pid: Pid, prot: u64, call: &str) -> Result<(), u64> {
+    if prot & (PROT_WRITE | PROT_EXEC) != PROT_WRITE | PROT_EXEC {
+        return Ok(());
+    }
+    let table = PROCESS_TABLE.lock();
+    let Some(me) = table.get(&caller_pid) else {
+        return Err(ENOTSUP);
+    };
+    if me.shared.lock().wx_allowed {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[wx] pid {} ({}): {} W^X violation",
+        caller_pid,
+        core::str::from_utf8(&me.comm).unwrap_or("?"),
+        call
+    );
+    drop(table);
+    if WXABORT.load(core::sync::atomic::Ordering::Relaxed) {
+        let _ = crate::process::signals::do_kill(caller_pid, caller_pid as i64, SIGABRT as i64);
+    }
+    Err(ENOTSUP)
+}
 
 /// Real `flags` bits `SYS_MMAP` understands, unpacked from `oxidebsd_sys_mmap`'s own `packed_prot`
 /// register (see that function's own doc comment for the wire format) — matches musl's own real
@@ -304,6 +365,7 @@ pub fn do_mmap(
         return Err(EBADF);
     }
     let effective_fd = if anon { -1 } else { fd };
+    check_wx(caller_pid, prot, "mmap")?;
 
     let page_count = len.div_ceil(4096);
     let region_len = page_count.checked_mul(4096).ok_or(ENOMEM)?;
@@ -446,13 +508,11 @@ fn do_mmap_anon(
         }
     };
 
-    let prot_accessible = prot & (PROT_READ | PROT_WRITE) != 0;
-    if !prot_accessible {
+    if !prot_accessible(prot) {
         // Real PROT_NONE: reserve the VA (already done above) but map nothing -- see this
         // function's own doc comment.
         return Ok(base);
     }
-    let writable = prot & PROT_WRITE != 0;
 
     let phys_offset = memory::phys_mem_offset();
     let mut table = PROCESS_TABLE.lock();
@@ -469,10 +529,7 @@ fn do_mmap_anon(
             .mapper(phys_offset)
     };
 
-    let mut leaf_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-    if writable {
-        leaf_flags |= PageTableFlags::WRITABLE;
-    }
+    let leaf_flags = prot_leaf_flags(prot);
     // Always fully open, regardless of this call's own leaf flags -- see `do_mprotect`'s own doc
     // comment: a later `mprotect()` widening just the leaf (e.g. a real `PROT_READ`-only region
     // upgraded to add `PROT_WRITE`) must not find an intermediate P2/P3/P4 entry this same region
@@ -571,10 +628,12 @@ fn do_mmap_fb(
             .mapper(phys_offset)
     };
 
+    // Never executable, whatever `prot` asked for: it's a framebuffer.
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
         | PageTableFlags::USER_ACCESSIBLE
-        | memory::address_space::SHARED_LEAF;
+        | memory::address_space::SHARED_LEAF
+        | crate::cpu::nx::no_execute();
     for i in 0..page_count {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + i * 4096));
         let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(
@@ -869,7 +928,7 @@ fn do_mmap_file_backed(
     };
 
     let writable = prot & PROT_WRITE != 0;
-    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    let mut flags = prot_leaf_flags(prot);
     if !private {
         // SHARED_LEAF: these frames are owned by MMAP_FILE_CACHE (keyed by content_id, real
         // cross-open sharing -- see that cache's own doc comment), not by this one mapping -- marks
@@ -879,9 +938,6 @@ fn do_mmap_file_backed(
         // frames are never shared this way, so they're left unmarked and get freed like any other
         // private leaf (matches every other private-anon-mmap/heap/stack frame already does).
         flags |= memory::address_space::SHARED_LEAF;
-    }
-    if writable {
-        flags |= PageTableFlags::WRITABLE;
     }
 
     let mut table = PROCESS_TABLE.lock();
@@ -903,12 +959,12 @@ fn do_mmap_file_backed(
     // `0`), so a reference anywhere in `[va_start, va_start + covered_pages*4096)` -- real content
     // that exists but is genuinely off-limits under `PROT_NONE` -- correctly falls into that
     // "everything else" `SIGSEGV` case rather than being misclassified as the reserved tail.
-    let prot_accessible = prot & (PROT_READ | PROT_WRITE) != 0;
+    let accessible = prot_accessible(prot);
     // Only `[base, base + covered_pages*4096)` is actually mapped -- `[covered_pages, page_count)`
     // is deliberately left with no page-table entry at all, real POSIX MPR (see MmapFileRegion's
     // own `mapped_pages` field doc comment); `covered_pages == 0` (the whole reservation is beyond
     // the object's own real content) skips this loop entirely.
-    if covered_pages > 0 && prot_accessible {
+    if covered_pages > 0 && accessible {
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
         let end_page =
             Page::<Size4KiB>::containing_address(VirtAddr::new(base + covered_pages * 4096 - 1));
@@ -1318,9 +1374,9 @@ pub fn has_live_phys_mapping(pid: Pid) -> bool {
 }
 
 /// `SYS_MPROTECT`'s real logic — scoped real enforcement, not the total no-op this used to be.
-/// `NO_EXECUTE`/`EFER.NXE` still isn't plumbed anywhere in this kernel, so `PROT_EXEC` is silently
-/// ignored same as before; `PROT_READ`/`PROT_WRITE` now genuinely toggle `USER_ACCESSIBLE`/
-/// `WRITABLE` on the caller's own existing page-table entries -- **but only for an address range
+/// `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` toggle `USER_ACCESSIBLE`/`WRITABLE`/`NO_EXECUTE` on the
+/// caller's own existing page-table entries, and asking for `PROT_WRITE | PROT_EXEC` is a W^X
+/// violation anywhere (`check_wx`) -- **but only for an address range
 /// entirely inside the mmap-managed VA window** (`MMAP_REGION_BASE..MMAP_REGION_CEILING`, where
 /// every `mmap()`'d region -- anonymous or file-backed -- already lives, see `NEXT_MMAP_PAGE`).
 /// Anything outside it (a `PT_LOAD` ELF segment, the heap, a thread's own fixed-VA stack, ...)
@@ -1353,6 +1409,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     let Some(end_inclusive) = addr.checked_add(len).and_then(|e| e.checked_sub(1)) else {
         return Ok(0);
     };
+    check_wx(caller_pid, prot, "mprotect")?;
     if addr < MMAP_REGION_BASE || end_inclusive >= MMAP_REGION_CEILING {
         return Ok(0);
     }
@@ -1360,15 +1417,11 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
         return Err(EINVAL);
     }
 
-    let prot_accessible = prot & (PROT_READ | PROT_WRITE) != 0;
     let writable = prot & PROT_WRITE != 0;
-    let mut leaf_flags = PageTableFlags::PRESENT;
-    if prot_accessible {
-        leaf_flags |= PageTableFlags::USER_ACCESSIBLE;
-    }
-    if writable {
-        leaf_flags |= PageTableFlags::WRITABLE;
-    }
+    // `PROT_NONE` keeps the page present but out of ring 3's reach.
+    let leaf_flags = if prot_accessible(prot) { prot_leaf_flags(prot) } else { PageTableFlags::PRESENT };
+    // The bits `mprotect` owns on an existing leaf; every other bit (`SHARED_LEAF`, ...) is kept.
+    let prot_bits = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
     // Always fully open -- see do_mmap_anon's identical reasoning.
     let parent_table_flags =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -1396,10 +1449,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                     flags: old_flags,
                     ..
                 } => {
-                    let mut new_flags =
-                        old_flags & !(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
-                    new_flags |=
-                        leaf_flags & (PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+                    let mut new_flags = (old_flags & !prot_bits) | (leaf_flags & prot_bits);
                     if writable && old_flags.contains(memory::address_space::CACHED_LEAF) {
                         // A page cache page made writable: this process's own copy from now on,
                         // the cache's page left as it is (PAGECACHE.md §3.2).
@@ -1637,7 +1687,8 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
                             frame,
                             PageTableFlags::PRESENT
                                 | PageTableFlags::WRITABLE
-                                | PageTableFlags::USER_ACCESSIBLE,
+                                | PageTableFlags::USER_ACCESSIBLE
+                                | crate::cpu::nx::no_execute(),
                             fa,
                         )
                         .map_err(|_| ENOMEM)?
