@@ -42,6 +42,16 @@ programs on the file system.
 For
 .Dq nullfs
 this also covers the directory mounted, however it is reached.
+.It Dv wxallowed
+with an empty value: programs on the file system marked
+.Dv PT_OXIDEBSD_WXNEEDED
+.Pq Nm ld.lld Fl z Cm wxneeded
+may map memory writable and executable at once
+.Pq Xr mmap 2 , Xr mprotect 2 .
+For
+.Dq nullfs
+this also covers the directory mounted, however it is reached.
+There is no flag for it.
 .It Dv errmsg
 a buffer, of the length its
 .Vt iovec

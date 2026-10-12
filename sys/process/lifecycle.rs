@@ -1109,11 +1109,13 @@ struct ExecFile {
     /// Mode bits, owner and group, for set-user-ID and set-group-ID (`identity::Cred::exec`);
     /// the set-ID bits are already cleared under a `nosuid` mount. `None` off oxfs.
     setid: Option<(u32, u32, u32)>,
+    /// Whether the program is under a `wxallowed` mount (`mm::check_wx`).
+    wxallowed: bool,
 }
 
 impl ExecFile {
     fn whole(image: Vec<u8>) -> Self {
-        ExecFile { size: image.len() as u64, head: image, content: None, setid: None }
+        ExecFile { size: image.len() as u64, head: image, content: None, setid: None, wxallowed: false }
     }
 }
 
@@ -1154,7 +1156,11 @@ fn read_exec_head(fd: u64, pread: bool) -> Result<ExecFile, u64> {
             head = read(end)?;
         }
     }
-    Ok(ExecFile { head, size, content: Some(content), setid: crate::fs::fd::exec_setid(fd) })
+    let (setid, wxallowed) = match crate::fs::fd::exec_setid(fd) {
+        Some((setid, wxallowed)) => (Some(setid), wxallowed),
+        None => (None, false),
+    };
+    Ok(ExecFile { head, size, content: Some(content), setid, wxallowed })
 }
 
 /// The page cache entry for `file`'s pages, used by `space` from now on (PAGECACHE.md §3.1).
@@ -1464,6 +1470,14 @@ fn exec_image(
     // directly; the bits on a `#!` script are ignored, as on NetBSD, OpenBSD and Linux (the file
     // checked and the one the interpreter opens could differ).
     let setid = if shebang_argv_prefix.is_none() { file.setid } else { None };
+    let wx_allowed = elf.wxneeded() && file.wxallowed;
+    if elf.wxneeded() && !file.wxallowed {
+        crate::serial_println!(
+            "[wx] pid {}: {} is marked wxneeded but not on a wxallowed mount: W^X enforced",
+            caller_pid,
+            core::str::from_utf8(basename(&effective_path)).unwrap_or("?")
+        );
+    }
     let mut new_cred = crate::process::identity::current_cred();
     let setid_applied = new_cred.exec(setid);
     let secure = setid_applied || new_cred.euid != new_cred.ruid || new_cred.egid != new_cred.rgid;
@@ -1524,7 +1538,9 @@ fn exec_image(
             // removed on execve(2) -- see ThreadGroupShared::mlockall_future's own doc comment.
             shared.mlockall_future = false;
             shared.locked_bytes = 0;
-            shared.wx_allowed = false;
+            // W^X's escape hatch (THREAT_MODEL.md §3.3, OpenBSD's): a program marked `wxneeded`,
+            // run from a `wxallowed` mount.
+            shared.wx_allowed = wx_allowed;
         }
         // effective_path is whichever path actually got loaded as the real ELF above -- the
         // caller's own original path_bytes when there was no `#!` to follow, or the final

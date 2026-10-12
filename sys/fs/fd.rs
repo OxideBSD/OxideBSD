@@ -809,7 +809,7 @@ pub(crate) type ContentSize = extern "C" fn(u64) -> i64;
 pub(crate) type ContentIsShm = extern "C" fn(u64) -> i64;
 /// `(real_fd, out)`: for a file open for reading, stores its mode bits, owner and group in
 /// `out[0..3]` for `execve`'s set-user-ID and set-group-ID handling (set-ID bits cleared under a
-/// `nosuid` mount); `0`, or negative if `real_fd` isn't such a file. Keyed by descriptor, unlike
+/// `nosuid` mount), and in `out[3]` `1` if it is under a `wxallowed` mount, else `0`; `0`, or negative if `real_fd` isn't such a file. Keyed by descriptor, unlike
 /// the other accessors: whether the file is under a `nosuid` mount depends on how it was opened.
 pub(crate) type ContentSetId = extern "C" fn(u64, *mut u32) -> i64;
 
@@ -828,12 +828,12 @@ pub(crate) extern "C" fn oxidebsd_register_content_accessors(
 }
 
 /// The mode bits, owner and group of the program open on `fd`, for `execve`
-/// (`process::identity::Cred::exec`).
-pub(crate) fn exec_setid(fd: u64) -> Option<(u32, u32, u32)> {
+/// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
+pub(crate) fn exec_setid(fd: u64) -> Option<((u32, u32, u32), bool)> {
     let real_fd = real_fd_of(fd)?;
     let setid = (*CONTENT_ACCESSORS.lock())?.4;
-    let mut out = [0u32; 3];
-    (setid(real_fd, out.as_mut_ptr()) == 0).then_some((out[0], out[1], out[2]))
+    let mut out = [0u32; 4];
+    (setid(real_fd, out.as_mut_ptr()) == 0).then_some(((out[0], out[1], out[2]), out[3] != 0))
 }
 
 /// `(content_id, offset, ptr, len) -> bytes read`, `-1` if no module ever registered content

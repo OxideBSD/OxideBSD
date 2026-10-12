@@ -70,7 +70,7 @@ that isn't mounted, isn't marked
 and isn't the root, in the order listed.
 .It Fl o Ar options
 Comma-separated mount options:
-.Bl -tag -width nosuid
+.Bl -tag -width wxallowed
 .It Cm rw
 Read-write, the only mode there is; accepted and ignored.
 .It Cm nosuid
@@ -79,6 +79,14 @@ system.
 On a
 .Cm nullfs
 mount this also covers the directory mounted, wherever it is reached from.
+.It Cm wxallowed
+Let programs on the file system that are marked as needing it (linked with
+.Fl z Cm wxneeded )
+map memory writable and executable at once, which is otherwise refused.
+On a
+.Cm nullfs
+mount this also covers the directory mounted, wherever it is reached from:
+mount only a tree no one but the superuser can write.
 .El
 .Pp
 The kernel refuses other options.

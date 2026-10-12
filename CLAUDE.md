@@ -183,8 +183,13 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 - User stacks grow on demand inside an 8 MiB reserve (`mm::try_grow_user_stack`, both rings).
 - `AddressSpace` is `Arc`-refcounted; frames are reclaimed at exit. `SHARED_LEAF` PTEs (SysV shm,
   `MAP_SHARED`) are never freed by teardown.
-- `mprotect` is enforced only in the mmap window; elsewhere it's a no-op. No `NX` anywhere.
-- `elf::load` doesn't union flags across segments sharing a page.
+- **W^X** (`THREAT_MODEL.md` §3.3): every new mapping is `NO_EXECUTE` (`cpu::nx::no_execute()`)
+  unless it holds code; nothing is writable and executable. `memory::wx` audits the kernel at boot
+  and after the modules load (`[wx]` lines must say none). User `PROT_WRITE|PROT_EXEC` is
+  `ENOTSUP` unless `wxneeded` (`PT_OXIDEBSD_WXNEEDED`, `ld.lld -z wxneeded`) on a `wxallowed` mount.
+- User leaves carry software bits: `SHARED_LEAF`, `CACHED_LEAF`, `PROT_NONE_LEAF` (non-present,
+  keeps its frame), `MAY_WRITE_LEAF`. **A page-table walk must not treat a non-`USER_ACCESSIBLE`
+  user-range entry as kernel-owned**; a non-present leaf may still own a frame.
 
 ## Syscall ABI (`sys/syscall/`)
 
@@ -283,6 +288,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
 - Mount never re-syncs seeded files; only a format does. `target/oxfs_disk.img` may be deleted to
   force a reformat (fast with virtio/DMA). Tests get a fresh `target/oxfs_test_disk.img`.
+- New mount options go through `oxfs_nmount` and `MountEntry` (`nosuid`, `wxallowed`), checked
+  at exec through the `ContentSetId` accessor.
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
   (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
   seeding a node; every device node opens through `oxidebsd_dev_open` by number.
@@ -311,7 +318,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   (checked at build): `panic=immediate-abort`, `location-detail=none`, symbol addresses via
   `asm!("lea ...")`, no `core::fmt`, no tables of slices, no `-T` linker script.
 - **Clang/LLVM** (`external/apache2/llvm`, `llvmorg-23.1.2`, see its `VENDOR_NOTES.md`):
-  `Triple::OxideBSD` toolchain driver. The on-target toolchain's configure-args stamp and musl
+  `Triple::OxideBSD` toolchain driver; lld's `-m elf_x86_64_oxidebsd` emulation (OxideBSD's
+  program header types, `0x6f78xxxx`). `build.rs` rebuilds on `clang/lib/Driver` and `lld/ELF`. The on-target toolchain's configure-args stamp and musl
   `libc.a` mtime decide relinks.
 - ncurses (`lib/ncurses`), bmake (`usr.bin/make`) are committed trees; nano, OpenVi, ninja are
   forks on `oxidebsd` branches. Make variable precedence matters: see `build_nvi`/`build_nano`.

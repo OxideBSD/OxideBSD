@@ -12,6 +12,8 @@
 //! 5. `mprotect` works outside the `mmap` window too: `.data` made read-only can't be written.
 //! 6. A shared page whose owner doesn't allow writing stays read-only: `mprotect` of an
 //!    `SHM_RDONLY` SysV attachment to `PROT_WRITE` fails with `EACCES`.
+//! 7. The escape hatch: `/usr/tests/wx/wx-needed` (linked `-z wxneeded`) may map W|X only when run
+//!    from a `wxallowed` mount; `wx-plain` (not marked) may not even there.
 #![no_std]
 #![no_main]
 
@@ -32,6 +34,9 @@ const IPC_PRIVATE: u64 = 0;
 const IPC_CREAT: u64 = 0o1000;
 const SHM_RDONLY: u64 = 0o10000;
 const EACCES: u64 = 13;
+const SYS_EXECVE: u64 = 59;
+const SYS_MKDIR: u64 = 136;
+const SYS_NMOUNT: u64 = 584;
 /// Registered by `tests/wx_syscall_smoke.rs` against a test-only handler.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -209,6 +214,55 @@ fn jit_page() -> u64 {
     page
 }
 
+/// `SYS_EXECVE`'s argv/envp entry (`sys/process/mod.rs`'s `RawArgvEntry`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawArgvEntry {
+    ptr: u64,
+    len: u64,
+}
+
+/// One `struct iovec`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+/// `nmount(2)` with name/value pairs (each NUL-terminated).
+fn nmount(pairs: &[(&[u8], &[u8])]) -> Result<u64, u64> {
+    let mut iov = [IoVec { base: 0, len: 0 }; 8];
+    for (i, (name, value)) in pairs.iter().enumerate() {
+        iov[2 * i] = IoVec { base: name.as_ptr() as u64, len: name.len() as u64 };
+        iov[2 * i + 1] = IoVec { base: value.as_ptr() as u64, len: value.len() as u64 };
+    }
+    syscall(SYS_NMOUNT, iov.as_ptr() as u64, 2 * pairs.len() as u64, 0)
+}
+
+/// Runs `path` in a forked child and returns its exit status (`wait4`'s, decoded), or `None` if
+/// it didn't exit normally.
+fn run(path: &[u8]) -> Option<i32> {
+    match syscall(SYS_FORK, 0, 0, 0) {
+        Ok(0) => {
+            let argv = [RawArgvEntry { ptr: path.as_ptr() as u64, len: path.len() as u64 }, RawArgvEntry { ptr: 0, len: 0 }];
+            let envp = [RawArgvEntry { ptr: 0, len: 0 }];
+            let _ = unsafe {
+                syscall4(SYS_EXECVE, path.as_ptr() as u64, path.len() as u64, argv.as_ptr() as u64, envp.as_ptr() as u64)
+            };
+            exit(127);
+        }
+        Ok(pid) => {
+            let mut status: i32 = 0;
+            if syscall(SYS_WAIT4, pid, &mut status as *mut i32 as u64, 0).is_err() {
+                fail(b"wait4");
+            }
+            (status & 0x7f == 0).then_some((status >> 8) & 0xff)
+        }
+        Err(_) => fail(b"fork"),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write_bytes(b"wx-syscall-smoke: starting\n");
@@ -299,6 +353,33 @@ pub extern "C" fn _start() -> ! {
         fail(b"mprotect a writable attachment R then RW again");
     }
     write_bytes(b"wx-syscall-smoke: part 6 OK (read-only shared pages stay read-only)\n");
+
+    // Part 7: wxneeded + wxallowed. Exit status 0: W|X allowed; 1: ENOTSUP (regress/wx-needed).
+    if run(b"/usr/tests/wx/wx-needed") != Some(1) {
+        fail(b"wx-needed off a wxallowed mount: expected W|X refused (exit 1)");
+    }
+    let dir = b"/wxallowed";
+    if syscall(SYS_MKDIR, dir.as_ptr() as u64, dir.len() as u64, 0o755).is_err() {
+        fail(b"mkdir /wxallowed");
+    }
+    let mounted = nmount(&[
+        (b"fstype\0", b"nullfs\0"),
+        (b"fspath\0", b"/wxallowed\0"),
+        (b"target\0", b"/usr/tests/wx\0"),
+        (b"wxallowed\0", b""),
+    ]);
+    if mounted.is_err() {
+        fail(b"nmount nullfs wxallowed");
+    }
+    match run(b"/wxallowed/wx-needed") {
+        Some(0) => {}
+        Some(1) => fail(b"wx-needed on a wxallowed mount: W|X refused"),
+        _ => fail(b"wx-needed on a wxallowed mount: didn't run the W|X page"),
+    }
+    if run(b"/wxallowed/wx-plain") != Some(1) {
+        fail(b"wx-plain (not wxneeded) on a wxallowed mount: expected W|X refused (exit 1)");
+    }
+    write_bytes(b"wx-syscall-smoke: part 7 OK (W|X only for wxneeded on a wxallowed mount)\n");
 
     write_bytes(b"wx-syscall-smoke: PASS\n");
     test_exit(true);

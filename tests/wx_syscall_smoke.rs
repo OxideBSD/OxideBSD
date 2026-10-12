@@ -1,7 +1,6 @@
-//! Boots the full kernel, loads `native_abi` (write, mmap, mprotect, brk, fork, wait4),
-//! `posix_compat` and `signal`, then spawns `regress/wx-syscall-smoke/` as pid 1: data pages don't
-//! execute, `PROT_WRITE | PROT_EXEC` is refused, and `PROT_NONE` pages survive `fork` as copies
-//! (THREAT_MODEL.md §3.3).
+//! Boots the full kernel with every module, then spawns `regress/wx-syscall-smoke/` as pid 1:
+//! data pages don't execute, `PROT_WRITE | PROT_EXEC` is refused except for a `wxneeded` program
+//! on a `wxallowed` mount, and `PROT_NONE` pages survive `fork` as copies (THREAT_MODEL.md §3.3).
 //!
 //! Same `SYS_TEST_EXIT` convention as `tests/wx_syscall_smoke.rs`.
 #![no_std]
@@ -39,7 +38,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
-    // Populates SYS_WRITE, SYS_MMAP, SYS_MPROTECT, SYS_BRK, SYS_FORK and SYS_WAIT4.
+    // Every module, as at boot: part 7 execs fixtures from oxfs and mounts with nmount.
     const NATIVE_ABI_MOD: &[u8] = include_bytes!(env!("NATIVE_ABI_MOD_PATH"));
     const NATIVE_ABI_PANIC_SYMBOL: &str = env!("NATIVE_ABI_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
@@ -52,7 +51,21 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
 
-    // The rest of the base system calls.
+    // Populates SYS_KILL/SYS_SIGACTION/SYS_SIGPROCMASK/SYS_SIGRETURN -- musl's own fork() path
+    // blocks and restores signals around the real SYS_FORK.
+    const SIGNAL_MOD: &[u8] = include_bytes!(env!("SIGNAL_MOD_PATH"));
+    const SIGNAL_PANIC_SYMBOL: &str = env!("SIGNAL_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "signal",
+        SIGNAL_MOD,
+        SIGNAL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the signal module: {e:?}"));
+
+    // Populates fcntl/ioctl/dup and friends -- stdio's isatty() probe and the fixture's fds.
     const POSIX_COMPAT_MOD: &[u8] = include_bytes!(env!("POSIX_COMPAT_MOD_PATH"));
     const POSIX_COMPAT_PANIC_SYMBOL: &str = env!("POSIX_COMPAT_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
@@ -65,18 +78,56 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
-    // Delivers the SIGSEGVs the children die of.
-    const SIGNAL_MOD: &[u8] = include_bytes!(env!("SIGNAL_MOD_PATH"));
-    const SIGNAL_PANIC_SYMBOL: &str = env!("SIGNAL_MOD_PANIC_SYMBOL");
+    // Populates SYS_CLOCK_GETTIME -- tmpnam()/tmpfile()'s random names are seeded from it.
+    const CLOCK_MOD: &[u8] = include_bytes!(env!("CLOCK_MOD_PATH"));
+    const CLOCK_PANIC_SYMBOL: &str = env!("CLOCK_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(
-        "signal",
-        SIGNAL_MOD,
-        SIGNAL_PANIC_SYMBOL,
+        "clock",
+        CLOCK_MOD,
+        CLOCK_PANIC_SYMBOL,
         false,
         &mut mapper,
         &mut frame_allocator,
     )
-    .unwrap_or_else(|e| panic!("failed to load the signal module: {e:?}"));
+    .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
+
+    const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
+    const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "oxfs",
+        OXFS_MOD,
+        OXFS_PANIC_SYMBOL,
+        true,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
+
+    // poll(2), for /dev/klog's readiness.
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "socket",
+        SOCKET_MOD,
+        SOCKET_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
+
+    // sysctl(2) itself.
+    const SYSCTL_MOD: &[u8] = include_bytes!(env!("SYSCTL_MOD_PATH"));
+    const SYSCTL_PANIC_SYMBOL: &str = env!("SYSCTL_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "sysctl",
+        SYSCTL_MOD,
+        SYSCTL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();

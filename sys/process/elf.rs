@@ -41,6 +41,10 @@ const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 /// The stack's permissions (GNU): executable if it has `PF_X`.
 const PT_GNU_STACK: u32 = 0x6474_e551;
+/// OxideBSD's program header types are `0x6f78_xxxx` ("ox"), in the OS-specific range.
+/// `PT_OXIDEBSD_WXNEEDED`: the program maps pages writable and executable at once (a JIT); allowed
+/// only from a `wxallowed` mount (`mm::check_wx`). `ld.lld -z wxneeded` emits it for OxideBSD.
+const PT_OXIDEBSD_WXNEEDED: u32 = 0x6f78_0001;
 const PF_EXEC: u32 = 1 << 0;
 const PF_WRITE: u32 = 1 << 1;
 
@@ -205,6 +209,11 @@ impl<'a> Elf<'a> {
     pub fn exec_stack(&self) -> bool {
         self.program_headers()
             .any(|h| h.p_type == PT_GNU_STACK && h.p_flags & PF_EXEC != 0)
+    }
+
+    /// Whether the program is marked `wxneeded` (`PT_OXIDEBSD_WXNEEDED`).
+    pub fn wxneeded(&self) -> bool {
+        self.program_headers().any(|h| h.p_type == PT_OXIDEBSD_WXNEEDED)
     }
 
     /// The highest virtual address any `PT_LOAD` segment reaches (`p_vaddr + p_memsz`, page-aligned

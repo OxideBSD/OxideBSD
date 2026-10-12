@@ -2649,6 +2649,9 @@ struct MountEntry {
     /// `nosuid`: set-user-ID and set-group-ID bits of programs under this mount are ignored by
     /// `execve` (`exec_setid`).
     nosuid: bool,
+    /// `wxallowed`: a program under this mount marked `wxneeded` (`PT_OXIDEBSD_WXNEEDED`) may map
+    /// pages writable and executable at once (THREAT_MODEL.md §3.3, `exec_setid`).
+    wxallowed: bool,
 }
 
 impl MountEntry {
@@ -2662,6 +2665,7 @@ impl MountEntry {
         source: [0; MAX_MOUNT_PATH],
         source_len: 0,
         nosuid: false,
+        wxallowed: false,
     };
 }
 
@@ -3667,35 +3671,40 @@ extern "C" fn oxfs_inode_is_shm(inode: u64) -> i64 {
 
 /// `setid` accessor for `oxidebsd_register_content_accessors`: for a file open for reading on
 /// `real_fd` (the program `execve` is loading), its mode bits, owner and group, with `S_ISUID` and
-/// `S_ISGID` cleared when it was opened from under a `nosuid` mount.
+/// `S_ISGID` cleared when it was opened from under a `nosuid` mount, and in `out[3]` whether it
+/// was opened from under a `wxallowed` one.
 extern "C" fn oxfs_exec_setid(real_fd: u64, out: *mut u32) -> i64 {
     let Some(&mut OpenFile::FileRead { inode, parent, .. }) = find_open_file(real_fd) else {
         return -1;
     };
     let node = read_inode(inode);
     let mut mode = node.mode;
-    if on_nosuid_mount(parent) {
+    if on_mount_with(parent, |m| m.nosuid) {
         mode &= !SETID_BITS;
     }
-    // SAFETY: the kernel passes a 3-element array of its own.
+    let wxallowed = on_mount_with(parent, |m| m.wxallowed);
+    // SAFETY: the kernel passes a 4-element array of its own.
     unsafe {
         out.write(mode as u32);
         out.add(1).write(node.uid);
         out.add(2).write(node.gid);
+        out.add(3).write(wxallowed as u32);
     }
     0
 }
 
-/// Whether directory `dir` is under a `nosuid` mount: walks up through `..` looking for one's
-/// root. A nullfs mount's root is its source directory, so a `nosuid` nullfs mount makes its
-/// source tree `nosuid` too: stricter than FreeBSD, never looser.
-fn on_nosuid_mount(dir: u32) -> bool {
-    if !mounts().iter().any(|m| m.used && m.nosuid) {
+/// Whether directory `dir` is under a mount `option` holds for (`nosuid`, `wxallowed`): walks up
+/// through `..` looking for one's root. A nullfs mount's root is its source directory, so a
+/// `nosuid` nullfs mount makes its source tree `nosuid` too (stricter than FreeBSD, never looser),
+/// and a `wxallowed` one makes it `wxallowed` (looser: only root mounts, and should mount a tree
+/// only root can write).
+fn on_mount_with(dir: u32, option: fn(&MountEntry) -> bool) -> bool {
+    if !mounts().iter().any(|m| m.used && option(m)) {
         return false;
     }
     let mut d = dir;
     for _ in 0..256 {
-        if mounts().iter().any(|m| m.used && m.nosuid && m.target_root_inode == d) {
+        if mounts().iter().any(|m| m.used && option(m) && m.target_root_inode == d) {
             return true;
         }
         match dir_lookup(d, b"..") {
@@ -3934,7 +3943,13 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
             MountKind::Tmpfs => b" tmpfs rw",
             MountKind::Devfs => b" devfs rw",
         });
-        push(if m.nosuid { b",nosuid 0 0\n".as_slice() } else { b" 0 0\n".as_slice() });
+        if m.nosuid {
+            push(b",nosuid");
+        }
+        if m.wxallowed {
+            push(b",wxallowed");
+        }
+        push(b" 0 0\n");
     }
     n
 }
@@ -7146,7 +7161,7 @@ fn free_mount_slot() -> Option<usize> {
 /// A nullfs (bind) mount of directory `source` on directory `target`: `oxfs_nmount` with
 /// `fstype=nullfs`. Both must be directories; `source` is resolved through any mount already on
 /// it (binding from inside another mount binds the effective view, not the raw inode).
-fn mount_nullfs(source: &[u8], target: &[u8], nosuid: bool) -> i64 {
+fn mount_nullfs(source: &[u8], target: &[u8], nosuid: bool, wxallowed: bool) -> i64 {
     let source_cwd = match real_cwd_for_mutation(source) {
         Ok(v) => v,
         Err(e) => return e,
@@ -7189,6 +7204,7 @@ fn mount_nullfs(source: &[u8], target: &[u8], nosuid: bool) -> i64 {
         source: src_buf,
         source_len: src_len,
         nosuid,
+        wxallowed,
     };
     0
 }
@@ -7196,7 +7212,7 @@ fn mount_nullfs(source: &[u8], target: &[u8], nosuid: bool) -> i64 {
 /// A new, empty tmpfs on directory `target`: `oxfs_nmount` with `fstype=tmpfs`. Its root comes
 /// from the tmpfs pool (`alloc_tmpfs_inode`) with real `.`/`..` records, `..` the mountpoint's own
 /// parent, so `cd ..` from inside it escapes back to the real tree with no special-casing.
-fn mount_tmpfs(target: &[u8], nosuid: bool) -> i64 {
+fn mount_tmpfs(target: &[u8], nosuid: bool, wxallowed: bool) -> i64 {
     let target_cwd = match real_cwd_for_mutation(target) {
         Ok(v) => v,
         Err(e) => return e,
@@ -7234,6 +7250,7 @@ fn mount_tmpfs(target: &[u8], nosuid: bool) -> i64 {
         source,
         source_len,
         nosuid,
+        wxallowed,
     };
     0
 }
@@ -7268,7 +7285,8 @@ fn iov_str(v: IoVec) -> Result<UserPath, i64> {
 /// Registered for `SYS_NMOUNT`: `nmount(iov, niov, flags)`, after FreeBSD's. `iov` holds
 /// `niov / 2` name/value pairs, each a `struct iovec` (a value may be empty): `fstype` (`tmpfs` or
 /// `nullfs`), `fspath` (the directory to mount on), and for nullfs `from` or `target` (the
-/// directory to mount), and `nosuid` (no value; or `MNT_NOSUID` in `flags`). `errmsg`, if given,
+/// directory to mount), `nosuid` (no value; or `MNT_NOSUID` in `flags`) and `wxallowed` (no
+/// value). `errmsg`, if given,
 /// is a buffer the kernel fills with a sentence saying why the call failed. Any other option or
 /// flag is refused with `EOPNOTSUPP`. Only root may mount.
 extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
@@ -7293,6 +7311,8 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
     // FreeBSD's MNT_NOSUID, as a flag or as the `nosuid` option.
     const MNT_NOSUID: u64 = 0x8;
     let mut nosuid = flags & MNT_NOSUID != 0;
+    // OpenBSD's option, as an option only: its MNT_WXALLOWED bit is an export flag on FreeBSD.
+    let mut wxallowed = false;
     for pair in iov.chunks_exact(2) {
         let name = match iov_str(pair[0]) {
             Ok(name) => name,
@@ -7305,6 +7325,10 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
         let slot = match name.as_bytes() {
             b"nosuid" => {
                 nosuid = true;
+                continue;
+            }
+            b"wxallowed" => {
+                wxallowed = true;
                 continue;
             }
             b"errmsg" => {
@@ -7346,15 +7370,15 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
         return fail(e, b"an option's name or value can't be read, or is too long");
     }
     if unknown || flags & !MNT_NOSUID != 0 {
-        return fail(-EOPNOTSUPP, b"the only mount option is nosuid");
+        return fail(-EOPNOTSUPP, b"the only mount options are nosuid and wxallowed");
     }
     if fspath.is_empty() {
         return fail(-EINVAL, b"no fspath: the directory to mount on");
     }
     match fstype {
-        b"tmpfs" => mount_tmpfs(fspath, nosuid),
+        b"tmpfs" => mount_tmpfs(fspath, nosuid, wxallowed),
         b"nullfs" if from.is_empty() => fail(-EINVAL, b"nullfs needs a target: the directory to mount"),
-        b"nullfs" => mount_nullfs(from, fspath, nosuid),
+        b"nullfs" => mount_nullfs(from, fspath, nosuid, wxallowed),
         b"" => fail(-EINVAL, b"no fstype"),
         _ => fail(-ENODEV, b"unknown file system type"),
     }
@@ -7555,6 +7579,7 @@ fn mount_devfs() -> bool {
         source,
         source_len,
         nosuid: false,
+        wxallowed: false,
     };
     // SAFETY: as `devfs_root`.
     unsafe { *core::ptr::addr_of_mut!(DEVFS_ROOT) = root };
@@ -9545,6 +9570,9 @@ fn format_fresh_filesystem() -> bool {
     ok &= fixture(b"net", b"socket-smoke", include_bytes!(env!("OXFS_SOCKET_SMOKE_ELF_PATH")));
     ok &= fixture(b"sysctl", b"sysctl-smoke", include_bytes!(env!("OXFS_SYSCTL_SMOKE_ELF_PATH")));
     ok &= fixture(b"pagecache", b"pagecache-smoke", include_bytes!(env!("OXFS_PAGECACHE_SMOKE_ELF_PATH")));
+    // W^X's escape hatch: the same program marked wxneeded (PT_OXIDEBSD_WXNEEDED) and not.
+    ok &= fixture(b"wx", b"wx-needed", include_bytes!(env!("OXFS_WX_NEEDED_ELF_PATH")));
+    ok &= fixture(b"wx", b"wx-plain", include_bytes!(env!("OXFS_WX_PLAIN_ELF_PATH")));
     ok &= fixture(b"poll", b"ppoll-smoke", include_bytes!(env!("OXFS_PPOLL_SMOKE_ELF_PATH")));
     ok &= fixture(b"fd", b"fd-smoke", include_bytes!(env!("OXFS_FD_SMOKE_ELF_PATH")));
     ok &= fixture(b"tty", b"tty-smoke", include_bytes!(env!("OXFS_TTY_SMOKE_ELF_PATH")));

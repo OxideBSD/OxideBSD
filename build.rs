@@ -658,6 +658,8 @@ fn main() {
     let socket_smoke_elf_path = build_c_pie(&musl_sysroot, "socket-smoke");
     let sysctl_smoke_elf_path = build_c_pie(&musl_sysroot, "sysctl-smoke");
     let pagecache_smoke_elf_path = build_c_pie(&musl_sysroot, "pagecache-smoke");
+    let wx_needed_elf_path = build_clang_pie("wx-needed", "wx-needed", &["-Wl,-z,wxneeded"]);
+    let wx_plain_elf_path = build_clang_pie("wx-needed", "wx-plain", &[]);
     let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
     let ppoll_smoke_elf_path = build_c_pie(&musl_sysroot, "ppoll-smoke");
     let fd_smoke_elf_path = build_c_pie(&musl_sysroot, "fd-smoke");
@@ -899,6 +901,8 @@ fn main() {
         ("OXFS_SOCKET_SMOKE_ELF_PATH", socket_smoke_elf_path.to_str().unwrap()),
         ("OXFS_SYSCTL_SMOKE_ELF_PATH", sysctl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PAGECACHE_SMOKE_ELF_PATH", pagecache_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_WX_NEEDED_ELF_PATH", wx_needed_elf_path.to_str().unwrap()),
+        ("OXFS_WX_PLAIN_ELF_PATH", wx_plain_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),
         ("OXFS_FD_SMOKE_ELF_PATH", fd_smoke_elf_path.to_str().unwrap()),
         ("OXFS_TTY_SMOKE_ELF_PATH", tty_smoke_elf_path.to_str().unwrap()),
@@ -1797,6 +1801,30 @@ fn build_c_pie(sysroot: &Path, name: &str) -> PathBuf {
     out
 }
 
+/// Cross-builds `regress/{name}/main.c` as a static PIE named `out_name` with the cross Clang
+/// (`toolchain/bin`) and so our LLD, for what `musl-gcc`'s host linker can't do: `-z wxneeded`
+/// emits OxideBSD's `PT_OXIDEBSD_WXNEEDED` only from LLD's OxideBSD emulation.
+fn build_clang_pie(name: &str, out_name: &str, extra_args: &[&str]) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join(format!("regress/{name}/main.c"));
+    let target_dir = Path::new(manifest_dir).join(format!("target/{name}"));
+    std::fs::create_dir_all(&target_dir).unwrap_or_else(|e| panic!("creating target/{name}: {e}"));
+    let out = target_dir.join(out_name);
+    println!("cargo:rerun-if-changed={}", src.display());
+    let status = Command::new(toolchain_dir().join("bin/x86_64-unknown-oxidebsd-clang"))
+        .args(["-static-pie", "-O2"])
+        .args(extra_args)
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run the cross clang for {name}: {e}"));
+    if !status.success() {
+        panic!("building {out_name} failed: {status}");
+    }
+    out
+}
+
 /// Cross-builds `regress/dynlink-smoke/main.c` (one `write()` call) as a dynamically linked
 /// `ET_EXEC` binary: `-no-pie` (the main binary isn't itself `ET_DYN`, only its interpreter is),
 /// fixed at `fixture_base`, which must stay clear of `sys/process/lifecycle.rs`'s
@@ -2060,6 +2088,7 @@ fn build_llvm_host_toolchain() -> PathBuf {
         "clang/lib/Driver",
         "clang/lib/Basic",
         "llvm/include/llvm/TargetParser",
+        "lld/ELF",
     ] {
         println!("cargo:rerun-if-changed={}", llvm_root.join(dir).display());
     }
@@ -2067,7 +2096,9 @@ fn build_llvm_host_toolchain() -> PathBuf {
     let build_rs_mtime = std::fs::metadata(Path::new(manifest_dir).join("build.rs"))
         .and_then(|m| m.modified())
         .unwrap_or(std::time::SystemTime::now());
-    let freshness_floor = build_rs_mtime.max(latest_mtime(&llvm_root.join("clang/lib/Driver")));
+    let freshness_floor = build_rs_mtime
+        .max(latest_mtime(&llvm_root.join("clang/lib/Driver")))
+        .max(latest_mtime(&llvm_root.join("lld/ELF")));
     let already_fresh = [&clang_bin, &lld_bin].into_iter().all(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -2416,8 +2447,10 @@ fn build_llvm_target_toolchain(host_build: &Path, musl_sysroot: &Path) -> PathBu
     // on them only transitively (host clang -> runtimes -> libc++.a) was a real gap, found live:
     // a driver edit relinks the host clang, but libc++ doesn't depend on the driver, so the
     // no-op runtimes rebuild never moved libc++.a's mtime and this binary was judged fresh.
+    // lld's sources the same way: OxideBSD patches them too (`-m elf_x86_64_oxidebsd`).
     let driver_mtime =
-        latest_mtime(&Path::new(manifest_dir).join("external/apache2/llvm/clang/lib/Driver"));
+        latest_mtime(&Path::new(manifest_dir).join("external/apache2/llvm/clang/lib/Driver"))
+            .max(latest_mtime(&Path::new(manifest_dir).join("external/apache2/llvm/lld/ELF")));
     let freshness_floor =
         std::fs::metadata(host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a")))
             .and_then(|m| m.modified())
