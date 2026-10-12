@@ -637,6 +637,7 @@ fn do_mmap_fb(
         | PageTableFlags::WRITABLE
         | PageTableFlags::USER_ACCESSIBLE
         | memory::address_space::SHARED_LEAF
+        | memory::address_space::MAY_WRITE_LEAF
         | crate::cpu::nx::no_execute();
     for i in 0..page_count {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + i * 4096));
@@ -942,6 +943,9 @@ fn do_mmap_file_backed(
         // frames are never shared this way, so they're left unmarked and get freed like any other
         // private leaf (matches every other private-anon-mmap/heap/stack frame already does).
         flags |= memory::address_space::SHARED_LEAF;
+        if fd_writable {
+            flags |= memory::address_space::MAY_WRITE_LEAF;
+        }
     }
 
     let mut table = PROCESS_TABLE.lock();
@@ -1391,49 +1395,38 @@ pub fn has_live_phys_mapping(pid: Pid) -> bool {
         .is_some_and(|p| !p.shared.lock().mmap_phys_regions.is_empty())
 }
 
-/// `SYS_MPROTECT`'s real logic — scoped real enforcement, not the total no-op this used to be.
-/// `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` toggle `USER_ACCESSIBLE`/`WRITABLE`/`NO_EXECUTE` on the
-/// caller's own existing page-table entries, and asking for `PROT_WRITE | PROT_EXEC` is a W^X
-/// violation anywhere (`check_wx`) -- **but only for an address range
-/// entirely inside the mmap-managed VA window** (`MMAP_REGION_BASE..MMAP_REGION_CEILING`, where
-/// every `mmap()`'d region -- anonymous or file-backed -- already lives, see `NEXT_MMAP_PAGE`).
-/// Anything outside it (a `PT_LOAD` ELF segment, the heap, a thread's own fixed-VA stack, ...)
-/// stays the exact permissive no-op this function has always been, unconditionally `Ok(0)` --
-/// real, unmodified `ld.so`'s own RELRO step (`mprotect`ing its relocated `PT_GNU_RELRO` segment
-/// read-only, far outside this window) must keep working exactly as it did before this landed.
+/// `SYS_MPROTECT`'s real logic. `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` set `USER_ACCESSIBLE`/
+/// `WRITABLE`/`NO_EXECUTE` on the caller's own page-table entries, anywhere in the user range:
+/// `mmap` regions, ELF segments (`ld.so`'s RELRO step), the `brk` heap, the stack. Asking for
+/// `PROT_WRITE | PROT_EXEC` is a W^X violation (`check_wx`). `PROT_NONE` leaves the page
+/// non-present with its frame kept (`PROT_NONE_LEAF`).
 ///
-/// This isn't just scope discipline, it's a real safety requirement: this window is the only VA
-/// range guaranteed to hold nothing but *this exact process's own* freshly-allocated page-table
-/// structures. The module/kernel region's lower page-table levels are the same physical frames
-/// referenced from every process's own L4 table (`AddressSpace::new`'s own doc comment) --
-/// blindly granting `USER_ACCESSIBLE` there from an ordinary unprivileged `mprotect()` call would
-/// leak a kernel-owned mapping to every process on the system, not just the caller.
+/// Every page is checked before any changes (all or nothing):
 ///
-/// Real `EINVAL` for a misaligned `addr`, checked only once already inside the window (so it can
-/// never newly reject a call this function used to silently accept outside it). **No
-/// `range_fully_mapped`/`ENOMEM` precondition** -- unlike `do_mlock`/`do_munlock`'s identical-
-/// looking check, a page inside this window can legitimately be currently *unmapped*: a real
-/// `PROT_NONE` guard region (`do_mmap_anon`'s own doc comment) is reserved VA with no page-table
-/// entry at all, and widening it back to real access is exactly the scenario this function has to
-/// handle -- a not-yet-`Mapped` page here demand-allocates a fresh, zeroed frame and maps it with
-/// fully-open intermediate flags (identical reasoning to `do_mmap_anon`'s own `parent_table_flags`)
-/// rather than erroring; an already-`Mapped` page just has its existing leaf's `WRITABLE`/
-/// `USER_ACCESSIBLE` bits toggled via `update_flags`, preserving every other bit (`SHARED_LEAF`
-/// included).
+/// - `ENOMEM` for a range outside `[VM_MINUSER, VM_MAXUSER)`, or for a page with nothing mapped,
+///   except inside the `mmap` window, where a `PROT_NONE` reservation (`do_mmap_anon`) is VA with
+///   no entry at all and widening it allocates a fresh zeroed page. Only a user leaf (present and
+///   `USER_ACCESSIBLE`, or `PROT_NONE_LEAF`) is ever changed; nothing kernel-only lies in the user
+///   range (`usercopy::check_user_range_layout`), and anything else is refused, not touched.
+/// - `EACCES` for `PROT_WRITE` on a shared page (`SHARED_LEAF`) whose owner doesn't allow writing
+///   (`MAY_WRITE_LEAF`: a `MAP_SHARED` mapping of a file not open for writing, an `SHM_RDONLY`
+///   attachment), as POSIX requires. A page cache page (`CACHED_LEAF`) made writable becomes a
+///   private copy instead.
 pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u64, u64> {
     if len == 0 {
-        return Ok(0);
-    }
-    let Some(end_inclusive) = addr.checked_add(len).and_then(|e| e.checked_sub(1)) else {
-        return Ok(0);
-    };
-    check_wx(caller_pid, prot, "mprotect")?;
-    if addr < MMAP_REGION_BASE || end_inclusive >= MMAP_REGION_CEILING {
         return Ok(0);
     }
     if !addr.is_multiple_of(4096) {
         return Err(EINVAL);
     }
+    let Some(end_inclusive) = addr.checked_add(len).and_then(|e| e.checked_sub(1)) else {
+        return Err(ENOMEM);
+    };
+    check_wx(caller_pid, prot, "mprotect")?;
+    if addr < crate::memory::usercopy::VM_MINUSER || end_inclusive >= crate::memory::usercopy::VM_MAXUSER {
+        return Err(ENOMEM);
+    }
+    let in_mmap_window = addr >= MMAP_REGION_BASE && end_inclusive < MMAP_REGION_CEILING;
 
     let writable = prot & PROT_WRITE != 0;
     let accessible = prot_accessible(prot);
@@ -1459,6 +1452,39 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     };
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_inclusive));
+    // The checks, before anything changes (this function's doc comment).
+    let mut shared_written = false;
+    for page in Page::range_inclusive(start_page, end_page) {
+        let entry = memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address());
+        let Some(entry) = entry.filter(|e| !e.is_unused()) else {
+            if in_mmap_window {
+                continue;
+            }
+            return Err(ENOMEM);
+        };
+        let flags = entry.flags();
+        let user_leaf = memory::address_space::is_prot_none(entry)
+            || flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+        if !user_leaf {
+            return Err(ENOMEM);
+        }
+        let shared = flags.contains(memory::address_space::SHARED_LEAF) && !flags.contains(memory::address_space::CACHED_LEAF);
+        if writable && shared {
+            if !flags.contains(memory::address_space::MAY_WRITE_LEAF) {
+                return Err(EACCES);
+            }
+            shared_written = true;
+        }
+    }
+    if shared_written {
+        // A `MAP_SHARED` file mapping made writable is written back like one mapped writable.
+        let mut shared = me.shared.lock();
+        for r in shared.mmap_file_regions.iter_mut().filter(|r| r.shared) {
+            if r.va_start <= end_inclusive && addr < r.va_start + r.npages * 4096 {
+                r.writable = true;
+            }
+        }
+    }
     with_frame_allocator(|fa| -> Result<(), u64> {
         for page in Page::range_inclusive(start_page, end_page) {
             let va = page.start_address();
@@ -1519,7 +1545,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                             .flush();
                     }
                 }
-                _ if !accessible => {}
+                _ if !accessible || !in_mmap_window => {}
                 _ => {
                     // Not yet backed -- a still-PROT_NONE guard sub-range being widened for the
                     // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill

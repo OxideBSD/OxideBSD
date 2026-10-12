@@ -328,7 +328,7 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
         | memory::address_space::SHARED_LEAF
         | crate::cpu::nx::no_execute();
     if want_write {
-        flags |= PageTableFlags::WRITABLE;
+        flags |= PageTableFlags::WRITABLE | memory::address_space::MAY_WRITE_LEAF;
     }
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + region_len - 1));

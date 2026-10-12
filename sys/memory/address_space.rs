@@ -60,6 +60,12 @@ pub const CACHED_LEAF: PageTableFlags = PageTableFlags::BIT_10;
 /// side made it accessible again and exited freed a frame the other still mapped.
 pub const PROT_NONE_LEAF: PageTableFlags = PageTableFlags::BIT_11;
 
+/// Marks a `SHARED_LEAF` page its owner allows to be written: a `MAP_SHARED` mapping of a file
+/// open for writing, a SysV segment attached without `SHM_RDONLY`, the framebuffer. Without it,
+/// `mprotect` refuses to make the page writable (`EACCES`): otherwise a read-only mapping of a
+/// file could be made writable and change the frames every other mapping of it shares.
+pub const MAY_WRITE_LEAF: PageTableFlags = PageTableFlags::BIT_52;
+
 /// Whether `entry` is a `PROT_NONE` user page (`PROT_NONE_LEAF`).
 pub fn is_prot_none(entry: &PageTableEntry) -> bool {
     let flags = entry.flags();
