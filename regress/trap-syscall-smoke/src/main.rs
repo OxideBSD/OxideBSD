@@ -11,6 +11,8 @@
 //!    whatever the handler wrote into its ucontext. A resume address outside the user range (from
 //!    the ucontext, or as the handler itself) kills only the process, with `SIGSEGV`.
 //! 5. An ELF whose entry point isn't a user address fails `execve` with `ENOEXEC`.
+//! 6. The process starts with every general-purpose register zero (checked by `_start` before
+//!    any Rust runs): nothing the kernel had in them leaks into ring 3.
 #![no_std]
 #![no_main]
 
@@ -416,8 +418,38 @@ fn exec_with_entry(path: &[u8], entry: u64) -> Result<u64, u64> {
     syscall4(SYS_EXECVE, path.as_ptr() as u64, path.len() as u64, argv.as_ptr() as u64, envp.as_ptr() as u64)
 }
 
+// _start: ORs together every general-purpose register but RSP, as the kernel handed them over,
+// into START_REGS, then calls `main`.
+global_asm!(
+    ".pushsection .text._start, \"ax\"",
+    ".global _start",
+    "_start:",
+    "or rax, rbx",
+    "or rax, rcx",
+    "or rax, rdx",
+    "or rax, rsi",
+    "or rax, rdi",
+    "or rax, rbp",
+    "or rax, r8",
+    "or rax, r9",
+    "or rax, r10",
+    "or rax, r11",
+    "or rax, r12",
+    "or rax, r13",
+    "or rax, r14",
+    "or rax, r15",
+    "mov [rip + START_REGS], rax",
+    "call main",
+    "ud2",
+    ".popsection",
+);
+
+/// What `_start` found in the registers, ORed together.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+static mut START_REGS: u64 = u64::MAX;
+
+#[unsafe(no_mangle)]
+extern "C" fn main() -> ! {
     write_bytes(b"trap-syscall-smoke: starting\n");
 
     // Part 1: exceptions become signals.
@@ -476,6 +508,17 @@ pub extern "C" fn _start() -> ! {
         }
     }
     write_bytes(b"trap-syscall-smoke: part 5 OK (bad entry points are ENOEXEC)\n");
+
+    // Part 6: registers at process start.
+    // SAFETY: written once by `_start`, before anything else ran.
+    let start_regs = unsafe { core::ptr::read_volatile(&raw const START_REGS) };
+    if start_regs != 0 {
+        write_bytes(b"trap-syscall-smoke: FAIL: the process started with nonzero registers (ORed: ");
+        write_hex(start_regs);
+        write_bytes(b")\n");
+        test_exit(false);
+    }
+    write_bytes(b"trap-syscall-smoke: part 6 OK (registers start at zero)\n");
 
     write_bytes(b"trap-syscall-smoke: PASS\n");
     test_exit(true);

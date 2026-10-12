@@ -26,6 +26,9 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
         "trap_syscall_smoke: child reported {}",
         if code == 0 { "PASS" } else { "FAIL" }
     );
+    // Nonzero only when NMIs were injected (QEMU's monitor `nmi`), to exercise their IST path.
+    let (nmis, from_user) = oxidebsd::cpu::interrupts::nmi_counts();
+    serial_println!("trap_syscall_smoke: {} NMIs taken, {} of them from ring 3", nmis, from_user);
     exit_qemu(if code == 0 {
         QemuExitCode::Success
     } else {

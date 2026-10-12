@@ -1093,9 +1093,18 @@ fn ffi_result_to_result(raw: i64) -> Result<u64, u64> {
 // USER_RSP_SCRATCH did would not have been safe here: do_wait4 already blocks and reschedules
 // mid-syscall, so a second process could enter its own syscall before the first one returns.
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.entry")]
 static mut SYSCALL_RSP_SCRATCH: u64 = 0;
 
+/// Where `SYSCALL_RSP_SCRATCH` sits, for `cpu::entry::check`.
+pub fn rsp_scratch_range() -> core::ops::Range<u64> {
+    let scratch = (&raw const SYSCALL_RSP_SCRATCH) as u64;
+    scratch..scratch + 8
+}
+
+// Entry text (`cpu::entry`), like the trap stubs.
 global_asm!(
+    ".pushsection .text.entry.syscall, \"ax\"",
     ".global syscall_entry",
     "syscall_entry:",
     // SYSCALL leaves RSP on the user's own stack (unlike an interrupt gate + TSS RSP0, there's no
@@ -1137,12 +1146,22 @@ global_asm!(
     "pop r9",
     "pop r8",
     "pop rbp",
-    "pop rdi",
-    "pop rsi",
-    "pop rdx",
-    "pop rcx",
-    "pop rbx",
-    "pop rax", // dispatcher's return value or errno, written directly into this stack slot
-    "pop rsp", // user_rsp -- must be the very last pop, right before sysretq
+    // Everything but RDI, which then carries the user RSP over to the entry stack, so nothing
+    // after this reads the process's kernel stack.
+    // [rsp] is the saved RDI; RSI, RDX, RCX, RBX, RAX and user_rsp follow.
+    "mov rsi, [rsp + 8]",
+    "mov rdx, [rsp + 16]",
+    "mov rcx, [rsp + 24]",
+    "mov rbx, [rsp + 32]",
+    "mov rax, [rsp + 40]", // dispatcher's return value or errno, written directly into this stack slot
+    "mov rdi, rsp",
+    "lea rsp, [rip + ENTRY_STACK + {entry_stack_size}]",
+    "push qword ptr [rdi + 48]", // user_rsp
+    "mov rdi, [rdi]",
+    // Must be the very last thing before sysretq. An NMI or #MC landing between the two runs on
+    // its own IST stack (`cpu::gdt`), not on this user RSP.
+    "pop rsp",
     "sysretq",
+    ".popsection",
+    entry_stack_size = const crate::cpu::entry::ENTRY_STACK_SIZE,
 );

@@ -72,6 +72,14 @@ SECTIONS
 
     .text : AT(_kernel_phys_base) {
         _kernel_phys_start = LOADADDR(.text);
+        /* The entry area (`cpu::entry`): every instruction that runs between a ring-3 trap or
+         * `syscall` and the switch to the kernel's page tables, and back. Page-aligned at both
+         * ends, so KPTI can map exactly these pages into a process's page tables. */
+        . = ALIGN(4096);
+        __entry_text_start = .;
+        KEEP(*(.text.entry .text.entry.*))
+        . = ALIGN(4096);
+        __entry_text_end = .;
         *(.text .text.*)
     } :text
 
@@ -87,6 +95,13 @@ SECTIONS
 
     _kernel_data_start = .;
     .data : AT(_kernel_phys_base + (ADDR(.data) - ADDR(.text))) {
+        /* The entry area's data: the GDT, TSS, IDT, entry and IST stacks, and the variables the
+         * entry code reads (`cpu::entry`). Page-aligned at both ends, like its text. */
+        . = ALIGN(4096);
+        __entry_data_start = .;
+        KEEP(*(.data.entry .data.entry.*))
+        . = ALIGN(4096);
+        __entry_data_end = .;
         *(.data .data.*)
         *(.data.rel.ro .data.rel.ro.*)
         *(.got)

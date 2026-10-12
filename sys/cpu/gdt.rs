@@ -1,157 +1,158 @@
-use spin::Lazy;
+//! The GDT, the TSS and the ring-0 stacks the CPU switches to on its own.
+//!
+//! All of it lives in the entry area's data (`cpu::entry`): the CPU reads the GDT and TSS during
+//! every privilege change, and the IST stacks are taken by traps that can arrive while a process's
+//! own page tables are still loaded.
+
+use core::ops::Range;
+
 use x86_64::VirtAddr;
 use x86_64::instructions::segmentation::{CS, SS, Segment};
 use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
+use x86_64::PrivilegeLevel;
 
 use crate::serial_println;
 
+/// IST slots (`TaskStateSegment::interrupt_stack_table` indices; an IDT gate names slot + 1).
+/// Each of these traps gets a known-good stack of its own: `#DF` because it's usually a kernel
+/// stack overflow, NMI and `#MC` because they can arrive anywhere, including between the return
+/// path's `pop rsp` and its `sysretq`, when `RSP` is already the user's.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const NMI_IST_INDEX: u16 = 1;
+pub const MACHINE_CHECK_IST_INDEX: u16 = 2;
 
-const STACK_SIZE: usize = 4096 * 5;
+const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;
+const NMI_STACK_SIZE: usize = 4096 * 4;
+const MACHINE_CHECK_STACK_SIZE: usize = 4096 * 4;
 
-/// Index into `TaskStateSegment::privilege_stack_table` for ring 0 (RSP0): the stack the CPU
-/// switches to automatically on any interrupt/exception that fires while running in ring 3.
-/// Without this set, such a transition uses `RSP0 = 0` — a crash the instant any user-mode code
-/// takes an interrupt.
-const KERNEL_STACK_INDEX: usize = 0;
+#[repr(C, align(16))]
+struct Stack<const N: usize>([u8; N]);
 
-static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
-    let mut tss = TaskStateSegment::new();
-    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-        // `static mut` (not `static`) is load-bearing here: the only pointer ever taken to this
-        // is a *const one, so as far as the Rust/LLVM optimizer can see, this data is never
-        // written and is free to be interned into read-only .rodata. It's actually written by
-        // the CPU pushing an interrupt frame onto it in hardware, invisible to that analysis —
-        // `static mut` (mutable-by-definition) forces genuinely writable .bss placement instead.
-        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-        let stack_start = VirtAddr::from_ptr(&raw mut STACK);
-        stack_start + STACK_SIZE as u64
-    };
-    tss.privilege_stack_table[KERNEL_STACK_INDEX] = {
-        // See the comment on the IST stack above — same reasoning applies here.
-        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-        let stack_start = VirtAddr::from_ptr(&raw mut STACK);
-        stack_start + STACK_SIZE as u64
-    };
-    tss
-});
-
-struct Selectors {
-    kernel_code_selector: SegmentSelector,
-    kernel_data_selector: SegmentSelector,
-    user_data_selector: SegmentSelector,
-    user_code_selector: SegmentSelector,
-    tss_selector: SegmentSelector,
+impl<const N: usize> Stack<N> {
+    const fn new() -> Self {
+        Stack([0; N])
+    }
 }
 
-static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
-    let mut gdt = GlobalDescriptorTable::new();
-    // Order matters: SYSCALL/SYSRETQ (see sys/syscall.rs) reconstruct target segment
-    // selectors from IA32_STAR using fixed offsets from two base values, which only works if
-    // kernel_code/kernel_data/[placeholder]/user_data/user_code stay in exactly this order and
-    // adjacency. `Descriptor::user_*_segment` are already tagged Ring 3 (DPL 3), and
-    // `GlobalDescriptorTable::append` bakes the descriptor's DPL into the returned selector's RPL
-    // bits.
-    let kernel_code_selector = gdt.append(Descriptor::kernel_code_segment());
-    let kernel_data_selector = gdt.append(Descriptor::kernel_data_segment());
-    // Reserves the GDT slot SYSRETQ's fixed offset scheme needs 8 bytes before
-    // user_data_selector — historically a 32-bit-compat user code segment, but since this kernel
-    // only ever uses SYSRETQ (64-bit), that slot's *contents* are never actually loaded by
-    // hardware. Its selector value is never used past this point; only its position matters.
-    let _syscall_compat_placeholder = gdt.append(Descriptor::user_code_segment());
-    let user_data_selector = gdt.append(Descriptor::user_data_segment());
-    let user_code_selector = gdt.append(Descriptor::user_code_segment());
-    let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));
-    (
-        gdt,
-        Selectors {
-            kernel_code_selector,
-            kernel_data_selector,
-            user_data_selector,
-            user_code_selector,
-            tss_selector,
-        },
-    )
-});
+/// Everything here, in one place in the entry data.
+#[repr(C)]
+struct CpuTables {
+    gdt: GlobalDescriptorTable,
+    tss: TaskStateSegment,
+    double_fault_stack: Stack<DOUBLE_FAULT_STACK_SIZE>,
+    nmi_stack: Stack<NMI_STACK_SIZE>,
+    machine_check_stack: Stack<MACHINE_CHECK_STACK_SIZE>,
+}
+
+/// `static mut`: the CPU writes the stacks (and the TSS descriptor's busy bit), invisibly to the
+/// compiler, so it must not be placed in `.rodata` (CLAUDE.md, Memory). Filled in once by `init`.
+#[unsafe(link_section = ".data.entry")]
+static mut TABLES: CpuTables = CpuTables {
+    gdt: GlobalDescriptorTable::new(),
+    tss: TaskStateSegment::new(),
+    double_fault_stack: Stack::new(),
+    nmi_stack: Stack::new(),
+    machine_check_stack: Stack::new(),
+};
+
+// The selectors `init` must produce. Order matters: SYSCALL/SYSRETQ (sys/syscall/mod.rs)
+// derive their selectors from IA32_STAR at fixed offsets, which only works with kernel code,
+// kernel data, a placeholder, user data and user code adjacent and in exactly this order.
+const KERNEL_CODE: SegmentSelector = SegmentSelector::new(1, PrivilegeLevel::Ring0);
+const KERNEL_DATA: SegmentSelector = SegmentSelector::new(2, PrivilegeLevel::Ring0);
+const USER_DATA: SegmentSelector = SegmentSelector::new(4, PrivilegeLevel::Ring3);
+const USER_CODE: SegmentSelector = SegmentSelector::new(5, PrivilegeLevel::Ring3);
+const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(6, PrivilegeLevel::Ring0);
+
+fn stack_top<const N: usize>(stack: *mut Stack<N>) -> VirtAddr {
+    VirtAddr::new(stack as u64 + N as u64)
+}
 
 pub fn init() {
-    serial_println!(
-        "[boot] loading GDT/TSS (double-fault stack at IST[{}], ring-0 stack at RSP0, {} bytes \
-         each)",
-        DOUBLE_FAULT_IST_INDEX,
-        STACK_SIZE
-    );
-    GDT.0.load();
+    // SAFETY: single-threaded boot, before anything has loaded this GDT or TSS.
+    let tables = unsafe { &mut *(&raw mut TABLES) };
+    // The TSS is packed: its arrays are copied out, filled and stored whole.
+    let mut ist = tables.tss.interrupt_stack_table;
+    ist[DOUBLE_FAULT_IST_INDEX as usize] = stack_top(&raw mut tables.double_fault_stack);
+    ist[NMI_IST_INDEX as usize] = stack_top(&raw mut tables.nmi_stack);
+    ist[MACHINE_CHECK_IST_INDEX as usize] = stack_top(&raw mut tables.machine_check_stack);
+    tables.tss.interrupt_stack_table = ist;
+    // Every ring-3 trap lands on the entry stack; `trap_common` moves it to the process's own.
+    let mut rsp = tables.tss.privilege_stack_table;
+    rsp[0] = VirtAddr::new(crate::cpu::entry::entry_stack_top());
+    tables.tss.privilege_stack_table = rsp;
+
+    let gdt = &mut tables.gdt;
+    assert_eq!(gdt.append(Descriptor::kernel_code_segment()), KERNEL_CODE);
+    assert_eq!(gdt.append(Descriptor::kernel_data_segment()), KERNEL_DATA);
+    // SYSRETQ's offsets need a slot here (a 32-bit user code segment, for a SYSRET without REX.W,
+    // which this kernel never does): only its position matters.
+    gdt.append(Descriptor::user_code_segment());
+    assert_eq!(gdt.append(Descriptor::user_data_segment()), USER_DATA);
+    assert_eq!(gdt.append(Descriptor::user_code_segment()), USER_CODE);
+    // SAFETY: the TSS is a static, so the descriptor's base stays valid.
+    let tss = unsafe { Descriptor::tss_segment_unchecked(&raw const tables.tss) };
+    assert_eq!(gdt.append(tss), TSS_SELECTOR);
+
+    // SAFETY: the GDT is a static, fully built above, and never rebuilt.
     unsafe {
-        CS::set_reg(GDT.1.kernel_code_selector);
-        SS::set_reg(GDT.1.kernel_data_selector);
-        load_tss(GDT.1.tss_selector);
+        gdt.load_unsafe();
+        CS::set_reg(KERNEL_CODE);
+        SS::set_reg(KERNEL_DATA);
+        load_tss(TSS_SELECTOR);
     }
-    serial_println!("[boot] GDT/TSS loaded");
+    serial_println!(
+        "[boot] GDT/TSS loaded (IST stacks: #DF {}, NMI {}, #MC {} bytes)",
+        DOUBLE_FAULT_STACK_SIZE,
+        NMI_STACK_SIZE,
+        MACHINE_CHECK_STACK_SIZE
+    );
 }
 
 /// The ring 3 code segment selector, for building an `iretq` frame into user mode.
 pub fn user_code_selector() -> SegmentSelector {
-    GDT.1.user_code_selector
+    USER_CODE
 }
 
 /// The ring 3 data segment selector, for building an `iretq` frame into user mode.
 pub fn user_data_selector() -> SegmentSelector {
-    GDT.1.user_data_selector
+    USER_DATA
 }
 
 /// The ring 0 code segment selector — needed by `sys/syscall.rs` to program `IA32_STAR`.
 pub fn kernel_code_selector() -> SegmentSelector {
-    GDT.1.kernel_code_selector
+    KERNEL_CODE
 }
 
 /// The ring 0 data segment selector — needed by `sys/syscall.rs` to program `IA32_STAR`.
 pub fn kernel_data_selector() -> SegmentSelector {
-    GDT.1.kernel_data_selector
+    KERNEL_DATA
 }
 
-/// Mirrors `TSS.privilege_stack_table[0]` (see `set_kernel_stack` below) in a plain, directly
-/// asm-readable location. `SYSCALL` — unlike an interrupt gate + TSS `RSP0` — does **not**
-/// automatically switch onto the kernel stack named there; `sys/syscall.rs`'s entry stub has to
-/// do that switch itself, in raw assembly, before it can push anything. It can't read the TSS
-/// directly (`TSS` is a private `spin::Lazy`, and dereferencing a `Lazy` runs its own
-/// initialization logic — not something raw asm can do), so this `static` exists purely to give
-/// that stub a fixed, flat memory location to `mov rsp, [CURRENT_RSP0]` from — same idiom as the
-/// old `src/linux_syscall.rs`'s (now-retired) `KERNEL_RSP_TOP`/`USER_RSP_SCRATCH` no-mangle
-/// statics. `static mut`, not `static`, for the same reason as `TSS`'s own stacks above: it's
-/// written here from ordinary Rust code (visible to the optimizer) but only ever *read* from
-/// asm — the risk isn't "interned into .rodata" here, it's the opposite one documented on
-/// `modules/fat32`'s `DISK`/`CURRENT_DIR_CLUSTER` (a write with no Rust-visible read can be
-/// proven dead) — but `syscall.rs`'s `global_asm!` reading it is invisible to that analysis too,
-/// so it gets the same `static mut` treatment defensively.
+/// The current process's kernel stack top. `SYSCALL` doesn't switch stacks, so
+/// `syscall_entry` loads `RSP` from here; a ring-3 trap lands on the entry stack, and
+/// `trap_common` moves its frame here. Read only from asm, by name; `static mut` so a write the
+/// compiler sees no read of isn't dropped.
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.entry")]
 static mut CURRENT_RSP0: u64 = 0;
 
-/// Repoints `TSS`'s RSP0 (`privilege_stack_table[0]`) at `rsp0` — the stack the CPU automatically
-/// switches to on the *next* ring-3→ring-0 transition caused by an interrupt or exception (and,
-/// via the `CURRENT_RSP0` mirror above, the stack `sys/syscall.rs`'s own entry stub manually
-/// switches to for a `SYSCALL`-triggered entry, which gets no automatic switch at all). The
-/// scheduler (`src/scheduler.rs`) calls this on every context switch, right before
-/// `switch_context`, so that a trap or syscall firing while the incoming process runs in ring 3
-/// lands on *its* kernel stack, not whichever process's stack happened to be running previously.
-///
-/// # Safety requirements satisfied here, not by the caller
-///
-/// `Lazy<TaskStateSegment>::deref` only hands out `&TaskStateSegment`, not `&mut` — `spin::Lazy`
-/// has no `DerefMut`. This takes `TSS`'s address (fixed for the process's lifetime: `Lazy` never
-/// moves its storage once forced, and the GDT's TSS descriptor bakes that fixed linear address in
-/// at `init` time, so mutating this field in place is picked up by the CPU with no `ltr`
-/// re-execution needed) and writes through a raw pointer instead. Sound because nothing else ever
-/// holds a live `&TaskStateSegment` across this call: the scheduler only calls this with
-/// interrupts disabled, and this is a single-core kernel.
+/// Makes `rsp0` the kernel stack the next ring-3 trap or `syscall` runs on. The scheduler calls
+/// this on every context switch, before `switch_context`.
 pub fn set_kernel_stack(rsp0: VirtAddr) {
-    let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
-    unsafe {
-        (*tss_ptr).privilege_stack_table[0] = rsp0;
-        CURRENT_RSP0 = rsp0.as_u64();
-    }
+    // SAFETY: a plain store; on this single-core kernel the scheduler calls this with interrupts
+    // off, and the entry code only reads it from ring 3 entries.
+    unsafe { CURRENT_RSP0 = rsp0.as_u64() };
+}
+
+/// Where this file's entry data sits, for `entry::check`.
+pub fn entry_data() -> [(&'static str, Range<u64>); 2] {
+    let tables = (&raw const TABLES) as u64;
+    let rsp0 = (&raw const CURRENT_RSP0) as u64;
+    [
+        ("the GDT, TSS and IST stacks", tables..tables + size_of::<CpuTables>() as u64),
+        ("CURRENT_RSP0", rsp0..rsp0 + 8),
+    ]
 }

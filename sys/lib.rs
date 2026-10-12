@@ -65,6 +65,7 @@ pub fn init(
         cpu::pit::init();
     }
     syscall::init();
+    cpu::entry::check();
 
     serial_println!("[boot] enabling interrupts");
     x86_64::instructions::interrupts::enable();

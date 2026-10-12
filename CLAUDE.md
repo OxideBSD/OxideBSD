@@ -221,6 +221,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   Anything waiting on an interrupt-driven event (tty input, IRQ-woken devices) must block via the
   scheduler, which re-enables interrupts; spinning makes the event impossible.
 - IDT gates reachable from ring 3 via `int n` need `DPL = Ring3`.
+- **The entry area** (`cpu::entry`): anything a ring-3 trap or `syscall` touches before reaching
+  Rust, or after leaving it, goes in `.text.entry*`/`.data.entry*` (KPTI maps only those);
+  `entry::check` panics at boot otherwise. Ring-3 traps land on `ENTRY_STACK` (fixed `TSS.RSP0`).
+- The NMI handler takes no locks (it only counts): an NMI can interrupt any lock holder.
 - Wire structs duplicated in `regress/*` crates (siginfo, ucontext, ...) must be updated together
   with the kernel copy.
 

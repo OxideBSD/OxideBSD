@@ -27,6 +27,15 @@ impl InterruptIndex {
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// NMIs taken since boot (`dispatch`), and how many of them interrupted ring 3.
+static NMI_COUNT: AtomicU64 = AtomicU64::new(0);
+static NMI_FROM_USER: AtomicU64 = AtomicU64::new(0);
+
+/// NMIs taken since boot: all of them, and those that interrupted ring 3.
+pub fn nmi_counts() -> (u64, u64) {
+    (NMI_COUNT.load(Ordering::Relaxed), NMI_FROM_USER.load(Ordering::Relaxed))
+}
+
 /// Number of timer interrupts handled since boot.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
@@ -135,8 +144,13 @@ pub(crate) fn dispatch(frame: &mut TrapFrame) {
     match frame.vector {
         14 => page_fault_handler(frame),
         8 => double_fault_handler(frame),
+        // Counted, nothing more: an NMI can land while the kernel holds any lock (printing takes
+        // four), so its handler must take none.
         2 => {
-            serial_println!("[trap] NMI at ip {:#x}", frame.rip);
+            NMI_COUNT.fetch_add(1, Ordering::Relaxed);
+            if frame.from_user() {
+                NMI_FROM_USER.fetch_add(1, Ordering::Relaxed);
+            }
         }
         // `int3` in the kernel: a debugging aid, logged and resumed.
         3 if !frame.from_user() => {

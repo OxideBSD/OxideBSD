@@ -7,16 +7,22 @@
 //! (a new `rip`, a register) changes what the interrupted code resumes with. FreeBSD's `trapframe`
 //! is the same idea.
 //!
+//! A trap from ring 3 lands on the entry stack (`cpu::entry`), not the process's kernel stack:
+//! `trap_common` moves the frame over before building the rest, and the way back to ring 3 moves
+//! the hardware part back onto the entry stack for the `iretq`. All of it is entry text.
+//!
 //! The handlers themselves live in `interrupts`; this file only gets the CPU there and back.
 
 use core::arch::global_asm;
 use core::mem::size_of;
+use core::ops::Range;
 
 use x86_64::VirtAddr;
 use x86_64::instructions::tables::lidt;
 use x86_64::structures::DescriptorTablePointer;
 
-use crate::cpu::gdt::{self, DOUBLE_FAULT_IST_INDEX};
+use crate::cpu::entry::ENTRY_STACK_SIZE;
+use crate::cpu::gdt::{self, DOUBLE_FAULT_IST_INDEX, MACHINE_CHECK_IST_INDEX, NMI_IST_INDEX};
 
 /// The vectors with a stub of their own: the 32 exceptions and the 16 legacy PIC lines. Every
 /// higher vector shares `trap_stub_spurious`, which reports itself as `SPURIOUS_VECTOR`.
@@ -84,7 +90,7 @@ macro_rules! trap_stubs {
     (@has_err noerr) => { false };
     ($($vector:literal $kind:ident),* $(,)?) => {
         global_asm!(
-            ".pushsection .text.trap, \"ax\"",
+            ".pushsection .text.entry.trap_stubs, \"ax\"",
             $(
                 concat!("trap_stub_", stringify!($vector), ":"),
                 trap_stubs!(@code $kind),
@@ -98,6 +104,7 @@ macro_rules! trap_stubs {
             ".popsection",
             ".pushsection .rodata.trap, \"a\"",
             ".balign 8",
+            ".global TRAP_STUBS",
             "TRAP_STUBS:",
             $( concat!(".quad trap_stub_", stringify!($vector)), )*
             ".quad trap_stub_spurious",
@@ -127,8 +134,26 @@ trap_stubs! {
 }
 
 global_asm!(
-    ".pushsection .text.trap, \"ax\"",
+    ".pushsection .text.entry.trap_common, \"ax\"",
+    ".global trap_common",
     "trap_common:",
+    // From ring 3, the CPU switched to the entry stack (TSS.RSP0). Move what's on it (the vector,
+    // the error code and the CPU's five-word frame) to this process's own kernel stack, to the
+    // very place the CPU would have put it, then carry on as for a trap from ring 0.
+    "test byte ptr [rsp + 24], 3", // the saved CS's RPL
+    "jz 2f",
+    "push rdi",
+    "mov rdi, rsp",
+    "mov rsp, [CURRENT_RSP0]",
+    "push qword ptr [rdi + 56]", // ss
+    "push qword ptr [rdi + 48]", // rsp
+    "push qword ptr [rdi + 40]", // rflags
+    "push qword ptr [rdi + 32]", // cs
+    "push qword ptr [rdi + 24]", // rip
+    "push qword ptr [rdi + 16]", // error code
+    "push qword ptr [rdi + 8]",  // vector
+    "mov rdi, [rdi]",
+    "2:",
     "push rax",
     "push rbx",
     "push rcx",
@@ -149,6 +174,12 @@ global_asm!(
     "cld",
     "mov rdi, rsp",
     "call trap_dispatch",
+    // Resumes the TrapFrame at RSP: the way back from every trap, and `usermode::jump_to_usermode`'s
+    // way into ring 3.
+    ".global trap_return",
+    "trap_return:",
+    "test byte ptr [rsp + {cs}], 3",
+    "jnz 3f",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -167,7 +198,36 @@ global_asm!(
     // The vector and error code.
     "add rsp, 16",
     "iretq",
+    // To ring 3: restore everything but RDI, which then carries the frame over to the entry
+    // stack, so the `iretq` doesn't read the process's kernel stack.
+    "3:",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rbp",
+    // [rsp] is now the saved RDI; RSI..RAX, the vector and error code, then the CPU's frame follow.
+    "mov rsi, [rsp + 8]",
+    "mov rdx, [rsp + 16]",
+    "mov rcx, [rsp + 24]",
+    "mov rbx, [rsp + 32]",
+    "mov rax, [rsp + 40]",
+    "mov rdi, rsp",
+    "lea rsp, [rip + ENTRY_STACK + {entry_stack_size}]",
+    "push qword ptr [rdi + 96]", // ss
+    "push qword ptr [rdi + 88]", // rsp
+    "push qword ptr [rdi + 80]", // rflags
+    "push qword ptr [rdi + 72]", // cs
+    "push qword ptr [rdi + 64]", // rip
+    "mov rdi, [rdi]",
+    "iretq",
     ".popsection",
+    cs = const core::mem::offset_of!(TrapFrame, cs),
+    entry_stack_size = const ENTRY_STACK_SIZE,
 );
 
 unsafe extern "C" {
@@ -221,12 +281,25 @@ impl Gate {
     }
 }
 
-/// The IDT. A page of its own, so it can later be mapped on its own.
+/// The IDT: the CPU reads it on every trap, so it's entry data.
 #[repr(C, align(4096))]
 struct Idt([Gate; 256]);
 
 /// `static mut`: filled in once by `init`, then only read by the CPU.
+#[unsafe(link_section = ".data.entry")]
 static mut IDT: Idt = Idt([Gate::MISSING; 256]);
+
+/// Where the IDT sits, for `entry::check`.
+pub fn idt_range() -> Range<u64> {
+    let idt = (&raw const IDT) as u64;
+    idt..idt + size_of::<Idt>() as u64
+}
+
+/// Every stub's address, for `entry::check`.
+pub fn stub_addresses() -> impl Iterator<Item = u64> {
+    // SAFETY: TRAP_STUBS is a read-only table emitted above.
+    unsafe { &*(&raw const TRAP_STUBS) }.iter().copied()
+}
 
 /// Builds the IDT and loads it. Every vector gets a gate: an exception or IRQ its own stub, the
 /// rest the spurious one. Only `#BP` is open to ring 3's `int n` (DPL 3, so `int3` raises it
@@ -240,8 +313,13 @@ pub fn init() {
     for (vector, gate) in idt.0.iter_mut().enumerate() {
         let handler = stubs[vector.min(STUB_VECTORS)];
         let dpl = if vector == 3 { 3 } else { 0 };
-        // The double fault gets a known-good stack: it's often a kernel stack overflow.
-        let ist = if vector == 8 { DOUBLE_FAULT_IST_INDEX as u8 + 1 } else { 0 };
+        // Known-good stacks of their own (see `gdt`'s IST slots).
+        let ist = match vector {
+            2 => NMI_IST_INDEX as u8 + 1,
+            8 => DOUBLE_FAULT_IST_INDEX as u8 + 1,
+            18 => MACHINE_CHECK_IST_INDEX as u8 + 1,
+            _ => 0,
+        };
         *gate = Gate::new(handler, selector, dpl, ist);
     }
     let pointer = DescriptorTablePointer {
