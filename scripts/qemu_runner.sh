@@ -69,7 +69,11 @@ cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
 # (`oxidebsd::boot::parse_cmdline`), and so do the arguments after `--` on `cargo run`, which
 # cargo hands this script after the ELF: `cargo run -- -s init_path=/bin/sh`. A test binary's
 # arguments are libtest-style filters, not kernel tokens, so they're ignored.
-KERNEL_CMDLINE=""
+#
+# The disks QEMU gets here (a fresh test disk, the dev disk) are disposable, so the kernel may
+# partition one that has no oxfs partition yet (`format-blank`, RAM_FLOOR.md §3.4.5). Never in a
+# real-hardware ISO.
+KERNEL_CMDLINE="format-blank"
 if [ -n "${OXIDEBSD_REAL_HARDWARE:-}" ]; then
     KERNEL_CMDLINE="no-ata"
 fi

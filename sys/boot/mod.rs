@@ -206,6 +206,15 @@ pub fn ata_disabled() -> bool {
     ATA_DISABLED.load(Ordering::Relaxed)
 }
 
+/// `format-blank` on the kernel command line: a data disk with no oxfs partition gets a fresh GPT
+/// with one (`drivers::disk`, `OxideBSD-doc/RAM_FLOOR.md` §3.4.5). The QEMU runner passes it for
+/// its disposable test and dev disks; a real disk is never partitioned without it.
+static FORMAT_BLANK: AtomicBool = AtomicBool::new(false);
+
+pub fn format_blank() -> bool {
+    FORMAT_BLANK.load(Ordering::Relaxed)
+}
+
 /// `-s` on the kernel command line: boot init into single-user mode (FreeBSD's `RB_SINGLE`).
 static SINGLE_USER: AtomicBool = AtomicBool::new(false);
 
@@ -249,6 +258,8 @@ pub fn init_paths() -> Option<alloc::string::String> {
 pub struct BootFlags {
     /// `no-ata` (or `no-disk`): see `ata_disabled`.
     pub no_ata: bool,
+    /// `format-blank`: see `format_blank`.
+    pub format_blank: bool,
     /// `-s`, alone or combined (`-sv`): see `single_user`.
     pub single_user: bool,
     /// `console.underline=color`: show underlined console text as a color, not a stroke.
@@ -267,6 +278,8 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
     for token in cmdline.split_whitespace() {
         if token == "no-ata" || token == "no-disk" {
             flags.no_ata = true;
+        } else if token == "format-blank" {
+            flags.format_blank = true;
         } else if let Some(mode) = token.strip_prefix("console.underline=") {
             flags.underline_color = mode == "color";
         } else if let Some(value) = ["pti=", "kpti=", "meltdown="]
@@ -297,6 +310,7 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
 pub fn apply_cmdline(cmdline: &str) {
     let flags = parse_cmdline(cmdline);
     ATA_DISABLED.store(flags.no_ata, Ordering::Relaxed);
+    FORMAT_BLANK.store(flags.format_blank, Ordering::Relaxed);
     SINGLE_USER.store(flags.single_user, Ordering::Relaxed);
     crate::cpu::pti::request(flags.pti);
     if flags.underline_color {
