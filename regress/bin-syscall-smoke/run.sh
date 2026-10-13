@@ -116,7 +116,8 @@ check "umount by special" umount $T/src
 check "umount -v" [ "$(umount -v $T/m1)" = "$T/m1: unmounted" ]
 check "an unknown type is refused" status_is 1 mount -t nosuchfs x $T/m1
 check "with the kernel's reason" sh -c "mount -t nosuchfs x $T/m1 2>&1 | grep -q 'unknown file system type'"
-check "an unsupported option is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'the only mount options are nosuid and wxallowed'"
+check "an unsupported option is refused" sh -c "mount -t tmpfs -o noexec tmpfs $T/m1 2>&1 | grep -q 'the only mount options are nosuid, wxallowed, ro and rw'"
+check "a new read-only mount is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'read-only mounts are for / only'"
 check "nosuid is accepted" mount -t tmpfs -o nosuid tmpfs $T/m1
 check "and shown in /proc/mounts" grep -q "$T/m1 tmpfs rw,nosuid" /proc/mounts
 check "umount the nosuid tmpfs" umount $T/m1

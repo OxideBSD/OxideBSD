@@ -1273,6 +1273,12 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
         "oxidebsd_module_serialize" => Some(oxidebsd_module_serialize as *const () as u64),
+        "oxidebsd_root_readonly_at_boot" => {
+            Some(crate::drivers::disk::oxidebsd_root_readonly_at_boot as *const () as u64)
+        }
+        "oxidebsd_root_mounted_rw" => {
+            Some(crate::drivers::disk::oxidebsd_root_mounted_rw as *const () as u64)
+        }
         "oxidebsd_register_shutdown_hook" => {
             Some(oxidebsd_register_shutdown_hook as *const () as u64)
         }

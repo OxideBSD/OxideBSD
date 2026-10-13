@@ -155,6 +155,10 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     } else {
         crate::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
     }
+    // The root file system is mounted read-only; /etc/rc checks it and remounts it read-write
+    // (rc.d/root), as on the BSDs (OxideBSD-doc RAM_FLOOR.md §3.4.3). Test kernels, which start
+    // their own pid 1, keep it read-write.
+    crate::drivers::disk::set_root_readonly_at_boot();
 
     // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
     // since removed (superseded, no longer buildable or loaded).

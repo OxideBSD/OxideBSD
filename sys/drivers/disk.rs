@@ -9,8 +9,8 @@
 //!
 //! Disks are named by bus (`virt0`, `ide0`; `nvme0`, `sata0`, `sda0`, `mmc0` when those drivers
 //! exist), partitions `<disk>p<N>` (GPT) or `<disk>s<N>` (MBR). Each gets a raw device in `/dev`,
-//! readable by root (writing one waits for read-only mounts, RAM_FLOOR.md §3.4.3: under a
-//! mounted file system it would go around its cache).
+//! readable and writable by root, except that the root file system's can't be written while it's
+//! mounted read-write (RAM_FLOOR.md §3.4.3: the writes would go around its cache).
 //!
 //! Every export takes oxfs's 4 KiB blocks, numbered from the start of its partition, and returns
 //! `0` or `-1`, the plain-integer convention modules need (no `alloc`, no rich types across the
@@ -37,6 +37,11 @@ static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 /// Whether oxfs is on the memory disk (no disk, no oxfs partition, or no probe at all) rather than
 /// on a partition of `BACKEND`'s disk.
 static ON_MEMORY: AtomicBool = AtomicBool::new(false);
+/// Whether oxfs should mount the root read-only at boot (`set_root_readonly_at_boot`).
+static ROOT_READONLY_AT_BOOT: AtomicBool = AtomicBool::new(false);
+/// Whether oxfs has its partition mounted read-write: raw writes to it are refused then, since
+/// they would go around its cache (`oxidebsd_root_mounted_rw`).
+static ROOT_MOUNTED_RW: AtomicBool = AtomicBool::new(false);
 /// oxfs's partition on the physical disk, in 4 KiB blocks.
 static ROOT_START: AtomicU64 = AtomicU64::new(0);
 static ROOT_BLOCKS: AtomicU64 = AtomicU64::new(0);
@@ -329,12 +334,36 @@ pub extern "C" fn oxidebsd_block_write_batch(start_block: u64, count: u64, buf_p
     write(start_block, buf)
 }
 
-/// Opens raw device `major:minor`, read-only: `EPERM` for writing (RAM_FLOOR.md §3.4.3).
+/// Asks oxfs to mount the root read-only (the real boot path, `kernel_main`).
+pub fn set_root_readonly_at_boot() {
+    ROOT_READONLY_AT_BOOT.store(true, Ordering::Relaxed);
+}
+
+/// For oxfs: `1` when it should mount the root read-only at boot.
+pub extern "C" fn oxidebsd_root_readonly_at_boot() -> u64 {
+    ROOT_READONLY_AT_BOOT.load(Ordering::Relaxed) as u64
+}
+
+/// For oxfs: it has its partition mounted read-write (`rw != 0`) or read-only.
+pub extern "C" fn oxidebsd_root_mounted_rw(rw: u64) {
+    ROOT_MOUNTED_RW.store(rw != 0, Ordering::Relaxed);
+}
+
+/// Whether sectors `[first, first + sectors)` overlap oxfs's partition on the physical disk.
+fn overlaps_root(first: u64, sectors: u64) -> bool {
+    if ON_MEMORY.load(Ordering::Relaxed) {
+        return false;
+    }
+    let root_first = ROOT_START.load(Ordering::Relaxed) * 8;
+    let root_end = root_first + ROOT_BLOCKS.load(Ordering::Relaxed) * 8;
+    first < root_end && root_first < first + sectors
+}
+
+/// Opens raw device `major:minor`. Writing is refused (`EPERM`) for a device overlapping the
+/// root file system while it's mounted read-write: the writes would go around its cache
+/// (RAM_FLOOR.md §3.4.3). `fsck_oxfs` writes while it's read-only.
 extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
     const O_ACCMODE: u64 = 3;
-    if flags & O_ACCMODE != 0 {
-        return -(crate::syscall::EPERM as i64);
-    }
     let extent = RAW_DEVS
         .lock()
         .iter()
@@ -343,6 +372,9 @@ extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
     let Some((first, sectors)) = extent else {
         return -(crate::syscall::ENXIO as i64);
     };
+    if flags & O_ACCMODE != 0 && ROOT_MOUNTED_RW.load(Ordering::Relaxed) && overlaps_root(first, sectors) {
+        return -(crate::syscall::EPERM as i64);
+    }
     if let Err(e) = crate::fs::fd::check_room(1) {
         return -(e as i64);
     }
@@ -386,8 +418,44 @@ extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags
     n as i64
 }
 
-extern "C" fn raw_write(_real_fd: u64, _uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
-    -(crate::syscall::EBADF as i64)
+/// Writes at the descriptor's position (or `pwrite`'s offset), a block of the physical disk at a
+/// time (read, patched, written back), stopping at the device's end. Refused again if the root
+/// was remounted read-write since the open.
+extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags: u64) -> i64 {
+    // SAFETY: the fd layer passes the live transfer of this call.
+    let uio = unsafe { &mut *uio };
+    let Some((first, sectors, pos)) = RAW_OPEN.lock().get(&real_fd).copied() else {
+        return -(crate::syscall::EBADF as i64);
+    };
+    if ROOT_MOUNTED_RW.load(Ordering::Relaxed) && overlaps_root(first, sectors) {
+        return -(crate::syscall::EPERM as i64);
+    }
+    let positioned = flags & crate::kern::subr_uio::FOF_OFFSET != 0;
+    let offset = if positioned { crate::kern::subr_uio::oxidebsd_uio_offset(uio) } else { pos };
+    let size = sectors * 512;
+    let len = uio.resid().min(size.saturating_sub(offset));
+    if len == 0 {
+        return if uio.resid() == 0 { 0 } else { -(crate::syscall::ENOSPC as i64) };
+    }
+    let start = first * 512 + offset;
+    let first_block = start / 4096;
+    let blocks = (start + len).div_ceil(4096) - first_block;
+    let mut buf = alloc::vec![0u8; (blocks * 4096) as usize];
+    if read_physical(first_block, &mut buf) != 0 {
+        return -(crate::syscall::EIO as i64);
+    }
+    let at = (start - first_block * 4096) as usize;
+    let n = match uio.uiomove_in(&mut buf[at..at + len as usize]) {
+        Ok(n) => n,
+        Err(e) => return -(e as i64),
+    };
+    if write_physical(first_block, &buf) != 0 {
+        return -(crate::syscall::EIO as i64);
+    }
+    if !positioned && let Some(entry) = RAW_OPEN.lock().get_mut(&real_fd) {
+        entry.2 = offset + n as u64;
+    }
+    n as i64
 }
 
 extern "C" fn raw_close(real_fd: u64) -> i64 {

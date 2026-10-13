@@ -1,0 +1,22 @@
+#!/sbin/init_sh
+#
+# PROVIDE: root
+# BEFORE: mountcritlocal
+#
+# Mounts the root file system read-write: the kernel mounts it read-only (OxideBSD-doc
+# RAM_FLOOR.md §3.4.3), so it can be checked first.
+
+. /etc/rc.subr
+
+name="root"
+desc="Mount the root file system read-write"
+start_cmd="root_start"
+stop_cmd=":"
+
+root_start()
+{
+	mount -uw /
+}
+
+load_rc_config $name
+run_rc_command "$1"

@@ -251,6 +251,10 @@ unsafe extern "C" {
     fn oxidebsd_block_device_blocks() -> u64;
     /// Makes every call into this module take the kernel's filesystem lock.
     fn oxidebsd_module_serialize();
+    /// `1` when the root should be mounted read-only at boot (the real boot path).
+    fn oxidebsd_root_readonly_at_boot() -> u64;
+    /// Tells the kernel whether the root is mounted read-write (`1`) or read-only.
+    fn oxidebsd_root_mounted_rw(rw: u64);
     /// `hook` runs before an orderly reboot, halt or power-off (`reboot(2)`).
     fn oxidebsd_register_shutdown_hook(hook: extern "C" fn());
 }
@@ -2084,6 +2088,9 @@ fn write_inode_data(inode_num: u32, content: &[u8]) -> bool {
 /// update," not persisted with per-read precision), not a fake pass condition; keeps a tight read
 /// loop from re-persisting the same inode-table block on every single call.
 fn touch_atime(inode_num: u32) {
+    if read_only_at(inode_num) {
+        return;
+    }
     let _delayed = delay_writes_of(inode_num);
     let mut inode = read_inode(inode_num);
     let now = unsafe { oxidebsd_unix_time() };
@@ -3729,7 +3736,7 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
         buf[n..n + take].copy_from_slice(&bytes[..take]);
         n += take;
     };
-    push(b"oxfs / oxfs rw 0 0\n");
+    push(if root_rdonly() { b"oxfs / oxfs ro 0 0\n" } else { b"oxfs / oxfs rw 0 0\n" });
     for m in mounts().iter().filter(|m| m.used) {
         push(&m.source[..m.source_len as usize]);
         push(b" ");
@@ -4438,6 +4445,7 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
                     unsafe { *core::ptr::addr_of_mut!(AT_BASE_OVERRIDE) = saved };
                     fd
                 }
+                _ if want_write && read_only_at(resolved) => -EROFS,
                 _ if want_write => {
                     let mut name = [0u8; NAME_MAX];
                     name[..leaf.len()].copy_from_slice(leaf);
@@ -4474,6 +4482,7 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
                 }
             }
         }
+        None if create && read_only_at(parent) => -EROFS,
         None if create => {
             let parent_inode = read_inode(parent);
             let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
@@ -4714,6 +4723,9 @@ extern "C" fn oxfs_sync(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 /// orderly reboot, halt or power-off writes everything delayed, then marks the filesystem clean
 /// (§3.4.1). Not called on a panic or a fault.
 extern "C" fn oxfs_shutdown() {
+    if root_rdonly() {
+        return; // nothing delayed, and the disk can't be written
+    }
     bcache::flush_all();
     set_clean(true);
     write_superblock();
@@ -5097,6 +5109,9 @@ fn mkdir_path(path: &[u8], mode: u64) -> i64 {
         Err(OxfsError::InvalidPath) if resolve_path(cwd, path).is_ok() => return -EEXIST,
         Err(e) => return errno_for(e),
     };
+    if read_only_at(parent) {
+        return -EROFS;
+    }
     if dir_lookup(parent, leaf).is_some() {
         return -EEXIST;
     }
@@ -5161,6 +5176,9 @@ fn unlink_path(path: &[u8]) -> i64 {
     let (uid, gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
     if !check_access(&read_inode(parent), uid, gid, W_OK) {
         return -EACCES;
+    }
+    if read_only_at(parent) {
+        return -EROFS;
     }
     let Some(target) = dir_lookup(parent, leaf) else {
         return -ENOENT;
@@ -5254,6 +5272,9 @@ fn link_impl(
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
+    if read_only_at(new_parent) {
+        return -EROFS;
+    }
     if dir_lookup(new_parent, new_leaf).is_some() {
         return -EEXIST;
     }
@@ -5320,6 +5341,9 @@ fn mknod_path(path: &[u8], mode: u64, dev: u64) -> i64 {
 fn make_node(path: &[u8], kind: InodeKind, perm: u16, dev: u32, device_char: bool) -> Result<u32, i64> {
     let cwd = real_cwd_for_mutation(path)?;
     let (parent, leaf) = resolve_parent(cwd, path).map_err(errno_for)?;
+    if read_only_at(parent) {
+        return Err(-EROFS);
+    }
     if dir_lookup(parent, leaf).is_some() {
         return Err(-EEXIST);
     }
@@ -5424,6 +5448,9 @@ fn rmdir_path(path: &[u8]) -> i64 {
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
+    if read_only_at(parent) {
+        return -EROFS;
+    }
     let Some(raw_target) = dir_lookup(parent, leaf) else {
         return -ENOENT;
     };
@@ -5509,6 +5536,9 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
     };
     let target_inode = read_inode(target);
     let is_dir = target_inode.kind == InodeKind::Dir;
+    if read_only_at(old_parent) || read_only_at(new_parent) {
+        return -EROFS;
+    }
     let existing = dir_lookup(new_parent, new_leaf);
     // Real POSIX: old and new naming the same file is a successful no-op. This used to remove
     // the "destination" (i.e. the source itself) and then fail the source's own removal with
@@ -5820,6 +5850,9 @@ fn symlink_path(target: &[u8], linkpath: &[u8]) -> i64 {
         Ok(v) => v,
         Err(e) => return errno_for(e),
     };
+    if read_only_at(parent) {
+        return -EROFS;
+    }
     if dir_lookup(parent, leaf).is_some() {
         return -EEXIST;
     }
@@ -5845,6 +5878,9 @@ fn symlink_path(target: &[u8], linkpath: &[u8]) -> i64 {
 /// root and isn't in the file's group. (This masked to `0o777` until 2026-09-30, so a `chmod 1777
 /// /tmp` silently took `/tmp`'s sticky bit away.)
 fn set_mode(inode_num: u32, mode: u64) -> i64 {
+    if read_only_at(inode_num) {
+        return -EROFS;
+    }
     let mut inode = read_inode(inode_num);
     let (caller_uid, caller_gid) = unsafe { (oxidebsd_current_uid(), oxidebsd_current_gid()) };
     if caller_uid != 0 && caller_uid != inode.uid as u64 {
@@ -6021,6 +6057,9 @@ fn utimensat_path(path: &[u8], times_ptr: u64, flags: u64) -> i64 {
 /// it straight to a dirfd's own inode -- real `utimensat(fd, NULL, ...)`, which is how musl
 /// implements `futimens(fd)` (that used to be a flat `ENOSYS` here).
 fn utimens_inode(inode_num: u32, times_ptr: u64) -> i64 {
+    if read_only_at(inode_num) {
+        return -EROFS;
+    }
     const UTIME_NOW: i64 = (1 << 30) - 1;
     const UTIME_OMIT: i64 = (1 << 30) - 2;
 
@@ -6238,6 +6277,9 @@ fn at_empty_path_inode(dirfd: i64) -> Result<u32, i64> {
 /// either ID; the owner may only change the group, to one it belongs to. A change by anyone but
 /// the superuser clears the set-user-ID and set-group-ID bits (`OxideBSD-doc/SUDO.md` §5.1.5).
 fn chown_inode(inode_num: u32, uid: u64, gid: u64) -> i64 {
+    if read_only_at(inode_num) {
+        return -EROFS;
+    }
     let caller = unsafe { oxidebsd_current_uid() };
     let mut inode = read_inode(inode_num);
     let new_uid = if uid == u32::MAX as u64 { inode.uid } else { uid as u32 };
@@ -6712,6 +6754,10 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
     let mut nosuid = flags & MNT_NOSUID != 0;
     // OpenBSD's option, as an option only: its MNT_WXALLOWED bit is an export flag on FreeBSD.
     let mut wxallowed = false;
+    // FreeBSD's MNT_RDONLY and MNT_UPDATE (`mount -u`), as flags or as the `ro`/`rw` options.
+    const MNT_RDONLY: u64 = 0x1;
+    const MNT_UPDATE: u64 = 0x0001_0000;
+    let mut rdonly = flags & MNT_RDONLY != 0;
     for pair in iov.chunks_exact(2) {
         let name = match iov_str(pair[0]) {
             Ok(name) => name,
@@ -6728,6 +6774,14 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
             }
             b"wxallowed" => {
                 wxallowed = true;
+                continue;
+            }
+            b"ro" => {
+                rdonly = true;
+                continue;
+            }
+            b"rw" => {
+                rdonly = false;
                 continue;
             }
             b"errmsg" => {
@@ -6768,11 +6822,24 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
     if let Some(e) = bad_option {
         return fail(e, b"an option's name or value can't be read, or is too long");
     }
-    if unknown || flags & !MNT_NOSUID != 0 {
-        return fail(-EOPNOTSUPP, b"the only mount options are nosuid and wxallowed");
+    if unknown || flags & !(MNT_NOSUID | MNT_RDONLY | MNT_UPDATE) != 0 {
+        return fail(-EOPNOTSUPP, b"the only mount options are nosuid, wxallowed, ro and rw");
     }
     if fspath.is_empty() {
         return fail(-EINVAL, b"no fspath: the directory to mount on");
+    }
+    if flags & MNT_UPDATE != 0 {
+        if fspath != b"/" {
+            return fail(-EOPNOTSUPP, b"only / can be updated (mount -u) for now");
+        }
+        return match remount_root(rdonly) {
+            0 => 0,
+            e if e == -EBUSY => fail(e, b"files are open for writing on /"),
+            e => fail(e, b"can't reread the root file system's superblock"),
+        };
+    }
+    if rdonly {
+        return fail(-EOPNOTSUPP, b"read-only mounts are for / only, with mount -u, for now");
     }
     match fstype {
         b"tmpfs" => mount_tmpfs(fspath, nosuid, wxallowed),
@@ -6781,6 +6848,45 @@ extern "C" fn oxfs_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 
         b"" => fail(-EINVAL, b"no fstype"),
         _ => fail(-ENODEV, b"unknown file system type"),
     }
+}
+
+/// `mount -u` of `/` (RAM_FLOOR.md §3.4.3), to read-only or read-write.
+///
+/// To read-write: the cache is dropped whole (`fsck_oxfs` may have changed the disk underneath
+/// it, through the raw device) and the layout, free counts and inode table reread, as at mount;
+/// then the clean flag is cleared on the disk and the orphans a read-only boot left are swept.
+/// To read-only: refused (`EBUSY`) while a file on it is open for writing; otherwise every
+/// delayed write goes out and the file system is marked clean.
+fn remount_root(rdonly: bool) -> i64 {
+    if rdonly == root_rdonly() {
+        return 0;
+    }
+    if rdonly {
+        let slots = unsafe { &*core::ptr::addr_of!(OPEN_FILES) };
+        let writing = slots
+            .iter()
+            .flatten()
+            .any(|(_, f)| matches!(f, OpenFile::Write { inode, .. } if !is_tmpfs_inode(*inode)));
+        if writing {
+            return -EBUSY;
+        }
+        bcache::flush_all();
+        set_clean(true);
+        write_superblock();
+        set_root_rdonly(true);
+        log("[oxfs] root remounted read-only\n");
+        return 0;
+    }
+    bcache::invalidate_all();
+    if !mount_from_disk() {
+        return -EIO;
+    }
+    set_root_rdonly(false);
+    set_clean(false);
+    write_superblock();
+    sweep_unnamed_inodes();
+    log("[oxfs] root remounted read-write\n");
+    0
 }
 
 // --- devfs (`DEVFS.md` §4) ---------------------------------------------------------------------
@@ -7566,6 +7672,31 @@ fn unpack_inode(data: &[u8]) -> Inode {
 
 /// Where the superblock keeps the disk inode file's own inode record.
 const SB_INODE_FILE: usize = 128;
+
+/// Whether the root file system is mounted read-only (`OxideBSD-doc/RAM_FLOOR.md` §3.4.3): from
+/// boot on the real boot path until `/etc/rc` remounts it read-write (`mount -u`), or after a
+/// remount read-only. Every change to it is refused with `EROFS`; tmpfs and devfs stay writable.
+static mut ROOT_RDONLY: bool = false;
+
+fn root_rdonly() -> bool {
+    // SAFETY: single-core, under the filesystem lock.
+    unsafe { *core::ptr::addr_of!(ROOT_RDONLY) }
+}
+
+/// Whether a change at inode `n` (the file, or the directory a name goes in) is refused: it's on
+/// the root file system, mounted read-only.
+fn read_only_at(n: u32) -> bool {
+    root_rdonly() && !is_tmpfs_inode(n)
+}
+
+/// Records the root's mode, and tells the kernel (raw writes to the partition are refused while
+/// it's read-write).
+fn set_root_rdonly(rdonly: bool) {
+    // SAFETY: as `root_rdonly`.
+    unsafe { *core::ptr::addr_of_mut!(ROOT_RDONLY) = rdonly };
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    unsafe { oxidebsd_root_mounted_rw(!rdonly as u64) };
+}
 
 /// Whether the filesystem is clean on the disk (§3.4.1): cleared by mount, before anything else is
 /// written, and set by an orderly shutdown (`oxfs_shutdown`) once every delayed write is out.
@@ -8414,6 +8545,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(etc_defaults, b"rc.conf", include_bytes!("../../../../etc/defaults/rc.conf"));
     let rc_d = ensure_dir(etc, b"rc.d");
     ok &= seed_file(rc_d, b"FILESYSTEMS", include_bytes!("../../../../etc/rc.d/FILESYSTEMS"));
+    ok &= seed_file(rc_d, b"root", include_bytes!("../../../../etc/rc.d/root"));
     ok &= seed_file(rc_d, b"NETWORKING", include_bytes!("../../../../etc/rc.d/NETWORKING"));
     ok &= seed_file(rc_d, b"SERVERS", include_bytes!("../../../../etc/rc.d/SERVERS"));
     ok &= seed_file(rc_d, b"DAEMON", include_bytes!("../../../../etc/rc.d/DAEMON"));
@@ -9672,6 +9804,8 @@ pub extern "C" fn module_init() -> i32 {
         let ok = format_fresh_filesystem();
         unsafe { *core::ptr::addr_of_mut!(KERNEL_SEGMENT) = false };
         if has_disk {
+            // Freshly made, nothing half-written: clean, until a read-write mount says otherwise.
+            set_clean(true);
             flush_all_to_disk();
         }
         ok
@@ -9683,12 +9817,19 @@ pub extern "C" fn module_init() -> i32 {
     // this point on is persisted immediately.
     set_persistence_ready(true);
     bcache::set_write_through(true);
-    // Mounted: not clean on the disk until an orderly shutdown says so (§3.4.1).
-    set_clean(false);
-    write_superblock();
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let rdonly = unsafe { oxidebsd_root_readonly_at_boot() } != 0;
+    set_root_rdonly(rdonly);
+    if rdonly {
+        log("[oxfs] root mounted read-only\n");
+    } else {
+        // Mounted: not clean on the disk until an orderly shutdown says so (§3.4.1).
+        set_clean(false);
+        write_superblock();
+    }
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     unsafe { oxidebsd_register_shutdown_hook(oxfs_shutdown) };
-    if mounted {
+    if mounted && !rdonly {
         sweep_unnamed_inodes();
     }
     // /dev (`DEVFS.md` §4.1): devfs over the disk's /dev, before any process runs.

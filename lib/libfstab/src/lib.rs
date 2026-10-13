@@ -81,6 +81,8 @@ pub struct Mounted {
     pub spec: String,
     pub file: String,
     pub vfstype: String,
+    /// Mounted read-only (`ro` among its options).
+    pub rdonly: bool,
 }
 
 /// Parses `/proc/mounts`: `spec file type options dump pass` per line.
@@ -88,7 +90,12 @@ pub fn parse_mounted(text: &str) -> Vec<Mounted> {
     text.lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
-            (f.len() >= 3).then(|| Mounted { spec: unescape(f[0]), file: unescape(f[1]), vfstype: f[2].to_string() })
+            (f.len() >= 3).then(|| Mounted {
+                spec: unescape(f[0]),
+                file: unescape(f[1]),
+                vfstype: f[2].to_string(),
+                rdonly: f.get(3).is_some_and(|o| o.split(',').any(|o| o == "ro")),
+            })
         })
         .collect()
 }

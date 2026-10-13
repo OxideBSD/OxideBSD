@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd September 30, 2026
+.Dd October 13, 2026
 .Dt MOUNT 8
 .Os OxideBSD
 .Sh NAME
@@ -26,6 +26,11 @@
 .Nm mount_nullfs
 .Op Fl o Ar options
 .Ar target node
+.Nm
+.Fl u
+.Op Fl rvw
+.Op Fl o Cm ro | Cm rw
+.Ar node | special
 .Sh DESCRIPTION
 .Nm
 attaches a file system to the directory
@@ -72,7 +77,14 @@ and isn't the root, in the order listed.
 Comma-separated mount options:
 .Bl -tag -width wxallowed
 .It Cm rw
-Read-write, the only mode there is; accepted and ignored.
+Read-write; for a new mount, the only mode there is, accepted and ignored.
+With
+.Fl u ,
+mount the file system read-write.
+.It Cm ro
+With
+.Fl u ,
+mount the file system read-only.
 .It Cm nosuid
 Ignore the set-user-ID and set-group-ID bits of programs on the file
 system.
@@ -90,14 +102,31 @@ mount only a tree no one but the superuser can write.
 .El
 .Pp
 The kernel refuses other options.
+.It Fl r
+With
+.Fl u :
+read-only, the same as
+.Fl o Cm ro .
 .It Fl t Ar type
 The type to mount; with
 .Fl a ,
 the types to mount, or with a leading
 .Dq no ,
 the types not to.
+.It Fl u
+Change a mounted file system between read-only and read-write; only the root,
+for now.
+The kernel mounts the root read-only at boot, and
+.Xr rc 8
+mounts it read-write once it's been checked.
+Read-write to read-only fails while a file on it is open for writing.
 .It Fl v
 Name each file system mounted.
+.It Fl w
+With
+.Fl u :
+read-write, the same as
+.Fl o Cm rw .
 .El
 .Sh FILES
 .Bl -tag -width /proc/mounts -compact

@@ -214,6 +214,8 @@ pub(crate) const ERANGE: u64 = 34;
 /// `sys/modules/oxfs`'s own local copy of this constant, used for its unrelated `ENXIO`-on-`open()`
 /// device-node case).
 pub(crate) const ENXIO: u64 = 6;
+/// A write past the end of a raw disk device (`drivers::disk`). `28` in musl.
+pub(crate) const ENOSPC: u64 = 28;
 /// Returned by `process::mm::do_mmap_file_backed` when a real `off`/`len` combination against a
 /// regular file exceeds the real offset maximum this ABI's `off_t` (a 64-bit signed type, matching
 /// musl's own x86_64 `off_t`) can represent (`mmap/31-1.c`) — checked kernel-side now that
