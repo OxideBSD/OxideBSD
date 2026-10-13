@@ -59,6 +59,17 @@ pub fn init(
     cpu::fpu::init();
     cpu::nx::init();
     cpu::smap::init();
+    cpu::pti::decide();
+    if cpu::pti::enabled() {
+        // Global pages survive a CR3 write, so a kernel mapping tagged Global would stay in the
+        // TLB across the switch to the process's tables -- exactly what KPTI removes. Nothing here
+        // marks a mapping Global, and Limine leaves CR4.PGE clear, but clear it for certain.
+        // SAFETY: turning Global pages off only flushes more; never unsound.
+        unsafe {
+            use x86_64::registers::control::{Cr4, Cr4Flags};
+            Cr4::update(|f| f.remove(Cr4Flags::PAGE_GLOBAL));
+        }
+    }
     cpu::interrupts::init_idt();
     cpu::interrupts::init_pics();
     unsafe {

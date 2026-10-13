@@ -264,8 +264,34 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
     let debug = add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
     let hw = add_node(t, &[], Some(CTL_HW), "hw", "hardware");
-    add_node(t, &[], Some(CTL_MACHDEP), "machdep", "machine dependent");
+    let machdep = add_node(t, &[], Some(CTL_MACHDEP), "machdep", "machine dependent");
     add_node(t, &[], Some(CTL_USER), "user", "user-level");
+
+    // Kernel page-table isolation (Meltdown), one state under three names (`cpu::pti`): FreeBSD's
+    // `vm.pmap.pti`, plus `machdep.kpti` and `hw.meltdown`. Read-only: the state is fixed at boot
+    // from the CPU and the `pti=`/`kpti=`/`meltdown=` command-line flag.
+    let pti_get: Getter = || int(crate::cpu::pti::enabled() as i32);
+    let pmap = add_node(t, &vm, None, "pmap", "Physical map");
+    for (parent, name, descr) in [
+        (&pmap, "pti", "Kernel page-table isolation is active (Meltdown mitigation)"),
+        (&machdep, "kpti", "Kernel page-table isolation is active (Meltdown mitigation)"),
+        (&hw, "meltdown", "Kernel page-table isolation is active (Meltdown mitigation)"),
+    ] {
+        add_leaf(
+            t,
+            parent,
+            Leaf {
+                number: None,
+                name,
+                kind: CTLTYPE_INT,
+                fmt: "I",
+                flags: CTLFLAG_RD,
+                descr,
+                get: pti_get,
+                set: None,
+            },
+        );
+    }
 
     let leaves = [
         Leaf {

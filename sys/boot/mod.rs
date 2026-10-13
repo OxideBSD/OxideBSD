@@ -257,6 +257,9 @@ pub struct BootFlags {
     pub dual_console: bool,
     /// `-h`: the serial console, COM1 only (FreeBSD's `RB_SERIAL`).
     pub serial_console: bool,
+    /// `pti=on|off` (also spelled `kpti=` and `meltdown=`): forces kernel page-table isolation
+    /// on or off (`cpu::pti`); unset, it's on only for CPUs Meltdown affects.
+    pub pti: Option<bool>,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootFlags {
@@ -266,6 +269,15 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
             flags.no_ata = true;
         } else if let Some(mode) = token.strip_prefix("console.underline=") {
             flags.underline_color = mode == "color";
+        } else if let Some(value) = ["pti=", "kpti=", "meltdown="]
+            .iter()
+            .find_map(|prefix| token.strip_prefix(prefix))
+        {
+            match value {
+                "on" => flags.pti = Some(true),
+                "off" => flags.pti = Some(false),
+                _ => {}
+            }
 
         } else if let Some(letters) = token.strip_prefix('-')
             && !letters.is_empty()
@@ -286,6 +298,7 @@ pub fn apply_cmdline(cmdline: &str) {
     let flags = parse_cmdline(cmdline);
     ATA_DISABLED.store(flags.no_ata, Ordering::Relaxed);
     SINGLE_USER.store(flags.single_user, Ordering::Relaxed);
+    crate::cpu::pti::request(flags.pti);
     if flags.underline_color {
         crate::console::vga::set_underline_mode(crate::console::vga::UnderlineMode::Color);
     }

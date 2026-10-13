@@ -164,6 +164,12 @@ static void names(void)
 	len = sizeof bynum;
 	CHECK(sysctl(pg, 2, &bynum, &len, 0, 0) == 0 && bynum == byname, "sysctl and sysctlbyname agree");
 
+	/* KPTI (Meltdown) reports one 0/1 state under three names (vm.pmap.pti, machdep.kpti,
+	 * hw.meltdown); they must agree, whatever the boot-time decision was. */
+	int pti = num("vm.pmap.pti");
+	CHECK((pti == 0 || pti == 1) && num("machdep.kpti") == pti && num("hw.meltdown") == pti,
+		"vm.pmap.pti, machdep.kpti and hw.meltdown agree");
+
 	/* {0, 1}: the name of an OID; {0, 5}: its description. */
 	int q[4] = { 0, 1, CTL_KERN, KERN_OSTYPE };
 	char buf[128];
