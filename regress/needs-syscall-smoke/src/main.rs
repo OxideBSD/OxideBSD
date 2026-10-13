@@ -422,13 +422,14 @@ pub extern "C" fn _start() -> ! {
 
     // 200 files at once grow the inode table by blocks of its own; removing them must give those
     // back too (the table's tail is trimmed), or the free block count stays short. They go in a
-    // directory of their own, removed at the end: a directory doesn't shrink as entries go, so
-    // in `/` the new entries' blocks would stay.
+    // directory of their own, which grows to 14 blocks (15 names to a block) and must shrink back
+    // to its first as they go: a directory gives back its empty trailing blocks, as FFS does.
     let gd = b"/nsgrow";
     check!(
         unsafe { syscall(SYS_MKDIR, gd.as_ptr() as u64, gd.len() as u64, 0o755) }.is_ok(),
         b"mkdir /nsgrow failed"
     );
+    let (free_dir, _) = root_usage();
     let mut name = *b"/nsgrow/f000";
     let set = |name: &mut [u8; 12], i: usize| {
         name[9] = b'0' + (i / 100) as u8;
@@ -445,6 +446,10 @@ pub extern "C" fn _start() -> ! {
         unlink(&name);
     }
     check!(root_usage().1 == used0 + 1, b"unlinking 200 files didn't free their inodes");
+    check!(
+        root_usage().0 == free_dir,
+        b"unlinking 200 files didn't shrink their directory back to one block"
+    );
     check!(
         unsafe { syscall(SYS_RMDIR, gd.as_ptr() as u64, gd.len() as u64, 0) }.is_ok(),
         b"rmdir /nsgrow failed"

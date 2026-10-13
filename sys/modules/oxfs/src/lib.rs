@@ -2614,6 +2614,7 @@ fn dir_remove(dir_inode: u32, name: &[u8]) -> Result<(), OxfsError> {
             if dir_record_used(&block, r) && dir_record_name(&block, r) == name {
                 clear_dir_record(&mut block, r);
                 write_block(blk, &block);
+                dir_trim(dir_inode);
                 touch_dir(dir_inode);
                 return Ok(());
             }
@@ -2621,6 +2622,59 @@ fn dir_remove(dir_inode: u32, name: &[u8]) -> Result<(), OxfsError> {
         i += 1;
     }
     Err(OxfsError::NotFound)
+}
+
+/// Gives back a directory's trailing blocks that no longer hold a record (never its first), as
+/// FFS truncates a directory's empty end: a directory that once held many names doesn't keep
+/// their blocks for good. Only trailing ones: a directory is read until its first missing block,
+/// so a hole would hide what follows it. Each pointer is cleared on the disk before its block is
+/// freed (`OxideBSD-doc/RAM_FLOOR.md` §3.3.1).
+fn dir_trim(dir_inode: u32) {
+    loop {
+        let inode = read_inode(dir_inode);
+        let mut count = 0;
+        while inode_block_at(&inode, count).is_some() {
+            count += 1;
+        }
+        if count <= 1 {
+            return;
+        }
+        let last = count - 1;
+        let Some(blk) = inode_block_at(&inode, last) else { return };
+        if with_block(blk, |b| (0..RECORDS_PER_BLOCK).any(|r| dir_record_used(b, r))) {
+            return;
+        }
+        if !clear_last_block_pointer(dir_inode, last) {
+            return;
+        }
+        free_block(blk);
+    }
+}
+
+/// Clears the pointer to block `index`, the last of inode `n`'s blocks, freeing the single-index
+/// block too when that leaves it empty. `false` past the single-indirect range (not trimmed).
+fn clear_last_block_pointer(n: u32, index: usize) -> bool {
+    let mut inode = read_inode(n);
+    if index < DIRECT_BLOCKS {
+        inode.direct[index] = NO_BLOCK;
+        write_inode(n, inode);
+        return true;
+    }
+    let slot = index - DIRECT_BLOCKS;
+    if slot >= PTRS_PER_INDIRECT || inode.indirect == NO_BLOCK {
+        return false;
+    }
+    let mut ib = read_block(inode.indirect);
+    ib[slot * 4..slot * 4 + 4].copy_from_slice(&NO_BLOCK.to_le_bytes());
+    write_index_block(inode.indirect, &ib);
+    if slot == 0 {
+        // Its last pointer gone: the index block goes too.
+        let index_block = inode.indirect;
+        inode.indirect = NO_BLOCK;
+        write_inode(n, inode);
+        free_block(index_block);
+    }
+    true
 }
 
 /// Counts live records in `dir_inode`, `.`/`..` included -- an otherwise-empty directory always
