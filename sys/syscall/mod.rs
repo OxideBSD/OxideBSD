@@ -1111,6 +1111,13 @@ global_asm!(
     // automatic switch) -- stash it, then move onto *this process's own* kernel stack (mirrored
     // into CURRENT_RSP0 by gdt::set_kernel_stack on every context switch) before pushing anything.
     "mov [SYSCALL_RSP_SCRATCH], rsp",
+    // KPTI: switch to the kernel table before loading CURRENT_RSP0, which the user table doesn't
+    // map. RSP is free here (already saved to the scratch), so it carries the CR3 value.
+    "cmp byte ptr [PTI_ON], 0",
+    "je 10f",
+    "mov rsp, [KERNEL_CR3]",
+    "mov cr3, rsp",
+    "10:",
     "mov rsp, [CURRENT_RSP0]",
     "push qword ptr [SYSCALL_RSP_SCRATCH]", // user_rsp -- see SyscallFrame's doc comment
     "push rax",
@@ -1157,7 +1164,14 @@ global_asm!(
     "mov rdi, rsp",
     "lea rsp, [rip + ENTRY_STACK + {entry_stack_size}]",
     "push qword ptr [rdi + 48]", // user_rsp
-    "mov rdi, [rdi]",
+    "push qword ptr [rdi]",      // stage user RDI on the entry stack (last process-stack read)
+    // KPTI: to the user table before sysretq; everything below reads only the entry stack.
+    "cmp byte ptr [PTI_ON], 0",
+    "je 11f",
+    "mov rdi, [USER_CR3]",
+    "mov cr3, rdi",
+    "11:",
+    "pop rdi", // user RDI
     // Must be the very last thing before sysretq. An NMI or #MC landing between the two runs on
     // its own IST stack (`cpu::gdt`), not on this user RSP.
     "pop rsp",

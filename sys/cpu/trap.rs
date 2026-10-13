@@ -86,16 +86,18 @@ const fn has_error_code(vector: usize) -> bool {
 macro_rules! trap_stubs {
     (@code err) => { "" };
     (@code noerr) => { "push 0" };
+    (@target normal) => { "jmp trap_common" };
+    (@target paranoid) => { "jmp trap_common_paranoid" };
     (@has_err err) => { true };
     (@has_err noerr) => { false };
-    ($($vector:literal $kind:ident),* $(,)?) => {
+    ($($vector:literal $kind:ident $target:ident),* $(,)?) => {
         global_asm!(
             ".pushsection .text.entry.trap_stubs, \"ax\"",
             $(
                 concat!("trap_stub_", stringify!($vector), ":"),
                 trap_stubs!(@code $kind),
                 concat!("push ", stringify!($vector)),
-                "jmp trap_common",
+                trap_stubs!(@target $target),
             )*
             "trap_stub_spurious:",
             "push 0",
@@ -125,12 +127,18 @@ macro_rules! trap_stubs {
 }
 
 trap_stubs! {
-    0 noerr, 1 noerr, 2 noerr, 3 noerr, 4 noerr, 5 noerr, 6 noerr, 7 noerr,
-    8 err, 9 noerr, 10 err, 11 err, 12 err, 13 err, 14 err, 15 noerr,
-    16 noerr, 17 err, 18 noerr, 19 noerr, 20 noerr, 21 err, 22 noerr, 23 noerr,
-    24 noerr, 25 noerr, 26 noerr, 27 noerr, 28 noerr, 29 err, 30 err, 31 noerr,
-    32 noerr, 33 noerr, 34 noerr, 35 noerr, 36 noerr, 37 noerr, 38 noerr, 39 noerr,
-    40 noerr, 41 noerr, 42 noerr, 43 noerr, 44 noerr, 45 noerr, 46 noerr, 47 noerr,
+    0 noerr normal, 1 noerr normal, 2 noerr paranoid, 3 noerr normal,
+    4 noerr normal, 5 noerr normal, 6 noerr normal, 7 noerr normal,
+    8 err paranoid, 9 noerr normal, 10 err normal, 11 err normal,
+    12 err normal, 13 err normal, 14 err normal, 15 noerr normal,
+    16 noerr normal, 17 err normal, 18 noerr paranoid, 19 noerr normal,
+    20 noerr normal, 21 err normal, 22 noerr normal, 23 noerr normal,
+    24 noerr normal, 25 noerr normal, 26 noerr normal, 27 noerr normal,
+    28 noerr normal, 29 err normal, 30 err normal, 31 noerr normal,
+    32 noerr normal, 33 noerr normal, 34 noerr normal, 35 noerr normal,
+    36 noerr normal, 37 noerr normal, 38 noerr normal, 39 noerr normal,
+    40 noerr normal, 41 noerr normal, 42 noerr normal, 43 noerr normal,
+    44 noerr normal, 45 noerr normal, 46 noerr normal, 47 noerr normal,
 }
 
 global_asm!(
@@ -143,6 +151,15 @@ global_asm!(
     "test byte ptr [rsp + 24], 3", // the saved CS's RPL
     "jz 2f",
     "push rdi",
+    // KPTI: switch to the kernel table before reading CURRENT_RSP0 or the process stack, neither
+    // of which the user table maps. rax is a free scratch here (saved and restored around it).
+    "cmp byte ptr [PTI_ON], 0",
+    "je 4f",
+    "push rax",
+    "mov rax, [KERNEL_CR3]",
+    "mov cr3, rax",
+    "pop rax",
+    "4:",
     "mov rdi, rsp",
     "mov rsp, [CURRENT_RSP0]",
     "push qword ptr [rdi + 56]", // ss
@@ -223,11 +240,82 @@ global_asm!(
     "push qword ptr [rdi + 80]", // rflags
     "push qword ptr [rdi + 72]", // cs
     "push qword ptr [rdi + 64]", // rip
-    "mov rdi, [rdi]",
+    "push qword ptr [rdi]",      // stage the user RDI on the entry stack (last process-stack read)
+    // KPTI: to the user table before iretq; everything below reads only the entry stack. RDI is
+    // the scratch, then restored from the entry stack.
+    "cmp byte ptr [PTI_ON], 0",
+    "je 5f",
+    "mov rdi, [USER_CR3]",
+    "mov cr3, rdi",
+    "5:",
+    "pop rdi",
     "iretq",
     ".popsection",
     cs = const core::mem::offset_of!(TrapFrame, cs),
     entry_stack_size = const ENTRY_STACK_SIZE,
+);
+
+// NMI, #DF and #MC enter here instead of `trap_common`. They run on an IST stack (mapped in every
+// user table) and can fire while the user table is loaded -- in ring 3, or in the sliver of ring-0
+// entry/exit code before or after the CR3 switch. So this path reads CR3, loads the kernel table,
+// runs the handler, then restores whatever CR3 was live, rather than assuming the ring tells it
+// which table is loaded. It stays on the IST stack throughout (these handlers only count or reboot
+// -- they never reschedule or deliver a signal), so there's no process-stack copy. Single core, so
+// the saved CR3 lives safely in a callee-saved register across the one call.
+global_asm!(
+    ".pushsection .text.entry.trap_paranoid, \"ax\"",
+    ".global trap_common_paranoid",
+    "trap_common_paranoid:",
+    "push rax",
+    "push rbx",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push rbp",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "cld",
+    // Save the live CR3 in rbx (callee-saved, so it survives the call) and load the kernel table.
+    // The interrupted rbx is already on the stack above, so the frame dispatch sees is correct.
+    "mov rbx, cr3",
+    "cmp byte ptr [PTI_ON], 0",
+    "je 2f",
+    "mov rax, [KERNEL_CR3]",
+    "mov cr3, rax",
+    "2:",
+    "mov rdi, rsp",
+    "call trap_dispatch",
+    // Restore exactly the CR3 that was live on entry (user if interrupted ring 3 or an entry/exit
+    // window, kernel otherwise), then the registers and the interrupted frame.
+    "cmp byte ptr [PTI_ON], 0",
+    "je 3f",
+    "mov cr3, rbx",
+    "3:",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rbp",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rbx",
+    "pop rax",
+    "add rsp, 16", // vector and error code
+    "iretq",
+    ".popsection",
 );
 
 unsafe extern "C" {

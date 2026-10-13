@@ -158,6 +158,42 @@ fn write_hex(mut v: u64) {
     write_bytes(&buf);
 }
 
+fn write_dec(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    if v == 0 {
+        write_bytes(b"0");
+        return;
+    }
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    write_bytes(&buf[i..]);
+}
+
+/// Times a tight `getpid` loop and prints nanoseconds per call -- the KPTI entry/exit cost shows
+/// up here as the difference between a `pti=on` and a `pti=off` run of this same test.
+fn time_getpid() {
+    const N: u64 = 2_000_000;
+    let start = monotonic_ms();
+    let mut i = 0u64;
+    while i < N {
+        let _ = syscall(SYS_GETPID, 0, 0, 0);
+        i += 1;
+    }
+    let ms = (monotonic_ms() - start) as u64;
+    let ns_per = ms * 1_000_000 / N;
+    write_bytes(b"trap-syscall-smoke: getpid x");
+    write_dec(N);
+    write_bytes(b" took ");
+    write_dec(ms);
+    write_bytes(b" ms (");
+    write_dec(ns_per);
+    write_bytes(b" ns/call)\n");
+}
+
 fn undefined_opcode() {
     unsafe { asm!("ud2") };
 }
@@ -519,6 +555,8 @@ extern "C" fn main() -> ! {
         test_exit(false);
     }
     write_bytes(b"trap-syscall-smoke: part 6 OK (registers start at zero)\n");
+
+    time_getpid();
 
     write_bytes(b"trap-syscall-smoke: PASS\n");
     test_exit(true);

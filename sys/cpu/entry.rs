@@ -36,13 +36,52 @@ pub fn entry_stack_top() -> u64 {
     (&raw const ENTRY_STACK) as u64 + ENTRY_STACK_SIZE as u64
 }
 
+/// KPTI state the entry/exit assembly reads, all in the entry data so it's mapped in a process's
+/// user table (`cpu::pti`). `PTI_ON` is 1 once isolation is on; the asm switches CR3 only then.
+/// `KERNEL_CR3`/`USER_CR3` are the two `CR3` values for the current process, set at context switch
+/// (`AddressSpace::activate`): kernel on entry, user on the way back to ring 3.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.entry")]
+pub static mut PTI_ON: u8 = 0;
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.entry")]
+pub static mut KERNEL_CR3: u64 = 0;
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.entry")]
+pub static mut USER_CR3: u64 = 0;
+
+/// Turns the entry/exit CR3 switch on. Called once, after `pti::decide` settles on isolation and
+/// the entry template and first user table exist.
+pub fn enable_switch() {
+    // SAFETY: a plain store, single-core, before the first ring-3 entry that would read it.
+    unsafe { PTI_ON = 1 };
+}
+
+/// Records the current process's two CR3 values for the entry asm. `user` equals `kernel` for an
+/// address space with no separate user table (KPTI off, or the kernel's own space), which makes
+/// the asm's switch a no-op write it skips anyway via `PTI_ON`.
+pub fn set_active_cr3(kernel: u64, user: u64) {
+    // SAFETY: plain stores, single-core, with interrupts off at the one caller (context switch).
+    unsafe {
+        KERNEL_CR3 = kernel;
+        USER_CR3 = user;
+    }
+}
+
+/// The current process's user and kernel CR3 values (`set_active_cr3`), for the page-fault
+/// handler's lazy L4 mirror.
+pub fn active_cr3() -> (u64, u64) {
+    // SAFETY: plain reads of values only written at context switch, single-core.
+    unsafe { (KERNEL_CR3, USER_CR3) }
+}
+
 unsafe extern "C" {
     static __entry_text_start: u8;
     static __entry_text_end: u8;
     static __entry_data_start: u8;
     static __entry_data_end: u8;
     static trap_common: u8;
-    static syscall_entry: u8;
+    static trap_common_paranoid: u8;
     static syscall_return_tail: u8;
 }
 
@@ -67,7 +106,8 @@ pub fn check() {
 
     let mut code = [
         ("trap_common", (&raw const trap_common) as u64),
-        ("syscall_entry", (&raw const syscall_entry) as u64),
+        ("trap_common_paranoid", (&raw const trap_common_paranoid) as u64),
+        ("syscall_entry", crate::syscall::syscall_entry as *const () as u64),
         ("syscall_return_tail", (&raw const syscall_return_tail) as u64),
     ]
     .into_iter()

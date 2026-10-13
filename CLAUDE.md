@@ -225,6 +225,12 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   Rust, or after leaving it, goes in `.text.entry*`/`.data.entry*` (KPTI maps only those);
   `entry::check` panics at boot otherwise. Ring-3 traps land on `ENTRY_STACK` (fixed `TSS.RSP0`).
 - The NMI handler takes no locks (it only counts): an NMI can interrupt any lock holder.
+- **KPTI** (`cpu::pti`, `THREAT_MODEL.md` §3.4): on for Intel without RDCL_NO, off otherwise;
+  `pti=`/`kpti=`/`meltdown=` on|off override, `vm.pmap.pti`/`machdep.kpti`/`hw.meltdown` report it.
+  Each `AddressSpace` gets a second (user) L4 mapping only the entry area plus its user half
+  (mirrored lazily on fault, `mirror_user_l4`); the trap/syscall entry+exit asm switches CR3 when
+  `PTI_ON`. NMI/#DF/#MC use `trap_common_paranoid` (save/restore CR3). No PCID yet: each switch
+  flushes the whole TLB (~3x the getpid cost here).
 - Wire structs duplicated in `regress/*` crates (siginfo, ucontext, ...) must be updated together
   with the kernel copy.
 

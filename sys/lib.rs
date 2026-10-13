@@ -97,6 +97,16 @@ pub fn init(
     memory::usercopy::check_user_range_layout(&mapper);
     memory::wx::check_kernel(&mapper, "boot");
 
+    if cpu::pti::enabled() {
+        // Build the shared entry template, then arm the entry/exit CR3 switch. Both happen here,
+        // after the mapper and frame allocator exist and before any user address space is built
+        // (process::spawn, after init returns): every user table aliases this template.
+        cpu::pti::build_entry_template(&mapper, phys_mem_offset, &mut frame_allocator)
+            .expect("KPTI: building the entry template ran out of frames");
+        cpu::pti::audit_entry_template(phys_mem_offset);
+        cpu::entry::enable_switch();
+    }
+
     serial_println!("[boot] kernel initialization complete");
 
     (mapper, frame_allocator)

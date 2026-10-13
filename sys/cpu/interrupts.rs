@@ -275,6 +275,14 @@ fn user_fault(frame: &mut TrapFrame, name: &str, signal: u64, fault_addr: Option
 /// trampoline, resolves the real disposition.
 fn page_fault_handler(frame: &mut TrapFrame) {
     let error_code = PageFaultErrorCode::from_bits_truncate(frame.error_code);
+    // KPTI lazy user-half mirror: a ring-3 fault on a 512 GiB region the user table hasn't got yet
+    // just copies the L4 entry from the kernel table and retries (`cpu::pti::mirror_user_l4`).
+    if frame.from_user()
+        && let Ok(fault_addr) = Cr2::read()
+        && crate::cpu::pti::mirror_user_l4(fault_addr.as_u64())
+    {
+        return;
+    }
     // Stack growth first, for either ring -- see `mm::try_grow_user_stack`. A not-present fault
     // inside the stack reserve just gets its page and retries the instruction.
     if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
-use x86_64::VirtAddr;
+use x86_64::{PhysAddr, VirtAddr};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{
@@ -106,6 +106,12 @@ pub fn leaf_entry(l4: &mut PageTable, physical_memory_offset: VirtAddr, va: Virt
 #[derive(Clone)]
 pub struct AddressSpace {
     level_4_frame: Arc<PhysFrame>,
+    /// The KPTI user table (`cpu::pti`): a second L4 the CPU runs on in ring 3, mapping this
+    /// address space's user half plus only the entry area, never the rest of the kernel. `None`
+    /// when KPTI is off, where `level_4_frame` is used in both rings. Shared across CLONE_VM
+    /// threads like `level_4_frame`. Its user-half L4 entries are filled lazily, on fault
+    /// (`pti::mirror_user_l4`); its one kernel-half entry is the shared entry template.
+    user_level_4_frame: Option<Arc<PhysFrame>>,
     /// The page cache entries this address space maps frames of (`memory::pagecache`), shared
     /// by its threads like the table itself.
     cached: Arc<Mutex<BTreeSet<EntryId>>>,
@@ -153,8 +159,10 @@ impl AddressSpace {
         };
         *new_table = active_table.clone();
 
+        let user_level_4_frame = build_user_table(physical_memory_offset, frame_allocator)?;
         Ok(AddressSpace {
             level_4_frame: Arc::new(new_frame),
+            user_level_4_frame,
             cached: Arc::default(),
         })
     }
@@ -276,8 +284,19 @@ impl AddressSpace {
             return Err(());
         }
 
+        let user_level_4_frame = match build_user_table(physical_memory_offset, frame_allocator) {
+            Ok(u) => u,
+            Err(()) => {
+                free_table_level(new_table, 4, physical_memory_offset, frame_allocator);
+                // SAFETY: new_frame was never activated; free_table_level only freed content
+                // beneath it, so the frame itself is still ours to return.
+                unsafe { frame_allocator.deallocate_frame(new_frame) };
+                return Err(());
+            }
+        };
         Ok(AddressSpace {
             level_4_frame: Arc::new(new_frame),
+            user_level_4_frame,
             cached: Arc::default(),
         })
     }
@@ -290,6 +309,7 @@ impl AddressSpace {
     pub(crate) fn share(&self) -> AddressSpace {
         AddressSpace {
             level_4_frame: Arc::clone(&self.level_4_frame),
+            user_level_4_frame: self.user_level_4_frame.as_ref().map(Arc::clone),
             cached: Arc::clone(&self.cached),
         }
     }
@@ -319,6 +339,15 @@ impl AddressSpace {
     /// process's address space must not activate it from a context that depends on what it removed.
     pub unsafe fn activate(&self) {
         unsafe { Cr3::write(*self.level_4_frame, Cr3Flags::empty()) };
+        // Record both CR3 values for the entry asm: the kernel table (loaded now, in ring 0) and
+        // the user table the exit path loads before returning to ring 3. With no user table they
+        // are equal, and the asm skips the switch via `PTI_ON`.
+        let kernel_cr3 = self.level_4_frame.start_address().as_u64();
+        let user_cr3 = match &self.user_level_4_frame {
+            Some(f) => f.start_address().as_u64(),
+            None => kernel_cr3,
+        };
+        crate::cpu::entry::set_active_cr3(kernel_cr3, user_cr3);
     }
 
     /// Real reclaim: frees every frame this address space privately owns -- every
@@ -390,6 +419,15 @@ impl AddressSpace {
         // safe to return to the allocator's own free list, same as every leaf/table frame it just
         // freed.
         unsafe { frame_allocator.deallocate_frame(*self.level_4_frame) };
+        // The user table, if any: its user-half entries alias the kernel table's subtrees (just
+        // freed) and its one kernel-half entry is the shared entry template -- nothing beneath it
+        // is this address space's own, so free only the frame itself. `strong_count == 1` holds
+        // here for the same reason the kernel frame's did (both Arcs are cloned together).
+        if let Some(user) = self.user_level_4_frame {
+            // SAFETY: not the active table (same contract as the kernel frame above), and the walk
+            // never descends into it.
+            unsafe { frame_allocator.deallocate_frame(*user) };
+        }
         // Its cached frames were left alone (`SHARED_LEAF`); the cache frees them once unused.
         pagecache::release_all(&self.cached, frame_allocator);
     }
@@ -414,6 +452,30 @@ impl AddressSpace {
         let table = unsafe { frame_to_page_table(*self.level_4_frame, physical_memory_offset) };
         count_table_level(table, 4, physical_memory_offset, shared)
     }
+}
+
+/// Builds this address space's KPTI user table, or `None` when KPTI is off. A fresh L4 mapping
+/// only the entry area (the shared template in slot 511); its user half is filled lazily on fault
+/// (`pti::mirror_user_l4`), never eagerly, so a process reaches ring 3 and faults each region in
+/// once.
+fn build_user_table(
+    physical_memory_offset: VirtAddr,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<Option<Arc<PhysFrame>>, ()> {
+    if !crate::cpu::pti::enabled() {
+        return Ok(None);
+    }
+    let l4e = crate::cpu::pti::entry_template_l4e();
+    assert!(l4e != 0, "KPTI on but the entry template isn't built");
+    let frame = frame_allocator.allocate_frame().ok_or(())?;
+    // SAFETY: a freshly allocated frame, viewed through the phys-mem window; exclusively ours.
+    let table = unsafe { frame_to_page_table(frame, physical_memory_offset) };
+    table.zero();
+    table[crate::cpu::pti::ENTRY_L4_SLOT].set_addr(
+        PhysAddr::new(l4e & 0x000f_ffff_ffff_f000),
+        PageTableFlags::from_bits_truncate(l4e),
+    );
+    Ok(Some(Arc::new(frame)))
 }
 
 fn count_table_level(table: &PageTable, level: u8, pmo: VirtAddr, shared: &mut BTreeSet<u64>) -> u64 {
