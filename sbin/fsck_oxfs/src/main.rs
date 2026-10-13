@@ -17,8 +17,9 @@
 //! unlink didn't finish -- and `-p` (preen) repairs exactly those without asking. Anything else
 //! (a pointer out of range, a block claimed twice, a record naming a free inode) means something
 //! worse; preen stops with status 8 and leaves it to `-y` (repair everything: clear bad inodes
-//! and records) or `-n` (report only, open the device read-only). Unreferenced inodes are freed,
-//! not reconnected: there's no `lost+found` yet.
+//! and records) or `-n` (report only, open the device read-only). An unreferenced directory, or
+//! file with links left, is reconnected in `/lost+found` as `#<inode>` (made if missing, as
+//! newfs makes it); a file with no links left was removed while open, and is freed.
 //!
 //! The on-disk format is oxfs's (`sys/modules/oxfs/src/lib.rs`: `SUPERBLOCK_VERSION`,
 //! `pack_inode`, `write_dir_record`, `layout_for`); keep this reader in step with it until the
@@ -189,6 +190,246 @@ impl Fs {
     }
 }
 
+/// Names and reachability found by the tree walk.
+struct Tree {
+    /// Names each inode has, `.` and `..` aside.
+    names: Vec<u32>,
+    /// Directories reached from the root (or reconnected).
+    reached: Vec<bool>,
+    /// Something preen mustn't repair was found.
+    serious: bool,
+}
+
+/// `/lost+found`, once found or made.
+struct LostFound {
+    inode: Option<u32>,
+    /// Making it was tried (and maybe failed): don't try again.
+    tried: bool,
+}
+
+/// Walks directory `dir` and everything under it, counting names, checking every record:
+/// `.` must name `dir`, `..` must name `parent` (when given), and every record a live inode.
+/// Bad records are removed under `-y`.
+fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode) -> Result<(), String> {
+    let count = fs.inodes.len() as u32;
+    let mut queue = vec![(dir, parent)];
+    while let Some((dir, parent)) = queue.pop() {
+        let inode = fs.inodes[dir as usize].clone();
+        let Ok((data, _)) = fs.blocks_of(&inode) else { continue };
+        for block in data {
+            let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
+            let mut changed = false;
+            for r in 0..RECORDS_PER_BLOCK {
+                let off = r * RECORD;
+                if buf[off] == 0 {
+                    continue;
+                }
+                let len = buf[off + 1] as usize;
+                let target = u32_at(&buf, off + 2);
+                let name = String::from_utf8_lossy(&buf[off + 6..off + 6 + len.min(NAME_MAX)]).into_owned();
+                let bad = if len == 0 || len > NAME_MAX {
+                    Some(format!("directory {dir}: a record with a bad name length {len}"))
+                } else if target >= count || fs.inodes[target as usize].kind() == FREE {
+                    Some(format!("directory {dir}: {name} names inode {target}, which is free"))
+                } else if name == "." && target != dir {
+                    Some(format!("directory {dir}: . names inode {target}"))
+                } else if name == ".." && parent.is_some_and(|p| target != p) {
+                    Some(format!("directory {dir}: .. names inode {target}, not {}", parent.unwrap()))
+                } else {
+                    None
+                };
+                if let Some(why) = bad {
+                    fs.problem(&why);
+                    tree.serious = true;
+                    if mode == Mode::Yes {
+                        println!("  REMOVED");
+                        buf[off] = 0;
+                        changed = true;
+                    }
+                    continue;
+                }
+                if name == "." || name == ".." {
+                    continue;
+                }
+                tree.names[target as usize] += 1;
+                if fs.inodes[target as usize].kind() == DIR {
+                    if tree.reached[target as usize] {
+                        fs.problem(&format!("directory {target} ({name}) has more than one name"));
+                        tree.serious = true;
+                        continue;
+                    }
+                    tree.reached[target as usize] = true;
+                    queue.push((target, Some(dir)));
+                }
+            }
+            if changed && fs.writable {
+                fs.write_block(block, &buf).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The inode directory `dir`'s `..` record names, if it has one.
+fn dotdot(fs: &Fs, dir: u32) -> Option<u32> {
+    let (data, _) = fs.blocks_of(&fs.inodes[dir as usize]).ok()?;
+    for block in data {
+        let buf = fs.read_block(block).ok()?;
+        for r in 0..RECORDS_PER_BLOCK {
+            let off = r * RECORD;
+            if buf[off] != 0 && buf[off + 1] == 2 && &buf[off + 6..off + 8] == b".." {
+                return Some(u32_at(&buf, off + 2));
+            }
+        }
+    }
+    None
+}
+
+/// Points directory `dir`'s `..` record at `parent`.
+fn set_dotdot(fs: &Fs, dir: u32, parent: u32) -> Result<(), String> {
+    let (data, _) = fs.blocks_of(&fs.inodes[dir as usize]).map_err(|b| format!("bad block {b}"))?;
+    for block in data {
+        let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
+        for r in 0..RECORDS_PER_BLOCK {
+            let off = r * RECORD;
+            if buf[off] != 0 && buf[off + 1] == 2 && &buf[off + 6..off + 8] == b".." {
+                buf[off + 2..off + 6].copy_from_slice(&parent.to_le_bytes());
+                return fs.write_block(block, &buf).map_err(|e| e.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `/lost+found`: the root's record of that name, if it's a directory phase 2 reached.
+fn find_lost_found(fs: &Fs, tree: &Tree) -> Result<Option<u32>, String> {
+    let (data, _) = fs.blocks_of(&fs.inodes[ROOT as usize]).map_err(|b| format!("bad block {b}"))?;
+    for block in data {
+        let buf = fs.read_block(block).map_err(|e| e.to_string())?;
+        for r in 0..RECORDS_PER_BLOCK {
+            let off = r * RECORD;
+            let len = buf[off + 1] as usize;
+            if buf[off] != 0 && &buf[off + 6..off + 6 + len.min(NAME_MAX)] == b"lost+found" {
+                let n = u32_at(&buf, off + 2);
+                let ok = (n as usize) < fs.inodes.len() && fs.inodes[n as usize].kind() == DIR && tree.reached[n as usize];
+                return Ok(ok.then_some(n));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// A free block (not in `used`), now marked used; the bitmap is rebuilt in phase 5.
+fn take_block(used: &mut [bool]) -> Option<u32> {
+    let n = used.iter().rposition(|&u| !u)?;
+    used[n] = true;
+    Some(n as u32)
+}
+
+/// Adds the record `name -> target` to directory `dir`, growing it by a block (direct pointers
+/// only) if it's full. `false` when it can't grow.
+fn insert_record(fs: &mut Fs, used: &mut [bool], dir: u32, name: &[u8], target: u32) -> Result<bool, String> {
+    let (data, _) = fs.blocks_of(&fs.inodes[dir as usize]).map_err(|b| format!("bad block {b}"))?;
+    let mut record = [0u8; RECORD];
+    record[0] = 1;
+    record[1] = name.len() as u8;
+    record[2..6].copy_from_slice(&target.to_le_bytes());
+    record[6..6 + name.len()].copy_from_slice(name);
+    for block in data {
+        let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
+        if let Some(r) = (0..RECORDS_PER_BLOCK).find(|r| buf[r * RECORD] == 0) {
+            buf[r * RECORD..(r + 1) * RECORD].copy_from_slice(&record);
+            fs.write_block(block, &buf).map_err(|e| e.to_string())?;
+            return Ok(true);
+        }
+    }
+    let Some(slot) = (0..DIRECT).find(|&i| fs.inodes[dir as usize].direct(i) == NO_BLOCK) else {
+        return Ok(false);
+    };
+    let Some(block) = take_block(used) else { return Ok(false) };
+    let mut buf = [0u8; BLOCK];
+    buf[..RECORD].copy_from_slice(&record);
+    fs.write_block(block, &buf).map_err(|e| e.to_string())?;
+    fs.inodes[dir as usize].raw[9 + slot * 4..13 + slot * 4].copy_from_slice(&block.to_le_bytes());
+    fs.dirty_inodes.insert(dir);
+    Ok(true)
+}
+
+/// Makes `/lost+found` (mode 0700) in a free inode slot and a free block, as newfs would have.
+fn make_lost_found(fs: &mut Fs, tree: &mut Tree, used: &mut [bool]) -> Result<Option<u32>, String> {
+    let Some(n) = (1..fs.inodes.len() as u32).find(|&n| fs.inodes[n as usize].kind() == FREE) else {
+        return Ok(None);
+    };
+    let Some(block) = take_block(used) else { return Ok(None) };
+    let mut buf = [0u8; BLOCK];
+    for (r, (name, target)) in [(&b"."[..], n), (&b".."[..], ROOT)].into_iter().enumerate() {
+        let off = r * RECORD;
+        buf[off] = 1;
+        buf[off + 1] = name.len() as u8;
+        buf[off + 2..off + 6].copy_from_slice(&target.to_le_bytes());
+        buf[off + 6..off + 6 + name.len()].copy_from_slice(name);
+    }
+    fs.write_block(block, &buf).map_err(|e| e.to_string())?;
+    let mut raw = [0u8; INODE_STRIDE];
+    raw[0] = DIR;
+    for i in 0..DIRECT {
+        raw[9 + i * 4..13 + i * 4].copy_from_slice(&NO_BLOCK.to_le_bytes());
+    }
+    raw[9..13].copy_from_slice(&block.to_le_bytes());
+    raw[57..61].copy_from_slice(&NO_BLOCK.to_le_bytes());
+    raw[61..65].copy_from_slice(&NO_BLOCK.to_le_bytes());
+    raw[65..67].copy_from_slice(&0o700u16.to_le_bytes());
+    raw[75..77].copy_from_slice(&1u16.to_le_bytes());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    for off in [82, 90, 98] {
+        raw[off..off + 8].copy_from_slice(&now.to_le_bytes());
+    }
+    fs.inodes[n as usize].raw = raw;
+    fs.dirty_inodes.insert(n);
+    if !insert_record(fs, used, ROOT, b"lost+found", n)? {
+        fs.inodes[n as usize].raw = [0; INODE_STRIDE];
+        return Ok(None);
+    }
+    tree.reached[n as usize] = true;
+    tree.names[n as usize] = 1;
+    println!("CREATED /lost+found (inode {n})");
+    Ok(Some(n))
+}
+
+/// Makes `/lost+found` the first time it's needed, if it's missing (not under `-n`).
+fn ensure_lost_found(fs: &mut Fs, tree: &mut Tree, lost: &mut LostFound, used: &mut [bool], mode: Mode) -> Result<(), String> {
+    if mode != Mode::No && lost.inode.is_none() && !lost.tried {
+        lost.tried = true;
+        lost.inode = make_lost_found(fs, tree, used)?;
+    }
+    Ok(())
+}
+
+/// Gives inode `n` the name `#<n>` in `/lost+found` (made if need be), counting it. Under `-n`
+/// only says where it would go. `None` when there's no lost+found and none can be made.
+fn reconnect(
+    fs: &mut Fs,
+    tree: &mut Tree,
+    lost: &mut LostFound,
+    used: &mut [bool],
+    n: u32,
+    mode: Mode,
+) -> Result<Option<u32>, String> {
+    if mode == Mode::No {
+        tree.names[n as usize] += 1;
+        return Ok(Some(lost.inode.unwrap_or(ROOT)));
+    }
+    ensure_lost_found(fs, tree, lost, used, mode)?;
+    let Some(lf) = lost.inode else { return Ok(None) };
+    if !insert_record(fs, used, lf, format!("#{n}").as_bytes(), n)? {
+        return Ok(None);
+    }
+    tree.names[n as usize] += 1;
+    Ok(Some(lf))
+}
+
 fn usage() -> ExitCode {
     eprintln!("usage: fsck_oxfs [-fnpy] device");
     ExitCode::from(EXIT_USAGE)
@@ -337,87 +578,83 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     }
 
     println!("** Phase 2 - Check Pathnames");
-    let mut names = vec![0u32; count as usize];
-    let mut reached = vec![false; count as usize];
-    let mut queue = vec![(ROOT, ROOT)];
-    reached[ROOT as usize] = fs.inodes.get(ROOT as usize).is_some_and(|i| i.kind() == DIR);
-    if !reached[ROOT as usize] {
+    if fs.inodes.get(ROOT as usize).is_none_or(|i| i.kind() != DIR) {
         return Err("the root inode isn't a directory".into());
     }
-    while let Some((dir, parent)) = queue.pop() {
-        let inode = fs.inodes[dir as usize].clone();
-        let Ok((data, _)) = fs.blocks_of(&inode) else { continue };
-        for block in data {
-            let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
-            let mut changed = false;
-            for r in 0..RECORDS_PER_BLOCK {
-                let off = r * RECORD;
-                if buf[off] == 0 {
-                    continue;
-                }
-                let len = buf[off + 1] as usize;
-                let target = u32_at(&buf, off + 2);
-                let name = String::from_utf8_lossy(&buf[off + 6..off + 6 + len.min(NAME_MAX)]).into_owned();
-                let bad = if len == 0 || len > NAME_MAX {
-                    Some(format!("directory {dir}: a record with a bad name length {len}"))
-                } else if target >= count || fs.inodes[target as usize].kind() == FREE {
-                    Some(format!("directory {dir}: {name} names inode {target}, which is free"))
-                } else if name == "." && target != dir {
-                    Some(format!("directory {dir}: . names inode {target}"))
-                } else if name == ".." && target != parent {
-                    Some(format!("directory {dir}: .. names inode {target}, not {parent}"))
-                } else {
-                    None
-                };
-                if let Some(why) = bad {
-                    fs.problem(&why);
-                    serious = true;
-                    if mode == Mode::Yes {
-                        println!("  REMOVED");
-                        buf[off] = 0;
-                        changed = true;
-                    }
-                    continue;
-                }
-                if name == "." || name == ".." {
-                    continue;
-                }
-                names[target as usize] += 1;
-                if fs.inodes[target as usize].kind() == DIR {
-                    if reached[target as usize] {
-                        fs.problem(&format!("directory {target} ({name}) has more than one name"));
-                        serious = true;
-                        continue;
-                    }
-                    reached[target as usize] = true;
-                    queue.push((target, dir));
-                }
-            }
-            if changed && fs.writable {
-                fs.write_block(block, &buf).map_err(|e| e.to_string())?;
-            }
-        }
-    }
+    let mut tree = Tree { names: vec![0; count as usize], reached: vec![false; count as usize], serious: false };
+    tree.reached[ROOT as usize] = true;
+    walk(&mut fs, &mut tree, ROOT, Some(ROOT), mode)?;
+    serious |= tree.serious;
 
     // Preen repairs only what a crash leaves; past phases 1-2 it would act on a tree it can't
-    // trust (a broken record makes a whole directory look unreferenced, and its files would be
-    // freed). Stop with nothing written.
+    // trust (a broken record makes a whole directory look unreferenced). Stop with nothing
+    // written.
     if serious && mode == Mode::Preen {
         println!("\nUNEXPECTED INCONSISTENCY; RUN fsck_oxfs MANUALLY (with -y to repair).");
         return Ok(EXIT_UNRESOLVED);
     }
 
     println!("** Phase 3 - Check Connectivity");
+    // Blocks in use, for growing or making lost+found: what phase 1 found held.
+    let mut used: Vec<bool> = vec![false; data_blocks as usize];
+    for &b in owner.keys() {
+        used[b as usize] = true;
+    }
+    let mut lost = LostFound { inode: find_lost_found(&fs, &tree)?, tried: false };
+    // Directories first, each at the top of the subtree that lost its way to the root: a directory
+    // whose `..` names another unreachable one comes back through it. Its contents are walked as
+    // phase 2 walks the tree, so they have their names again.
+    loop {
+        let pending: Vec<u32> = (1..count)
+            .filter(|&n| fs.inodes[n as usize].kind() == DIR && !tree.reached[n as usize])
+            .collect();
+        let Some(&first) = pending.first() else { break };
+        let top = pending
+            .iter()
+            .copied()
+            .find(|&n| !dotdot(&fs, n).is_some_and(|p| p != n && pending.contains(&p)))
+            .unwrap_or(first);
+        tree.reached[top as usize] = true;
+        ensure_lost_found(&mut fs, &mut tree, &mut lost, &mut used, mode)?;
+        print!("UNREF directory {top}");
+        let parent = match reconnect(&mut fs, &mut tree, &mut lost, &mut used, top, mode)? {
+            Some(lf) => {
+                println!("{}", if mode == Mode::No { " (would RECONNECT)" } else { " (RECONNECTED)" });
+                if fs.writable {
+                    set_dotdot(&fs, top, lf)?;
+                }
+                Some(lf)
+            }
+            None => {
+                println!(" (NO lost+found; LEFT ALONE)");
+                None
+            }
+        };
+        fs.errors += 1;
+        let expected_parent = if fs.writable { parent } else { None };
+        walk(&mut fs, &mut tree, top, expected_parent, mode)?;
+    }
+    // Then files: one still linked lost its name to the crash and goes to lost+found; one with no
+    // links left was unlinked while open, and is freed, as the kernel's orphan sweep would.
     for n in 1..count {
-        let unreferenced = fs.inodes[n as usize].kind() != FREE && names[n as usize] == 0;
-        if unreferenced {
-            // A file whose last name went away (or never came) before a crash: what preen frees.
+        let inode = &fs.inodes[n as usize];
+        if inode.kind() == FREE || inode.kind() == DIR || tree.names[n as usize] > 0 {
+            continue;
+        }
+        fs.errors += 1;
+        if inode.nlink() == 0 {
             println!("UNREF inode {n}{}", if mode == Mode::No { "" } else { " (CLEARED)" });
-            fs.errors += 1;
             if mode != Mode::No {
                 fs.inodes[n as usize].raw = [0; INODE_STRIDE];
                 fs.dirty_inodes.insert(n);
             }
+            continue;
+        }
+        ensure_lost_found(&mut fs, &mut tree, &mut lost, &mut used, mode)?;
+        print!("UNREF inode {n}");
+        match reconnect(&mut fs, &mut tree, &mut lost, &mut used, n, mode)? {
+            Some(_) => println!("{}", if mode == Mode::No { " (would RECONNECT)" } else { " (RECONNECTED)" }),
+            None => println!(" (NO lost+found; LEFT ALONE)"),
         }
     }
 
@@ -427,7 +664,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
         if inode.kind() == FREE {
             continue;
         }
-        let want = if inode.kind() == DIR { 1 } else { names[n as usize].max(1) as u16 };
+        let want = if inode.kind() == DIR { 1 } else { tree.names[n as usize].max(1) as u16 };
         if inode.nlink() != want {
             println!(
                 "LINK COUNT inode {n}: {} should be {want}{}",

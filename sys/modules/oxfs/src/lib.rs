@@ -8101,6 +8101,12 @@ fn format_fresh_filesystem() -> bool {
     // The rest of the program hierarchy (hier(7), share/man/man7/hier.7): /bin and /sbin are what
     // single-user repair needs, /usr/bin and /usr/sbin everything else.
     let sbin = ensure_dir(root, b"sbin");
+    // Where fsck_oxfs(8) reconnects files that lost their names (newfs(8) makes it too). Root's
+    // only: what lands there was someone's, and nobody else may read it.
+    let lost_found = ensure_dir(root, b"lost+found");
+    let mut node = read_inode(lost_found);
+    node.mode = 0o700;
+    write_inode(lost_found, node);
     let usr = ensure_dir(root, b"usr");
     let usr_bin = ensure_dir(usr, b"bin");
     let usr_sbin = ensure_dir(usr, b"sbin");

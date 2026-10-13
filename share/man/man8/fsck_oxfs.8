@@ -34,7 +34,13 @@ against each other;
 .It
 the directory tree is walked from the root, checking every name;
 .It
-inodes with no name are found and freed;
+inodes with no name are found: a directory, or a file with links left, is
+reconnected in
+.Pa /lost+found
+as
+.Pa # Ns Ar inode
+(a directory with everything under it), and a file with no links left (removed
+while still open) is freed;
 .It
 link counts are compared with the names found;
 .It
@@ -69,11 +75,16 @@ check
 .Pq Fl p
 or still has problems
 .Pq Fl n .
+.Sh FILES
+.Bl -tag -width /lost+found -compact
+.It Pa /lost+found
+Where files that lost their names are reconnected; made by the format, and by
+.Nm
+when it is missing and needed.
+It grows to twelve blocks (180 names); past that, what can't be reconnected is
+left as it is, and reported.
+.El
 .Sh SEE ALSO
 .Xr fsck 8 ,
 .Xr mount 8 ,
 .Xr update 8
-.Sh BUGS
-There is no
-.Pa lost+found :
-files and directories that lost their names are freed, not reconnected.
