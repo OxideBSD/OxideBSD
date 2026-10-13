@@ -634,6 +634,30 @@ pub(crate) extern "C" fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64 {
     }
 }
 
+/// Where physical memory is mapped (the HHDM): from the module loader's mapper while a
+/// `module_init` runs, else from the global memory state once it's installed.
+pub(crate) fn phys_mem_offset() -> Option<VirtAddr> {
+    // SAFETY: as `allocate_frame`.
+    if let Some(mapper) = unsafe { CURRENT_LOAD_MAPPER.as_ref() } {
+        return Some(mapper.phys_offset());
+    }
+    crate::memory::try_phys_mem_offset()
+}
+
+/// One frame (not zeroed) from whichever frame allocator is live: the module loader's while a
+/// `module_init` runs (the global one isn't installed until every module has loaded), else the
+/// global one. For drivers a module drives from inside its `module_init` (the memory disk, which
+/// oxfs formats there).
+pub(crate) fn allocate_frame() -> Option<x86_64::structures::paging::PhysFrame> {
+    use x86_64::structures::paging::FrameAllocator;
+    // SAFETY: non-null only for the duration of a `module_init`, on this same single core (see
+    // the static's own doc comment).
+    if let Some(frame_allocator) = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() } {
+        return frame_allocator.allocate_frame();
+    }
+    crate::memory::with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame())
+}
+
 /// `/proc/modules` -- real Linux's own seven-space-separated-field format per line (`name size
 /// refcount deps state address`), just with fixed placeholders for the three fields this loader
 /// has no equivalent concept for: `refcount` (no module ever tracks how many things reference it),

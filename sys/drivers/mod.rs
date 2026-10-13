@@ -10,6 +10,7 @@ pub mod ata;
 pub mod disk;
 pub mod dma;
 pub mod fbdev;
+pub mod md;
 pub mod pci;
 pub mod rtl8139;
 pub mod usb;

@@ -151,6 +151,7 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // real hardware, where oxfs would format whatever disk it found (`boot::ata_disabled`).
     if crate::boot::ata_disabled() {
         serial_println!("[boot] no-ata on kernel command line: skipping the data disk probe");
+        crate::drivers::disk::init_memory(physical_memory_offset);
     } else {
         crate::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
     }

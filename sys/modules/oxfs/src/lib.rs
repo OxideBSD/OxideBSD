@@ -63,6 +63,8 @@
 //! syscall, see `oxfs_getdents`'s own doc comment for the wire format.
 #![no_std]
 
+mod bcache;
+
 unsafe extern "C" {
     fn oxidebsd_log(ptr: *const u8, len: u64);
     fn oxidebsd_register_syscall(
@@ -245,6 +247,8 @@ unsafe extern "C" {
     fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
     /// Usable RAM in bytes, for sizing pools.
     fn oxidebsd_physmem_bytes() -> u64;
+    /// The data disk's size in 4 KiB blocks.
+    fn oxidebsd_block_device_blocks() -> u64;
 }
 
 /// Changes whenever a file this module embeds changes (`build.rs`'s `build_module_crate`); reading
@@ -536,47 +540,49 @@ const EXDEV: i64 = 18;
 const ENXIO: i64 = 6;
 
 const BLOCK_SIZE: usize = 4096;
-/// 32 MiB pool (raised from 4 MiB once the BusyBox roster grew from 24 applets to ~300 -- see
-/// CLAUDE.md's BusyBox section -- whose combined embedded ELF bytes alone run to ~18 MiB), with
-/// real headroom left over for runtime-created files (`stsh`'s `write` built-in, BusyBox's own
-/// file creation). `sys/memory.rs`'s frame allocator and this module's own eager, non-paged
-/// mapping mean this whole pool becomes a real physical-memory commitment the moment the module
-/// loads (see `Cargo.toml`'s `[package.metadata.bootimage]` `-m` bump, made at the same time as
-/// this).
-/// Raised again, 8192 -> 16384, once the Open POSIX Test Suite pilot (see CLAUDE.md's "POSIX
-/// conformance pilot" sections and `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`) grew from its original
-/// 68-file curated subset to several hundred files, adding real content on the order of the
-/// existing BusyBox applet roster's own footprint -- the ~14 MiB of headroom left at 8192 blocks
-/// (32 MiB total, minus BusyBox's own ~18 MiB) wasn't enough. 16384 blocks (64 MiB) leaves real
-/// headroom again, not just enough to exactly fit.
-///
-/// **Raised again, 65536 -> 262144 (256 MiB -> 1 GiB), alongside the real per-file addressing fix**
-/// (`Inode::double_indirect`, see that field's own doc comment): a per-file cap of ~4 MiB was the
-/// binding constraint before, so the real pool's own size never mattered much past "bigger than
-/// the seeded content." Once a single file can address up to ~4.1 GiB, the pool itself becomes the
-/// real, honest ceiling on how big any file can actually get -- 1 GiB gives genuinely useful
-/// headroom for that without exhausting this project's own hard `MODULE_REGION_CEILING` VA budget
-/// (`sys/module.rs`; ~1.5 GiB total, shared by *every* kernel module -- this module is already by
-/// far the largest consumer of it, and the only one with any large static pools at all). A real 4
-/// GiB file is structurally impossible regardless of this number: the whole pool is a fixed
-/// `static mut` array baked directly into this module's own image, eagerly mapped as real physical
-/// RAM the instant it loads (see this constant's own opening paragraph) -- it can never itself
-/// reach anywhere near 4 GiB without either blowing the VA budget outright or costing more real
-/// RAM than this kernel has ever assumed a single module would need. A file's real achievable size
-/// is bounded by whatever of this pool is actually still free (an honest `ENOSPC` once it isn't),
-/// exactly like any real filesystem whose maximum file size (a property of its own addressing
-/// scheme) can exceed its disk's real free space.
-///
-/// **Found live alongside this bump, a real pre-existing bug**: `persist_bitmap_if_ready`/
-/// `mount_from_disk`/`flush_all_to_disk` packed the *entire* block-used bitmap into a single
-/// `BLOCK_SIZE`-byte buffer (`i / 8` indexing it directly) -- correct only while `NUM_BLOCKS` fits
-/// in `BLOCK_SIZE * 8` bits (32768). This constant had already silently exceeded that bound at
-/// 65536 blocks before this pass (a real, guaranteed out-of-bounds panic -- fatal to this module,
-/// see `module::CURRENT_MODULE_FATAL` -- the moment any real write happened against a real,
-/// persisted disk past boot), just never hit because this pass is what actually exercises real
-/// disk persistence hard enough to surface it. Fixed by spreading the bitmap across
-/// `BITMAP_BLOCKS` real blocks instead of a hardcoded one -- see that constant's own doc comment.
-const NUM_BLOCKS: usize = 262144;
+/// The disk filesystem's size in data blocks, from its superblock (or, at format, from the
+/// device: `layout_for`). Block numbers `0..disk_blocks()` are the disk pool's; tmpfs's start at
+/// `TMPFS_BLOCK_BASE`, far above any disk this can describe. (Until the 128 MB floor,
+/// `OxideBSD-doc/RAM_FLOOR.md` §3.1.3, this was a compile-time 1 GiB `NUM_BLOCKS`, every block of
+/// it held in RAM.)
+static mut DISK_BLOCKS: u32 = 0;
+/// Bitmap blocks: one bit per data block, `BITS_PER_BITMAP_BLOCK` to a block.
+static mut BITMAP_BLOCKS: u32 = 0;
+/// Device block holding data block `0`: right after the superblock and the bitmap.
+static mut DATA_BLOCK_OFFSET: u32 = 0;
+const BITS_PER_BITMAP_BLOCK: u32 = (BLOCK_SIZE * 8) as u32;
+
+fn disk_blocks() -> u32 {
+    // SAFETY: set once at mount or format, inside `module_init`.
+    unsafe { *core::ptr::addr_of!(DISK_BLOCKS) }
+}
+
+fn bitmap_blocks() -> u32 {
+    // SAFETY: as `disk_blocks`.
+    unsafe { *core::ptr::addr_of!(BITMAP_BLOCKS) }
+}
+
+fn data_block_offset() -> u32 {
+    // SAFETY: as `disk_blocks`.
+    unsafe { *core::ptr::addr_of!(DATA_BLOCK_OFFSET) }
+}
+
+/// `(data blocks, bitmap blocks)` for a device of `device_blocks` blocks: the superblock, then
+/// as few bitmap blocks as cover the data blocks after them. Capped below `TMPFS_BLOCK_BASE`.
+fn layout_for(device_blocks: u64) -> (u32, u32) {
+    let usable = device_blocks.saturating_sub(BITMAP_START as u64).min(TMPFS_BLOCK_BASE as u64 - 1);
+    let bitmap = usable.div_ceil(BITS_PER_BITMAP_BLOCK as u64 + 1);
+    ((usable - bitmap) as u32, bitmap as u32)
+}
+
+fn set_layout(data_blocks: u32, bitmap: u32) {
+    // SAFETY: inside `module_init`, before any syscall.
+    unsafe {
+        *core::ptr::addr_of_mut!(DISK_BLOCKS) = data_blocks;
+        *core::ptr::addr_of_mut!(BITMAP_BLOCKS) = bitmap;
+        *core::ptr::addr_of_mut!(DATA_BLOCK_OFFSET) = BITMAP_START + bitmap;
+    }
+}
 /// Inode numbers: the disk filesystem's are `0..TMPFS_INODE_BASE`, tmpfs mounts' are
 /// `TMPFS_INODE_BASE..TMPFS_INODE_LIMIT`. Neither pool has a fixed inode count: each keeps its
 /// inodes in an inode file (`InodeTable`) that grows a block at a time from its own block pool, so
@@ -627,16 +633,12 @@ const TMPFS_MAX_BLOCKS: usize = 16384;
 //
 // Physical disk block layout: block `0` is the superblock (which also holds the inode file's own
 // inode record, see `InodeTable`), `[BITMAP_START,
-// BITMAP_START + BITMAP_BLOCKS)` is the block-used bitmap, and real data starts at
-// `DATA_BLOCK_OFFSET` -- this module's own in-memory block number `i` maps to physical disk block
-// `DATA_BLOCK_OFFSET + i`. Inodes are packed at a fixed
+// BITMAP_START + bitmap_blocks())` is the block-used bitmap, and data starts at
+// `data_block_offset()` -- data block `i` is device block `data_block_offset() + i`. Inodes are packed at a fixed
 // 128-byte stride, `INODES_PER_BLOCK` to a block of the inode file (real packed content is 106 bytes -- 1 tag + 8 size + 48 direct + 4 indirect + 4
 // double_indirect + 2 mode + 4 uid + 4 gid + 2 nlink + 4 rdev + 1 device_char + 8 mtime + 8 ctime +
 // 8 atime -- rounded up to a power-of-two stride that divides BLOCK_SIZE evenly, leaving headroom
-// for future fields); `BITMAP_BLOCKS` bitmap blocks, one bit per real block (`NUM_BLOCKS`, no
-// longer assumed to fit a single block -- see that constant's own doc comment for the real bug
-// this fixed). `BITMAP_BLOCKS`/`DATA_BLOCK_OFFSET` are both real, derived
-// consts, not hand-computed numbers -- see each one's own definition below.
+// for future fields); one bitmap bit per data block, sized with the filesystem (`layout_for`).
 
 /// Marks a real, formatted oxfs disk. Absence/mismatch (an unformatted/all-zero disk, or one some
 /// other filesystem wrote) means the same thing either way: format fresh rather than try to
@@ -661,7 +663,11 @@ const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// the superblock is gone, so the bitmap now starts at block 1.
 ///
 /// Bumped 4 -> 5 for `Inode::shm`, one byte after `atime` in the packed inode.
-const SUPERBLOCK_VERSION: u32 = 5;
+///
+/// Bumped 5 -> 6 for the buffer cache (`OxideBSD-doc/RAM_FLOOR.md` §3.1.3): the filesystem spans
+/// the whole device, its size (in the superblock) sets the bitmap's length, and data starts after
+/// that many bitmap blocks instead of after a fixed 1 GiB pool's.
+const SUPERBLOCK_VERSION: u32 = 6;
 
 /// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
 /// `Inode` itself, since it isn't `#[repr(C)]` and `InodeKind` has no explicit discriminant, so its
@@ -670,14 +676,8 @@ const SUPERBLOCK_VERSION: u32 = 5;
 /// `dir_record_inode` already established for directory records.
 const INODE_STRIDE: usize = 128;
 const INODES_PER_BLOCK: usize = BLOCK_SIZE / INODE_STRIDE;
-/// How many physical blocks the block-used bitmap spans -- one bit per real (non-tmpfs) block,
-/// `BLOCK_SIZE * 8` bits per physical block. **Must be a real, computed span, not a hardcoded
-/// single block** -- see `NUM_BLOCKS`'s own doc comment for the real, previously-live bug this
-/// fixes (a `NUM_BLOCKS` past `BLOCK_SIZE * 8` = 32768 already silently exceeded a single block's
-/// worth of bits before this pass).
-const BITMAP_BLOCKS: u32 = ((NUM_BLOCKS + BLOCK_SIZE * 8 - 1) / (BLOCK_SIZE * 8)) as u32;
+/// The bitmap's first device block, right after the superblock.
 const BITMAP_START: u32 = 1;
-const DATA_BLOCK_OFFSET: u32 = BITMAP_START + BITMAP_BLOCKS;
 
 /// Gates `write_block`/`write_inode`/`set_block_used`'s own write-through persistence (see those
 /// functions below). Deliberately `false` for the *entire* duration of `format_fresh_filesystem`
@@ -970,18 +970,10 @@ impl Inode {
 /// syscall-reachable functions, whose results feed observably into `oxidebsd_log`/syscall return
 /// values, so the optimizer can't treat any write as an unobservable dead store. All-zero initial
 /// values place these in `.bss` (not baked into the merged object's own size).
-/// Real, kernel-allocated storage (`oxidebsd_module_alloc_zeroed`, set once by `init_pools` at the
-/// very top of `module_init`), *not* a `static mut [[u8; BLOCK_SIZE]; NUM_BLOCKS]` array baked
-/// into this module's own object file the way every other fixed-size pool here is. This one pool
-/// alone would otherwise be `NUM_BLOCKS * BLOCK_SIZE` ~= 1 GiB of pure, never-yet-written `.bss`
-/// -- harmless to the on-disk object size (`.bss` never costs file bytes), but *not* harmless to
-/// how much of this module's own mapped kernel VA/physical footprint is pure empty pool versus
-/// real code -- found live investigating a boot-path memory failure: this module's own mapped
-/// region was measured at ~1.5 GiB, of which barely 15% was actual code/embedded seed content.
-/// `read_block`/`write_block` are the only two functions that ever touch it -- everything else
-/// here goes through them.
-static mut BLOCKS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
-static mut BLOCK_USED: [bool; NUM_BLOCKS] = [false; NUM_BLOCKS];
+/// Free blocks in each bitmap block (`BITS_PER_BITMAP_BLOCK` data blocks), resident so the
+/// allocator and `statfs` never read a full bitmap block to learn it's full. Allocated in
+/// `init_pools` for the largest filesystem the device can hold; counts are set at mount/format.
+static mut FREE_COUNTS: *mut u32 = core::ptr::null_mut();
 /// The tmpfs pool (`TMPFS_BLOCK_BASE`): `TMPFS_BLOCKS` blocks from `init_pools`.
 static mut TMPFS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
 static mut TMPFS_BLOCKS: u32 = 0;
@@ -996,17 +988,17 @@ fn tmpfs_pool_blocks(ram: u64) -> usize {
     (ram as usize / 16 / BLOCK_SIZE).clamp(TMPFS_MIN_BLOCKS, TMPFS_MAX_BLOCKS)
 }
 
-/// Block `n`'s storage, in whichever pool it belongs to.
-fn block_ptr(n: u32) -> *mut [u8; BLOCK_SIZE] {
-    // SAFETY: both pools are set once by `init_pools` before any syscall can reach here, and
-    // callers only pass block numbers this module handed out.
-    unsafe {
-        if is_tmpfs_block(n) {
-            TMPFS_PTR.add((n - TMPFS_BLOCK_BASE) as usize)
-        } else {
-            BLOCKS_PTR.add(n as usize)
-        }
-    }
+/// Tmpfs block `n`'s storage (`is_tmpfs_block(n)`). Disk blocks live in the cache (`bcache`).
+fn tmpfs_ptr(n: u32) -> *mut [u8; BLOCK_SIZE] {
+    // SAFETY: the pool is set once by `init_pools` before any syscall can reach here, and callers
+    // only pass tmpfs block numbers this module handed out.
+    unsafe { TMPFS_PTR.add((n - TMPFS_BLOCK_BASE) as usize) }
+}
+
+/// Bitmap block `index`'s free count.
+fn free_count(index: u32) -> &'static mut u32 {
+    // SAFETY: `index < bitmap_blocks()`, inside the `init_pools` allocation.
+    unsafe { &mut *FREE_COUNTS.add(index as usize) }
 }
 
 /// One pool's inodes: an inode file whose data blocks, from that pool, hold packed inodes
@@ -1097,29 +1089,35 @@ fn register_proc_render(render: usize, len: usize) -> i64 {
     fd
 }
 
-/// Claims real kernel-allocated storage for `BLOCKS_PTR`/`TMPFS_PTR` -- must run first, before
+/// Claims real kernel-allocated storage for the cache, `FREE_COUNTS` and `TMPFS_PTR` -- must run
+/// first, before
 /// `module_init`'s mount-or-format decision (or anything else) ever calls `read_block`/
 /// `write_block`. Returns `false` on failure (kernel out of memory), which
 /// `module_init` treats as a fatal `module_init` failure like any other -- this module's own
 /// `fatal_on_panic = true` (see `sys/kernel_main.rs`, kernel tree) reboots rather than resuming
 /// with a filesystem that has nowhere to actually store a block.
 fn init_pools() -> bool {
-    let blocks_bytes = (NUM_BLOCKS * BLOCK_SIZE) as u64;
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let tmpfs_blocks = tmpfs_pool_blocks(unsafe { oxidebsd_physmem_bytes() });
-    let tmpfs_addr = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * BLOCK_SIZE) as u64) };
-    if tmpfs_addr == 0 {
+    // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures.
+    let ram = unsafe { oxidebsd_physmem_bytes() };
+    let device_blocks = unsafe { oxidebsd_block_device_blocks() };
+    if !bcache::init(ram) {
         return false;
     }
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let blocks_addr = unsafe { oxidebsd_module_alloc_zeroed(blocks_bytes) };
-    if blocks_addr == 0 {
+    let (_, most_bitmap_blocks) = layout_for(device_blocks);
+    let counts = unsafe { oxidebsd_module_alloc_zeroed(most_bitmap_blocks.max(1) as u64 * 4) };
+    if counts == 0 {
+        return false;
+    }
+    // SAFETY: inside `module_init`, before any syscall.
+    unsafe { FREE_COUNTS = counts as *mut u32 };
+    let tmpfs_blocks = tmpfs_pool_blocks(ram);
+    let tmpfs_addr = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * BLOCK_SIZE) as u64) };
+    if tmpfs_addr == 0 {
         return false;
     }
     // SAFETY: both addresses are freshly kernel-allocated, zeroed, and mapped read/write for
     // exactly the sizes requested above -- never written through any other pointer.
     unsafe {
-        BLOCKS_PTR = blocks_addr as *mut [u8; BLOCK_SIZE];
         TMPFS_PTR = tmpfs_addr as *mut [u8; BLOCK_SIZE];
         TMPFS_BLOCKS = tmpfs_blocks as u32;
     }
@@ -1161,82 +1159,64 @@ fn release_flocks_for(real_fd: u64) {
     }
 }
 
-/// Borrows block `n` in place, for reads that don't want `read_block`'s 4 KiB copy (index blocks,
-/// inode records). Must not be held across a `write_block` of the same block.
-fn block_ref(n: u32) -> &'static [u8; BLOCK_SIZE] {
-    // SAFETY: as `read_block`.
-    unsafe { &*block_ptr(n) }
+/// Runs `f` on block `n` in place, for reads that don't want `read_block`'s 4 KiB copy (index
+/// blocks, inode records). `f` must not touch another block: a disk block is lent from the cache.
+fn with_block<R>(n: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
+    if is_tmpfs_block(n) {
+        // SAFETY: see `tmpfs_ptr`.
+        f(unsafe { &*tmpfs_ptr(n) })
+    } else {
+        bcache::with(data_block_offset() + n, f)
+    }
 }
 
 fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
-    // SAFETY: see BLOCKS_PTR's own doc comment -- single-core, syscall-serialized access only,
-    // set once by `init_pools` before any real syscall is reachable. Copies the whole block out
-    // by value rather than returning a reference, so no borrow of the pool ever outlives this
-    // call -- deliberately simple over clever, see the module doc comment.
-    unsafe { *block_ptr(n) }
+    with_block(n, |b| *b)
 }
 
+/// Stores block `n`; a disk block reaches the disk before the system call returns (§3.3 until
+/// delayed writes), or at `flush_all_to_disk` while formatting.
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
-    unsafe { *block_ptr(n) = *data };
-    persist_data_block_if_ready(n, data);
+    if is_tmpfs_block(n) {
+        // SAFETY: see `tmpfs_ptr`.
+        unsafe { *tmpfs_ptr(n) = *data };
+    } else {
+        bcache::write(data_block_offset() + n, data);
+    }
 }
 
-/// Persists a real, physically-contiguous run `[run_start, run_start + run_len)` of already-
-/// in-memory-updated data blocks in one real ATA command (one real `CACHE FLUSH` covering the
-/// whole run), the same pattern `flush_all_to_disk`'s own bulk pass already uses (see that call
-/// site's own comment) -- used by `write_inode_at`'s live per-syscall write path below to batch
-/// whatever contiguous stretch of blocks a single write happens to touch, instead of persisting
-/// (and real-`CACHE-FLUSH`-ing) one block at a time. Found live chasing real disk-I/O slowness
-/// (see CLAUDE.md's bmake section): a real `tar` extraction of hundreds of small files, each
-/// several blocks, used to issue one real command *and* one real `CACHE FLUSH` per individual
-/// 4 KiB block -- the exact "fixed per-command overhead dominates, not transfer size" cost
-/// `oxidebsd_block_write_batch`'s own doc comment already documents for the bulk mount/format
-/// pass, just never extended to live writes until now. Block allocation is a forward-only bump
-/// allocator (see `NEXT_FREE_BLOCK`'s own doc comment), so a freshly-growing file's own blocks are
-/// very often genuinely contiguous in practice -- this only ever *helps* when they are, and is a
-/// correct no-op fallback (one run of length 1 per call) when they aren't. No-op for a tmpfs-pool
-/// run (`run_start >= NUM_BLOCKS`, no on-disk counterpart) or before persistence is ready, same
-/// guards `persist_data_block_if_ready` already has.
-fn persist_data_run_if_ready(run_start: u32, run_len: u32) {
-    if run_len == 0
-        || run_start >= NUM_BLOCKS as u32
-        || !persistence_ready()
-        || !block_device_present()
-    {
-        return;
-    }
-    let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
-    // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering [0, NUM_BLOCKS);
-    // run_start < NUM_BLOCKS was just checked above, and every caller only ever grows a run one
-    // already-in-memory-updated block at a time, so [run_start, run_start + run_len) is always a
-    // real, already-written slice of the pool.
-    let src = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
-    unsafe {
-        oxidebsd_block_write_batch(phys, run_len as u64, src);
-    }
+/// Bitmap block and bit for disk block `n`.
+fn bitmap_position(n: u32) -> (u32, usize) {
+    (n / BITS_PER_BITMAP_BLOCK, (n % BITS_PER_BITMAP_BLOCK) as usize)
 }
 
 fn block_used(n: u32) -> bool {
-    // SAFETY: single-core, syscall-serialized, as every pool here.
-    unsafe {
-        if is_tmpfs_block(n) {
-            (*core::ptr::addr_of!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize]
-        } else {
-            (*core::ptr::addr_of!(BLOCK_USED))[n as usize]
-        }
+    if is_tmpfs_block(n) {
+        // SAFETY: single-core, syscall-serialized, as every pool here.
+        return unsafe { (*core::ptr::addr_of!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] };
     }
+    let (index, bit) = bitmap_position(n);
+    bcache::with(BITMAP_START + index, |b| b[bit / 8] & (1 << (bit % 8)) != 0)
 }
 
+/// Marks block `n` used or free: a read-modify-write of its bitmap block through the cache, with
+/// that block's free count kept in step.
 fn set_block_used(n: u32, used: bool) {
-    // SAFETY: as `block_used`.
-    unsafe {
-        if is_tmpfs_block(n) {
-            (*core::ptr::addr_of_mut!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] = used;
-        } else {
-            (*core::ptr::addr_of_mut!(BLOCK_USED))[n as usize] = used;
-        }
+    if is_tmpfs_block(n) {
+        // SAFETY: as `block_used`.
+        unsafe { (*core::ptr::addr_of_mut!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] = used };
+        return;
     }
-    persist_bitmap_if_ready(n);
+    let (index, bit) = bitmap_position(n);
+    let mut block = bcache::read(BITMAP_START + index);
+    let was = block[bit / 8] & (1 << (bit % 8)) != 0;
+    if was == used {
+        return;
+    }
+    block[bit / 8] ^= 1 << (bit % 8);
+    bcache::write(BITMAP_START + index, &block);
+    let count = free_count(index);
+    if used { *count -= 1 } else { *count += 1 }
 }
 
 /// Where inode `n`'s record is: its inode-file block and byte offset. `None` past the table.
@@ -1253,7 +1233,7 @@ fn inode_location(n: u32) -> Option<(u32, usize)> {
 /// Inode `n`, or a free one if `n` is past its table.
 fn read_inode(n: u32) -> Inode {
     match inode_location(n) {
-        Some((block, off)) => unpack_inode(&block_ref(block)[off..off + INODE_STRIDE]),
+        Some((block, off)) => with_block(block, |b| unpack_inode(&b[off..off + INODE_STRIDE])),
         None => Inode::FREE,
     }
 }
@@ -1264,7 +1244,7 @@ fn write_inode(n: u32, inode: Inode) {
     let Some((block, off)) = inode_location(n) else {
         return;
     };
-    let was_free = block_ref(block)[off] == 0;
+    let was_free = with_block(block, |b| b[off] == 0);
     let mut data = read_block(block);
     pack_inode(&inode, &mut data[off..off + INODE_STRIDE]);
     write_block(block, &data);
@@ -1298,13 +1278,26 @@ static mut NEXT_FREE_BLOCK: u32 = 0;
 /// a rebuilt-each-call scan.
 fn alloc_block() -> Option<u32> {
     let start = unsafe { *core::ptr::addr_of!(NEXT_FREE_BLOCK) };
-    for i in start..NUM_BLOCKS as u32 {
-        if !block_used(i) {
-            set_block_used(i, true);
-            write_block(i, &[0u8; BLOCK_SIZE]);
-            unsafe { *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK) = i + 1 };
-            return Some(i);
+    let total = disk_blocks();
+    let mut index = start / BITS_PER_BITMAP_BLOCK;
+    while index < bitmap_blocks() {
+        // A full bitmap block is skipped on its resident count, without reading it.
+        if *free_count(index) > 0 {
+            let base = index * BITS_PER_BITMAP_BLOCK;
+            let from = start.max(base) - base;
+            let end = (total - base).min(BITS_PER_BITMAP_BLOCK);
+            let found = bcache::with(BITMAP_START + index, |b| {
+                (from..end).find(|&bit| b[bit as usize / 8] & (1 << (bit % 8)) == 0)
+            });
+            if let Some(bit) = found {
+                let n = base + bit;
+                set_block_used(n, true);
+                write_block(n, &[0u8; BLOCK_SIZE]);
+                unsafe { *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK) = n + 1 };
+                return Some(n);
+            }
         }
+        index += 1;
     }
     None
 }
@@ -1335,7 +1328,7 @@ fn alloc_inode() -> Option<u32> {
 /// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
 fn free_block(n: u32) {
     set_block_used(n, false);
-    if n < NUM_BLOCKS as u32 {
+    if !is_tmpfs_block(n) {
         // SAFETY: single-core, syscall-serialized, as `alloc_block`.
         unsafe {
             let cursor = &mut *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK);
@@ -1648,9 +1641,8 @@ fn alloc_inode_in(parent: u32) -> Option<u32> {
 /// indirection tier (a single-indirect block's own slots, and both levels of a double-indirect
 /// block's own two-level slot chain), factored out once there were three call sites instead of one.
 fn read_index_ptr(ib_num: u32, slot: usize) -> u32 {
-    let ib = block_ref(ib_num);
     let off = slot * 4;
-    u32::from_le_bytes([ib[off], ib[off + 1], ib[off + 2], ib[off + 3]])
+    with_block(ib_num, |ib| u32::from_le_bytes([ib[off], ib[off + 1], ib[off + 2], ib[off + 3]]))
 }
 
 /// Reads the block number backing `inode`'s logical block `index` -- direct, then (past
@@ -2139,20 +2131,25 @@ fn write_inode_with(
             result = Err(e);
             break;
         }
-        // SAFETY: same as write_block's own in-memory half -- block_ptr(blk) is a real,
-        // in-bounds slot for any block number this module ever hands out.
-        unsafe { *block_ptr(blk) = block };
-        if run_len > 0 && blk == run_start + run_len {
-            run_len += 1;
+        if is_tmpfs_block(blk) {
+            write_block(blk, &block);
         } else {
-            persist_data_run_if_ready(run_start, run_len);
-            run_start = blk;
-            run_len = 1;
+            // Stored dirty and written a contiguous run at a time, so a long write goes to the
+            // disk as a few large commands rather than one per block.
+            let dev = data_block_offset() + blk;
+            bcache::store(dev, &block);
+            if run_len > 0 && dev == run_start + run_len {
+                run_len += 1;
+            } else {
+                bcache::flush_run(run_start, run_len);
+                run_start = dev;
+                run_len = 1;
+            }
         }
         pos += chunk;
         written += chunk;
     }
-    persist_data_run_if_ready(run_start, run_len);
+    bcache::flush_run(run_start, run_len);
     let mut inode = read_inode(inode_num);
     if pos > inode.size as usize {
         inode.size = pos as u64;
@@ -4804,9 +4801,13 @@ fn write_statfs(is_tmpfs: bool, buf_ptr: u64) -> i64 {
     let (blocks_lo, blocks_hi) = if is_tmpfs {
         (TMPFS_BLOCK_BASE, TMPFS_BLOCK_BASE + unsafe { *core::ptr::addr_of!(TMPFS_BLOCKS) })
     } else {
-        (0, NUM_BLOCKS as u32)
+        (0, disk_blocks())
     };
-    let free_blocks = (blocks_lo..blocks_hi).filter(|&i| !block_used(i)).count() as u64;
+    let free_blocks = if is_tmpfs {
+        (blocks_lo..blocks_hi).filter(|&i| !block_used(i)).count() as u64
+    } else {
+        (0..bitmap_blocks()).map(|i| *free_count(i) as u64).sum()
+    };
     // The table grows into free blocks, so each free block is `INODES_PER_BLOCK` inodes to come
     // (as ZFS reports it): the count is an estimate that shrinks as data fills the pool.
     let table = inode_table(is_tmpfs);
@@ -7483,52 +7484,6 @@ fn unpack_inode(data: &[u8]) -> Inode {
     }
 }
 
-/// Write-through hook for `write_block` -- persists the single physical data block `n` maps to,
-/// gated on both a disk being attached and `persistence_ready()` (see that flag's own doc comment
-/// for why format/mount themselves must not trigger this).
-fn persist_data_block_if_ready(n: u32, data: &[u8; BLOCK_SIZE]) {
-    // Tmpfs-pool blocks (see TMPFS_BLOCK_BASE's own doc comment) are never persisted -- they have
-    // no physical counterpart in the on-disk layout, which is sized to NUM_BLOCKS exactly.
-    if n >= NUM_BLOCKS as u32 || !persistence_ready() || !block_device_present() {
-        return;
-    }
-    let phys = DATA_BLOCK_OFFSET as u64 + n as u64;
-    unsafe {
-        oxidebsd_block_write(phys, data.as_ptr() as u64);
-    }
-}
-
-/// Write-through hook for `set_block_used` -- repacks and writes only the *one* physical bitmap
-/// block covering `n`, from the in-memory `BLOCK_USED` array, same "memory is the complete source
-/// of truth, no read-modify-write needed" reasoning as `persist_data_block_if_ready`. **Used to
-/// repack and write the *entire* multi-block bitmap on every single call** -- harmless at the old,
-/// much smaller `NUM_BLOCKS`, but with the pool now spanning `BITMAP_BLOCKS` real physical blocks
-/// (see that constant's own doc comment), rewriting every one of them on every single block
-/// allocation would turn a real, big sequential file write into thousands of redundant PIO-under-
-/// emulation sector transfers (see CLAUDE.md's own "Real disk persistence" gotcha on this exact
-/// cost) for exactly one call site: the file's own already-correct data-block writes, which each
-/// already write independently via `persist_data_block_if_ready`. Scoped to one block the same way
-/// that function already is.
-fn persist_bitmap_if_ready(n: u32) {
-    if n >= NUM_BLOCKS as u32 || !persistence_ready() || !block_device_present() {
-        return;
-    }
-    let bits_per_block = (BLOCK_SIZE * 8) as u32;
-    let bitmap_block_idx = n / bits_per_block;
-    let base = bitmap_block_idx * bits_per_block;
-    let end = (base + bits_per_block).min(NUM_BLOCKS as u32);
-    let mut block = [0u8; BLOCK_SIZE];
-    for i in base..end {
-        if block_used(i) {
-            let rel = (i - base) as usize;
-            block[rel / 8] |= 1 << (rel % 8);
-        }
-    }
-    unsafe {
-        oxidebsd_block_write((BITMAP_START + bitmap_block_idx) as u64, block.as_ptr() as u64);
-    }
-}
-
 /// Where the superblock keeps the disk inode file's own inode record.
 const SB_INODE_FILE: usize = 128;
 
@@ -7536,61 +7491,43 @@ fn write_superblock() {
     let mut block = [0u8; BLOCK_SIZE];
     block[0..4].copy_from_slice(&SUPERBLOCK_MAGIC);
     block[4..8].copy_from_slice(&SUPERBLOCK_VERSION.to_le_bytes());
-    block[8..12].copy_from_slice(&(NUM_BLOCKS as u32).to_le_bytes());
+    block[8..12].copy_from_slice(&disk_blocks().to_le_bytes());
     let table = inode_table(false);
     block[12..16].copy_from_slice(&table.count.to_le_bytes());
     block[16..20].copy_from_slice(&ROOT_INODE.to_le_bytes());
     pack_inode(&table.file, &mut block[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
+    // Written straight to the disk, never through the cache: it's the commit record of a format
+    // (`flush_all_to_disk`), and nothing reads it after mount.
     unsafe {
         oxidebsd_block_write(0, block.as_ptr() as u64);
     }
 }
 
-/// Resets the *real* (non-tmpfs) block-used bitmap and inode table back to a pristine, all-free
-/// state -- `0..NUM_BLOCKS` and an empty disk `InodeTable`, never touching the separate
-/// tmpfs pool above them (which `mount_from_disk` never populates in the first place, and which
-/// `module_init` never touches at this stage either). Must run before `format_fresh_filesystem` on
-/// *any* path that might have already partially populated this state -- concretely, a failed
-/// `mount_from_disk` call.
-///
-/// **Found live, the hard way**: `mount_from_disk`'s own bitmap-load and inode-table-load loops
-/// (both, below) run to completion *before* its own subsequent per-block data-read loop, which is
-/// where a real failure (`oxidebsd_block_read` returning nonzero partway through) actually gets
-/// detected and turned into a `return false`. A stale disk image predating a real layout change --
-/// concretely, the very case this fix was found from: the then-fixed inode table doubling (512 ->
-/// 1024, for TinyCC's own runtime tree) shifted `DATA_BLOCK_OFFSET` forward, so an
-/// already-existing disk image written under the old, smaller layout has real, physically
-/// different bytes at every "data block" location the new layout expects -- mounted cleanly enough
-/// to load a bitmap marking most of the *old* install's blocks used (a fully-packed ~300-applet
-/// roster, close to the old pool's own capacity), then failed partway through the actual data read.
-/// Without this reset, `format_fresh_filesystem`'s own fresh allocations (`alloc_block`/
-/// `alloc_inode`, both plain linear scans for the first *unmarked* slot) inherited that stale
-/// "mostly full" bitmap from a filesystem that no longer exists in memory at all -- confirmed live:
-/// a fresh format, on a completely empty in-memory pool, panicked `DiskFull` seeding `/etc`'s own
-/// `.` entry (one of the very first real block allocations *after* `/bin`'s ~300+ applets), not
-/// because the real content genuinely didn't fit, but because most of the pool was falsely marked
-/// used before formatting had allocated anything of its own.
+/// Starts a format: invalidates the superblock on the disk (the commit record, written last by
+/// `flush_all_to_disk`), lays the filesystem out over the whole device, and resets the bitmap
+/// (every block free), the free counts, the disk inode table and the allocation cursor. The new
+/// bitmap stays in the cache, dirty, until `flush_all_to_disk`.
 fn reset_real_pool_for_fresh_format() {
-    for i in 0..NUM_BLOCKS as u32 {
-        set_block_used(i, false);
+    let blank = [0u8; BLOCK_SIZE];
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    unsafe { oxidebsd_block_write(0, blank.as_ptr() as u64) };
+    bcache::invalidate_all();
+    let (data_blocks, bitmap) = layout_for(unsafe { oxidebsd_block_device_blocks() });
+    set_layout(data_blocks, bitmap);
+    for index in 0..bitmap {
+        bcache::store(BITMAP_START + index, &blank);
+        let base = index * BITS_PER_BITMAP_BLOCK;
+        *free_count(index) = (data_blocks - base).min(BITS_PER_BITMAP_BLOCK);
     }
     *inode_table(false) = InodeTable::EMPTY;
-    // A pristine, all-free state means `alloc_block`'s own resume cursor (see `NEXT_FREE_BLOCK`'s
-    // own doc comment) has nothing behind it to skip past either.
     unsafe { *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK) = 0 };
 }
 
-/// Attempts to mount an already-formatted disk: reads the superblock, and if its magic matches,
-/// loads the bitmap and inode table wholesale, then eager-loads only the data blocks the bitmap
-/// marks used (not an unconditional full sweep of `NUM_BLOCKS` -- see this file's own
-/// `PERSISTENCE_READY` doc comment and CLAUDE.md's own notes on this class of PIO-under-emulation
-/// cost). Returns `false` on a missing/mismatched superblock (an unformatted disk -- the expected,
-/// common first-boot case) or on any real read failure partway through, in which case the caller
-/// falls back to `format_fresh_filesystem` (after first calling
-/// `reset_real_pool_for_fresh_format` -- see its own doc comment for why that's required, not
-/// optional) -- a partially-readable disk gets cleanly reformatted rather than the kernel trying to
-/// recover a partial mount, a deliberate simplification for this phase (see the implementation
-/// plan's own "known limitations" list).
+/// Mounts a formatted disk: checks the superblock, takes the layout from it, and counts each
+/// bitmap block's free blocks. Nothing else is read: every other block comes from the disk on
+/// first use, through the cache. `false` for a missing or mismatched superblock (an unformatted
+/// disk, another filesystem, or a layout from another `SUPERBLOCK_VERSION`), and the caller
+/// formats instead.
 fn mount_from_disk() -> bool {
     let mut sb = [0u8; BLOCK_SIZE];
     if unsafe { oxidebsd_block_read(0, sb.as_mut_ptr() as u64) } != 0 {
@@ -7599,93 +7536,42 @@ fn mount_from_disk() -> bool {
     if sb[0..4] != SUPERBLOCK_MAGIC {
         return false;
     }
-
-    // Layout check, not just a magic check -- a disk formatted under a previous `NUM_BLOCKS`/
-    // `SUPERBLOCK_VERSION` has the right magic but real, physically different bytes
-    // at every block-offset this build's own `BITMAP_START`/
-    // `DATA_BLOCK_OFFSET` expect (all derived from these same constants -- see this file's own
-    // "Real disk persistence" section). Before this check, a stale disk merely *usually* failed
-    // loudly partway through the loops below (see `reset_real_pool_for_fresh_format`'s own doc
-    // comment for the real, live case this was found from) -- that was incidental, not a real
-    // safety guarantee, since a layout change can just as easily leave every read in-bounds and
-    // silently misinterpret stale bytes as this build's own inode table/bitmap/data.
     let stored_version = u32::from_le_bytes(sb[4..8].try_into().unwrap());
-    let stored_num_blocks = u32::from_le_bytes(sb[8..12].try_into().unwrap());
-    if stored_version != SUPERBLOCK_VERSION || stored_num_blocks as usize != NUM_BLOCKS {
-        log("[oxfs] mount: on-disk layout doesn't match this build -- falling back to format\n");
+    let data_blocks = u32::from_le_bytes(sb[8..12].try_into().unwrap());
+    let (_, bitmap_most) = layout_for(unsafe { oxidebsd_block_device_blocks() });
+    let bitmap = data_blocks.div_ceil(BITS_PER_BITMAP_BLOCK);
+    if stored_version != SUPERBLOCK_VERSION || bitmap > bitmap_most {
+        log("[oxfs] mount: on-disk layout doesn't match this build or disk -- falling back to format\n");
         return false;
     }
-
-    // Real, multi-block bitmap read (`BITMAP_BLOCKS` physical blocks, not a hardcoded one -- see
-    // that constant's own doc comment for the real bug this fixes). Each block covers its own real
-    // `BLOCK_SIZE * 8`-bit range of the pool.
-    let bits_per_block = BLOCK_SIZE * 8;
-    for bitmap_block_idx in 0..BITMAP_BLOCKS as usize {
-        let mut bitmap_block = [0u8; BLOCK_SIZE];
-        let phys = BITMAP_START as u64 + bitmap_block_idx as u64;
-        if unsafe { oxidebsd_block_read(phys, bitmap_block.as_mut_ptr() as u64) } != 0 {
-            log("[oxfs] mount: failed to read block-used bitmap -- falling back to format\n");
-            return false;
-        }
-        let base = bitmap_block_idx * bits_per_block;
-        let end = (base + bits_per_block).min(NUM_BLOCKS);
-        for i in base..end {
-            let rel = i - base;
-            let used = (bitmap_block[rel / 8] >> (rel % 8)) & 1 != 0;
-            set_block_used(i as u32, used);
-        }
+    set_layout(data_blocks, bitmap);
+    let mut used = 0u32;
+    for index in 0..bitmap {
+        let base = index * BITS_PER_BITMAP_BLOCK;
+        let bits = (data_blocks - base).min(BITS_PER_BITMAP_BLOCK);
+        let set = bcache::with(BITMAP_START + index, |b| {
+            (0..bits).filter(|&bit| b[bit as usize / 8] & (1 << (bit % 8)) != 0).count() as u32
+        });
+        *free_count(index) = bits - set;
+        used += set;
     }
 
-    // The disk inode file: its record is in the superblock, its blocks are ordinary data
-    // blocks, loaded below with the rest.
     let count = u32::from_le_bytes(sb[12..16].try_into().unwrap());
     let file = unpack_inode(&sb[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
     *inode_table(false) = InodeTable { file, count, free: 0, hint: 0 };
+    let free = (0..count).filter(|&n| read_inode(n).kind == InodeKind::Free).count() as u32;
+    inode_table(false).free = free;
 
-    // Real, multi-block data read: one `oxidebsd_block_read_batch` call per *contiguous* run of
-    // used blocks, not one `oxidebsd_block_read` per individual block -- see that function's own
-    // doc comment (kernel tree) for why this matters at this pool's own scale. `BLOCKS_PTR` is
-    // itself one contiguous kernel-allocated region, so a run's destination is simply
-    // `BLOCKS_PTR.add(run_start)` -- no intermediate per-block copy needed the way a stack buffer
-    // would require. Skips `write_block`'s own `persist_data_block_if_ready` call (harmless to
-    // skip here: that call is a no-op until `PERSISTENCE_READY` flips true, well after this
-    // function returns -- see that flag's own doc comment).
-    let mut loaded: u32 = 0;
-    let mut i: u32 = 0;
-    while i < NUM_BLOCKS as u32 {
-        if !block_used(i) {
-            i += 1;
-            continue;
-        }
-        let run_start = i;
-        let mut run_len: u32 = 0;
-        while run_start + run_len < NUM_BLOCKS as u32 && block_used(run_start + run_len) {
-            run_len += 1;
-        }
-        let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
-        // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
-        // [0, NUM_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
-        let dst = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
-        if unsafe { oxidebsd_block_read_batch(phys, run_len as u64, dst) } != 0 {
-            log("[oxfs] mount: failed to read a data block -- falling back to format\n");
-            return false;
-        }
-        loaded += run_len;
-        i = run_start + run_len;
-    }
-
-    let mut msg_buf = [0u8; 96];
+    let mut msg_buf = [0u8; 192];
     let mut msg = ByteBuf {
         buf: &mut msg_buf,
         len: 0,
     };
-    // The free count isn't stored: count it once.
-    let free = (0..count).filter(|&n| read_inode(n).kind == InodeKind::Free).count() as u32;
-    inode_table(false).free = free;
-
     msg.push_bytes(b"[oxfs] mounted existing filesystem from disk (");
-    msg.push_decimal(loaded);
-    msg.push_bytes(b" data blocks loaded, ");
+    msg.push_decimal(used);
+    msg.push_bytes(b" of ");
+    msg.push_decimal(data_blocks);
+    msg.push_bytes(b" blocks used, ");
     msg.push_decimal(count - free);
     msg.push_bytes(b" inodes in use)\n");
     let len = msg.len;
@@ -7693,87 +7579,34 @@ fn mount_from_disk() -> bool {
     true
 }
 
-/// Performs the one-time bulk write a freshly formatted filesystem needs: the full bitmap, every
-/// block the bitmap marks used (the inode file's among them), and last the superblock. Called once,
-/// right after `format_fresh_filesystem` completes, while `PERSISTENCE_READY` is still `false`
-/// (see that flag's own doc comment for why the format pass itself doesn't write through
-/// block-by-block) -- so every subsequent boot mounts this disk instead of reformatting it.
+/// Finishes a format: writes every block the format left dirty in the cache (the bitmap, the
+/// inode file, every seeded file), then the superblock.
 ///
-/// **The superblock is the commit record: cleared first, written last.** It used to be written
-/// first, so a format interrupted partway (QEMU closed during the old 17-minute PIO format) left a
-/// valid superblock over mostly-unwritten data, which every later boot mounted as a gutted
-/// filesystem -- found live: a disk with 1,719 of ~66,470 blocks, `/bin/ls` and most of `/etc`
-/// missing, and doom faulting on its unwritten WAD. Now an interrupted format leaves no valid
-/// superblock, and the next boot formats again. Clearing it first matters when a format follows a
-/// failed mount of a disk whose superblock was valid.
+/// **The superblock is the commit record: cleared first (`reset_real_pool_for_fresh_format`),
+/// written last.** It used to be written first, so a format interrupted partway (QEMU closed
+/// during the old 17-minute PIO format) left a valid superblock over mostly-unwritten data, which
+/// every later boot mounted as a gutted filesystem -- found live: a disk with 1,719 of ~66,470
+/// blocks, `/bin/ls` and most of `/etc` missing, and doom faulting on its unwritten WAD. Now an
+/// interrupted format leaves no valid superblock, and the next boot formats again.
 fn flush_all_to_disk() {
-    let blank = [0u8; BLOCK_SIZE];
-    // SAFETY: FFI call to a kernel-exported function, with a live 4096-byte buffer.
-    unsafe { oxidebsd_block_write(0, blank.as_ptr() as u64) };
-
-    // Real, multi-block bitmap write -- see `mount_from_disk`'s own matching read loop and
-    // `BITMAP_BLOCKS`'s own doc comment.
-    let bits_per_block = BLOCK_SIZE * 8;
-    for bitmap_block_idx in 0..BITMAP_BLOCKS as usize {
-        let mut bitmap_block = [0u8; BLOCK_SIZE];
-        let base = bitmap_block_idx * bits_per_block;
-        let end = (base + bits_per_block).min(NUM_BLOCKS);
-        for i in base..end {
-            if block_used(i as u32) {
-                let rel = i - base;
-                bitmap_block[rel / 8] |= 1 << (rel % 8);
-            }
-        }
-        let phys = BITMAP_START as u64 + bitmap_block_idx as u64;
-        unsafe {
-            oxidebsd_block_write(phys, bitmap_block.as_ptr() as u64);
-        }
-    }
-
-    // Real, multi-block data write: one `oxidebsd_block_write_batch` call (one real `CACHE FLUSH`)
-    // per *contiguous* run of used blocks, not one per individual block -- see that function's own
-    // doc comment (kernel tree) for why this matters at this pool's own scale. `BLOCKS_PTR` is
-    // itself one contiguous kernel-allocated region, so a run's source is simply
-    // `BLOCKS_PTR.add(run_start)` -- no intermediate per-block copy needed the way `read_block`'s
-    // own by-value return would require.
-    let mut flushed: u32 = 0;
-    let mut i: u32 = 0;
-    while i < NUM_BLOCKS as u32 {
-        if !block_used(i) {
-            i += 1;
-            continue;
-        }
-        let run_start = i;
-        let mut run_len: u32 = 0;
-        while run_start + run_len < NUM_BLOCKS as u32 && block_used(run_start + run_len) {
-            run_len += 1;
-        }
-        let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
-        // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
-        // [0, NUM_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
-        let src = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
-        unsafe {
-            oxidebsd_block_write_batch(phys, run_len as u64, src);
-        }
-        flushed += run_len;
-        i = run_start + run_len;
-    }
-
-    // Everything above is on disk (every block write flushes before returning), so the
-    // superblock that makes it mountable can go now.
+    let flushed = bcache::flush_all();
     write_superblock();
 
-    let mut msg_buf = [0u8; 96];
+    let mut msg_buf = [0u8; 192];
     let mut msg = ByteBuf {
         buf: &mut msg_buf,
         len: 0,
     };
     msg.push_bytes(b"[oxfs] formatted fresh filesystem and flushed to disk (");
     msg.push_decimal(flushed);
-    msg.push_bytes(b" data blocks, ");
+    msg.push_bytes(b" blocks, ");
     let table = inode_table(false);
     msg.push_decimal(table.count - table.free);
-    msg.push_bytes(b" inodes)\n");
+    msg.push_bytes(b" inodes, ");
+    msg.push_decimal(disk_blocks());
+    msg.push_bytes(b"-block filesystem, ");
+    msg.push_decimal(bcache::buffers());
+    msg.push_bytes(b" cache buffers)\n");
     let len = msg.len;
     log_bytes(&msg_buf[..len]);
 }
@@ -9723,11 +9556,8 @@ pub extern "C" fn module_init() -> i32 {
     let ok = if mounted {
         true
     } else {
-        // A failed mount attempt can have already partially populated the real block-used
-        // bitmap/inode table from the stale disk it just gave up on -- see
-        // `reset_real_pool_for_fresh_format`'s own doc comment for the real, live bug this
-        // guards against. Harmless (a no-op over already-pristine state) on the "no disk
-        // attached at all" path, so this runs unconditionally rather than only when `has_disk`.
+        // Lays the filesystem out over the whole disk (the memory disk, `md`, when there's no
+        // real one) and forgets anything a failed mount left in the cache.
         reset_real_pool_for_fresh_format();
         // SAFETY: single-core, before any process exists (see `KERNEL_SEGMENT`).
         unsafe { *core::ptr::addr_of_mut!(KERNEL_SEGMENT) = true };
@@ -9744,6 +9574,7 @@ pub extern "C" fn module_init() -> i32 {
     // right before real syscalls become reachable, so every write a running process makes from
     // this point on is persisted immediately.
     set_persistence_ready(true);
+    bcache::set_write_through(true);
     if mounted {
         sweep_unnamed_inodes();
     }

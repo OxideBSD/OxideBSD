@@ -1,8 +1,8 @@
 //! The data disk: the one block device backing oxfs's persistence, behind the `oxidebsd_block_*`
 //! exports oxfs calls. `init` picks it at boot -- a virtio-blk disk if there is one (the fastest
 //! under QEMU), else the legacy IDE disk at secondary master (by bus-master DMA when the
-//! controller can, else PIO) -- and oxfs never knows which. Not a general block layer: exactly one
-//! disk, found once.
+//! controller can, else PIO), else a memory disk (`md`) -- and oxfs never knows which. Not a
+//! general block layer: exactly one disk, found once.
 //!
 //! Every export takes oxfs's 4 KiB blocks and returns `0` or `-1`, the plain-integer convention
 //! modules need (no `alloc`, no rich types across the boundary). Callers are oxfs's
@@ -19,11 +19,12 @@ use crate::serial_println;
 const NONE: u8 = 0;
 const ATA: u8 = 1;
 const VIRTIO: u8 = 2;
+const MEMORY: u8 = 3;
 
 static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 
-/// Finds the data disk: virtio-blk first, then the IDE disk (setting up its DMA). With neither,
-/// oxfs runs in memory only this boot.
+/// Finds the data disk: virtio-blk first, then the IDE disk (setting up its DMA), else a memory
+/// disk.
 pub fn init(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     mapper: &mut impl Mapper<Size4KiB>,
@@ -40,7 +41,35 @@ pub fn init(
         BACKEND.store(ATA, Ordering::Relaxed);
         serial_println!("[boot] disk: data disk is the IDE secondary master");
     } else {
-        serial_println!("[boot] disk: no data disk -- oxfs runs in memory only this boot");
+        init_memory(phys_mem_offset);
+    }
+}
+
+/// Makes a memory disk of a quarter of RAM the data disk (`md`): with no real disk, or with
+/// `no-ata`, where real disks aren't probed at all.
+pub fn init_memory(phys_mem_offset: VirtAddr) {
+    let blocks = crate::memory::usable_ram_bytes() / 4 / 4096;
+    super::md::init(blocks, phys_mem_offset);
+    BACKEND.store(MEMORY, Ordering::Relaxed);
+    serial_println!(
+        "[boot] disk: no data disk -- a {} MiB memory disk this boot, nothing persists",
+        blocks / 256
+    );
+}
+
+/// The data disk's backend. When nothing chose one (no probe ran: a test kernel that loads oxfs
+/// without `init`), a memory disk, as for a boot with no disk.
+fn backend() -> u8 {
+    let backend = BACKEND.load(Ordering::Relaxed);
+    if backend != NONE {
+        return backend;
+    }
+    match crate::module::phys_mem_offset() {
+        Some(offset) => {
+            init_memory(offset);
+            MEMORY
+        }
+        None => NONE,
     }
 }
 
@@ -54,18 +83,20 @@ pub fn stats() -> (u64, u64) {
 }
 
 fn read(start_block: u64, buf: &mut [u8]) -> i64 {
-    let ok = match BACKEND.load(Ordering::Relaxed) {
+    let ok = match backend() {
         ATA => super::ata::read_blocks(start_block, buf).is_ok(),
         VIRTIO => super::virtio_blk::read_blocks(start_block, buf),
+        MEMORY => super::md::read_blocks(start_block, buf),
         _ => false,
     };
     if ok { 0 } else { -1 }
 }
 
 fn write(start_block: u64, buf: &[u8]) -> i64 {
-    let ok = match BACKEND.load(Ordering::Relaxed) {
+    let ok = match backend() {
         ATA => super::ata::write_blocks(start_block, buf).is_ok(),
         VIRTIO => super::virtio_blk::write_blocks(start_block, buf),
+        MEMORY => super::md::write_blocks(start_block, buf),
         _ => false,
     };
     if ok { 0 } else { -1 }
@@ -73,14 +104,15 @@ fn write(start_block: u64, buf: &[u8]) -> i64 {
 
 /// Whether a data disk is attached this boot: `1` or `0`.
 pub extern "C" fn oxidebsd_block_device_present() -> i64 {
-    (BACKEND.load(Ordering::Relaxed) != NONE) as i64
+    (backend() != NONE) as i64
 }
 
 /// The data disk's size in 4 KiB blocks, `0` without one.
 pub extern "C" fn oxidebsd_block_device_blocks() -> u64 {
-    let sectors = match BACKEND.load(Ordering::Relaxed) {
+    let sectors = match backend() {
         ATA => super::ata::capacity_sectors(),
         VIRTIO => super::virtio_blk::capacity_sectors(),
+        MEMORY => super::md::capacity_blocks() * 8,
         _ => 0,
     };
     sectors / 8

@@ -319,6 +319,11 @@ pub fn try_with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -
     Some(f(guard.as_mut()?))
 }
 
+/// `phys_mem_offset`, or `None` before `install_global_memory_state` has run.
+pub fn try_phys_mem_offset() -> Option<VirtAddr> {
+    *PHYS_MEM_OFFSET.lock()
+}
+
 /// The bootloader's physical-memory offset (see `init`'s own doc comment). Panics if
 /// `install_global_memory_state` hasn't run yet.
 pub fn phys_mem_offset() -> VirtAddr {
