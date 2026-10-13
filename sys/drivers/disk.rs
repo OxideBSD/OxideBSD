@@ -45,6 +45,9 @@ static ROOT_BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// partition N minor N.
 const IDE_MAJOR: u32 = 3;
 const VIRTIO_MAJOR: u32 = 252;
+/// `/dev/gpt/<label>`: another name for a labelled GPT partition (FreeBSD's `glabel`), minor N
+/// for partition N of the one data disk.
+const GPT_LABEL_MAJOR: u32 = 253;
 
 /// A raw device: its number and the sectors it covers on the physical disk.
 struct RawDev {
@@ -110,8 +113,18 @@ fn attach(name: &str, major: u32, phys_mem_offset: VirtAddr) {
     for p in &parts {
         let dev = alloc::format!("{name}{}", p.suffix());
         let _ = crate::fs::devfs::make_dev(&dev, major, p.index, 0, 0, 0o600, raw_open);
+        if let Some(label) = &p.label {
+            RAW_DEVS.lock().push(RawDev {
+                major: GPT_LABEL_MAJOR,
+                minor: p.index,
+                first_sector: p.first_lba,
+                sectors: p.sectors,
+            });
+            let dev = alloc::format!("gpt/{label}");
+            let _ = crate::fs::devfs::make_dev(&dev, GPT_LABEL_MAJOR, p.index, 0, 0, 0o600, raw_open);
+        }
     }
-    match parts.iter().find(|p| p.oxfs).and_then(|p| Some((p, p.blocks()?))) {
+    match choose_root(name, &parts).and_then(|p| Some((p, p.blocks()?))) {
         Some((p, (start, blocks))) => {
             ROOT_START.store(start, Ordering::Relaxed);
             ROOT_BLOCKS.store(blocks, Ordering::Relaxed);
@@ -125,6 +138,32 @@ fn attach(name: &str, major: u32, phys_mem_offset: VirtAddr) {
             init_memory(phys_mem_offset);
         }
     }
+}
+
+/// oxfs's partition on disk `name`: the root device `/boot/fsconf` names (`/dev/virt0p1`, or
+/// `/dev/gpt/<label>`), if it's on this disk; else the first oxfs partition.
+fn choose_root<'a>(name: &str, parts: &'a [super::part::Partition]) -> Option<&'a super::part::Partition> {
+    if let Some(device) = crate::kern::fsconf::root_device() {
+        let spec = device.strip_prefix("/dev/").unwrap_or(&device);
+        let named = parts.iter().find(|p| {
+            alloc::format!("{name}{}", p.suffix()) == spec
+                || p.label.as_deref().is_some_and(|l| spec.strip_prefix("gpt/") == Some(l))
+        });
+        match named {
+            Some(p) => {
+                serial_println!("[boot] disk: root {} (from /boot/fsconf)", device);
+                return Some(p);
+            }
+            None => {
+                serial_println!(
+                    "[boot] disk: root {} (from /boot/fsconf) isn't on {} -- using its first oxfs partition",
+                    device,
+                    name
+                );
+            }
+        }
+    }
+    parts.iter().find(|p| p.oxfs)
 }
 
 /// The physical disk's partitions, from its first 34 sectors.

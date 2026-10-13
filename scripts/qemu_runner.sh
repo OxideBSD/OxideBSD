@@ -52,6 +52,10 @@ cp "$STAGE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/limine/"
 cp "$STAGE_DIR/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/"
 cp "$STAGE_DIR/BOOTIA32.EFI" "$ISO_ROOT/EFI/BOOT/"
 cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
+# /etc/fstab compiled by build.rs (fsconf_mkdb), for the kernel to find the root by.
+if [ -f target/boot/fsconf ]; then
+    cp target/boot/fsconf "$ISO_ROOT/boot/fsconf"
+fi
 
 # `no-ata` on `kernel_cmdline:` (see `oxidebsd::boot::ata_disabled`'s own doc comment) skips the
 # real ATA disk probe entirely -- a deliberate safety gate for a first real-hardware boot attempt
@@ -103,6 +107,9 @@ fi
     echo "/OxideBSD"
     echo "protocol: limine"
     echo "kernel_path: boot():/boot/kernel"
+    if [ -f "$ISO_ROOT/boot/fsconf" ]; then
+        echo "module_path: boot():/boot/fsconf"
+    fi
     if [ -n "$KERNEL_CMDLINE" ]; then
         echo "kernel_cmdline: $KERNEL_CMDLINE"
     fi

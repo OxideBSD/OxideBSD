@@ -1,0 +1,53 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt FSCONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm fsconf
+.Nd compiled file system table
+.Sh DESCRIPTION
+.Pa /boot/fsconf
+is
+.Pa /etc/fstab
+in a form the kernel reads at boot, before it has mounted any file system, to
+find the device that holds the root.
+.Xr fsconf_mkdb 8
+writes it; the boot loader loads it beside the kernel.
+.Pp
+All integers are little-endian.
+The file is:
+.Bl -enum
+.It
+the eight bytes
+.Ql OXFSCONF ;
+.It
+a 32-bit version, 1;
+.It
+a 32-bit count of entries;
+.It
+that many entries, each four strings and two 32-bit integers: the device, the
+mount point, the file system type and the options (comma-separated), each a
+16-bit length followed by that many bytes of UTF-8; then the dump frequency
+and the
+.Xr fsck 8
+pass number, as in
+.Xr fstab 5 .
+.El
+.Pp
+The kernel uses the entry for
+.Pa / .
+Its device is a partition of the data disk, by name
+.Pq Pa /dev/virt0p1
+or by GPT label
+.Pq Pa /dev/gpt/rootfs .
+If there is no
+.Pa /boot/fsconf ,
+or the device it names isn't on the disk, the kernel uses the disk's first oxfs
+partition.
+.Sh FILES
+.Bl -tag -width /boot/fsconf -compact
+.It Pa /boot/fsconf
+.El
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr fsconf_mkdb 8

@@ -8174,6 +8174,7 @@ fn format_fresh_filesystem() -> bool {
     // login and passwd keep the env var names the BusyBox applets had.
     ok &= seed_file(usr_libexec, b"getty", include_bytes!(env!("OXFS_GETTY_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"pwd_mkdb", include_bytes!(env!("OXFS_PWD_MKDB_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"fsconf_mkdb", include_bytes!(env!("OXFS_FSCONF_MKDB_ELF_PATH")));
     ok &= seed_file(bin, b"grep", include_bytes!(env!("OXFS_GREP_ELF_PATH")));
     ok &= seed_file(usr_bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
     ok &= seed_file(bin, b"gunzip", include_bytes!(env!("OXFS_GUNZIP_ELF_PATH")));
@@ -8636,6 +8637,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man4, b"unix.4", include_bytes!("../../../../share/man/man4/unix.4"));
     let man_man5 = ensure_dir(usr_share_man, b"man5");
     ok &= seed_file(man_man5, b"devfs.conf.5", include_bytes!("../../../../share/man/man5/devfs.conf.5"));
+    ok &= seed_file(man_man5, b"fsconf.5", include_bytes!("../../../../share/man/man5/fsconf.5"));
     ok &= seed_file(man_man5, b"gettytab.5", include_bytes!("../../../../share/man/man5/gettytab.5"));
     ok &= seed_file(man_man5, b"login.conf.5", include_bytes!("../../../../share/man/man5/login.conf.5"));
     ok &= seed_file(man_man5, b"man.conf.5", include_bytes!("../../../../share/man/man5/man.conf.5"));
@@ -8667,6 +8669,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));
     ok &= seed_file(man_man8, b"newsyslog.8", include_bytes!("../../../../share/man/man8/newsyslog.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
+    ok &= seed_file(man_man8, b"fsconf_mkdb.8", include_bytes!("../../../../share/man/man8/fsconf_mkdb.8"));
     ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
     ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));

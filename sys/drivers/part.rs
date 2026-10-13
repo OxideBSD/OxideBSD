@@ -40,14 +40,16 @@ pub enum Scheme {
     Mbr,
 }
 
-/// One partition: its index from 1, where it is in sectors, and whether it's oxfs's.
-#[derive(Clone, Copy, Debug)]
+/// One partition: its index from 1, where it is in sectors, whether it's oxfs's, and its GPT
+/// name (the label `/dev/gpt/<label>` names it by), if it has one.
+#[derive(Clone, Debug)]
 pub struct Partition {
     pub scheme: Scheme,
     pub index: u32,
     pub first_lba: u64,
     pub sectors: u64,
     pub oxfs: bool,
+    pub label: Option<alloc::string::String>,
 }
 
 impl Partition {
@@ -88,6 +90,7 @@ pub fn read(head: &[u8]) -> Vec<Partition> {
                 first_lba: first,
                 sectors,
                 oxfs: kind == OXFS_MBR_TYPE,
+                label: None,
             })
         })
         .collect()
@@ -129,20 +132,28 @@ fn read_gpt(head: &[u8]) -> Option<Vec<Partition>> {
             .map(|(i, e)| {
                 let first = u64::from_le_bytes(e[32..40].try_into().unwrap());
                 let last = u64::from_le_bytes(e[40..48].try_into().unwrap());
+                let units = e[56..128.min(e.len())]
+                    .chunks(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .take_while(|&u| u != 0);
+                let label: alloc::string::String =
+                    char::decode_utf16(units).map(|c| c.unwrap_or('?')).collect();
                 Partition {
                     scheme: Scheme::Gpt,
                     index: i as u32 + 1,
                     first_lba: first,
                     sectors: last.saturating_sub(first) + 1,
                     oxfs: e[0..16] == OXFS_TYPE_GUID,
+                    label: (!label.is_empty() && !label.contains('/')).then_some(label),
                 }
             })
             .collect(),
     )
 }
 
-/// A fresh GPT for a disk of `total_sectors` with one oxfs partition from 1 MiB to the last
-/// usable sector, rounded down to whole 4 KiB blocks: `(head, tail)`, the bytes for the disk's
+/// A fresh GPT for a disk of `total_sectors` with one oxfs partition, named `rootfs` (so
+/// `/dev/gpt/rootfs`, which `/etc/fstab` names the root by), from 1 MiB to the last usable
+/// sector, rounded down to whole 4 KiB blocks: `(head, tail)`, the bytes for the disk's
 /// first 34 sectors and its last 33 (backup entries and header). `disk_guid` and `part_guid`
 /// identify the disk and the partition.
 pub fn fresh_gpt(total_sectors: u64, disk_guid: [u8; 16], part_guid: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
@@ -155,7 +166,7 @@ pub fn fresh_gpt(total_sectors: u64, disk_guid: [u8; 16], part_guid: [u8; 16]) -
     entries[16..32].copy_from_slice(&part_guid);
     entries[32..40].copy_from_slice(&first.to_le_bytes());
     entries[40..48].copy_from_slice(&last.to_le_bytes());
-    for (i, unit) in "oxfs".encode_utf16().enumerate() {
+    for (i, unit) in "rootfs".encode_utf16().enumerate() {
         entries[56 + i * 2..58 + i * 2].copy_from_slice(&unit.to_le_bytes());
     }
     let entries_crc = crc32(&entries);

@@ -123,6 +123,42 @@ include!("build_busybox.rs");
 /// built for the host, over a copy of `share/man`. oxfs seeds it as `/usr/share/man/oxdoc.db`,
 /// so apropos(1) and man(1)'s lookup by any page name work from the first boot, as the BSDs
 /// ship theirs prebuilt. Returns the index's path.
+/// `target/boot/fsconf`: etc/fstab compiled by a host build of fsconf_mkdb(8), which the QEMU
+/// runner puts on the boot image as `/boot/fsconf` for the kernel to find the root by
+/// (OxideBSD-doc `RAM_FLOOR.md` §3.4.5).
+fn build_boot_fsconf() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fstab = root.join("etc/fstab");
+    println!("cargo:rerun-if-changed={}", fstab.display());
+    let target_dir = root.join("target/fsconf-host");
+    let status = Command::new(cargo_bin())
+        .current_dir(root.join("usr.sbin/fsconf_mkdb"))
+        .args(["build", "--release", "--target", "x86_64-unknown-linux-gnu", "--target-dir"])
+        .arg(&target_dir)
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_PKG_NAME")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTC_WRAPPER")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run cargo for fsconf_mkdb (host): {e}"));
+    if !status.success() {
+        panic!("building fsconf_mkdb for the host failed: {status}");
+    }
+    let out = root.join("target/boot");
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
+    let status = Command::new(target_dir.join("x86_64-unknown-linux-gnu/release/fsconf_mkdb"))
+        .arg("-f")
+        .arg(&fstab)
+        .arg("-o")
+        .arg(out.join("fsconf"))
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run fsconf_mkdb (host): {e}"));
+    if !status.success() {
+        panic!("fsconf_mkdb {} failed: {status}", fstab.display());
+    }
+}
+
 fn build_man_index() -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let pages = root.join("share/man");
@@ -632,6 +668,9 @@ fn main() {
         build_std_oxidebsd_userland_crate("usr.bin/crontab", "NATIVE_CRONTAB_ELF_PATH", &musl_sysroot);
     let pwd_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
+    let fsconf_mkdb_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/fsconf_mkdb", "OXFS_FSCONF_MKDB_ELF_PATH", &musl_sysroot);
+    build_boot_fsconf();
 
     // The manual system (MAN.md in OxideBSD-doc): oxdoc(1), man(1) and more(1) over liboxdoc,
     // replacing BusyBox's man, more and less.
@@ -888,6 +927,7 @@ fn main() {
         ("OXFS_SUDO_RS_SU_ELF_PATH", sudo_rs[1].to_str().unwrap()),
         ("OXFS_VISUDO_ELF_PATH", sudo_rs[2].to_str().unwrap()),
         ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
+        ("OXFS_FSCONF_MKDB_ELF_PATH", fsconf_mkdb_elf_path.to_str().unwrap()),
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
         ("OXFS_MAN_ELF_PATH", man_elf_path.to_str().unwrap()),
         ("OXFS_MORE_ELF_PATH", more_elf_path.to_str().unwrap()),

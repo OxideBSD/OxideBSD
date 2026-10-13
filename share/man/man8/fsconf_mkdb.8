@@ -1,0 +1,65 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt FSCONF_MKDB 8
+.Os OxideBSD
+.Sh NAME
+.Nm fsconf_mkdb
+.Nd compile the file system table for the kernel
+.Sh SYNOPSIS
+.Nm
+.Op Fl f Ar fstab
+.Op Fl o Ar fsconf
+.Sh DESCRIPTION
+The kernel has to know which device holds the root file system before it can
+read any file system, so it can't read
+.Pa /etc/fstab .
+.Nm
+compiles
+.Pa /etc/fstab
+into
+.Pa /boot/fsconf ,
+the binary form described in
+.Xr fsconf 5 ,
+which the boot loader loads beside the kernel.
+Run it after changing the
+.Pa /
+line of
+.Pa /etc/fstab .
+.Pp
+The new file is written beside the old one and renamed over it, so the boot
+loader never finds half of it.
+It must hold an entry for
+.Pa / .
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl f Ar fstab
+Read
+.Ar fstab
+instead of
+.Pa /etc/fstab .
+.It Fl o Ar fsconf
+Write
+.Ar fsconf
+instead of
+.Pa /boot/fsconf .
+.El
+.Sh FILES
+.Bl -tag -width /boot/fsconf -compact
+.It Pa /etc/fstab
+The file system table.
+.It Pa /boot/fsconf
+Its compiled form.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr fsconf 5 ,
+.Xr fstab 5 ,
+.Xr mount 8 ,
+.Xr pwd_mkdb 8
+.Sh CAVEATS
+The boot loader loads
+.Pa /boot/fsconf
+from the boot partition.
+Where that isn't the root file system, copy the new file there too.

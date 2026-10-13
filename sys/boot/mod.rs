@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use limine::memmap::Entry;
 #[cfg(not(feature = "multiboot2"))]
 use limine::request::FramebufferRequest;
-use limine::request::{ExecutableCmdlineRequest, HhdmRequest, MemmapRequest, RsdpRequest};
+use limine::request::{ExecutableCmdlineRequest, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
@@ -42,6 +42,11 @@ static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".requests")]
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+/// Files the boot loader loads beside the kernel (`module_path:` in `limine.conf`): today
+/// `/boot/fsconf` (`kern::fsconf`).
+#[unsafe(link_section = ".requests")]
+static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end")]
@@ -182,6 +187,13 @@ pub fn primary_framebuffer() -> Option<FbInfo> {
 /// `primary_framebuffer`'s own address above. `None` if Limine's own ACPI/firmware probe found no
 /// RSDP at all (not expected on any real or QEMU x86_64 target, but handled the same "absence
 /// logged, not fatal" way every other optional hardware probe in this codebase already is).
+/// The contents of the boot module whose path ends in `name` (e.g. `/boot/fsconf`), if the boot
+/// loader loaded one. None under Multiboot2, which loads no modules here.
+pub fn boot_module(name: &str) -> Option<&'static [u8]> {
+    let response = MODULES_REQUEST.response()?;
+    response.modules().iter().find(|m| m.path().ends_with(name)).map(|m| m.data())
+}
+
 pub fn rsdp_address() -> Option<u64> {
     RSDP_REQUEST.response().map(|r| r.address as u64)
 }
