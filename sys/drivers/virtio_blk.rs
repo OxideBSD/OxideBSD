@@ -164,6 +164,11 @@ impl Disk {
     }
 }
 
+/// The disk's size in 512-byte sectors, `0` without one.
+pub fn capacity_sectors() -> u64 {
+    DISK.lock().as_ref().map_or(0, |disk| disk.capacity)
+}
+
 /// Reads blocks from `start_block` into `buf` (a whole number of 4 KiB blocks).
 pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> bool {
     let mut guard = DISK.lock();

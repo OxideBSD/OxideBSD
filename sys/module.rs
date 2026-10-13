@@ -1203,6 +1203,10 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_block_device_present" => {
             Some(crate::drivers::disk::oxidebsd_block_device_present as *const () as u64)
         }
+        "oxidebsd_block_device_blocks" => {
+            Some(crate::drivers::disk::oxidebsd_block_device_blocks as *const () as u64)
+        }
+        "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
         "oxidebsd_block_read" => Some(crate::drivers::disk::oxidebsd_block_read as *const () as u64),
         "oxidebsd_block_write" => {
             Some(crate::drivers::disk::oxidebsd_block_write as *const () as u64)

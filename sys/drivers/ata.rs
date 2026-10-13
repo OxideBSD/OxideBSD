@@ -25,7 +25,7 @@
 //! kernel itself booted from. See `Cargo.toml`'s `run-args`/`test-args` for the matching
 //! `-device ide-hd,bus=ide.1,unit=0` pinning.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use x86_64::instructions::port::Port;
 
@@ -107,6 +107,8 @@ const DATA_DISK_DRIVE: Drive = Drive::Master;
 /// Set by `init()` once, read by `oxidebsd_block_device_present` -- whether the one fixed
 /// channel/drive this driver's block API targets actually responded to `IDENTIFY` at boot.
 static DATA_DISK_PRESENT: AtomicBool = AtomicBool::new(false);
+/// The data disk's LBA28 capacity in sectors, from `IDENTIFY` (`capacity_sectors`).
+static DATA_DISK_SECTORS: AtomicU64 = AtomicU64::new(0);
 
 fn read_status(io_base: u16) -> u8 {
     unsafe { Port::<u8>::new(io_base + REG_STATUS_COMMAND).read() }
@@ -354,11 +356,10 @@ pub fn write_sector(
     write_sectors(channel, drive, lba, 1, buf)
 }
 
-/// Issues `IDENTIFY` against `channel`/`drive` and reports whether a real ATA drive answered.
-/// Drains (but doesn't interpret) the 256-word IDENTIFY payload on success -- this driver doesn't
-/// need any of it yet, but the data port must be emptied to leave the channel clean for the next
-/// command.
-fn identify(channel: Channel, drive: Drive) -> bool {
+/// Issues `IDENTIFY` against `channel`/`drive` and returns the drive's LBA28 capacity in sectors
+/// (words 60-61) if a real ATA drive answered. The whole 256-word payload is drained either way:
+/// the data port must be emptied to leave the channel clean for the next command.
+fn identify(channel: Channel, drive: Drive) -> Option<u64> {
     let p = ports(channel);
     let select: u8 = match drive {
         Drive::Master => 0xA0,
@@ -375,7 +376,7 @@ fn identify(channel: Channel, drive: Drive) -> bool {
     if read_status(p.io_base) == 0 {
         // Nothing at all wired up at this channel/drive -- the common, expected case for three
         // of the four combos probed at boot.
-        return false;
+        return None;
     }
 
     unsafe {
@@ -385,14 +386,19 @@ fn identify(channel: Channel, drive: Drive) -> bool {
     match wait_for_data(p.io_base) {
         Ok(()) => {
             let mut data_port: Port<u16> = Port::new(p.io_base + REG_DATA);
-            for _ in 0..256 {
-                unsafe {
-                    let _ = data_port.read();
+            let mut sectors = 0u64;
+            for word in 0..256 {
+                // SAFETY: draining the IDENTIFY payload the drive just signalled ready.
+                let value = unsafe { data_port.read() } as u64;
+                match word {
+                    60 => sectors |= value,
+                    61 => sectors |= value << 16,
+                    _ => {}
                 }
             }
-            true
+            Some(sectors)
         }
-        Err(_) => false,
+        Err(_) => None,
     }
 }
 
@@ -407,10 +413,11 @@ pub fn init() {
         (Channel::Secondary, Drive::Slave, "secondary slave"),
     ];
     for (channel, drive, label) in COMBOS {
-        if identify(channel, drive) {
+        if let Some(sectors) = identify(channel, drive) {
             serial_println!("[boot] ata: {} present", label);
             if channel == DATA_DISK_CHANNEL && drive == DATA_DISK_DRIVE {
                 DATA_DISK_PRESENT.store(true, Ordering::Relaxed);
+                DATA_DISK_SECTORS.store(sectors, Ordering::Relaxed);
             }
         } else {
             serial_println!("[boot] ata: {} not present", label);
@@ -428,6 +435,11 @@ pub fn init() {
 /// Whether the data disk (secondary master) answered `IDENTIFY` at boot.
 pub fn present() -> bool {
     DATA_DISK_PRESENT.load(Ordering::Relaxed)
+}
+
+/// The data disk's size in 512-byte sectors, as far as LBA28 reaches (128 GiB).
+pub fn capacity_sectors() -> u64 {
+    DATA_DISK_SECTORS.load(Ordering::Relaxed)
 }
 
 /// Blocks per command: `31 * 8 = 248` sectors, under LBA28's 255-per-command ceiling (`0`

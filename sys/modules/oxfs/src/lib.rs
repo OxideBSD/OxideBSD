@@ -243,6 +243,8 @@ unsafe extern "C" {
     /// other `module_init` failure -- see this module's own `fatal_on_panic = true` in
     /// `sys/kernel_main.rs`, kernel tree).
     fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
+    /// Usable RAM in bytes, for sizing pools.
+    fn oxidebsd_physmem_bytes() -> u64;
 }
 
 /// Changes whenever a file this module embeds changes (`build.rs`'s `build_module_crate`); reading
@@ -464,6 +466,7 @@ const EBUSY: i64 = 16;
 const EEXIST: i64 = 17;
 const ENOTDIR: i64 = 20;
 const EISDIR: i64 = 21;
+const ENFILE: i64 = 23;
 const EMFILE: i64 = 24;
 const ENOSPC: i64 = 28;
 const EIO: i64 = 5;
@@ -610,19 +613,17 @@ const NO_BLOCK: u32 = u32::MAX;
 
 const ROOT_INODE: u32 = 0;
 
-/// A second, purely in-memory pool reserved for tmpfs mounts (see `MountKind::Tmpfs`) and devfs,
-/// whose `/dev/shm` holds POSIX shared memory -- 64 MiB (4 MiB until devfs: a 4 MiB `shm_open`
-/// object, `mmap/1-2.c`, no longer fit), not persisted. Block numbers `>= NUM_BLOCKS`
-/// and inode numbers `>= TMPFS_INODE_BASE` belong to it; `BLOCKS`/`BLOCK_USED` below are simply
-/// extended to cover it, and its inodes have their own `InodeTable`, so every accessor
-/// (`read_block`/`write_block`/`read_inode`/`write_inode`/`dir_lookup`/`dir_insert`/
-/// `resolve_path_impl`/...) works over the unified number space -- only the allocators
-/// (`inode_ensure_block_at`, `alloc_inode_in`) and the disk-persistence hooks need to know which
-/// pool a number is in. Every whole-pool disk loop iterates `0..NUM_BLOCKS`, so none of it touches
-/// this pool. Deliberately never reclaimed when a tmpfs mount is unmounted (its
-/// inodes/blocks stay marked used forever) -- matches this module's existing "no deallocation
-/// anywhere" stance (`unlink`/`rmdir` already only clear a directory record's `used` byte).
-const TMPFS_NUM_BLOCKS: usize = 16384;
+/// A second, purely in-memory pool for tmpfs mounts and devfs, whose `/dev/shm` holds POSIX
+/// shared memory; not persisted. Its size is fixed at boot from RAM (`tmpfs_pool_blocks`):
+/// `RAM / 16`, at least `TMPFS_MIN_BLOCKS` (8 MiB: a 4 MiB `shm_open` object, `mmap/1-2.c`, must
+/// fit) and at most `TMPFS_MAX_BLOCKS` (64 MiB). Block numbers from `TMPFS_BLOCK_BASE` and inode
+/// numbers from `TMPFS_INODE_BASE` belong to it, far above anything the disk pool hands out, so
+/// every accessor (`read_block`/`write_block`/`read_inode`/`dir_lookup`/...) works over one number
+/// space and only the allocators (`inode_ensure_block_at`, `alloc_inode_in`), `block_ptr` and the
+/// disk-persistence hooks need to know which pool a number is in.
+const TMPFS_BLOCK_BASE: u32 = 0xF000_0000;
+const TMPFS_MIN_BLOCKS: usize = 2048;
+const TMPFS_MAX_BLOCKS: usize = 16384;
 
 // --- Real disk persistence (see src/ata.rs) --------------------------------------------------
 //
@@ -732,6 +733,8 @@ const RECORDS_PER_BLOCK: usize = BLOCK_SIZE / DIR_RECORD_SIZE;
 /// three for this kernel's simple, single-threaded processes; longer content silently truncates
 /// (accepted simplification for this tier, not indefinite-length-safe).
 const PROC_BUFFER: usize = 1024;
+/// How many `/proc` files can be open at once (`PROC_RENDERS`): 256 KiB in all.
+const MAX_PROC_RENDERS: usize = 256;
 /// Base for synthetic `d_ino` values `/proc`'s own `getdents` records report -- nothing
 /// dereferences these as real inodes (there's no real inode backing any `/proc` entry), they only
 /// need to be distinct and non-zero. Above every real inode number (those are `u32`).
@@ -772,10 +775,10 @@ const CWD_PROC_PID_MASK: u64 = 0xFFFF_FFFF;
 ///
 /// **Bumped again to 2048 once the real fix landed**: `OpenFile::Write`'s buffer moved out of the
 /// enum entirely into its own separate, smaller `WRITE_BUFFERS` pool (see that pool's own doc
-/// comment) -- a slot's cost is no longer `MAX_WRITE_BUFFER` regardless of use, just the enum's new
-/// largest variant (`DirListing`/`ProcDir`'s `DIR_LISTING_BUFFER`, ~4 KiB). 2048 slots now costs
-/// **less** total memory than the old 256 did (~8 MiB vs. ~32 MiB) while giving `shm_open/23-1.c`
-/// real headroom past its own 1000-object peak.
+/// comment) -- a slot's cost is no longer `MAX_WRITE_BUFFER` regardless of use. Since the 128 MB
+/// floor (`OxideBSD-doc/RAM_FLOOR.md` §3.1.6) no variant embeds a content buffer either (directory
+/// fds have no formatted listing, `/proc` renders live in `PROC_RENDERS`): the largest variants
+/// are the ones carrying a name, a few hundred bytes.
 const MAX_OPEN_FILES: usize = 2048;
 /// Write-side flush-window size (see `OpenFile::Write`'s own doc comment). Raised 128 KiB -> 16
 /// MiB alongside the real max-file-size redesign: this used to be a hard *whole-file* cap (every
@@ -802,7 +805,6 @@ const MAX_WRITE_BUFFER: usize = 16 * 1024 * 1024;
 /// written object like `shm_open/23-1.c`'s own 1000 objects, real POSIX
 /// `shm_open(O_RDONLY|O_CREAT, ...)` use).
 const MAX_WRITE_BUFFERS: usize = 16;
-const DIR_LISTING_BUFFER: usize = 4096;
 
 const MAX_CWD_PATH: usize = 256;
 const MAX_CWD_DEPTH: usize = 32;
@@ -996,12 +998,10 @@ impl Inode {
 /// syscall-reachable functions, whose results feed observably into `oxidebsd_log`/syscall return
 /// values, so the optimizer can't treat any write as an unobservable dead store. All-zero initial
 /// values place these in `.bss` (not baked into the merged object's own size).
-const TOTAL_BLOCKS: usize = NUM_BLOCKS + TMPFS_NUM_BLOCKS;
-
 /// Real, kernel-allocated storage (`oxidebsd_module_alloc_zeroed`, set once by `init_pools` at the
-/// very top of `module_init`), *not* a `static mut [[u8; BLOCK_SIZE]; TOTAL_BLOCKS]` array baked
+/// very top of `module_init`), *not* a `static mut [[u8; BLOCK_SIZE]; NUM_BLOCKS]` array baked
 /// into this module's own object file the way every other fixed-size pool here is. This one pool
-/// alone would otherwise be `TOTAL_BLOCKS * BLOCK_SIZE` ~= 1 GiB of pure, never-yet-written `.bss`
+/// alone would otherwise be `NUM_BLOCKS * BLOCK_SIZE` ~= 1 GiB of pure, never-yet-written `.bss`
 /// -- harmless to the on-disk object size (`.bss` never costs file bytes), but *not* harmless to
 /// how much of this module's own mapped kernel VA/physical footprint is pure empty pool versus
 /// real code -- found live investigating a boot-path memory failure: this module's own mapped
@@ -1009,7 +1009,33 @@ const TOTAL_BLOCKS: usize = NUM_BLOCKS + TMPFS_NUM_BLOCKS;
 /// `read_block`/`write_block` are the only two functions that ever touch it -- everything else
 /// here goes through them, same discipline `WRITE_BUFFERS` below already establishes.
 static mut BLOCKS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
-static mut BLOCK_USED: [bool; TOTAL_BLOCKS] = [false; TOTAL_BLOCKS];
+static mut BLOCK_USED: [bool; NUM_BLOCKS] = [false; NUM_BLOCKS];
+/// The tmpfs pool (`TMPFS_BLOCK_BASE`): `TMPFS_BLOCKS` blocks from `init_pools`.
+static mut TMPFS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
+static mut TMPFS_BLOCKS: u32 = 0;
+static mut TMPFS_BLOCK_USED: [bool; TMPFS_MAX_BLOCKS] = [false; TMPFS_MAX_BLOCKS];
+
+fn is_tmpfs_block(n: u32) -> bool {
+    n >= TMPFS_BLOCK_BASE
+}
+
+/// How many blocks the tmpfs pool gets on a machine with `ram` bytes.
+fn tmpfs_pool_blocks(ram: u64) -> usize {
+    (ram as usize / 16 / BLOCK_SIZE).clamp(TMPFS_MIN_BLOCKS, TMPFS_MAX_BLOCKS)
+}
+
+/// Block `n`'s storage, in whichever pool it belongs to.
+fn block_ptr(n: u32) -> *mut [u8; BLOCK_SIZE] {
+    // SAFETY: both pools are set once by `init_pools` before any syscall can reach here, and
+    // callers only pass block numbers this module handed out.
+    unsafe {
+        if is_tmpfs_block(n) {
+            TMPFS_PTR.add((n - TMPFS_BLOCK_BASE) as usize)
+        } else {
+            BLOCKS_PTR.add(n as usize)
+        }
+    }
+}
 
 /// One pool's inodes: an inode file whose data blocks, from that pool, hold packed inodes
 /// (`INODES_PER_BLOCK` per block, inode number `base + slot` at byte `slot * INODE_STRIDE`). The
@@ -1064,6 +1090,41 @@ fn all_inode_numbers() -> impl Iterator<Item = u32> {
 }
 static mut OPEN_FILES: [Option<(u64, OpenFile)>; MAX_OPEN_FILES] = [None; MAX_OPEN_FILES];
 
+/// Rendered `/proc` files (`OpenFile::ProcRead::render`), pooled so an `OPEN_FILES` slot doesn't
+/// carry `PROC_BUFFER` bytes it rarely needs. A file is rendered once at `open`, so a reader sees
+/// one consistent snapshot however it splits its reads.
+static mut PROC_RENDERS: [[u8; PROC_BUFFER]; MAX_PROC_RENDERS] = [[0; PROC_BUFFER]; MAX_PROC_RENDERS];
+static mut PROC_RENDER_USED: [bool; MAX_PROC_RENDERS] = [false; MAX_PROC_RENDERS];
+
+/// Claims a `PROC_RENDERS` slot, `None` when every one is in use.
+fn alloc_proc_render() -> Option<usize> {
+    // SAFETY: single-core, syscall-serialized, as every pool here.
+    let used = unsafe { &mut *core::ptr::addr_of_mut!(PROC_RENDER_USED) };
+    let idx = used.iter().position(|&u| !u)?;
+    used[idx] = true;
+    Some(idx)
+}
+
+fn free_proc_render(idx: usize) {
+    // SAFETY: as `alloc_proc_render`.
+    unsafe { (*core::ptr::addr_of_mut!(PROC_RENDER_USED))[idx] = false };
+}
+
+fn proc_render(idx: usize) -> &'static mut [u8; PROC_BUFFER] {
+    // SAFETY: as `alloc_proc_render`; callers never hold two borrows of one slot.
+    unsafe { &mut (*core::ptr::addr_of_mut!(PROC_RENDERS))[idx] }
+}
+
+/// Registers a `ProcRead` for the `len` bytes rendered into slot `render`, releasing the slot if
+/// no descriptor can be made.
+fn register_proc_render(render: usize, len: usize) -> i64 {
+    let fd = register_open_file(OpenFile::ProcRead { render: render as u16, len, position: 0 });
+    if fd < 0 {
+        free_proc_render(render);
+    }
+    fd
+}
+
 /// Real per-open-file write-accumulation buffers, pooled separately from `OPEN_FILES` itself --
 /// see `MAX_WRITE_BUFFERS`'s own doc comment for why this split exists. `OpenFile::Write::buf_slot`
 /// is `None` until the first real `write()` call (or, for `O_APPEND`, until `open()`'s own
@@ -1082,7 +1143,13 @@ static mut WRITE_BUFFER_USED: [bool; MAX_WRITE_BUFFERS] = [false; MAX_WRITE_BUFF
 /// `fatal_on_panic = true` (see `sys/kernel_main.rs`, kernel tree) reboots rather than resuming
 /// with a filesystem that has nowhere to actually store a block.
 fn init_pools() -> bool {
-    let blocks_bytes = (TOTAL_BLOCKS * BLOCK_SIZE) as u64;
+    let blocks_bytes = (NUM_BLOCKS * BLOCK_SIZE) as u64;
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    let tmpfs_blocks = tmpfs_pool_blocks(unsafe { oxidebsd_physmem_bytes() });
+    let tmpfs_addr = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * BLOCK_SIZE) as u64) };
+    if tmpfs_addr == 0 {
+        return false;
+    }
     let write_buffers_bytes = (MAX_WRITE_BUFFERS * MAX_WRITE_BUFFER) as u64;
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let blocks_addr = unsafe { oxidebsd_module_alloc_zeroed(blocks_bytes) };
@@ -1097,6 +1164,8 @@ fn init_pools() -> bool {
     // exactly the sizes requested above -- never written through any other pointer.
     unsafe {
         BLOCKS_PTR = blocks_addr as *mut [u8; BLOCK_SIZE];
+        TMPFS_PTR = tmpfs_addr as *mut [u8; BLOCK_SIZE];
+        TMPFS_BLOCKS = tmpfs_blocks as u32;
         WRITE_BUFFERS_PTR = write_buffers_addr as *mut [u8; MAX_WRITE_BUFFER];
     }
     true
@@ -1171,7 +1240,7 @@ fn release_flocks_for(real_fd: u64) {
 /// inode records). Must not be held across a `write_block` of the same block.
 fn block_ref(n: u32) -> &'static [u8; BLOCK_SIZE] {
     // SAFETY: as `read_block`.
-    unsafe { &*BLOCKS_PTR.add(n as usize) }
+    unsafe { &*block_ptr(n) }
 }
 
 fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
@@ -1179,11 +1248,11 @@ fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
     // set once by `init_pools` before any real syscall is reachable. Copies the whole block out
     // by value rather than returning a reference, so no borrow of the pool ever outlives this
     // call -- deliberately simple over clever, see the module doc comment.
-    unsafe { *BLOCKS_PTR.add(n as usize) }
+    unsafe { *block_ptr(n) }
 }
 
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
-    unsafe { *BLOCKS_PTR.add(n as usize) = *data };
+    unsafe { *block_ptr(n) = *data };
     persist_data_block_if_ready(n, data);
 }
 
@@ -1212,7 +1281,7 @@ fn persist_data_run_if_ready(run_start: u32, run_len: u32) {
         return;
     }
     let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
-    // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering [0, TOTAL_BLOCKS);
+    // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering [0, NUM_BLOCKS);
     // run_start < NUM_BLOCKS was just checked above, and every caller only ever grows a run one
     // already-in-memory-updated block at a time, so [run_start, run_start + run_len) is always a
     // real, already-written slice of the pool.
@@ -1223,11 +1292,25 @@ fn persist_data_run_if_ready(run_start: u32, run_len: u32) {
 }
 
 fn block_used(n: u32) -> bool {
-    unsafe { (*core::ptr::addr_of!(BLOCK_USED))[n as usize] }
+    // SAFETY: single-core, syscall-serialized, as every pool here.
+    unsafe {
+        if is_tmpfs_block(n) {
+            (*core::ptr::addr_of!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize]
+        } else {
+            (*core::ptr::addr_of!(BLOCK_USED))[n as usize]
+        }
+    }
 }
 
 fn set_block_used(n: u32, used: bool) {
-    unsafe { (*core::ptr::addr_of_mut!(BLOCK_USED))[n as usize] = used };
+    // SAFETY: as `block_used`.
+    unsafe {
+        if is_tmpfs_block(n) {
+            (*core::ptr::addr_of_mut!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] = used;
+        } else {
+            (*core::ptr::addr_of_mut!(BLOCK_USED))[n as usize] = used;
+        }
+    }
     persist_bitmap_if_ready(n);
 }
 
@@ -1590,12 +1673,13 @@ fn grow_inode_table(tmpfs: bool) -> Option<()> {
     Some(())
 }
 
-/// `alloc_block`'s tmpfs-pool counterpart -- same linear scan, over the tail range reserved by
-/// `TMPFS_NUM_BLOCKS` instead of `0..NUM_BLOCKS`. Only ever called from `inode_ensure_block_at`,
+/// `alloc_block`'s tmpfs-pool counterpart -- same linear scan, over the tmpfs pool
+/// (`TMPFS_BLOCK_BASE`) instead of `0..NUM_BLOCKS`. Only ever called from `inode_ensure_block_at`,
 /// which picks this over `alloc_block` based on which pool `inode_num` falls in -- see that
 /// function's own doc comment for why it's the sole call site that needs to know this pool exists.
 fn alloc_tmpfs_block() -> Option<u32> {
-    for i in NUM_BLOCKS as u32..TOTAL_BLOCKS as u32 {
+    let end = TMPFS_BLOCK_BASE + unsafe { *core::ptr::addr_of!(TMPFS_BLOCKS) };
+    for i in TMPFS_BLOCK_BASE..end {
         if !block_used(i) {
             set_block_used(i, true);
             write_block(i, &[0u8; BLOCK_SIZE]);
@@ -1681,7 +1765,7 @@ fn inode_block_at(inode: &Inode, index: usize) -> Option<u32> {
 /// goes through the copy-in/copy-out helpers above, so no reference to either static is ever held
 /// across a nested call (`alloc_block` here) that itself touches them.
 ///
-/// **The one place block allocation needs to know about the tmpfs pool** (see `TMPFS_NUM_BLOCKS`'s
+/// **The one place block allocation needs to know about the tmpfs pool** (see `TMPFS_BLOCK_BASE`'s
 /// own doc comment): `dir_insert`'s directory-growth path and every real file write both funnel
 /// through this single function (confirmed by grep -- `alloc_block`/`alloc_indirect_block` have no
 /// other caller), so picking the allocator by whether `inode_num` falls in the tmpfs range here is
@@ -2138,9 +2222,9 @@ fn write_inode_with(
             result = Err(e);
             break;
         }
-        // SAFETY: same as write_block's own in-memory half -- BLOCKS_PTR.add(blk) is a real,
+        // SAFETY: same as write_block's own in-memory half -- block_ptr(blk) is a real,
         // in-bounds slot for any block number this module ever hands out.
-        unsafe { *BLOCKS_PTR.add(blk as usize) = block };
+        unsafe { *block_ptr(blk) = block };
         if run_len > 0 && blk == run_start + run_len {
             run_len += 1;
         } else {
@@ -2209,7 +2293,7 @@ unsafe impl Pod for MuslStat {}
 /// `Inode::atime`/`Inode::mtime`'s own doc comments), whole-second precision only (`*_nsec` fields
 /// stay `0`). `st_dev` is `1` for the one real, persisted
 /// filesystem and `2` for anything in the tmpfs pool (`is_tmpfs_inode`, see
-/// `TMPFS_NUM_BLOCKS`'s own doc comment) -- derivable from the inode number alone, and just enough
+/// `TMPFS_BLOCK_BASE`'s own doc comment) -- derivable from the inode number alone, and just enough
 /// for `mountpoint`'s real `st_dev(path) != st_dev(parent)` check to detect a tmpfs mount. A bind
 /// mount deliberately keeps `st_dev == 1` (same underlying superblock, matching real Linux's own
 /// same-filesystem bind-mount behavior), so `mountpoint` can't distinguish a bind-mounted directory
@@ -3259,15 +3343,10 @@ fn build_cwd_path(inode_num: u32, out: &mut [u8; MAX_CWD_PATH]) -> usize {
     len
 }
 
-/// An open file's own state, keyed by fd in `OPEN_FILES`. `DirListing`/`ProcDir`'s own
-/// `DIR_LISTING_BUFFER` (4 KiB) is the largest embedded buffer here now that `Write`'s own
-/// (formerly `OPEN_FILES`-dominating, `MAX_WRITE_BUFFER` = 128 KiB) content buffer lives in the
-/// separate `WRITE_BUFFERS` pool instead (`buf_slot`, an index, not the content itself) -- see
-/// that pool's own doc comment for why: modules can't use `alloc`/`Box`, so every `OPEN_FILES`
-/// slot still has to be sized for its own worst case, but decoupling the one genuinely huge,
-/// rarely-simultaneously-needed buffer from the fixed per-slot cost lets `MAX_OPEN_FILES` scale far
-/// higher without a matching memory cost (see `MAX_OPEN_FILES`'s own doc comment for the concrete
-/// before/after numbers).
+/// An open file's own state, keyed by fd in `OPEN_FILES`. Modules can't use `alloc`/`Box`, so
+/// every slot is sized for the largest variant: no variant embeds a content buffer (the write
+/// buffers and `/proc` renders are pooled and referenced by index), so a slot stays small (see
+/// `MAX_OPEN_FILES`).
 #[derive(Clone, Copy)]
 #[allow(clippy::large_enum_variant)]
 enum OpenFile {
@@ -3284,20 +3363,12 @@ enum OpenFile {
         name: [u8; NAME_MAX],
         name_len: u8,
     },
-    /// A directory listing, formatted into a fixed buffer at `open` time -- listings stay small,
-    /// so caching one is simpler than streaming it record-by-record, and this mirrors
-    /// `modules/fat32`'s existing "open a directory, read back a formatted listing" trick for
-    /// `ls`. `inode` is the directory's own inode number -- used by `inode_of_open_file`
-    /// (`oxfs_fstat` on a directory fd) and by `oxfs_getdents`, which walks `inode`'s *live*
-    /// records directly rather than this variant's own pre-formatted `content` (real
-    /// `readdir()`/`getdents()` must see every record, `.`/`..` included, not the human-readable
-    /// summary `content` holds). `dirent_pos` is `oxfs_getdents`'s own resume cursor -- see that
-    /// function's own doc comment.
+    /// An open directory. `inode` is the directory's own inode number -- used by
+    /// `inode_of_open_file` (`oxfs_fstat` on a directory fd) and by `oxfs_getdents`, which walks
+    /// its live records. `dirent_pos` is `oxfs_getdents`'s resume cursor and the descriptor's
+    /// offset (`oxfs_lseek`). `read` is `EISDIR`.
     DirListing {
         inode: u32,
-        content: [u8; DIR_LISTING_BUFFER],
-        len: usize,
-        position: usize,
         dirent_pos: usize,
     },
     /// A file opened for writing. **Real streaming write-back, not a whole-file staging buffer**:
@@ -3415,23 +3486,18 @@ enum OpenFile {
         /// offset `0` (an all-zero `memset`'d `aiocb`), each overwriting the last.
         append: bool,
     },
-    /// A synthetic `/proc/<pid>/{stat,cmdline,status}` file's content, generated once at `open`
-    /// time by calling into `sys/process.rs`'s kernel-exported accessors (see `open_proc_leaf`) --
-    /// no real inode backs this, mirroring `DirListing`'s own "format once, stream on read" shape.
+    /// A synthetic `/proc` file's content, generated once at `open` time by calling into
+    /// `sys/process.rs`'s kernel-exported accessors (see `open_proc_leaf`) into a `PROC_RENDERS`
+    /// slot; no real inode backs this.
     ProcRead {
-        content: [u8; PROC_BUFFER],
+        render: u16,
         len: usize,
         position: usize,
     },
-    /// A synthetic `/proc` directory listing -- see `ProcDirKind` for what each variant lists.
-    /// `content`/`position` back a human-readable read (`cat /proc`, mirroring `DirListing`'s dual
-    /// read/getdents purpose); `dirent_pos` is `oxfs_getdents`'s own resume cursor, same role as
-    /// `DirListing::dirent_pos`.
+    /// A synthetic `/proc` directory -- see `ProcDirKind` for what each variant lists.
+    /// `dirent_pos` has the same role as `DirListing::dirent_pos`.
     ProcDir {
         kind: ProcDirKind,
-        content: [u8; DIR_LISTING_BUFFER],
-        len: usize,
-        position: usize,
         dirent_pos: usize,
     },
     /// A synthetic `/dev/random` or `/dev/urandom` fd -- see `dev_open`'s own doc comment for why
@@ -3731,49 +3797,9 @@ fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
     None
 }
 
-/// Formats `dir_inode`'s listing (one name per line, `<DIR>` or a byte count) into a fresh
-/// `OpenFile::DirListing` and registers a fd for it -- see the module doc comment's note on `ls`.
-/// `.`/`..` are hidden, matching plain `ls`'s default.
+/// Registers a descriptor for directory `dir_inode`, read with `getdents`.
 fn open_dir_listing(dir_inode: u32) -> i64 {
-    let mut content = [0u8; DIR_LISTING_BUFFER];
-    let len = {
-        let mut out = ByteBuf {
-            buf: &mut content,
-            len: 0,
-        };
-        let inode = read_inode(dir_inode);
-        let mut i = 0;
-        while let Some(blk) = inode_block_at(&inode, i) {
-            let block = read_block(blk);
-            for r in 0..RECORDS_PER_BLOCK {
-                if !dir_record_used(&block, r) {
-                    continue;
-                }
-                let name = dir_record_name(&block, r);
-                if name == b"." || name == b".." {
-                    continue;
-                }
-                let child_inode = read_inode(dir_record_inode(&block, r));
-                out.push_bytes(name);
-                if child_inode.kind == InodeKind::Dir {
-                    out.push_bytes(b"  <DIR>\n");
-                } else {
-                    out.push_bytes(b"  ");
-                    out.push_decimal_u64(child_inode.size);
-                    out.push_bytes(b"\n");
-                }
-            }
-            i += 1;
-        }
-        out.len
-    };
-    register_open_file(OpenFile::DirListing {
-        inode: dir_inode,
-        content,
-        len,
-        position: 0,
-        dirent_pos: 0,
-    })
+    register_open_file(OpenFile::DirListing { inode: dir_inode, dirent_pos: 0 })
 }
 
 /// Which synthetic `/proc/<pid>/*` leaf a call to `open_proc_leaf` should generate.
@@ -3800,110 +3826,28 @@ fn parse_pid(bytes: &[u8]) -> Option<u32> {
     Some(value)
 }
 
-/// `/proc` itself: one live pid per line (`oxidebsd_proc_pid_at`, ascending, `-1`-terminated),
-/// mirroring `open_dir_listing`'s own human-readable style.
+/// `/proc` itself: the live pids (`oxidebsd_proc_pid_at`) and the system-wide files
+/// (`proc_dir_nth_entry`).
 fn open_proc_root_dir() -> i64 {
-    let mut content = [0u8; DIR_LISTING_BUFFER];
-    let len = {
-        let mut out = ByteBuf {
-            buf: &mut content,
-            len: 0,
-        };
-        let mut i = 0u64;
-        loop {
-            // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-            let pid = unsafe { oxidebsd_proc_pid_at(i) };
-            if pid < 0 {
-                break;
-            }
-            out.push_decimal(pid as u32);
-            out.push_bytes(b"\n");
-            i += 1;
-        }
-        out.push_bytes(b"meminfo\nuptime\nstat\nmodules\nmounts\ninitdeaths\n");
-        out.len
-    };
-    register_open_file(OpenFile::ProcDir {
-        kind: ProcDirKind::Root,
-        content,
-        len,
-        position: 0,
-        dirent_pos: 0,
-    })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::Root, dirent_pos: 0 })
 }
 
 /// `/proc/<pid>`: the fixed three leaf names.
 fn open_proc_pid_dir(pid: u32) -> i64 {
-    let mut content = [0u8; DIR_LISTING_BUFFER];
-    let len = {
-        let mut out = ByteBuf {
-            buf: &mut content,
-            len: 0,
-        };
-        out.push_bytes(b"stat\ncmdline\nstatus\n");
-        out.len
-    };
-    register_open_file(OpenFile::ProcDir {
-        kind: ProcDirKind::PidFiles(pid),
-        content,
-        len,
-        position: 0,
-        dirent_pos: 0,
-    })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::PidFiles(pid), dirent_pos: 0 })
 }
 
 /// `/proc/<pid>/task`: exactly one entry, `pid`'s own decimal string -- see `ProcDirKind::TaskList`'s
 /// own doc comment for why this exists at all.
 fn open_task_dir(pid: u32) -> i64 {
-    let mut content = [0u8; DIR_LISTING_BUFFER];
-    let len = {
-        let mut out = ByteBuf {
-            buf: &mut content,
-            len: 0,
-        };
-        out.push_decimal(pid);
-        out.push_bytes(b"\n");
-        out.len
-    };
-    register_open_file(OpenFile::ProcDir {
-        kind: ProcDirKind::TaskList(pid),
-        content,
-        len,
-        position: 0,
-        dirent_pos: 0,
-    })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::TaskList(pid), dirent_pos: 0 })
 }
 
 /// `/proc/<pid>/fd`: one entry per real fd this process has open -- see `ProcDirKind::FdList`'s
 /// own doc comment for why each entry is a plain placeholder rather than a real target-bearing
 /// symlink.
 fn open_fd_dir(pid: u32) -> i64 {
-    let mut content = [0u8; DIR_LISTING_BUFFER];
-    let len = {
-        let mut out = ByteBuf {
-            buf: &mut content,
-            len: 0,
-        };
-        let mut i = 0u64;
-        loop {
-            // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-            let fd = unsafe { oxidebsd_fd_at(pid as u64, i) };
-            if fd < 0 {
-                break;
-            }
-            out.push_decimal(fd as u32);
-            out.push_bytes(b"\n");
-            i += 1;
-        }
-        out.len
-    };
-    register_open_file(OpenFile::ProcDir {
-        kind: ProcDirKind::FdList(pid),
-        content,
-        len,
-        position: 0,
-        dirent_pos: 0,
-    })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::FdList(pid), dirent_pos: 0 })
 }
 
 /// Which system-wide (not per-pid) synthetic `/proc` file a call to `open_proc_sysfile` should
@@ -3959,9 +3903,12 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
 /// kernel accessors (or, for `Mounts`, this module's own state) instead of a per-pid one. Unlike
 /// `open_proc_leaf`, there's no pid to vanish out from under this call -- none of these ever fail.
 fn open_proc_sysfile(kind: ProcSysFile) -> i64 {
-    let mut content = [0u8; PROC_BUFFER];
+    let Some(render) = alloc_proc_render() else {
+        return -ENFILE;
+    };
+    let content = proc_render(render);
     let n = match kind {
-        ProcSysFile::Mounts => format_mounts(&mut content) as i64,
+        ProcSysFile::Mounts => format_mounts(content) as i64,
         // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures;
         // each writes at most PROC_BUFFER bytes into content, sized to match.
         _ => unsafe {
@@ -3985,17 +3932,16 @@ fn open_proc_sysfile(kind: ProcSysFile) -> i64 {
             }
         },
     };
-    register_open_file(OpenFile::ProcRead {
-        content,
-        len: n as usize,
-        position: 0,
-    })
+    register_proc_render(render, n as usize)
 }
 
 /// `/proc/<pid>/{stat,cmdline,status}`: calls the matching kernel accessor once, at `open` time,
 /// into a fresh fixed buffer -- same "format once, stream on read" shape `open_dir_listing` uses.
 fn open_proc_leaf(pid: u32, leaf: ProcLeaf) -> i64 {
-    let mut content = [0u8; PROC_BUFFER];
+    let Some(render) = alloc_proc_render() else {
+        return -ENFILE;
+    };
+    let content = proc_render(render);
     // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures; each
     // writes at most PROC_BUFFER bytes into content, sized to match.
     let n = unsafe {
@@ -4014,13 +3960,10 @@ fn open_proc_leaf(pid: u32, leaf: ProcLeaf) -> i64 {
     if n < 0 {
         // The pid existed at proc_open's own check but is gone now (exited between that check and
         // this call) -- ESRCH is the honest answer, not EBADF/ENOENT.
+        free_proc_render(render);
         return -ESRCH;
     }
-    register_open_file(OpenFile::ProcRead {
-        content,
-        len: n as usize,
-        position: 0,
-    })
+    register_proc_render(render, n as usize)
 }
 
 /// Dispatches every `/proc/...` path `oxfs_open` hands off to it (`suffix` is the path *after*
@@ -4874,46 +4817,17 @@ extern "C" fn oxfs_read(fd: u64, uio: u64, flags: u64) -> i64 {
             }
             n as i64
         }
-        OpenFile::DirListing {
-            content,
-            len: total,
-            position,
-            ..
-        } => {
-            let remaining = *total - *position;
-            let n = remaining.min(uio_resid(uio));
-            match uio_out(uio, &content[*position..*position + n]) {
-                Ok(m) => {
-                    *position += m;
-                    m as i64
-                }
-                Err(e) => e,
-            }
-        }
+        // read(2) on a directory is EISDIR, as on OpenBSD and FreeBSD 13+: getdents reads it.
+        OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } => -EISDIR,
         OpenFile::Write { .. } => -EBADF,
         OpenFile::ProcRead {
-            content,
+            render,
             len: total,
             position,
         } => {
             let remaining = *total - *position;
             let n = remaining.min(uio_resid(uio));
-            match uio_out(uio, &content[*position..*position + n]) {
-                Ok(m) => {
-                    *position += m;
-                    m as i64
-                }
-                Err(e) => e,
-            }
-        }
-        OpenFile::ProcDir {
-            content,
-            len: total,
-            position,
-            ..
-        } => {
-            let remaining = *total - *position;
-            let n = remaining.min(uio_resid(uio));
+            let content = proc_render(*render as usize);
             match uio_out(uio, &content[*position..*position + n]) {
                 Ok(m) => {
                     *position += m;
@@ -5174,6 +5088,9 @@ extern "C" fn oxfs_close(fd: u64) -> i64 {
     };
     let (_, mut file) = slot.take().expect("just matched Some above");
     let result = commit_write_buffer(&mut file);
+    if let OpenFile::ProcRead { render, .. } = file {
+        free_proc_render(render as usize);
+    }
     // The last descriptor of an unlinked file frees it (`maybe_release`). A file created and then
     // unlinked before its first commit got an inode just now, with no name to go with it.
     let closed = match file {
@@ -5454,15 +5371,18 @@ const OXFS_STATFS_MAGIC: u64 = 0x4f584653;
 
 /// Builds a real `struct statfs` from this filesystem's own live usage counts and writes it into
 /// the caller's buffer -- shared by `oxfs_statfs` (path-based) and `oxfs_fstatfs` (fd-based).
-/// `is_tmpfs` picks which of the two block/inode pools to report on (see `TMPFS_NUM_BLOCKS`'s own
-/// doc comment) -- free counts are computed by scanning that pool's own slice of `BLOCK_USED`/
-/// `INODES` fresh on every call (no cached running total exists to go stale). `f_bavail` is set
+/// `is_tmpfs` picks which of the two block/inode pools to report on (see `TMPFS_BLOCK_BASE`'s own
+/// doc comment) -- free counts are computed by scanning that pool's `block_used` bits fresh on
+/// every call (no cached running total exists to go stale). `f_bavail` is set
 /// equal to `f_bfree` -- this filesystem has no reserved-for-root-only block reservation to make
 /// the two diverge, unlike a real ext-family filesystem's own `statfs()`.
 fn write_statfs(is_tmpfs: bool, buf_ptr: u64) -> i64 {
-    let (blocks_lo, blocks_hi) = if is_tmpfs { (NUM_BLOCKS, TOTAL_BLOCKS) } else { (0, NUM_BLOCKS) };
-    let used = unsafe { &*core::ptr::addr_of!(BLOCK_USED) };
-    let free_blocks = (blocks_lo..blocks_hi).filter(|&i| !used[i]).count() as u64;
+    let (blocks_lo, blocks_hi) = if is_tmpfs {
+        (TMPFS_BLOCK_BASE, TMPFS_BLOCK_BASE + unsafe { *core::ptr::addr_of!(TMPFS_BLOCKS) })
+    } else {
+        (0, NUM_BLOCKS as u32)
+    };
+    let free_blocks = (blocks_lo..blocks_hi).filter(|&i| !block_used(i)).count() as u64;
     // The table grows into free blocks, so each free block is `INODES_PER_BLOCK` inodes to come
     // (as ZFS reports it): the count is an estimate that shrinks as data fills the pool.
     let table = inode_table(is_tmpfs);
@@ -7734,9 +7654,21 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         OpenFile::FileRead { inode, position, .. } => {
             (position, read_inode(*inode).size as i64)
         }
-        OpenFile::DirListing { content: _, len, position, .. } => (position, *len as i64),
+        // A directory's offset is `getdents`' record cursor (`d_off` is the next record's index),
+        // so `rewinddir`'s `lseek(fd, 0, SEEK_SET)` and `seekdir` land where they should.
+        OpenFile::DirListing { dirent_pos, .. } | OpenFile::ProcDir { dirent_pos, .. } => {
+            let new_pos = match whence {
+                0 => offset,
+                1 => *dirent_pos as i64 + offset,
+                _ => return -EINVAL,
+            };
+            if new_pos < 0 {
+                return -EINVAL;
+            }
+            *dirent_pos = new_pos as usize;
+            return new_pos;
+        }
         OpenFile::ProcRead { len, position, .. } => (position, *len as i64),
-        OpenFile::ProcDir { len, position, .. } => (position, *len as i64),
         // `OpenFile::Write` is always caught by the unconditional check above now (every `Write`
         // fd, `O_WRONLY` included, has a real seekable `position`) -- kept here only so this
         // match stays exhaustive against `OpenFile`'s own variant list.
@@ -8203,7 +8135,7 @@ fn unpack_inode(data: &[u8]) -> Inode {
 /// gated on both a disk being attached and `persistence_ready()` (see that flag's own doc comment
 /// for why format/mount themselves must not trigger this).
 fn persist_data_block_if_ready(n: u32, data: &[u8; BLOCK_SIZE]) {
-    // Tmpfs-pool blocks (see TMPFS_NUM_BLOCKS's own doc comment) are never persisted -- they have
+    // Tmpfs-pool blocks (see TMPFS_BLOCK_BASE's own doc comment) are never persisted -- they have
     // no physical counterpart in the on-disk layout, which is sized to NUM_BLOCKS exactly.
     if n >= NUM_BLOCKS as u32 || !persistence_ready() || !block_device_present() {
         return;
@@ -8380,7 +8312,7 @@ fn mount_from_disk() -> bool {
         }
         let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
         // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
-        // [0, TOTAL_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
+        // [0, NUM_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
         let dst = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
         if unsafe { oxidebsd_block_read_batch(phys, run_len as u64, dst) } != 0 {
             log("[oxfs] mount: failed to read a data block -- falling back to format\n");
@@ -8466,7 +8398,7 @@ fn flush_all_to_disk() {
         }
         let phys = DATA_BLOCK_OFFSET as u64 + run_start as u64;
         // SAFETY: BLOCKS_PTR is real, contiguous, kernel-allocated storage covering
-        // [0, TOTAL_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
+        // [0, NUM_BLOCKS); [run_start, run_start + run_len) falls within [0, NUM_BLOCKS).
         let src = unsafe { BLOCKS_PTR.add(run_start as usize) as u64 };
         unsafe {
             oxidebsd_block_write_batch(phys, run_len as u64, src);
@@ -10011,19 +9943,19 @@ fn format_fresh_filesystem() -> bool {
             ok = false;
             log("[oxfs] self-check FAILED: chdir /proc failed\n");
         } else {
-            // Relative "" (list cwd) should match the absolute /proc listing's own content.
+            // Relative "" opens cwd, /proc itself: a directory, so read() is EISDIR.
             let empty = b"";
             let dfd = oxfs_open(empty.as_ptr() as u64, 0, 0, 0);
             if dfd < 0 {
                 ok = false;
                 log("[oxfs] self-check FAILED: relative open(\"\") inside /proc failed\n");
             } else {
-                let mut buf = [0u8; DIR_LISTING_BUFFER];
+                let mut buf = [0u8; 16];
                 let n = sc_read(dfd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
                 sc_close(dfd as u64);
-                if n <= 0 || !buf[..n as usize].windows(7).any(|w| w == b"meminfo") {
+                if n != -EISDIR {
                     ok = false;
-                    log("[oxfs] self-check FAILED: relative /proc listing missing meminfo\n");
+                    log("[oxfs] self-check FAILED: read() of the /proc directory isn't EISDIR\n");
                 }
             }
 

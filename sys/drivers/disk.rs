@@ -76,6 +76,16 @@ pub extern "C" fn oxidebsd_block_device_present() -> i64 {
     (BACKEND.load(Ordering::Relaxed) != NONE) as i64
 }
 
+/// The data disk's size in 4 KiB blocks, `0` without one.
+pub extern "C" fn oxidebsd_block_device_blocks() -> u64 {
+    let sectors = match BACKEND.load(Ordering::Relaxed) {
+        ATA => super::ata::capacity_sectors(),
+        VIRTIO => super::virtio_blk::capacity_sectors(),
+        _ => 0,
+    };
+    sectors / 8
+}
+
 /// Reads block `block_no` into the 4096 bytes at `buf_ptr`.
 pub extern "C" fn oxidebsd_block_read(block_no: u64, buf_ptr: u64) -> i64 {
     oxidebsd_block_read_batch(block_no, 1, buf_ptr)

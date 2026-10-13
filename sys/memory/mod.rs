@@ -285,6 +285,11 @@ pub fn usable_ram_bytes() -> u64 {
     USABLE_RAM_BYTES.load(Ordering::Relaxed)
 }
 
+/// `usable_ram_bytes` for modules, which size their pools from it (oxfs's cache and tmpfs).
+pub extern "C" fn oxidebsd_physmem_bytes() -> u64 {
+    usable_ram_bytes()
+}
+
 /// Global home for the frame allocator and the bootloader's physical-memory offset, promoted out
 /// of `main.rs`'s local variables once process creation (`sys/process.rs`'s `spawn`/`fork`/
 /// `execve` paths) needs both from arbitrary syscall contexts, not just at boot. Populated exactly

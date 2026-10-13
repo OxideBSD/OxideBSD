@@ -5,7 +5,9 @@
  * F_DUPFD the lowest one >= its argument. A FIFO's open() waits for the other side (unless
  * O_NONBLOCK: then a reader opens at once and a lone writer gets ENXIO), readers see EOF once
  * every writer closes, and unread data goes away with the last close. Writing to a pipe with no
- * reader raises SIGPIPE, and fails EPIPE when SIGPIPE is ignored.
+ * reader raises SIGPIPE, and fails EPIPE when SIGPIPE is ignored. A directory descriptor is read
+ * with getdents, not read() (EISDIR, as on OpenBSD and FreeBSD), and its offset is the record
+ * cursor: rewinddir restarts the walk, seekdir returns to a telldir position.
  *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
@@ -167,6 +169,51 @@ static void fifos(void)
 	CHECK(unlink(FIFO) == 0, "unlink FIFO");
 }
 
+/* Entries left in `dir` from where it stands. */
+static int count_entries(DIR *dir)
+{
+	int n = 0;
+	while (readdir(dir))
+		n++;
+	return n;
+}
+
+static void directories(void)
+{
+	char buf[64];
+	int fd = open("/", O_RDONLY | O_DIRECTORY);
+	CHECK(fd >= 0 && read(fd, buf, sizeof buf) == -1 && errno == EISDIR,
+	      "read() of a directory is EISDIR");
+	if (fd >= 0)
+		close(fd);
+	fd = open("/proc", O_RDONLY | O_DIRECTORY);
+	CHECK(fd >= 0 && read(fd, buf, sizeof buf) == -1 && errno == EISDIR,
+	      "read() of the /proc directory is EISDIR");
+	if (fd >= 0)
+		close(fd);
+
+	DIR *dir = opendir("/");
+	CHECK(dir != NULL, "opendir /");
+	if (!dir)
+		return;
+	int first = count_entries(dir);
+	rewinddir(dir);
+	CHECK(first > 2 && count_entries(dir) == first, "rewinddir restarts the walk");
+
+	rewinddir(dir);
+	readdir(dir);
+	long mark = telldir(dir);
+	struct dirent *ent = readdir(dir);
+	char name[256] = "";
+	if (ent)
+		snprintf(name, sizeof name, "%s", ent->d_name);
+	count_entries(dir);
+	seekdir(dir, mark);
+	ent = readdir(dir);
+	CHECK(ent && name[0] && strcmp(ent->d_name, name) == 0, "seekdir returns to a telldir position");
+	closedir(dir);
+}
+
 static void sigpipe(void)
 {
 	int p[2];
@@ -192,6 +239,7 @@ int main(void)
 {
 	fd_numbering();
 	fifos();
+	directories();
 	sigpipe();
 	printf("fd-smoke: %d failure(s)\n", failures);
 	return failures;
