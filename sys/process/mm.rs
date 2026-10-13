@@ -846,9 +846,12 @@ fn do_mmap_file_backed(
     } else {
         // The cache holds the object's pages from its start, so it has to reach this mapping's end.
         let cached_pages = file_page + covered_pages;
-        let mut cache = MMAP_FILE_CACHE.lock();
-        let existing_len = cache.get(&content_id).map(Vec::len).unwrap_or(0) as u64;
-        if existing_len < cached_pages {
+        // Grown with the cache unlocked: the read goes into the filesystem, which takes its own
+        // lock and may wait for the disk (`fs::fslock`); a spin lock held across that would stop
+        // every other process that maps a file.
+        let existing_len =
+            MMAP_FILE_CACHE.lock().get(&content_id).map(Vec::len).unwrap_or(0) as u64;
+        let grown = if existing_len < cached_pages {
             // First mmap of this file, or a later mmap asking for more real-content pages than any
             // earlier one did -- allocate+zero exactly the *new* frames needed and append them,
             // never discarding whatever's already cached (those frames may already be live in
@@ -899,7 +902,23 @@ fn do_mmap_file_backed(
                     }
                 }
             }
-            cache.entry(content_id).or_default().extend(new_frames);
+            Some(new_frames)
+        } else {
+            None
+        };
+        let mut cache = MMAP_FILE_CACHE.lock();
+        if let Some(new_frames) = grown {
+            if cache.get(&content_id).map(Vec::len).unwrap_or(0) as u64 == existing_len {
+                cache.entry(content_id).or_default().extend(new_frames);
+            } else {
+                // Another mapping grew the entry meanwhile: its frames stand, these go back.
+                with_frame_allocator(|fa| {
+                    for frame in new_frames {
+                        // SAFETY: allocated above, never mapped anywhere.
+                        unsafe { fa.deallocate_frame(frame) };
+                    }
+                });
+            }
         }
         // `.entry(...).or_default()`, not `.get(...).expect(...)`: the growth block above is
         // skipped entirely when `covered_pages == 0` (an object with no real content yet, e.g. a
@@ -1322,7 +1341,12 @@ pub fn do_msync(caller_pid: Pid, addr: u64, len: u64, flags: u64) -> Result<u64,
     if flags & MS_INVALIDATE != 0 && region.locked {
         return Err(EBUSY);
     }
-    writeback_region(region, phys_offset);
+    // Written back with no lock held: the write goes into the filesystem, which takes its own
+    // lock and may wait for the disk (`fs::fslock`).
+    let region = region.clone();
+    drop(shared);
+    drop(table);
+    writeback_region(&region, phys_offset);
     Ok(0)
 }
 

@@ -1051,6 +1051,7 @@ pub(crate) fn dispatch(
             // sys/module.rs. Must happen right before the call: this flag has no meaning except
             // for whatever module code is currently executing.
             crate::module::mark_active_module_by_address(handler as usize as u64);
+            let _lock = crate::fs::fslock::Guard::for_call(handler as usize as u64);
             ffi_result_to_result(handler(arg0, arg1, arg2, arg3))
         }
         None => {

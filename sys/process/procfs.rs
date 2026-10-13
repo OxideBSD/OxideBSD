@@ -43,6 +43,7 @@ pub(crate) fn copy_into(content: &[u8], buf_ptr: *mut u8, buf_cap: u64) -> i64 {
 fn state_char(state: ProcState) -> u8 {
     match state {
         ProcState::Ready | ProcState::Running => b'R',
+        ProcState::Blocked(BlockReason::WaitingForDisk | BlockReason::WaitingForFsLock) => b'D',
         ProcState::Blocked(_) => b'S',
         ProcState::Zombie(_) => b'Z',
         ProcState::Stopped(_) => b'T',
@@ -169,6 +170,9 @@ pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_ca
     out.extend_from_slice(b"State:\t");
     out.extend_from_slice(match proc.state {
         ProcState::Ready | ProcState::Running => b"R (running)".as_slice(),
+        ProcState::Blocked(BlockReason::WaitingForDisk | BlockReason::WaitingForFsLock) => {
+            b"D (disk sleep)".as_slice()
+        }
         ProcState::Blocked(_) => b"S (sleeping)".as_slice(),
         ProcState::Zombie(_) => b"Z (zombie)".as_slice(),
         ProcState::Stopped(_) => b"T (stopped)".as_slice(),

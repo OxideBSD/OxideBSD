@@ -1047,7 +1047,10 @@ pub(crate) extern "C" fn oxidebsd_register_kernel_open(f: KernOpenFn) {
 
 fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
     let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
-    let fd = open(path.as_ptr() as u64, path.len() as u64, 0);
+    let fd = {
+        let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
+        open(path.as_ptr() as u64, path.len() as u64, 0)
+    };
     if fd < 0 {
         return Err(-fd as u64);
     }
@@ -1889,6 +1892,14 @@ pub(crate) fn terminate_thread_group(target_pid: Pid, code: i32) {
             None => return,
         }
     };
+    // Terminating another process closes its files, which enters the filesystem: not while that
+    // would wait (from an interrupt handler it can't) or land inside an operation asleep partway
+    // through. Carried out when the filesystem lock is released (`fs::fslock`). A process ending
+    // itself just waits for the lock like any other caller.
+    if tgid != scheduler::current_tgid() && crate::fs::fslock::busy() {
+        crate::fs::fslock::defer_termination(target_pid, code);
+        return;
+    }
     let siblings: Vec<Pid> = {
         let table = PROCESS_TABLE.lock();
         table

@@ -619,7 +619,10 @@ fn node_call(create: bool, path: &[u8]) -> Result<u64, i64> {
         return Err(ENAMETOOLONG as i64);
     }
     let f = if create { c } else { l };
-    let r = f(path.as_ptr() as u64, path.len() as u64);
+    let r = {
+        let _lock = crate::fs::fslock::Guard::for_call(f as usize as u64);
+        f(path.as_ptr() as u64, path.len() as u64)
+    };
     if r < 0 { Err(-r) } else { Ok(r as u64) }
 }
 

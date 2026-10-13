@@ -644,6 +644,28 @@ pub(crate) fn phys_mem_offset() -> Option<VirtAddr> {
     crate::memory::try_phys_mem_offset()
 }
 
+/// The code range of the module whose calls are serialized by the filesystem lock
+/// (`fs::fslock`): set by `oxidebsd_module_serialize`. One such module (oxfs) for now.
+static SERIALIZED_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SERIALIZED_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Kernel API exposed to modules: called from a module's `module_init`, makes every later call
+/// into that module take the filesystem lock (`fs::fslock`) -- for a module whose state assumes
+/// one system call at a time while its own calls can sleep (oxfs, waiting for the disk).
+pub(crate) extern "C" fn oxidebsd_module_serialize() {
+    use core::sync::atomic::Ordering;
+    if let Some(m) = LOADED_MODULES.lock().last() {
+        SERIALIZED_BASE.store(m.base, Ordering::Release);
+        SERIALIZED_END.store(m.base + m.size, Ordering::Release);
+    }
+}
+
+/// Whether `function` (an address about to be called) is in the serialized module.
+pub(crate) fn is_serialized(function: u64) -> bool {
+    use core::sync::atomic::Ordering;
+    function >= SERIALIZED_BASE.load(Ordering::Acquire) && function < SERIALIZED_END.load(Ordering::Acquire)
+}
+
 /// Hooks modules registered to run before an orderly reboot, halt or power-off
 /// (`oxidebsd_register_shutdown_hook`): oxfs writes its delayed blocks and marks itself clean.
 static SHUTDOWN_HOOKS: Mutex<Vec<extern "C" fn()>> = Mutex::new(Vec::new());
@@ -658,6 +680,7 @@ pub(crate) extern "C" fn oxidebsd_register_shutdown_hook(hook: extern "C" fn()) 
 pub(crate) fn run_shutdown_hooks() {
     let hooks = SHUTDOWN_HOOKS.lock().clone();
     for hook in hooks.iter().rev() {
+        let _lock = crate::fs::fslock::Guard::for_call(*hook as usize as u64);
         hook();
     }
 }
@@ -1249,6 +1272,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::drivers::disk::oxidebsd_block_device_blocks as *const () as u64)
         }
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
+        "oxidebsd_module_serialize" => Some(oxidebsd_module_serialize as *const () as u64),
         "oxidebsd_register_shutdown_hook" => {
             Some(oxidebsd_register_shutdown_hook as *const () as u64)
         }

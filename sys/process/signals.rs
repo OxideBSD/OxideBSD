@@ -584,6 +584,19 @@ pub(crate) const RT_QUEUE_CAP: usize = 16;
 /// this to its caller; `do_kill`/`signal_foreground_group` (whose own `kill(2)`/broadcast callers
 /// have no path to observe a failure here, and for whom the pending bit is already set regardless)
 /// just drop the excess instance.
+/// Leaves `sig` pending on `pid`, from the kernel (no sending process), waking it if it waits
+/// for a signal. For a termination the filesystem lock deferred onto the process holding it
+/// (`fs::fslock`): delivered as that process returns from its system call.
+pub(crate) fn post_signal(pid: Pid, sig: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        let _ = record_pending(proc, sig, SI_USER, 0, 0, 0);
+        wake_if_paused(pid, proc, sig);
+        wake_if_sigwaiting(pid, proc, sig);
+        wake_if_sleeping(pid, proc, sig);
+    }
+}
+
 fn record_pending(
     proc: &mut Process,
     sig: u64,

@@ -9,6 +9,7 @@
 
 pub mod devfs;
 pub mod fd;
+pub mod fslock;
 pub mod mqueue;
 pub mod pipe;
 pub mod sysv_ipc;

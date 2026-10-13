@@ -513,7 +513,10 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
             }
             process::table().lock().get_mut(&caller).unwrap().state =
                 ProcState::Blocked(BlockReason::Polling(u64::MAX));
+            // Opened through the filesystem, which holds its lock: the other end's open needs it.
+            let held = crate::fs::fslock::release_for_sleep();
             scheduler::schedule();
+            crate::fs::fslock::reacquire(held);
         }
         FIFO_OPENING.lock().remove(&caller);
     }

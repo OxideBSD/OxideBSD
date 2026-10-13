@@ -101,7 +101,10 @@ pub(crate) extern "C" fn oxidebsd_dev_open(major: u64, minor: u64, flags: u64) -
         .find(|d| (d.major as u64, d.minor as u64) == (major, minor))
         .map(|d| d.open);
     match open {
-        Some(open) => open(major, minor, flags),
+        Some(open) => {
+            let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
+            open(major, minor, flags)
+        }
         None => -(crate::syscall::ENXIO as i64),
     }
 }

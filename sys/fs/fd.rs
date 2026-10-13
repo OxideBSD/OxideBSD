@@ -261,6 +261,7 @@ pub(crate) fn release(real_fd: u64) {
         descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
         NONBLOCKING.lock().remove(&real_fd);
+        let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
         close(real_fd);
     }
 }
@@ -593,6 +594,7 @@ fn close_one(pid: u64, fd: u64) -> bool {
         descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
         NONBLOCKING.lock().remove(&real_fd);
+        let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
         close(real_fd);
     } else {
         drop(descriptions);
@@ -710,7 +712,10 @@ fn transfer(op: FdReadWrite, positioned: bool, real_fd: u64, uio: &mut Uio, flag
     if len == 0 {
         return 0;
     }
-    let r = op(real_fd, uio, flags);
+    let r = {
+        let _lock = crate::fs::fslock::Guard::for_call(op as usize as u64);
+        op(real_fd, uio, flags)
+    };
     let moved = len - uio.resid();
     if r < 0 && moved > 0 && [EINTR, ERESTART, EAGAIN].contains(&(-r as u64)) {
         moved as i64
@@ -740,6 +745,7 @@ pub(crate) fn real_fd_of(fd: u64) -> Option<u64> {
 /// cross-open shared-frame cache. `None` covers both "no such fd" and "not identifiable right now."
 pub(crate) fn content_id_of(fd: u64) -> Option<u64> {
     let (real_fd, ops) = lookup(fd)?;
+    let _lock = crate::fs::fslock::Guard::for_call(ops.content_id as usize as u64);
     let id = (ops.content_id)(real_fd);
     if id < 0 { None } else { Some(id as u64) }
 }
@@ -752,6 +758,7 @@ pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
     let Some((real_fd, ops)) = lookup(fd) else {
         return (true, true);
     };
+    let _lock = crate::fs::fslock::Guard::for_call(ops.access_mode as usize as u64);
     let bits = (ops.access_mode)(real_fd);
     (bits & 0b01 != 0, bits & 0b10 != 0)
 }
@@ -764,6 +771,7 @@ pub(crate) fn is_append_of(fd: u64) -> bool {
     let Some((real_fd, ops)) = lookup(fd) else {
         return false;
     };
+    let _lock = crate::fs::fslock::Guard::for_call(ops.is_append as usize as u64);
     (ops.is_append)(real_fd) != 0
 }
 
@@ -782,6 +790,7 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
         pitch: 0,
         bpp: 0,
     };
+    let _lock = crate::fs::fslock::Guard::for_call(ops.fb_geometry as usize as u64);
     let ok = (ops.fb_geometry)(
         real_fd,
         &mut geom as *mut crate::drivers::fbdev::FbGeometry as u64,
@@ -832,6 +841,7 @@ pub(crate) extern "C" fn oxidebsd_register_content_accessors(
 pub(crate) fn exec_setid(fd: u64) -> Option<((u32, u32, u32), bool)> {
     let real_fd = real_fd_of(fd)?;
     let setid = (*CONTENT_ACCESSORS.lock())?.4;
+    let _lock = crate::fs::fslock::Guard::for_call(setid as usize as u64);
     let mut out = [0u32; 4];
     (setid(real_fd, out.as_mut_ptr()) == 0).then_some(((out[0], out[1], out[2]), out[3] != 0))
 }
@@ -840,8 +850,13 @@ pub(crate) fn exec_setid(fd: u64) -> Option<((u32, u32, u32), bool)> {
 /// accessors (never happens once `sys/modules/oxfs` has loaded, which it always has by the time any
 /// real syscall is reachable).
 pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> i64 {
-    match *CONTENT_ACCESSORS.lock() {
-        Some((read, ..)) => read(content_id, offset, ptr, len),
+    // Copied out before the call: the call can sleep, and the table's lock mustn't be held then.
+    let accessors = *CONTENT_ACCESSORS.lock();
+    match accessors {
+        Some((read, ..)) => {
+            let _lock = crate::fs::fslock::Guard::for_call(read as usize as u64);
+            read(content_id, offset, ptr, len)
+        }
         None => -1,
     }
 }
@@ -850,16 +865,24 @@ pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> 
 /// exactly `len` bytes, matching `sys/modules/oxfs`'s own one-shot write model (see that module's
 /// `OpenFile::Write` doc comment).
 pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
-    match *CONTENT_ACCESSORS.lock() {
-        Some((_, write, ..)) => write(content_id, ptr, len),
+    let accessors = *CONTENT_ACCESSORS.lock();
+    match accessors {
+        Some((_, write, ..)) => {
+            let _lock = crate::fs::fslock::Guard::for_call(write as usize as u64);
+            write(content_id, ptr, len)
+        }
         None => -1,
     }
 }
 
 /// Real current content length of `content_id`, in bytes.
 pub(crate) fn content_size(content_id: u64) -> i64 {
-    match *CONTENT_ACCESSORS.lock() {
-        Some((_, _, size, ..)) => size(content_id),
+    let accessors = *CONTENT_ACCESSORS.lock();
+    match accessors {
+        Some((_, _, size, ..)) => {
+            let _lock = crate::fs::fslock::Guard::for_call(size as usize as u64);
+            size(content_id)
+        }
         None => -1,
     }
 }
@@ -868,8 +891,12 @@ pub(crate) fn content_size(content_id: u64) -> i64 {
 /// object's size, where a regular file may be mapped past its end (`crate::process::mm::
 /// do_mmap_file_backed`).
 pub(crate) fn content_is_shm(content_id: u64) -> bool {
-    match *CONTENT_ACCESSORS.lock() {
-        Some((_, _, _, is_shm, _)) => is_shm(content_id) != 0,
+    let accessors = *CONTENT_ACCESSORS.lock();
+    match accessors {
+        Some((_, _, _, is_shm, _)) => {
+            let _lock = crate::fs::fslock::Guard::for_call(is_shm as usize as u64);
+            is_shm(content_id) != 0
+        }
         None => false,
     }
 }

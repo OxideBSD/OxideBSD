@@ -50,7 +50,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::cpu::gdt;
 use crate::process::context_switch::switch_context;
-use crate::process::{self, Pid, ProcState};
+use crate::process::{self, BlockReason, Pid, ProcState};
 use crate::serial_println;
 
 /// `0` is never a valid `Pid` (`process::alloc_pid` starts at 1) — used as "no current process,"
@@ -241,6 +241,9 @@ fn reap_pending_threads() {
 /// switches to it; falls back to `wait_for_ready`'s real idle wait only if nothing is runnable at
 /// all. Returns once this exact call site is switched back into — for a caller that just blocked,
 /// that means "a later event woke it back to `Ready` and the scheduler picked it again."
+/// How many sleeps under the filesystem lock `schedule` has reported (it stops at 8).
+static FSLOCK_SLEEP_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 pub fn schedule() {
     without_interrupts(|| {
         reap_pending_threads();
@@ -253,6 +256,21 @@ pub fn schedule() {
             let prev = table
                 .get_mut(&prev_pid)
                 .expect("schedule: current process missing from table");
+            // A process asleep inside the filesystem for anything but the disk holds up every
+            // other process's file access (`fs::fslock`); a sleep that waits on another process
+            // there must release the lock first (`fslock::release_for_sleep`). Reported, the
+            // first few times, so such a path shows up in a test log.
+            if let ProcState::Blocked(reason) = prev.state
+                && !matches!(reason, BlockReason::WaitingForDisk | BlockReason::WaitingForFsLock)
+                && crate::fs::fslock::held_by_current()
+                && FSLOCK_SLEEP_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
+            {
+                crate::serial_println!(
+                    "[fslock] pid {} sleeping ({:?}) while holding the filesystem lock",
+                    prev_pid,
+                    reason
+                );
+            }
             if matches!(prev.state, ProcState::Ready | ProcState::Running) {
                 // Real invariant this codebase's own cross-process `Action::Stop` handling
                 // (`process::signals`) depends on: "every pid sitting in `READY_QUEUE` has

@@ -125,6 +125,12 @@ pub enum ProcState {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockReason {
+    /// Waiting for the filesystem lock (`fs::fslock`) another process holds. Uninterruptible:
+    /// nothing but the lock's release wakes it.
+    WaitingForFsLock,
+    /// Waiting for a disk transfer to finish (`drivers::dma::wait_until`). Uninterruptible; woken
+    /// by the disk's completion interrupt, and by every timer tick in case one is lost.
+    WaitingForDisk,
     /// `None` = waiting for any child (`wait4(-1, ...)`); `Some(pid)` = waiting for one specific
     /// child.
     WaitingForChild(Option<Pid>),

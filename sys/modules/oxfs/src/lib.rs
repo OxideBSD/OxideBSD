@@ -249,6 +249,8 @@ unsafe extern "C" {
     fn oxidebsd_physmem_bytes() -> u64;
     /// The data disk's size in 4 KiB blocks.
     fn oxidebsd_block_device_blocks() -> u64;
+    /// Makes every call into this module take the kernel's filesystem lock.
+    fn oxidebsd_module_serialize();
     /// `hook` runs before an orderly reboot, halt or power-off (`reboot(2)`).
     fn oxidebsd_register_shutdown_hook(hook: extern "C" fn());
 }
@@ -9643,6 +9645,10 @@ fn format_fresh_filesystem() -> bool {
 /// actually use.
 #[unsafe(no_mangle)]
 pub extern "C" fn module_init() -> i32 {
+    // One system call at a time inside oxfs, even once a call sleeps for the disk: every call into
+    // this module takes the kernel's filesystem lock (`OxideBSD-doc/RAM_FLOOR.md` §3.5.2).
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    unsafe { oxidebsd_module_serialize() };
     if !init_pools() {
         return -1;
     }
