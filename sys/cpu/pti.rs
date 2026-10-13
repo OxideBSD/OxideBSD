@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB,
     Translate,
 };
 
@@ -76,6 +76,80 @@ pub fn decide() {
 /// Whether KPTI is on. Only meaningful after `decide`.
 pub fn enabled() -> bool {
     STATE.load(Ordering::Relaxed) == ON
+}
+
+/// Whether PCID tagging is active (`try_enable_pcid`), to keep the kernel TLB across syscalls.
+static PCID_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The two PCIDs. The kernel table runs on 1 and is kept across a syscall (the entry switch sets
+/// CR3's no-flush bit); the user table runs on 2 and is flushed on every return to ring 3, so a
+/// stale user translation can never outlive a kernel excursion that changed a mapping -- which is
+/// why none of the scattered `.flush()` sites need PCID awareness.
+const PCID_KERNEL: u64 = 1;
+const PCID_USER: u64 = 2;
+/// CR3 bit 63: set means "don't flush this PCID's TLB entries on the load" (Intel SDM, `MOV CR3`).
+const CR3_NO_FLUSH: u64 = 1 << 63;
+
+/// Whether the CPU has PCID (CPUID.1:ECX[17]).
+fn pcid_supported() -> bool {
+    // SAFETY: leaf 1 is always available.
+    unsafe { core::arch::x86_64::__cpuid(1).ecx & (1 << 17) != 0 }
+}
+
+/// Turns on PCID tagging, if KPTI is on and the CPU supports it. Must run while CR3 still holds
+/// PCID 0 (the boot table), before the first `activate`, or enabling CR4.PCIDE faults.
+pub fn try_enable_pcid() {
+    if !enabled() {
+        return;
+    }
+    if !pcid_supported() {
+        crate::serial_println!("[pti] no PCID: each CR3 switch flushes the whole TLB");
+        return;
+    }
+    // SAFETY: long mode with PAE, and CR3's low 12 bits are 0 here (the page-aligned boot table),
+    // so setting PCIDE doesn't fault.
+    unsafe {
+        use x86_64::registers::control::{Cr4, Cr4Flags};
+        Cr4::update(|f| f.insert(Cr4Flags::PCID));
+    }
+    PCID_ACTIVE.store(true, Ordering::Relaxed);
+    crate::serial_println!(
+        "[pti] PCID on: the kernel TLB (PCID 1) survives a syscall; the user TLB (PCID 2) is flushed on return"
+    );
+}
+
+/// Whether PCID tagging is active.
+pub fn pcid_active() -> bool {
+    PCID_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// The CR3 value the entry asm loads to reach the kernel table: PCID 1, kept (no flush). Without
+/// PCID it is just the frame, and the switch flushes everything.
+pub fn kernel_cr3(kernel_frame_phys: u64) -> u64 {
+    if pcid_active() {
+        kernel_frame_phys | PCID_KERNEL | CR3_NO_FLUSH
+    } else {
+        kernel_frame_phys
+    }
+}
+
+/// The CR3 value the exit asm loads to reach the user table: PCID 2, flushed (no no-flush bit).
+pub fn user_cr3(user_frame_phys: u64) -> u64 {
+    if pcid_active() {
+        user_frame_phys | PCID_USER
+    } else {
+        user_frame_phys
+    }
+}
+
+/// The CR3 value `activate` loads at a context switch: PCID 1, flushed, since the incoming
+/// process's kernel table maps a different user half than whatever PCID 1 last held.
+pub fn activate_cr3(kernel_frame_phys: u64) -> u64 {
+    if pcid_active() {
+        kernel_frame_phys | PCID_KERNEL
+    } else {
+        kernel_frame_phys
+    }
 }
 
 /// Whether this CPU is affected by Meltdown: `GenuineIntel` that doesn't advertise `RDCL_NO`.

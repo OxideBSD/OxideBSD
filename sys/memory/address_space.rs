@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use x86_64::{PhysAddr, VirtAddr};
-use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame,
@@ -338,16 +338,25 @@ impl AddressSpace {
     /// construction for a freshly-`new`'d one, but code that later removes kernel entries from a
     /// process's address space must not activate it from a context that depends on what it removed.
     pub unsafe fn activate(&self) {
-        unsafe { Cr3::write(*self.level_4_frame, Cr3Flags::empty()) };
-        // Record both CR3 values for the entry asm: the kernel table (loaded now, in ring 0) and
-        // the user table the exit path loads before returning to ring 3. With no user table they
-        // are equal, and the asm skips the switch via `PTI_ON`.
-        let kernel_cr3 = self.level_4_frame.start_address().as_u64();
-        let user_cr3 = match &self.user_level_4_frame {
+        let kphys = self.level_4_frame.start_address().as_u64();
+        let uphys = match &self.user_level_4_frame {
             Some(f) => f.start_address().as_u64(),
-            None => kernel_cr3,
+            None => kphys,
         };
-        crate::cpu::entry::set_active_cr3(kernel_cr3, user_cr3);
+        // Load the kernel table now (ring 0). With PCID this carries PCID 1 and flushes it (the
+        // incoming process's kernel table maps a different user half than PCID 1 last held).
+        let cr3 = crate::cpu::pti::activate_cr3(kphys);
+        // SAFETY: `cr3` is a page-aligned table frame plus, with PCID on, a PCID in its low bits;
+        // switching the active address space is this method's purpose. Raw `mov cr3` rather than
+        // `Cr3::write` so the PCID and no-flush bits are exactly what `cpu::pti` chose.
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
+        // Record both CR3 values for the entry/exit asm: the kernel table (PCID 1, kept across a
+        // syscall) on entry, the user table (PCID 2, flushed) on the way back to ring 3. With no
+        // user table they are equal and the asm skips the switch via `PTI_ON`.
+        crate::cpu::entry::set_active_cr3(
+            crate::cpu::pti::kernel_cr3(kphys),
+            crate::cpu::pti::user_cr3(uphys),
+        );
     }
 
     /// Real reclaim: frees every frame this address space privately owns -- every

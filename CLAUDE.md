@@ -229,8 +229,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `pti=`/`kpti=`/`meltdown=` on|off override, `vm.pmap.pti`/`machdep.kpti`/`hw.meltdown` report it.
   Each `AddressSpace` gets a second (user) L4 mapping only the entry area plus its user half
   (mirrored lazily on fault, `mirror_user_l4`); the trap/syscall entry+exit asm switches CR3 when
-  `PTI_ON`. NMI/#DF/#MC use `trap_common_paranoid` (save/restore CR3). No PCID yet: each switch
-  flushes the whole TLB (~3x the getpid cost here).
+  `PTI_ON`. NMI/#DF/#MC use `trap_common_paranoid` (save/restore CR3). With PCID (CPUID.1:ECX[17])
+  the kernel table runs on PCID 1 kept across a syscall (entry sets CR3's no-flush bit) and the
+  user table on PCID 2 flushed on every ring-3 return -- so no `.flush()` site needs PCID
+  awareness; without PCID each switch flushes the whole TLB (fallback).
 - Wire structs duplicated in `regress/*` crates (siginfo, ucontext, ...) must be updated together
   with the kernel copy.
 

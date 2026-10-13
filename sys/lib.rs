@@ -104,6 +104,8 @@ pub fn init(
         cpu::pti::build_entry_template(&mapper, phys_mem_offset, &mut frame_allocator)
             .expect("KPTI: building the entry template ran out of frames");
         cpu::pti::audit_entry_template(phys_mem_offset);
+        // Enable PCID while CR3 still holds the boot table (PCID 0), before the first `activate`.
+        cpu::pti::try_enable_pcid();
         cpu::entry::enable_switch();
     }
 
