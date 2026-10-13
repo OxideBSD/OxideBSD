@@ -250,21 +250,40 @@ impl Cache {
         }
     }
 
-    /// Writes dirty buffer `i` (with its dependencies first), together with any dirty buffers
-    /// right after it that need nothing written first, in one command.
+    /// Whether dirty buffer `j` can share a write command with others: only a block nothing has
+    /// to precede. Blocks within one command can reach the disk in any order, so an inode-file
+    /// or index block always gets a command of its own (after its dependencies).
+    fn joins_runs(&mut self, j: u32) -> bool {
+        self.header(j).dirty && matches!(self.header(j).kind, Kind::Meta | Kind::Data(_))
+    }
+
+    /// Writes dirty buffer `i` (with its dependencies first). A data or metadata block goes out
+    /// with the contiguous dirty data and metadata blocks around it, up to `STAGE_BLOCKS` in one
+    /// command: flushes walk the dirty list newest first, so a file's run is usually met at its
+    /// end, and has to be extended backward as well as forward.
     fn write_buffer(&mut self, i: u32) {
         let kind = self.header(i).kind;
         self.write_dependencies(kind);
         if !self.header(i).dirty {
             return;
         }
-        let start = self.header(i).block;
-        let first = *self.buffer(i);
+        let mut start = self.header(i).block;
+        if self.joins_runs(i) {
+            while start > 0
+                && (self.header(i).block - (start - 1)) < STAGE_BLOCKS as u32
+                && self.lookup(start - 1).is_some_and(|j| self.joins_runs(j))
+            {
+                start -= 1;
+            }
+        }
+        let first_index = self.lookup(start).unwrap_or(i);
+        let first = *self.buffer(first_index);
         self.stage[0] = first;
         let mut run = 1;
-        while run < STAGE_BLOCKS {
+        let joins = self.joins_runs(i);
+        while joins && run < STAGE_BLOCKS {
             match start.checked_add(run as u32).and_then(|b| self.lookup(b)) {
-                Some(j) if self.header(j).dirty && matches!(self.header(j).kind, Kind::Meta | Kind::Data(_)) => {
+                Some(j) if self.joins_runs(j) => {
                     let data = *self.buffer(j);
                     self.stage[run] = data;
                     run += 1;
