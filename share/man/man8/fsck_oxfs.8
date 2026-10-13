@@ -1,0 +1,79 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt FSCK_OXFS 8
+.Os OxideBSD
+.Sh NAME
+.Nm fsck_oxfs
+.Nd check and repair an oxfs file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl fnpy
+.Ar device
+.Sh DESCRIPTION
+.Nm
+checks the oxfs file system on
+.Ar device ,
+a raw disk partition such as
+.Pa /dev/gpt/rootfs ,
+and repairs it.
+The file system must not be mounted read-write: the kernel refuses to let its
+raw device be written then.
+.Pp
+oxfs writes a file's data and size later than its names and its allocation
+.Pq Xr update 8 ,
+in an order that leaves the file system consistent after a crash except for a
+few things:
+blocks marked in use that no file holds, files with no name left, and link
+counts off by a rename or removal that didn't finish.
+.Nm
+finds and repairs these in five phases:
+.Bl -enum -compact
+.It
+every inode's blocks are checked against the size of the file system and
+against each other;
+.It
+the directory tree is walked from the root, checking every name;
+.It
+inodes with no name are found and freed;
+.It
+link counts are compared with the names found;
+.It
+the block bitmap is rebuilt from the blocks the remaining files hold.
+.El
+Then the file system is marked clean.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl f
+Check the file system even if it is marked clean.
+.It Fl n
+Open the device read-only and report, repairing nothing.
+This is also what happens with none of
+.Fl n ,
+.Fl p
+and
+.Fl y .
+.It Fl p
+Preen: skip a clean file system, repair what a crash leaves without asking,
+and stop with exit status 8, having written nothing, at anything else.
+.Xr rc 8
+runs this at boot, through
+.Xr fsck 8 .
+.It Fl y
+Repair everything: also clear inodes holding blocks that are out of range or
+held twice, and remove names of free inodes.
+.El
+.Sh EXIT STATUS
+0 when the file system is clean or was repaired; 8 when it needs a manual
+check
+.Pq Fl p
+or still has problems
+.Pq Fl n .
+.Sh SEE ALSO
+.Xr fsck 8 ,
+.Xr mount 8 ,
+.Xr update 8
+.Sh BUGS
+There is no
+.Pa lost+found :
+files and directories that lost their names are freed, not reconnected.

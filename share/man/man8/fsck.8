@@ -1,0 +1,47 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt FSCK 8
+.Os OxideBSD
+.Sh NAME
+.Nm fsck
+.Nd check and repair file systems
+.Sh SYNOPSIS
+.Nm
+.Op Fl fnpy
+.Op Fl t Ar type
+.Op Ar special | node ...
+.Sh DESCRIPTION
+.Nm
+checks file systems by running each type's own checker,
+.Pa /sbin/fsck_ Ns Ar type
+.Pq Xr fsck_oxfs 8 .
+With no file systems named, it checks every entry of
+.Xr fstab 5
+with a nonzero pass number, lowest pass first.
+A file system named is looked up in
+.Xr fstab 5
+by device or mount point; one not there is taken to be of the
+.Fl t
+type, oxfs by default.
+.Pp
+The options
+.Fl f ,
+.Fl n ,
+.Fl p
+and
+.Fl y
+are passed to the checkers; see
+.Xr fsck_oxfs 8 .
+.Pp
+.Xr rc 8
+runs
+.Nm Fl p
+at boot, while the root file system is still mounted read-only.
+.Sh EXIT STATUS
+The worst status any checker returned: 0 when every file system is clean or
+was repaired, 8 when one needs checking by hand.
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr fsck_oxfs 8 ,
+.Xr mount 8 ,
+.Xr rc 8

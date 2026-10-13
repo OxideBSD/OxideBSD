@@ -1,0 +1,43 @@
+#!/sbin/init_sh
+#
+# PROVIDE: fsck
+# BEFORE: root
+#
+# Checks the file systems /etc/fstab gives a pass number, the root among them, while the root is
+# still read-only (fsck(8), OxideBSD-doc RAM_FLOOR.md §3.4.3). A file system the last shutdown
+# left clean is skipped; preening repairs what a crash leaves; anything worse stops the boot in
+# single-user mode for a manual fsck.
+
+. /etc/rc.subr
+
+name="fsck"
+desc="Check the file systems"
+start_cmd="fsck_start"
+stop_cmd=":"
+
+fsck_start()
+{
+	# Only a root the kernel mounted read-only is checked: one already read-write (a memory
+	# disk, a test kernel) can't be, and has nothing to check.
+	case "$(mount)" in
+	*" on / ("*"read-only)"*)
+		;;
+	*)
+		return 0
+		;;
+	esac
+	fsck -p
+	case $? in
+	0)
+		;;
+	*)
+		echo "Automatic file system check failed; run fsck -y manually."
+		echo "Stopping the boot: single-user mode."
+		kill -TERM 1
+		exit 1
+		;;
+	esac
+}
+
+load_rc_config $name
+run_rc_command "$1"

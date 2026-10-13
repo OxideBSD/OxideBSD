@@ -1,6 +1,7 @@
 #!/sbin/init_sh
 #
 # PROVIDE: root
+# REQUIRE: fsck
 # BEFORE: mountcritlocal
 #
 # Mounts the root file system read-write: the kernel mounts it read-only (OxideBSD-doc

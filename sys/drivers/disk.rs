@@ -339,9 +339,10 @@ pub fn set_root_readonly_at_boot() {
     ROOT_READONLY_AT_BOOT.store(true, Ordering::Relaxed);
 }
 
-/// For oxfs: `1` when it should mount the root read-only at boot.
+/// For oxfs: `1` when it should mount the root read-only at boot. Never for the memory disk:
+/// formatted moments ago, it has nothing to check, and no raw device to check it through.
 pub extern "C" fn oxidebsd_root_readonly_at_boot() -> u64 {
-    ROOT_READONLY_AT_BOOT.load(Ordering::Relaxed) as u64
+    (ROOT_READONLY_AT_BOOT.load(Ordering::Relaxed) && backend() != MEMORY) as u64
 }
 
 /// For oxfs: it has its partition mounted read-write (`rw != 0`) or read-only.
