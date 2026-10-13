@@ -537,6 +537,7 @@ fn secondary_irq_handler() {
         bm_clear_status(base);
         DMA_IRQ_SEEN.store(true, Ordering::Release);
         DMA_IRQS.fetch_add(1, Ordering::Relaxed);
+        crate::drivers::dma::wake_disk_waiters(&mut crate::process::table().lock());
     }
 }
 
@@ -647,7 +648,7 @@ fn dma_transfer(lba: u32, sector_count: u8, dir: Direction) -> Result<(), AtaErr
     // Done once the drive raised its interrupt: seen by the IRQ handler, or still set in the
     // bus-master status when interrupts are masked.
     let base = bm.base;
-    let finished = crate::drivers::dma::wait_until(TIMEOUT_MS, || {
+    let finished = crate::drivers::dma::wait_for_disk(TIMEOUT_MS, || {
         DMA_IRQ_SEEN.load(Ordering::Acquire) || bm_read_status(base) & (BM_STATUS_INTERRUPT | BM_STATUS_ERROR) != 0
     });
     let bm_status = bm_read_status(base);

@@ -69,6 +69,7 @@ fn irq_handler() {
     // SAFETY: the mapped ISR register.
     if unsafe { (isr as *const u8).read_volatile() } & 1 != 0 {
         IRQS.fetch_add(1, Ordering::Relaxed);
+        super::dma::wake_disk_waiters(&mut crate::process::table().lock());
     }
 }
 
@@ -154,7 +155,7 @@ impl Disk {
         }
         REQUESTS.fetch_add(1, Ordering::Relaxed);
         let queue = &mut self.queue;
-        if !super::dma::wait_until(TIMEOUT_MS, || queue.take_used()) {
+        if !super::dma::wait_for_disk(TIMEOUT_MS, || queue.take_used()) {
             serial_println!("[virtio-blk] request {} at sector {} timed out", kind, sector);
             return false;
         }

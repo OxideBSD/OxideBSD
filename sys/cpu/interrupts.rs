@@ -404,6 +404,8 @@ fn timer_interrupt_handler(frame: &mut TrapFrame) {
         crate::kern::kern_synch::tick(&table, now);
         // Terminal reads whose VTIME ran out.
         crate::tty::expire_timers(&mut table, now);
+        // Disk waits re-check every tick, in case a completion interrupt was lost.
+        crate::drivers::dma::wake_disk_waiters(&mut table);
         for (&pid, proc) in table.iter_mut() {
             if let crate::process::ProcState::Blocked(
                 crate::process::BlockReason::Sleeping(deadline)

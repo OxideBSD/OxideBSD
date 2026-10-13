@@ -73,6 +73,57 @@ impl DmaBuffer {
     }
 }
 
+/// `wait_until` for a disk transfer (`OxideBSD-doc/RAM_FLOOR.md` §3.5.1). In a process (a system
+/// call, with interrupts masked), the process sleeps through the scheduler instead of spinning,
+/// so others run while the disk works -- when called under the filesystem lock from a caller
+/// holding no spin lock (`fs::fslock::may_sleep`); otherwise, and with no process (boot), it's
+/// `wait_until`. Marked `WaitingForDisk` only after `done()` was checked with interrupts still
+/// masked, so the completion interrupt can't slip in between and be lost.
+/// The disk's interrupt handler wakes it (`wake_disk_waiters`), and so does every timer tick, in
+/// case an interrupt is lost; each wake re-checks. Uninterruptible: signals don't wake it.
+pub fn wait_for_disk(timeout_ms: u64, mut done: impl FnMut() -> bool) -> bool {
+    use crate::process::{self, BlockReason, ProcState, scheduler};
+    let pid = scheduler::current_pid();
+    if pid == 0 || !crate::fs::fslock::may_sleep() {
+        return wait_until(timeout_ms, done);
+    }
+    let deadline = tsc::now() + tsc::ms_to_cycles(timeout_ms);
+    loop {
+        let finished = interrupts::without_interrupts(|| {
+            if done() {
+                return true;
+            }
+            if let Some(p) = process::table().lock().get_mut(&pid) {
+                p.state = ProcState::Blocked(BlockReason::WaitingForDisk);
+            }
+            false
+        });
+        if finished {
+            return true;
+        }
+        // Asleep inside the filesystem, holding its lock: what `fslock::busy` reports, so an
+        // interrupt handler doesn't run filesystem code on top of the half-done operation.
+        crate::fs::fslock::set_owner_asleep(true);
+        scheduler::schedule();
+        crate::fs::fslock::set_owner_asleep(false);
+        if tsc::now() >= deadline {
+            return done();
+        }
+    }
+}
+
+/// Wakes every process waiting for a disk transfer (`wait_for_disk`); each re-checks its own.
+/// Called from the disks' interrupt handlers and the timer's.
+pub fn wake_disk_waiters(table: &mut alloc::collections::BTreeMap<crate::process::Pid, alloc::boxed::Box<crate::process::Process>>) {
+    use crate::process::{BlockReason, ProcState, scheduler};
+    for (&pid, p) in table.iter_mut() {
+        if p.state == ProcState::Blocked(BlockReason::WaitingForDisk) {
+            p.state = ProcState::Ready;
+            scheduler::enqueue_ready(pid);
+        }
+    }
+}
+
 /// Waits until `done()` holds, for up to `timeout_ms`: sleeping in `hlt` between checks when
 /// interrupts are enabled, spinning when they're masked (see the module doc). `false` on timeout.
 pub fn wait_until(timeout_ms: u64, mut done: impl FnMut() -> bool) -> bool {

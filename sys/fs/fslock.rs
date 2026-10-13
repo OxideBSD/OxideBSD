@@ -100,24 +100,55 @@ pub fn exit() {
 
 /// Holds the lock for its lifetime, if `function` (a module function about to be called) belongs
 /// to a serialized module; does nothing otherwise.
-pub struct Guard(bool);
+///
+/// Whether the call may sleep for the disk (`drivers::dma::wait_for_disk`) depends on where it's
+/// made from: only a caller that holds no spin lock of the kernel's can let the process sleep, or
+/// every other process would spin on that lock with interrupts masked. `for_call_sleepable` is
+/// for the two that hold none -- system call dispatch and descriptor reads and writes; every
+/// other call into the filesystem (mapping, exec's page cache, closing, queries) uses `for_call`,
+/// under which disk transfers poll.
+pub struct Guard {
+    locked: bool,
+    atomic: bool,
+}
 
 impl Guard {
     pub fn for_call(function: u64) -> Self {
         let locked = crate::module::is_serialized(function);
         if locked {
             enter();
+            NO_SLEEP.fetch_add(1, Ordering::AcqRel);
         }
-        Guard(locked)
+        Guard { locked, atomic: true }
+    }
+
+    pub fn for_call_sleepable(function: u64) -> Self {
+        let locked = crate::module::is_serialized(function);
+        if locked {
+            enter();
+        }
+        Guard { locked, atomic: false }
     }
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        if self.0 {
+        if self.locked {
+            if self.atomic {
+                NO_SLEEP.fetch_sub(1, Ordering::AcqRel);
+            }
             exit();
         }
     }
+}
+
+/// `for_call` guards in force: while any is, a disk transfer polls instead of sleeping.
+static NO_SLEEP: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a disk transfer may sleep now: the current process holds the lock, and nothing on
+/// the way here forbade it (`Guard`).
+pub fn may_sleep() -> bool {
+    held_by_current() && NO_SLEEP.load(Ordering::Acquire) == 0
 }
 
 /// Whether entering the filesystem now would have to wait, or would run inside an operation

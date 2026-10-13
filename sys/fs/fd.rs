@@ -713,7 +713,7 @@ fn transfer(op: FdReadWrite, positioned: bool, real_fd: u64, uio: &mut Uio, flag
         return 0;
     }
     let r = {
-        let _lock = crate::fs::fslock::Guard::for_call(op as usize as u64);
+        let _lock = crate::fs::fslock::Guard::for_call_sleepable(op as usize as u64);
         op(real_fd, uio, flags)
     };
     let moved = len - uio.resid();
