@@ -1,0 +1,63 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt UPDATE 8
+.Os OxideBSD
+.Sh NAME
+.Nm update
+.Nd periodically write delayed file system writes to the disk
+.Sh SYNOPSIS
+.Nm
+.Op Fl i Ar seconds
+.Sh DESCRIPTION
+The file system keeps a regular file's data, and the size, times and block
+pointers of its inode, in memory for a while after a
+.Xr write 2 ,
+writing them to the disk later and together.
+.Nm
+sets the longest that can be: it detaches into the background and calls
+.Xr sync 2
+every 30 seconds, so a crash loses at most about that much recent file content.
+The file system's structure (names, links, the allocation bitmap) is always
+written at once, and is never lost.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl i Ar seconds
+Synchronize every
+.Ar seconds
+seconds instead of 30.
+.El
+.Pp
+.Xr rc 8
+starts
+.Nm
+at boot when
+.Va update_enable
+is set in
+.Xr rc.conf 5 ,
+as it is by default.
+It records its process ID in
+.Pa /var/run/update.pid .
+Single-user mode doesn't start it: delayed writes then reach the disk at
+.Xr sync 8 ,
+when memory is needed, or at
+.Xr reboot 8 .
+.Sh FILES
+.Bl -tag -width /var/run/update.pid -compact
+.It Pa /var/run/update.pid
+The running daemon's process ID.
+.El
+.Sh SEE ALSO
+.Xr sync 2 ,
+.Xr rc.conf 5 ,
+.Xr rc 8 ,
+.Xr reboot 8 ,
+.Xr sync 8
+.Sh HISTORY
+An
+.Nm
+daemon ran on early
+.Ux
+systems;
+.Bx 4.4
+moved its job into the kernel's syncer process.

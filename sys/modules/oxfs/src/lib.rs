@@ -8151,6 +8151,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(bin, b"df", include_bytes!(env!("OXFS_DF_ELF_PATH")));
     ok &= seed_file(usr_bin, b"diff", include_bytes!(env!("OXFS_DIFF_ELF_PATH")));
     ok &= seed_file(sbin, b"dmesg", include_bytes!(env!("OXFS_SBIN_DMESG_ELF_PATH")));
+    ok &= seed_file(sbin, b"update", include_bytes!(env!("OXFS_UPDATE_ELF_PATH")));
     ok &= seed_file(usr_bin, b"du", include_bytes!(env!("OXFS_DU_ELF_PATH")));
     ok &= seed_file(bin, b"ed", include_bytes!(env!("OXFS_ED_ELF_PATH")));
     ok &= seed_file(bin, b"egrep", include_bytes!(env!("OXFS_EGREP_ELF_PATH")));
@@ -8422,6 +8423,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(rc_d, b"newsyslog", include_bytes!("../../../../etc/rc.d/newsyslog"));
     ok &= seed_file(rc_d, b"syslogd", include_bytes!("../../../../etc/rc.d/syslogd"));
     ok &= seed_file(rc_d, b"cron", include_bytes!("../../../../etc/rc.d/cron"));
+    ok &= seed_file(rc_d, b"update", include_bytes!("../../../../etc/rc.d/update"));
     ok &= seed_file(rc_d, b"mountcritlocal", include_bytes!("../../../../etc/rc.d/mountcritlocal"));
     ok &= seed_file(etc, b"sysctl.conf", include_bytes!("../../../../etc/sysctl.conf"));
     // System logging (SYSLOG.md): routing, rotation, and their drop-in directories.
@@ -8657,6 +8659,7 @@ fn format_fresh_filesystem() -> bool {
     let man_man8 = ensure_dir(usr_share_man, b"man8");
     ok &= seed_file(man_man8, b"emergency.8", include_bytes!("../../../../share/man/man8/emergency.8"));
     ok &= seed_file(man_man8, b"dmesg.8", include_bytes!("../../../../share/man/man8/dmesg.8"));
+    ok &= seed_file(man_man8, b"update.8", include_bytes!("../../../../share/man/man8/update.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
     ok &= seed_file(man_man8, b"init.8", include_bytes!("../../../../share/man/man8/init.8"));
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));

@@ -11,13 +11,16 @@
 .Nm
 writes everything the system holds in memory for its disks out to them, with
 .Xr sync 2 .
-It is rarely needed: the file system writes through, and
+The file system delays writing regular files' data;
+.Xr update 8
+synchronizes every 30 seconds, and
 .Xr reboot 8
-synchronizes before restarting.
+before restarting.
 Arguments are ignored.
 .Sh SEE ALSO
 .Xr sync 2 ,
-.Xr reboot 8
+.Xr reboot 8 ,
+.Xr update 8
 .Sh HISTORY
 A
 .Nm
