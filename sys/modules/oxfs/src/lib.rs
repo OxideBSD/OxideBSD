@@ -249,6 +249,8 @@ unsafe extern "C" {
     fn oxidebsd_physmem_bytes() -> u64;
     /// The data disk's size in 4 KiB blocks.
     fn oxidebsd_block_device_blocks() -> u64;
+    /// `hook` runs before an orderly reboot, halt or power-off (`reboot(2)`).
+    fn oxidebsd_register_shutdown_hook(hook: extern "C" fn());
 }
 
 /// Changes whenever a file this module embeds changes (`build.rs`'s `build_module_crate`); reading
@@ -325,10 +327,8 @@ const SYS_NMOUNT: u64 = 584;
 /// `external/mit/musl/arch/x86_64/bits/syscall.h.in` (e.g. real `__NR_gettid=186`, which has a live
 /// caller inside musl itself, `src/thread/synccall.c`) -- see that file's own comment on
 /// `__NR_flock` (right near `__NR_fsync`) for the full story on why 471-486 is provably
-/// collision-free instead. `SYS_FSYNC`/`SYS_SYNC` force-commit a still-open fd's pending write
-/// buffer to its real inode (oxfs's write model otherwise only commits at `close()`, see
-/// `OpenFile::Write`'s own doc comment) -- `oxfs_fsync` for one fd, `oxfs_sync` for every
-/// currently-open write fd at once. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
+/// collision-free instead. `SYS_FSYNC`/`SYS_SYNC` put delayed writes on the disk (`sync_file`,
+/// `bcache::flush_all`) -- one file's, or every one. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
 /// directly at the block level (`resize_inode_data`, not `write_inode_data` -- materializing a
 /// whole file's content into one stack buffer first would risk overflowing this kernel's 128 KiB
 /// kernel-stack floor for anything near this filesystem's ~4 MiB per-file cap).
@@ -345,8 +345,8 @@ const SYS_SYNC: u64 = 472;
 /// Real, unremapped Linux `__NR_fdatasync=75` (confirmed unclaimed -- this ABI's own invented
 /// numbers start at 100, and `external/mit/musl/src/unistd/fdatasync.c` issues this exact number
 /// directly, no OxideBSD-side remap needed, matching `SYS_PREAD`/`SYS_PWRITE`'s own precedent).
-/// Registered straight at `oxfs_fsync`: with every write already on the disk there is nothing for
-/// either to flush, so `fdatasync(2)`'s "may skip metadata" relaxation changes nothing.
+/// Registered straight at `oxfs_fsync`: `fdatasync(2)` may skip metadata, and writing the inode
+/// record too costs one block at most.
 const SYS_FDATASYNC: u64 = 75;
 const SYS_FTRUNCATE: u64 = 473;
 const SYS_FALLOCATE: u64 = 474;
@@ -1174,14 +1174,63 @@ fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
     with_block(n, |b| *b)
 }
 
-/// Stores block `n`; a disk block reaches the disk before the system call returns (§3.3 until
-/// delayed writes), or at `flush_all_to_disk` while formatting.
+/// The regular file whose writes are being delayed (§3.3.2), `NO_OWNER` when none: set by
+/// `delay_writes_of` for the length of a write, resize or atime update of that file.
+static mut DELAY_OWNER: u32 = NO_OWNER;
+const NO_OWNER: u32 = u32::MAX;
+
+fn delay_owner() -> Option<u32> {
+    // SAFETY: single-core, syscall-serialized.
+    let owner = unsafe { *core::ptr::addr_of!(DELAY_OWNER) };
+    (owner != NO_OWNER).then_some(owner)
+}
+
+/// Restores the previous delay context when dropped.
+struct Delayed(u32);
+
+impl Drop for Delayed {
+    fn drop(&mut self) {
+        // SAFETY: as `delay_owner`.
+        unsafe { *core::ptr::addr_of_mut!(DELAY_OWNER) = self.0 };
+    }
+}
+
+/// Until the returned guard drops, the data blocks, index blocks and inode record of `n` are
+/// written back later instead of at once -- if `n` is a regular file on the disk. Everything
+/// else (directories, symlinks, names, the bitmap) stays synchronous (§3.3.1).
+fn delay_writes_of(n: u32) -> Delayed {
+    // SAFETY: as `delay_owner`.
+    let previous = unsafe { *core::ptr::addr_of!(DELAY_OWNER) };
+    if !is_tmpfs_inode(n) && read_inode(n).kind == InodeKind::File {
+        unsafe { *core::ptr::addr_of_mut!(DELAY_OWNER) = n };
+    }
+    Delayed(previous)
+}
+
+/// Stores block `n`. Inside `delay_writes_of`, it's that file's data: left dirty in the cache.
+/// Otherwise it reaches the disk before the system call returns (or at `flush_all_to_disk`
+/// while formatting).
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
     if is_tmpfs_block(n) {
         // SAFETY: see `tmpfs_ptr`.
         unsafe { *tmpfs_ptr(n) = *data };
+    } else if let Some(owner) = delay_owner() {
+        bcache::store(data_block_offset() + n, data, bcache::Kind::Data(owner));
     } else {
-        bcache::write(data_block_offset() + n, data);
+        bcache::write(data_block_offset() + n, data, bcache::Kind::Meta);
+    }
+}
+
+/// `write_block` for an index (indirect) block: delayed as that file's index block, so it can't
+/// reach the disk before the data blocks it points at.
+fn write_index_block(n: u32, data: &[u8; BLOCK_SIZE]) {
+    if is_tmpfs_block(n) {
+        // SAFETY: see `tmpfs_ptr`.
+        unsafe { *tmpfs_ptr(n) = *data };
+    } else if let Some(owner) = delay_owner() {
+        bcache::store(data_block_offset() + n, data, bcache::Kind::Index(owner));
+    } else {
+        bcache::write(data_block_offset() + n, data, bcache::Kind::Meta);
     }
 }
 
@@ -1214,7 +1263,7 @@ fn set_block_used(n: u32, used: bool) {
         return;
     }
     block[bit / 8] ^= 1 << (bit % 8);
-    bcache::write(BITMAP_START + index, &block);
+    bcache::write(BITMAP_START + index, &block, bcache::Kind::Meta);
     let count = free_count(index);
     if used { *count -= 1 } else { *count += 1 }
 }
@@ -1247,7 +1296,19 @@ fn write_inode(n: u32, inode: Inode) {
     let was_free = with_block(block, |b| b[off] == 0);
     let mut data = read_block(block);
     pack_inode(&inode, &mut data[off..off + INODE_STRIDE]);
-    write_block(block, &data);
+    if is_tmpfs_block(block) {
+        write_block(block, &data);
+    } else {
+        // An inode-file block: written after the dirty data and index blocks of the inodes in it
+        // (bcache's ordering); left dirty only for the file whose writes are being delayed.
+        let kind = bcache::Kind::Inodes(n - n % INODES_PER_BLOCK as u32);
+        let dev = data_block_offset() + block;
+        if delay_owner() == Some(n) {
+            bcache::store(dev, &data, kind);
+        } else {
+            bcache::write(dev, &data, kind);
+        }
+    }
     let is_free = inode.kind == InodeKind::Free;
     let table = inode_table(is_tmpfs_inode(n));
     match (was_free, is_free) {
@@ -1308,7 +1369,7 @@ fn alloc_block() -> Option<u32> {
 /// ("no pointer here yet").
 fn alloc_indirect_block() -> Option<u32> {
     let n = alloc_block()?;
-    write_block(n, &[0xFFu8; BLOCK_SIZE]);
+    write_index_block(n, &[0xFFu8; BLOCK_SIZE]);
     Some(n)
 }
 
@@ -1327,6 +1388,9 @@ fn alloc_inode() -> Option<u32> {
 
 /// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
 fn free_block(n: u32) {
+    if !is_tmpfs_block(n) {
+        bcache::discard(data_block_offset() + n);
+    }
     set_block_used(n, false);
     if !is_tmpfs_block(n) {
         // SAFETY: single-core, syscall-serialized, as `alloc_block`.
@@ -1411,6 +1475,8 @@ fn content_changed(inode_num: u32) {
 /// someone else may be given.
 fn release_inode(n: u32, inode: Inode) {
     content_changed(n);
+    // Its unwritten data and index blocks are about to be freed: never write them.
+    bcache::discard_owned(n);
     write_inode(n, Inode::FREE);
     free_inode_blocks(&inode);
     trim_inode_table(is_tmpfs_inode(n));
@@ -1747,7 +1813,7 @@ fn ensure_block(inode: &mut Inode, index: usize, tmpfs: bool) -> Option<u32> {
                 alloc_indirect_block()?
             };
             outer[outer_off..outer_off + 4].copy_from_slice(&inner_block.to_le_bytes());
-            write_block(inode.double_indirect, &outer);
+            write_index_block(inode.double_indirect, &outer);
         }
         ensure_index_slot(inner_block, inner_slot, tmpfs)
     }
@@ -1770,7 +1836,7 @@ fn ensure_index_slot(ib_num: u32, slot: usize, tmpfs: bool) -> Option<u32> {
         alloc_block()?
     };
     ib[off..off + 4].copy_from_slice(&nb.to_le_bytes());
-    write_block(ib_num, &ib);
+    write_index_block(ib_num, &ib);
     Some(nb)
 }
 
@@ -2016,6 +2082,7 @@ fn write_inode_data(inode_num: u32, content: &[u8]) -> bool {
 /// update," not persisted with per-read precision), not a fake pass condition; keeps a tight read
 /// loop from re-persisting the same inode-table block on every single call.
 fn touch_atime(inode_num: u32) {
+    let _delayed = delay_writes_of(inode_num);
     let mut inode = read_inode(inode_num);
     let now = unsafe { oxidebsd_unix_time() };
     if inode.atime == now {
@@ -2037,6 +2104,7 @@ fn touch_atime(inode_num: u32) {
 /// GiB, see `Inode::double_indirect`'s own doc comment), far past what this kernel's 128 KiB
 /// kernel-stack floor could ever hold as one local buffer.
 fn resize_inode_data(inode_num: u32, new_size: usize) -> bool {
+    let _delayed = delay_writes_of(inode_num);
     content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if new_size > old_size {
@@ -2101,6 +2169,7 @@ fn write_inode_with(
     len: usize,
     mut fill: impl FnMut(&mut [u8]) -> Result<(), i64>,
 ) -> Result<usize, i64> {
+    let _delayed = delay_writes_of(inode_num);
     content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if position > old_size && !resize_inode_data(inode_num, position) {
@@ -2108,14 +2177,6 @@ fn write_inode_with(
     }
     let mut pos = position;
     let mut written = 0;
-    // Real batching (see `persist_data_run_if_ready`'s own doc comment): the in-memory pool is
-    // always updated immediately below, same as `write_block` -- only the real, persisted write is
-    // deferred until the end of whatever contiguous run of physical blocks this call happens to
-    // touch. `run_len == 0` means "no pending run yet"; a block whose physical number doesn't
-    // extend the pending run flushes it first, same discipline `flush_all_to_disk`'s own bulk-pass
-    // run-scan already uses.
-    let mut run_start: u32 = 0;
-    let mut run_len: u32 = 0;
     let mut result = Ok(());
     while written < len {
         let block_index = pos / BLOCK_SIZE;
@@ -2131,25 +2192,12 @@ fn write_inode_with(
             result = Err(e);
             break;
         }
-        if is_tmpfs_block(blk) {
-            write_block(blk, &block);
-        } else {
-            // Stored dirty and written a contiguous run at a time, so a long write goes to the
-            // disk as a few large commands rather than one per block.
-            let dev = data_block_offset() + blk;
-            bcache::store(dev, &block);
-            if run_len > 0 && dev == run_start + run_len {
-                run_len += 1;
-            } else {
-                bcache::flush_run(run_start, run_len);
-                run_start = dev;
-                run_len = 1;
-            }
-        }
+        // A regular file's data stays dirty in the cache (`delay_writes_of`) and goes to the
+        // disk later, in long runs; anything else is written now.
+        write_block(blk, &block);
         pos += chunk;
         written += chunk;
     }
-    bcache::flush_run(run_start, run_len);
     let mut inode = read_inode(inode_num);
     if pos > inode.size as usize {
         inode.size = pos as u64;
@@ -2158,6 +2206,11 @@ fn write_inode_with(
     inode.mtime = now;
     inode.ctime = now;
     write_inode(inode_num, inode);
+    // Back-pressure (§3.2.5): a writer that has filled half the cache with unwritten blocks waits
+    // for them, rather than leave eviction to write them a block at a time.
+    if bcache::mostly_dirty() {
+        bcache::flush_all();
+    }
     match result {
         Err(e) if written == 0 => Err(e),
         _ => Ok(written),
@@ -4616,8 +4669,8 @@ extern "C" fn sys_close(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     if unsafe { oxidebsd_close_fd(fd) } == 0 { 0 } else { -EBADF }
 }
 
-/// Registered for `SYS_FSYNC`. Every write already reaches the disk before `write` returns
-/// (write-through), so there is nothing left to flush: success for any of this module's files.
+/// Registered for `SYS_FSYNC`: the file's delayed writes go to the disk (`sync_file`) before this
+/// returns.
 ///
 /// A real, registered fd that just isn't one of *this* module's own (a pipe, socket, or mqueue
 /// end) resolves fine via `oxidebsd_real_fd_of` but has no `find_open_file` entry -- real POSIX
@@ -4628,16 +4681,41 @@ extern "C" fn oxfs_fsync(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     if real_fd < 0 {
         return -EBADF;
     }
-    match find_open_file(real_fd as u64) {
-        Some(_) => 0,
-        None => -EINVAL,
+    if find_open_file(real_fd as u64).is_none() {
+        return -EINVAL;
     }
+    if let Some(inode) = inode_of_open_file(real_fd as u64) {
+        sync_file(inode);
+    }
+    0
 }
 
-/// Registered for `SYS_SYNC`. Nothing is held back from the disk (write-through), so `sync(2)` has
-/// nothing to do; it has no failure return.
+/// Puts regular file `n`'s delayed writes on the disk: its data, its index blocks, then its inode
+/// record (§3.3.5). Nothing to do for anything else, which is never delayed.
+fn sync_file(n: u32) {
+    if is_tmpfs_inode(n) {
+        return;
+    }
+    let inode_block = inode_location(n).map(|(block, _)| data_block_offset() + block);
+    bcache::flush_file(n, inode_block);
+}
+
+/// Registered for `SYS_SYNC`: every delayed write goes to the disk before this returns (POSIX lets
+/// `sync(2)` return early; OxideBSD doesn't, since `update(8)` and shutdown rely on it). No
+/// failure return.
 extern "C" fn oxfs_sync(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    bcache::flush_all();
     0
+}
+
+/// Registered with the kernel as the shutdown hook (`oxidebsd_register_shutdown_hook`): an
+/// orderly reboot, halt or power-off writes everything delayed, then marks the filesystem clean
+/// (§3.4.1). Not called on a panic or a fault.
+extern "C" fn oxfs_shutdown() {
+    bcache::flush_all();
+    set_clean(true);
+    write_superblock();
+    log("[oxfs] filesystem synced and marked clean\n");
 }
 
 /// Real POSIX `ftruncate(2)`/`fallocate(2)`: `EINVAL` when `fd` isn't open for writing -- shared by
@@ -7487,8 +7565,23 @@ fn unpack_inode(data: &[u8]) -> Inode {
 /// Where the superblock keeps the disk inode file's own inode record.
 const SB_INODE_FILE: usize = 128;
 
+/// Whether the filesystem is clean on the disk (§3.4.1): cleared by mount, before anything else is
+/// written, and set by an orderly shutdown (`oxfs_shutdown`) once every delayed write is out.
+static mut CLEAN: bool = false;
+/// The superblock's state word: `SB_CLEAN` when the last shutdown was orderly.
+const SB_STATE: usize = 20;
+const SB_CLEAN: u32 = 1;
+
+fn set_clean(clean: bool) {
+    // SAFETY: single-core, syscall-serialized.
+    unsafe { *core::ptr::addr_of_mut!(CLEAN) = clean };
+}
+
 fn write_superblock() {
     let mut block = [0u8; BLOCK_SIZE];
+    // SAFETY: as `set_clean`.
+    let state = if unsafe { *core::ptr::addr_of!(CLEAN) } { SB_CLEAN } else { 0 };
+    block[SB_STATE..SB_STATE + 4].copy_from_slice(&state.to_le_bytes());
     block[0..4].copy_from_slice(&SUPERBLOCK_MAGIC);
     block[4..8].copy_from_slice(&SUPERBLOCK_VERSION.to_le_bytes());
     block[8..12].copy_from_slice(&disk_blocks().to_le_bytes());
@@ -7515,7 +7608,7 @@ fn reset_real_pool_for_fresh_format() {
     let (data_blocks, bitmap) = layout_for(unsafe { oxidebsd_block_device_blocks() });
     set_layout(data_blocks, bitmap);
     for index in 0..bitmap {
-        bcache::store(BITMAP_START + index, &blank);
+        bcache::store(BITMAP_START + index, &blank, bcache::Kind::Meta);
         let base = index * BITS_PER_BITMAP_BLOCK;
         *free_count(index) = (data_blocks - base).min(BITS_PER_BITMAP_BLOCK);
     }
@@ -7545,6 +7638,9 @@ fn mount_from_disk() -> bool {
         return false;
     }
     set_layout(data_blocks, bitmap);
+    if u32::from_le_bytes(sb[SB_STATE..SB_STATE + 4].try_into().unwrap()) != SB_CLEAN {
+        log("[oxfs] mount: filesystem was not cleanly unmounted\n");
+    }
     let mut used = 0u32;
     for index in 0..bitmap {
         let base = index * BITS_PER_BITMAP_BLOCK;
@@ -9575,6 +9671,11 @@ pub extern "C" fn module_init() -> i32 {
     // this point on is persisted immediately.
     set_persistence_ready(true);
     bcache::set_write_through(true);
+    // Mounted: not clean on the disk until an orderly shutdown says so (§3.4.1).
+    set_clean(false);
+    write_superblock();
+    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
+    unsafe { oxidebsd_register_shutdown_hook(oxfs_shutdown) };
     if mounted {
         sweep_unnamed_inodes();
     }

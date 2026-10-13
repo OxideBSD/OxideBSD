@@ -1,14 +1,21 @@
-//! The buffer cache (`OxideBSD-doc/RAM_FLOOR.md` §3.2): a fixed set of 4 KiB buffers, sized from
-//! RAM at boot, holding recently used blocks of the data disk. Every disk block oxfs touches --
-//! superblock aside -- goes through here by its *device* block number: data blocks, the inode
+//! The buffer cache (`OxideBSD-doc/RAM_FLOOR.md` §3.2-3.3): a fixed set of 4 KiB buffers, sized
+//! from RAM at boot, holding recently used blocks of the data disk. Every disk block oxfs touches
+//! -- superblock aside -- goes through here by its *device* block number: data blocks, the inode
 //! file, directories, index blocks and the block-used bitmap alike. A miss evicts the least
 //! recently used buffer and reads the block (and a few after it, `READ_AHEAD`) from the disk.
 //!
-//! A buffer is `DIRTY` when it holds a write the disk hasn't seen. While the filesystem is being
-//! formatted (`write_through` false) every write stays dirty until `flush_all`; afterwards
-//! writes go to the disk before the system call returns, either at once (`write`) or as one batch
-//! per contiguous run (`store` then `flush_run`, the shape `write_inode_with` uses for a file's
-//! data). A dirty buffer chosen for eviction is written out first.
+//! A buffer is dirty when it holds a write the disk hasn't seen. `write` puts a block on the disk
+//! before returning (structural metadata, §3.3.1); `store` leaves it dirty, tagged with what it is
+//! (`Kind`), for a later flush (a regular file's data, index blocks and inode record, §3.3.2).
+//! While the filesystem is being formatted (`write_through` false) even `write` only stores, and
+//! `flush_all` writes everything at the end.
+//!
+//! **Ordering (§3.3.3): a pointer never reaches the disk before what it points at.** Before an
+//! inode-file block is written, the dirty data and index blocks of the inodes in it are; before an
+//! index block is, its file's dirty data blocks are. Every path to the disk -- `write`, a flush,
+//! evicting a dirty buffer -- goes through `write_buffer`, which does that first. So after a crash
+//! an inode on disk points only at blocks holding its own data (an older size at worst), never at
+//! another file's freed contents.
 //!
 //! Modules have no `alloc`: the buffers, their headers and the hash table come from
 //! `oxidebsd_module_alloc_zeroed` in `init`, which must run inside `module_init`. Everything is
@@ -17,7 +24,7 @@
 
 use crate::{BLOCK_SIZE, log, oxidebsd_block_read_batch, oxidebsd_block_write_batch, oxidebsd_module_alloc_zeroed};
 
-/// "No buffer" in the LRU links and hash chains.
+/// "No buffer" in the LRU, dirty and hash links.
 const NIL: u32 = u32::MAX;
 /// A buffer whose `block` means nothing yet.
 const FREE_BLOCK: u32 = u32::MAX;
@@ -25,21 +32,40 @@ const FREE_BLOCK: u32 = u32::MAX;
 /// at one that's already cached. Programs and files are mostly laid out contiguously
 /// (`alloc_block` is a forward cursor), so the next blocks are usually wanted next.
 const READ_AHEAD: usize = 16;
-/// Largest run written in one command (`flush_run`, `flush_all`): the staging buffer's size.
+/// Largest run written in one command: the staging buffer's size.
 const STAGE_BLOCKS: usize = 32;
 /// The cache's size: `RAM / 8`, between these.
 const MIN_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// Inodes per inode-file block (`INODES_PER_BLOCK` in the crate root).
+const INODES_PER_BLOCK: u32 = 32;
+
+/// What a dirty buffer holds, for the write ordering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Anything written synchronously, or during a format: no ordering.
+    Meta,
+    /// A data block of regular file `owner`.
+    Data(u32),
+    /// An index (indirect) block of regular file `owner`.
+    Index(u32),
+    /// An inode-file block holding inodes `first .. first + INODES_PER_BLOCK`.
+    Inodes(u32),
+}
 
 #[derive(Clone, Copy)]
 struct Header {
     block: u32,
     dirty: bool,
+    kind: Kind,
     /// LRU neighbours: `prev` toward the most recently used end.
     prev: u32,
     next: u32,
     /// Next buffer in the same hash chain.
     hash_next: u32,
+    /// Dirty-list neighbours, while `dirty`.
+    dirty_prev: u32,
+    dirty_next: u32,
 }
 
 struct Cache {
@@ -51,6 +77,9 @@ struct Cache {
     /// Most and least recently used buffers.
     head: u32,
     tail: u32,
+    /// First dirty buffer, and how many there are.
+    dirty_head: u32,
+    dirty_count: u32,
     write_through: bool,
     stage: [[u8; BLOCK_SIZE]; STAGE_BLOCKS],
 }
@@ -63,6 +92,8 @@ static mut CACHE: Cache = Cache {
     hash_mask: 0,
     head: NIL,
     tail: NIL,
+    dirty_head: NIL,
+    dirty_count: 0,
     write_through: false,
     stage: [[0; BLOCK_SIZE]; STAGE_BLOCKS],
 };
@@ -85,9 +116,13 @@ impl Cache {
     }
 
     fn bucket(&mut self, block: u32) -> &mut u32 {
-        let slot = (block.wrapping_mul(0x9E37_79B1) & self.hash_mask) as usize;
+        let slot = block.wrapping_mul(0x9E37_79B1) & self.hash_mask;
+        self.bucket_at(slot)
+    }
+
+    fn bucket_at(&mut self, slot: u32) -> &mut u32 {
         // SAFETY: `slot <= hash_mask`, inside the `init` allocation.
-        unsafe { &mut *self.hash.add(slot) }
+        unsafe { &mut *self.hash.add(slot as usize) }
     }
 
     fn lookup(&mut self, block: u32) -> Option<u32> {
@@ -142,7 +177,9 @@ impl Cache {
         }
         self.unlink(i);
         let head = self.head;
-        *self.header(i) = Header { prev: NIL, next: head, ..*self.header(i) };
+        let h = self.header(i);
+        h.prev = NIL;
+        h.next = head;
         if head != NIL {
             self.header(head).prev = i;
         }
@@ -152,25 +189,113 @@ impl Cache {
         }
     }
 
-    /// The least recently used buffer, written out if dirty, ready to hold another block.
+    fn mark_dirty(&mut self, i: u32, kind: Kind) {
+        self.header(i).kind = kind;
+        if self.header(i).dirty {
+            return;
+        }
+        let head = self.dirty_head;
+        let h = self.header(i);
+        h.dirty = true;
+        h.dirty_prev = NIL;
+        h.dirty_next = head;
+        if head != NIL {
+            self.header(head).dirty_prev = i;
+        }
+        self.dirty_head = i;
+        self.dirty_count += 1;
+    }
+
+    fn mark_clean(&mut self, i: u32) {
+        if !self.header(i).dirty {
+            return;
+        }
+        let Header { dirty_prev, dirty_next, .. } = *self.header(i);
+        if dirty_prev == NIL { self.dirty_head = dirty_next } else { self.header(dirty_prev).dirty_next = dirty_next }
+        if dirty_next != NIL {
+            self.header(dirty_next).dirty_prev = dirty_prev;
+        }
+        let h = self.header(i);
+        h.dirty = false;
+        h.kind = Kind::Meta;
+        self.dirty_count -= 1;
+    }
+
+    /// Writes every dirty buffer `wanted` picks out, after what it depends on.
+    fn write_where(&mut self, wanted: impl Fn(Kind) -> bool) {
+        let mut i = self.dirty_head;
+        while i != NIL {
+            let next = self.header(i).dirty_next;
+            if !wanted(self.header(i).kind) {
+                i = next;
+                continue;
+            }
+            self.write_buffer(i);
+            // Writing `i` may have cleaned others (its run, its dependencies): carry on from
+            // `next` while it's still on the list, else start over.
+            i = if next != NIL && self.header(next).dirty { next } else { self.dirty_head };
+        }
+    }
+
+    /// Writes what buffer `i`'s contents point at, so `i` itself can go to the disk.
+    fn write_dependencies(&mut self, kind: Kind) {
+        match kind {
+            Kind::Meta | Kind::Data(_) => {}
+            Kind::Index(owner) => self.write_where(|k| k == Kind::Data(owner)),
+            Kind::Inodes(first) => {
+                let mine = |owner: u32| owner.wrapping_sub(first) < INODES_PER_BLOCK;
+                self.write_where(|k| matches!(k, Kind::Data(o) if mine(o)));
+                self.write_where(|k| matches!(k, Kind::Index(o) if mine(o)));
+            }
+        }
+    }
+
+    /// Writes dirty buffer `i` (with its dependencies first), together with any dirty buffers
+    /// right after it that need nothing written first, in one command.
+    fn write_buffer(&mut self, i: u32) {
+        let kind = self.header(i).kind;
+        self.write_dependencies(kind);
+        if !self.header(i).dirty {
+            return;
+        }
+        let start = self.header(i).block;
+        let first = *self.buffer(i);
+        self.stage[0] = first;
+        let mut run = 1;
+        while run < STAGE_BLOCKS {
+            match start.checked_add(run as u32).and_then(|b| self.lookup(b)) {
+                Some(j) if self.header(j).dirty && matches!(self.header(j).kind, Kind::Meta | Kind::Data(_)) => {
+                    let data = *self.buffer(j);
+                    self.stage[run] = data;
+                    run += 1;
+                }
+                _ => break,
+            }
+        }
+        let stage = self.stage.as_ptr() as u64;
+        // SAFETY: FFI call; `run` blocks are in the staging area.
+        if unsafe { oxidebsd_block_write_batch(start as u64, run as u64, stage) } != 0 {
+            log("[oxfs] cache: write failed\n");
+        }
+        for k in 0..run as u32 {
+            if let Some(j) = self.lookup(start + k) {
+                self.mark_clean(j);
+            }
+        }
+    }
+
+    /// The least recently used buffer, written out first if dirty, ready to hold another block.
     fn victim(&mut self) -> u32 {
         let i = self.tail;
         if self.header(i).dirty {
-            let block = self.header(i).block;
-            let data = self.buffer(i).as_ptr() as u64;
-            // SAFETY: FFI call; `data` is one live block.
-            if unsafe { oxidebsd_block_write_batch(block as u64, 1, data) } != 0 {
-                log("[oxfs] cache: write failed evicting a dirty block\n");
-            }
-            self.header(i).dirty = false;
+            self.write_buffer(i);
         }
         i
     }
 
-    /// Buffer `i` now holds `block`, most recently used.
+    /// Buffer `i` now holds `block`, clean, most recently used.
     fn claim(&mut self, i: u32, block: u32) {
         self.rehash(i, block);
-        self.header(i).dirty = false;
         self.touch(i);
     }
 
@@ -184,6 +309,14 @@ impl Cache {
         while run < READ_AHEAD && block.checked_add(run as u32).is_some_and(|b| self.lookup(b).is_none()) {
             run += 1;
         }
+        // Evict first: a dirty victim's write uses the staging area this read fills.
+        let mut victims = [NIL; READ_AHEAD];
+        for slot in victims.iter_mut().take(run) {
+            let i = self.victim();
+            // Out of the LRU's tail, so the next `victim` picks another buffer.
+            self.touch(i);
+            *slot = i;
+        }
         let stage = self.stage.as_mut_ptr() as u64;
         // SAFETY: FFI call; the staging area holds `STAGE_BLOCKS >= READ_AHEAD` blocks.
         if unsafe { oxidebsd_block_read_batch(block as u64, run as u64, stage) } != 0 {
@@ -196,15 +329,13 @@ impl Cache {
             }
         }
         // Claim the read-ahead blocks first, so the wanted one ends up most recently used.
-        let mut wanted = NIL;
         for k in (0..run).rev() {
-            let i = self.victim();
+            let i = victims[k];
             self.claim(i, block + k as u32);
             let staged = self.stage[k];
             *self.buffer(i) = staged;
-            wanted = i;
         }
-        wanted
+        victims[0]
     }
 
     /// The buffer for `block` without reading it: the caller overwrites the whole block.
@@ -216,39 +347,6 @@ impl Cache {
         let i = self.victim();
         self.claim(i, block);
         i
-    }
-
-    /// Writes the dirty buffers among `[start, start + len)`, a contiguous run at a time.
-    fn write_run(&mut self, start: u32, len: u32) {
-        let mut b = start;
-        while b < start + len {
-            let mut staged = 0;
-            while staged < STAGE_BLOCKS && b + (staged as u32) < start + len {
-                match self.lookup(b + staged as u32) {
-                    Some(i) if self.header(i).dirty => {
-                        let data = *self.buffer(i);
-                        self.stage[staged] = data;
-                        staged += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if staged == 0 {
-                b += 1;
-                continue;
-            }
-            let stage = self.stage.as_ptr() as u64;
-            // SAFETY: FFI call; `staged` blocks are in the staging area.
-            if unsafe { oxidebsd_block_write_batch(b as u64, staged as u64, stage) } != 0 {
-                log("[oxfs] cache: write failed\n");
-            }
-            for k in 0..staged as u32 {
-                if let Some(i) = self.lookup(b + k) {
-                    self.header(i).dirty = false;
-                }
-            }
-            b += staged as u32;
-        }
     }
 }
 
@@ -287,9 +385,12 @@ pub fn init(ram: u64) -> bool {
         *c.header(i) = Header {
             block: FREE_BLOCK,
             dirty: false,
+            kind: Kind::Meta,
             prev: if i == 0 { NIL } else { i - 1 },
             next: if i + 1 == count { NIL } else { i + 1 },
             hash_next: NIL,
+            dirty_prev: NIL,
+            dirty_next: NIL,
         };
     }
     c.head = 0;
@@ -297,19 +398,19 @@ pub fn init(ram: u64) -> bool {
     true
 }
 
-impl Cache {
-    fn bucket_at(&mut self, slot: u32) -> &mut u32 {
-        // SAFETY: `slot <= hash_mask`, inside the `init` allocation.
-        unsafe { &mut *self.hash.add(slot as usize) }
-    }
-}
-
 /// The cache's size in buffers, for the boot log.
 pub fn buffers() -> u32 {
     cache().count
 }
 
-/// From now on, writes reach the disk before the system call returns (§3.3 until delayed writes).
+/// Whether more than half the cache is dirty: the writer should flush (back-pressure, §3.2.5).
+pub fn mostly_dirty() -> bool {
+    let c = cache();
+    c.dirty_count > c.count / 2
+}
+
+/// From now on, `write` reaches the disk before returning (until now, during a format, it only
+/// stores).
 pub fn set_write_through(on: bool) {
     cache().write_through = on;
 }
@@ -326,62 +427,81 @@ pub fn read(block: u32) -> [u8; BLOCK_SIZE] {
     with(block, |b| *b)
 }
 
-/// Writes device block `block`: to the disk at once when write-through, else left dirty.
-pub fn write(block: u32, data: &[u8; BLOCK_SIZE]) {
-    store(block, data);
-    if cache().write_through {
-        cache().write_run(block, 1);
-    }
-}
-
-/// Stores `data` as device block `block`, dirty, without writing it: the caller ends the run with
-/// `flush_run`. Lets a long write go to the disk as a few large commands.
-pub fn store(block: u32, data: &[u8; BLOCK_SIZE]) {
+/// Writes device block `block` (`kind` says what it is) to the disk before returning, after
+/// anything it points at. While formatting, only stores it.
+pub fn write(block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
     let c = cache();
     let i = c.get_for_overwrite(block);
     *c.buffer(i) = *data;
-    c.header(i).dirty = true;
-}
-
-/// Writes the dirty blocks of `[start, start + len)` when write-through; nothing before then
-/// (`flush_all` writes them).
-pub fn flush_run(start: u32, len: u32) {
-    if len > 0 && cache().write_through {
-        cache().write_run(start, len);
+    c.mark_dirty(i, kind);
+    if c.write_through {
+        c.write_buffer(i);
     }
 }
 
-/// Writes every dirty buffer, as contiguous runs.
+/// Stores `data` as device block `block`, dirty, for a later flush (§3.3.2).
+pub fn store(block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
+    let c = cache();
+    let i = c.get_for_overwrite(block);
+    *c.buffer(i) = *data;
+    c.mark_dirty(i, kind);
+}
+
+/// Drops device block `block` from the cache without writing it: the block was freed.
+pub fn discard(block: u32) {
+    let c = cache();
+    if let Some(i) = c.lookup(block) {
+        c.mark_clean(i);
+    }
+}
+
+/// Drops the dirty data and index blocks of file `owner` without writing them: it's being freed.
+pub fn discard_owned(owner: u32) {
+    let c = cache();
+    let mut i = c.dirty_head;
+    while i != NIL {
+        let next = c.header(i).dirty_next;
+        if matches!(c.header(i).kind, Kind::Data(o) | Kind::Index(o) if o == owner) {
+            c.mark_clean(i);
+        }
+        i = next;
+    }
+}
+
+/// `fsync(2)` of file `owner`, whose record is in inode-file block `inode_block`: its data, its
+/// index blocks, then that block.
+pub fn flush_file(owner: u32, inode_block: Option<u32>) {
+    let c = cache();
+    c.write_where(|k| k == Kind::Data(owner));
+    c.write_where(|k| k == Kind::Index(owner));
+    if let Some(block) = inode_block
+        && let Some(i) = c.lookup(block)
+        && c.header(i).dirty
+    {
+        c.write_buffer(i);
+    }
+}
+
+/// Writes every dirty buffer: data first, then index blocks, then inode-file blocks, then the
+/// rest. Returns how many were dirty.
 pub fn flush_all() -> u32 {
     let c = cache();
-    let mut written = 0;
-    for i in 0..c.count {
-        if !c.header(i).dirty {
-            continue;
-        }
-        // Start each run at its first dirty block, so runs aren't split in the middle.
-        let mut start = c.header(i).block;
-        while start > 0 && c.lookup(start - 1).is_some_and(|j| c.header(j).dirty) {
-            start -= 1;
-        }
-        let mut len = 0;
-        while c.lookup(start + len).is_some_and(|j| c.header(j).dirty) {
-            len += 1;
-        }
-        c.write_run(start, len);
-        written += len;
-    }
-    written
+    let dirty = c.dirty_count;
+    c.write_where(|k| matches!(k, Kind::Data(_)));
+    c.write_where(|k| matches!(k, Kind::Index(_)));
+    c.write_where(|k| matches!(k, Kind::Inodes(_)));
+    c.write_where(|_| true);
+    dirty
 }
 
 /// Forgets every buffer (dirty ones included): the disk changed underneath the cache.
 pub fn invalidate_all() {
     let c = cache();
     for i in 0..c.count {
+        c.mark_clean(i);
         c.unhash(i);
         let h = c.header(i);
         h.block = FREE_BLOCK;
-        h.dirty = false;
         h.hash_next = NIL;
     }
 }

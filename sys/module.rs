@@ -644,6 +644,24 @@ pub(crate) fn phys_mem_offset() -> Option<VirtAddr> {
     crate::memory::try_phys_mem_offset()
 }
 
+/// Hooks modules registered to run before an orderly reboot, halt or power-off
+/// (`oxidebsd_register_shutdown_hook`): oxfs writes its delayed blocks and marks itself clean.
+static SHUTDOWN_HOOKS: Mutex<Vec<extern "C" fn()>> = Mutex::new(Vec::new());
+
+/// Kernel API exposed to modules: runs `hook` in `run_shutdown_hooks`.
+pub(crate) extern "C" fn oxidebsd_register_shutdown_hook(hook: extern "C" fn()) {
+    SHUTDOWN_HOOKS.lock().push(hook);
+}
+
+/// Runs every shutdown hook, most recently registered first, like `rc.shutdown` stopping services
+/// in reverse. `reboot(2)` calls this before resetting; a panic or fault reboot doesn't.
+pub(crate) fn run_shutdown_hooks() {
+    let hooks = SHUTDOWN_HOOKS.lock().clone();
+    for hook in hooks.iter().rev() {
+        hook();
+    }
+}
+
 /// One frame (not zeroed) from whichever frame allocator is live: the module loader's while a
 /// `module_init` runs (the global one isn't installed until every module has loaded), else the
 /// global one. For drivers a module drives from inside its `module_init` (the memory disk, which
@@ -1231,6 +1249,9 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::drivers::disk::oxidebsd_block_device_blocks as *const () as u64)
         }
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
+        "oxidebsd_register_shutdown_hook" => {
+            Some(oxidebsd_register_shutdown_hook as *const () as u64)
+        }
         "oxidebsd_block_read" => Some(crate::drivers::disk::oxidebsd_block_read as *const () as u64),
         "oxidebsd_block_write" => {
             Some(crate::drivers::disk::oxidebsd_block_write as *const () as u64)

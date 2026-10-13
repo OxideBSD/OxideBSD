@@ -2253,11 +2253,16 @@ const RB_POWER_OFF: u64 = 0x4321fedc;
 /// `SYS_REBOOT`'s real logic -- matches real Linux's own magic `cmd` values against this kernel's
 /// three real actions (`sys/reboot.rs`). Root only (`EPERM` otherwise, checked before `cmd`, as
 /// Linux does for `CAP_SYS_BOOT`). Every success arm diverges (`-> !`) -- the `Result` return
-/// type exists only for the error cases.
+/// type exists only for the error cases. Each first runs the modules' shutdown hooks, as BSD
+/// `reboot(2)` syncs the filesystems: oxfs writes its delayed blocks and marks itself clean.
 pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
     if crate::process::identity::oxidebsd_current_uid() != 0 {
         return Err(crate::syscall::EPERM);
     }
+    if !matches!(cmd, RB_AUTOBOOT | RB_HALT_SYSTEM | RB_POWER_OFF) {
+        return Err(EINVAL);
+    }
+    crate::module::run_shutdown_hooks();
     match cmd {
         RB_AUTOBOOT => crate::reboot::reboot(),
         RB_HALT_SYSTEM => crate::reboot::halt(),
