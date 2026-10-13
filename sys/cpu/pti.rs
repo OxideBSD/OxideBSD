@@ -348,3 +348,72 @@ pub fn audit_entry_template(physical_memory_offset: VirtAddr) {
     }
     crate::serial_println!("[kpti] entry template maps {} pages, all in the entry area", pages);
 }
+
+/// Walks `l4_frame`'s page tables for `va`, returning whether it maps to a present page. A plain
+/// 4-level walk (huge pages count as mapped); used only by the Meltdown PoC probe.
+fn maps(l4_frame: PhysFrame<Size4KiB>, va: u64, pmo: VirtAddr) -> bool {
+    const MASK: u64 = 0x000f_ffff_ffff_f000;
+    let idx = |level: u32| ((va >> (12 + 9 * level)) & 0x1ff) as usize;
+    // SAFETY: a live page-table frame, read only through the phys-mem window.
+    let l4 = unsafe { frame_to_page_table(l4_frame, pmo) };
+    let e4 = &l4[idx(3)];
+    if !e4.flags().contains(PageTableFlags::PRESENT) {
+        return false;
+    }
+    let l3 = unsafe { frame_to_page_table(PhysFrame::containing_address(PhysAddr::new(e4.addr().as_u64() & MASK)), pmo) };
+    let e3 = &l3[idx(2)];
+    if !e3.flags().contains(PageTableFlags::PRESENT) {
+        return false;
+    }
+    if e3.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return true;
+    }
+    let l2 = unsafe { frame_to_page_table(PhysFrame::containing_address(PhysAddr::new(e3.addr().as_u64() & MASK)), pmo) };
+    let e2 = &l2[idx(1)];
+    if !e2.flags().contains(PageTableFlags::PRESENT) {
+        return false;
+    }
+    if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return true;
+    }
+    let l1 = unsafe { frame_to_page_table(PhysFrame::containing_address(PhysAddr::new(e2.addr().as_u64() & MASK)), pmo) };
+    l1[idx(0)].flags().contains(PageTableFlags::PRESENT)
+}
+
+/// What the Meltdown PoC regression test checks (tier 1): the kernel is genuinely absent from the
+/// current process's user table, not merely supervisor-protected. For each sampled kernel address
+/// that the kernel table maps, the user table must not -- otherwise a ring-3 Meltdown read would
+/// have a translation to speculate against. Returns the number of addresses confirmed hidden, or
+/// the name of the first one that leaked. Also checks the entry area is present in the user table,
+/// so a false pass can't come from an empty table.
+pub fn poc_probe() -> Result<u64, &'static str> {
+    let (kcr3, ucr3) = crate::cpu::entry::active_cr3();
+    if ucr3 == 0 || ucr3 == kcr3 {
+        return Err("no user table active");
+    }
+    const MASK: u64 = 0x000f_ffff_ffff_f000;
+    let pmo = VirtAddr::new(crate::boot::hhdm_offset());
+    let kframe = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(kcr3 & MASK));
+    let uframe = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(ucr3 & MASK));
+
+    let samples: [(&str, u64); 3] = [
+        ("the HHDM window", pmo.as_u64()),
+        ("the kernel heap", crate::memory::allocator::HEAP_START as u64),
+        ("kernel text", poc_probe as *const () as u64),
+    ];
+    let mut hidden = 0;
+    for (name, va) in samples {
+        if !maps(kframe, va, pmo) {
+            // Not mapped in the kernel table either (e.g. an unused heap page) -- nothing to prove.
+            continue;
+        }
+        if maps(uframe, va, pmo) {
+            return Err(name);
+        }
+        hidden += 1;
+    }
+    if !maps(uframe, crate::cpu::entry::text().start, pmo) {
+        return Err("the entry area, which should be mapped");
+    }
+    Ok(hidden)
+}
