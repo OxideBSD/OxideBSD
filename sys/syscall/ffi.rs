@@ -1079,8 +1079,7 @@ struct RawTimeval {
 /// `write_zeroed_rusage`, below). This kernel tracks no per-process CPU time/memory-usage
 /// accounting at all (`/proc/stat`'s own `cpu` line is already an honest all-zero placeholder for
 /// the identical reason) -- every field here is a real, correctly-shaped, honestly-zeroed
-/// placeholder rather than an invented number, same tier as `/proc/meminfo`'s `MemFree ==
-/// MemTotal`.
+/// placeholder rather than an invented number.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct RawRusage {

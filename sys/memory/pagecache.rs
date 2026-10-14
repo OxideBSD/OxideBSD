@@ -262,6 +262,15 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
     (c.entries.len() as u64, pages, c.hits, c.misses, limit())
 }
 
+/// `(frames held, frames held by entries no address space uses)`: what `/proc/meminfo` reports as
+/// `Cached`, and the part of it `reclaim` can give back on demand (counted as available).
+pub fn meminfo_pages() -> (u64, u64) {
+    let c = CACHE.lock();
+    let held = c.entries.values().map(Entry::held).sum();
+    let unused = c.entries.values().filter(|e| e.uses == 0).map(Entry::held).sum();
+    (held, unused)
+}
+
 /// A line per entry, for debugging: content id, size, frames held, uses, whether still cached.
 pub fn describe() -> Vec<u8> {
     let c = CACHE.lock();

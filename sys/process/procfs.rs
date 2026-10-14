@@ -211,30 +211,29 @@ pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_ca
     copy_into(&out, buf_ptr, buf_cap)
 }
 
-/// `/proc/meminfo` -- system-wide, not per-pid (named `_meminfo`, not tied to any single process).
-/// `MemTotal` is real (`memory::usable_ram_bytes()`); `MemFree`/`MemAvailable` are set **equal to
-/// `MemTotal`** -- no free-memory/deallocation tracking exists anywhere in this kernel (see
-/// `memory.rs`'s own doc comments: the frame allocator never reclaims a frame), so there is
-/// genuinely nothing more honest to report than "as much as there ever was" -- same documented
-/// fixed-placeholder precedent `write_stat`/`write_proc_stat` already use for `st_uid`/`st_gid`/
-/// timestamps. `Buffers`/`Cached`/`SwapTotal`/`SwapFree` are fixed `0` (no page cache, no swap).
-/// Never fails (no pid-race case the per-pid accessors above have).
+/// `/proc/meminfo` -- system-wide, not per-pid. From the frame allocator's count: `MemFree` is
+/// the frames never handed out, `Cached` the page cache's frames (`memory::pagecache`), and
+/// `MemAvailable` the free ones plus the cached frames no address space maps, which the allocator
+/// takes back when it runs out. oxfs's buffer cache and tmpfs pool are reserved at boot and count
+/// as used (`Buffers` stays `0`); there is no swap. Never fails.
 pub(crate) extern "C" fn oxidebsd_proc_meminfo(buf_ptr: *mut u8, buf_cap: u64) -> i64 {
-    let total_kb = crate::memory::usable_ram_bytes() / 1024;
+    let (total_frames, used_frames) = crate::memory::frame_counts();
+    let free_frames = total_frames.saturating_sub(used_frames);
+    let (cached, reclaimable) = crate::memory::pagecache::meminfo_pages();
     let mut out = Vec::new();
-    out.extend_from_slice(b"MemTotal:       ");
-    push_decimal(&mut out, total_kb);
-    out.extend_from_slice(b" kB\n");
-    out.extend_from_slice(b"MemFree:        ");
-    push_decimal(&mut out, total_kb);
-    out.extend_from_slice(b" kB\n");
-    out.extend_from_slice(b"MemAvailable:   ");
-    push_decimal(&mut out, total_kb);
-    out.extend_from_slice(b" kB\n");
-    out.extend_from_slice(b"Buffers:        0 kB\n");
-    out.extend_from_slice(b"Cached:         0 kB\n");
-    out.extend_from_slice(b"SwapTotal:      0 kB\n");
-    out.extend_from_slice(b"SwapFree:       0 kB\n");
+    for (name, kb) in [
+        (b"MemTotal:       ".as_slice(), total_frames * 4),
+        (b"MemFree:        ", free_frames * 4),
+        (b"MemAvailable:   ", (free_frames + reclaimable) * 4),
+        (b"Buffers:        ", 0),
+        (b"Cached:         ", cached * 4),
+        (b"SwapTotal:      ", 0),
+        (b"SwapFree:       ", 0),
+    ] {
+        out.extend_from_slice(name);
+        push_decimal(&mut out, kb);
+        out.extend_from_slice(b" kB\n");
+    }
     copy_into(&out, buf_ptr, buf_cap)
 }
 
