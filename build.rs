@@ -811,6 +811,8 @@ fn main() {
     // CLAUDE.md's ncurses/nano/nvi section for the placement/licensing reasoning.
     let vi_elf_path = build_nvi(&musl_sysroot, &ncurses_sysroot);
     let nano_elf_path = build_nano(&musl_sysroot, &ncurses_sysroot);
+    let ncurses_progs = build_ncurses_progs(&musl_sysroot);
+    let [clear_elf_path, tput_elf_path, tset_elf_path] = ["clear", "tput", "tset"].map(|p| ncurses_progs.join(p));
     // ninja (`usr.bin/ninja`, a fork of ninja-build/ninja) -- the first rung of the clang
     // self-hosting ladder that's pure C++; see `build_ninja`.
     let ninja_elf_path = build_ninja(&llvm_host_build, &musl_sysroot);
@@ -884,16 +886,9 @@ fn main() {
         }
     });
 
-    // oxfs: the real, live filesystem (see CLAUDE.md's oxfs section). There's no
-    // on-disk image format to generate -- oxfs's own module_init populates its inode table directly
-    // via ordinary function calls, using each already-built ELF's path passed straight through as
-    // its own env var (see `build_module_crate`'s own doc comment for the `extra_env` mechanism). Built
-    // from BUSYBOX_APPLETS itself (not one hand-written `let ..._elf_path = ...` line per applet)
-    // so the next applet added there doesn't need a matching edit here too -- `oxfs_env_var_name`
-    // derives each one's `OXFS_<NAME>_ELF_PATH` env var straight from its own `out_name`, with one
-    // explicit exception ("sh" -> "HUSH", matching `sys/modules/oxfs/src/lib.rs`'s existing
-    // `OXFS_HUSH_ELF_PATH`/`seed_file(root, b"sh.elf", ...)` naming, itself inherited from this
-    // applet's own Kconfig symbol `HUSH`, not its embedded filename).
+    // Each applet's binary, by `OXFS_<NAME>_ELF_PATH` (`oxfs_env_var_name`), for
+    // `distrib/install.mtree`'s `artifact:` sources -- derived from the roster, so a new applet
+    // needs no edit here.
     let oxfs_applet_paths: Vec<(String, String)> = all_applets
         .iter()
         .map(|&(_, out_name, _)| {
@@ -1016,6 +1011,9 @@ fn main() {
         ("OXFS_CRED_SMOKE_ELF_PATH", cred_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),
+        ("OXFS_NCURSES_CLEAR_ELF_PATH", clear_elf_path.to_str().unwrap()),
+        ("OXFS_NCURSES_TPUT_ELF_PATH", tput_elf_path.to_str().unwrap()),
+        ("OXFS_NCURSES_TSET_ELF_PATH", tset_elf_path.to_str().unwrap()),
         ("OXFS_NINJA_ELF_PATH", ninja_elf_path.to_str().unwrap()),
         (
             "NINJA_SRC_MANIFEST_PATH",
@@ -1150,13 +1148,8 @@ const NATIVE_BIN_UTILITIES: &[&str] = &[
 ];
 
 fn oxfs_env_var_name(out_name: &str) -> String {
-    let suffix = if out_name == "sh" {
-        "HUSH".to_string()
-    } else {
-        out_name.to_uppercase()
-    };
     // `run-parts` -> `OXFS_RUN_PARTS_ELF_PATH`.
-    format!("OXFS_{}_ELF_PATH", suffix.replace('-', "_"))
+    format!("OXFS_{}_ELF_PATH", out_name.to_uppercase().replace('-', "_"))
 }
 
 /// Each `BUSYBOX_APPLETS` entry's own out-of-tree build directory follows a fixed, predictable
@@ -3002,6 +2995,73 @@ fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
 
     assert!(lib.exists(), "ncurses build produced no libncursesw.a");
     sysroot
+}
+
+/// ncurses' `clear`, `tput` and `tset` (`reset` is a link to it), the BSDs' own, for `/usr/bin`:
+/// dynamic PIEs on `/lib/libc.so` like the rest of `/usr`, with ncurses linked in statically. A
+/// second configure of `lib/ncurses` in its own directory, `-fPIE` with the programs on, so
+/// `build_ncurses`'s library (which nano and nvi link, fixed-address) stays as it is. Returns the
+/// directory holding the three.
+fn build_ncurses_progs(musl_sysroot: &Path) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("lib/ncurses");
+    let build_dir = Path::new(manifest_dir).join("target/ncurses-progs");
+    let progs = build_dir.join("progs");
+    println!("cargo:rerun-if-changed={}", src.join("progs").display());
+
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let floor = collect_dir_files(&src)
+        .into_iter()
+        .filter_map(|(_, abs)| mtime(&abs))
+        .chain(mtime(&musl_sysroot.join("lib/libc.a")))
+        .max()
+        .unwrap_or(std::time::SystemTime::now());
+    if ["clear", "tput", "tset"].iter().all(|p| mtime(&progs.join(p)).is_some_and(|m| m >= floor)) {
+        return progs;
+    }
+
+    // From scratch, as `build_ncurses` does.
+    let _ = std::fs::remove_dir_all(&build_dir);
+    std::fs::create_dir_all(&build_dir).expect("failed to create target/ncurses-progs");
+    let status = Command::new(src.join("configure"))
+        .current_dir(&build_dir)
+        .env("CC", musl_sysroot.join("bin/musl-gcc"))
+        .env("CFLAGS", "-Os -fPIE")
+        .env("LDFLAGS", "-pie")
+        .args([
+            "--prefix=/usr",
+            "--host=x86_64-unknown-linux-musl",
+            "--with-build-cc=cc",
+            "--without-shared",
+            "--with-normal",
+            "--without-debug",
+            "--without-cxx",
+            "--without-cxx-binding",
+            "--without-ada",
+            "--without-manpages",
+            "--without-tests",
+            "--with-progs",
+            "--disable-db-install",
+            "--disable-stripping",
+            "--with-terminfo-dirs=/usr/share/terminfo",
+            "--with-default-terminfo-dir=/usr/share/terminfo",
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run ncurses configure (programs): {e}"));
+    assert!(status.success(), "ncurses configure (programs) failed: {status}");
+    let jobs = build_jobs().to_string();
+    for (dir, targets) in [("include", &[][..]), ("ncurses", &[][..]), ("progs", &["clear", "tput", "tset"][..])] {
+        let status = Command::new("make")
+            .current_dir(build_dir.join(dir))
+            .args(["-j", &jobs])
+            .args(targets)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run make in ncurses {dir}: {e}"));
+        assert!(status.success(), "ncurses {dir} build failed: {status}");
+    }
+    progs
 }
 
 /// Generates `NCURSES_INCLUDE_FILES`/`NCURSES_LIB_FILES` -- same generated-`include!` idiom as

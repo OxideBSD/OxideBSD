@@ -18,72 +18,18 @@
 // split), with its own explicit `cargo:rerun-if-changed` registration (an `include!`'d file isn't
 // automatically watched by cargo the way `build.rs` itself is).
 
-    // BusyBox applets ported to OxideBSD -- see CLAUDE.md's BusyBox section. Each is its own
-    // genuinely standalone, single-applet static binary (not a multi-call `busybox` binary
-    // dispatching on argv[0], which this codebase's execve doesn't support -- see
-    // build_busybox_applet's own doc comment), embedded into oxfs's inode table by build.rs's own
-    // oxfs-seeding code further down (originally the FAT32 image, back when FAT32 was still the
-    // live filesystem -- see CLAUDE.md's oxfs section). Data-driven (a plain list, not one
-    // hand-duplicated block of variables per applet like the original TRUE/ECHO-only version of
-    // this function) specifically so adding the next applet is a one-line addition here. Load
-    // addresses continue the existing `0x<b|c|d...>00000` sequence every prior regress/BusyBox
-    // binary in this codebase already claimed one of (see CLAUDE.md's "User-mode execution"
-    // section) -- each must stay clear of every other one already in use.
+    // The BusyBox roster (OxideBSD-doc `BUSYBOX_APPLETS.md`, `HIER.md` for where each goes):
+    // `(Kconfig symbol, name, load address)`. Each applet is its own standalone static binary
+    // (`build_busybox_applet`), not a multi-call `busybox` dispatching on argv[0]. Fixed-address
+    // (`-Ttext-segment`): each load address must sit above the kernel's low reservations and below
+    // the module region at `0x2000_0000` (CLAUDE.md, Memory). They're kept distinct, at `0x40000`
+    // steps (every applet is under 256 KiB). `distrib/install.mtree` installs each one
+    // from `OXFS_<NAME>_ELF_PATH`.
     //
-    // `cat` is the first applet added after `true`/`echo` that actually calls `open()` on a real
-    // path -- see CLAUDE.md's musl-port section for the open()/SYS_OPEN argument-convention fix
-    // (musl's `open()` is now patched to speak fat32_open's own (path_ptr, path_len, flags) wire
-    // format directly) that had to land before this could work at all.
+    // Editing this file rebuilds every applet (20 to 40 minutes): batch roster changes.
     //
-    // "HUSH" (embedded as SH.ELF, not HUSH.ELF -- this codebase's own choice of filename, same as
-    // every other applet here) is BusyBox's smaller/simpler shell, not "ASH" -- deliberately:
-    // `CONFIG_HUSH_INTERACTIVE` is left off (`allnoconfig`'s own default), so hush just reads and
-    // executes commands from stdin like a script, no prompt/readline/job-control machinery that
-    // would need real termios/ioctl support this kernel doesn't have. See CLAUDE.md's BusyBox
-    // section for what this needed: real pipe(2)/dup2(2) (sys/modules/posix_compat, sys/fs/pipe.rs,
-    // sys/fs/fd.rs), discovered the same iterative "boot and see what's unrecognized" way musl/cat's
-    // own new syscalls were.
-    // "FALSE"/"YES"/"MORE" continue the same load-address sequence right past HUSH's own
-    // 0xe00000. `more`'s own isatty()/TIOCGWINSZ probe hits the same already-documented,
-    // confirmed-harmless ioctl gap `cat`'s stdout write path already exercises (see the musl-port
-    // section) -- without a real terminal, it just falls back to dumping the whole file, the same
-    // shape `cat` already has.
-    //
-    // The next batch (`mkdir` through `uniq`) directly exercises the syscalls `sys/modules/oxfs` added
-    // over `modules/fat32` -- `mkdir`/`rmdir`/`rm`/`mv` map straight onto
-    // `mkdir`/`rmdir`/`unlink`/`rename`, all real (`rm`'s directory-recursion mode, `-r`, isn't
-    // exercised or expected to work -- it needs `lstat`/`readdir`, neither implemented). `cp`/
-    // `touch` may call `fstat`/`utimensat`-family syscalls this kernel doesn't implement at all
-    // (unmapped, so a real ENOSYS -- see CLAUDE.md's oxfs section on why `stat`/`fstat` was
-    // deliberately skipped) and could misbehave or fail outright depending on how gracefully
-    // BusyBox's own code tolerates that; not pre-verified line-by-line, same "boot it and see"
-    // discovery process every applet before it went through. `head`/`tail`/`wc`/`cut`/`sort`/
-    // `uniq` are plain stdin/stdout/file text tools needing nothing beyond `open`/`read`/`write`/
-    // `close`; `basename`/`dirname`/`printf`/`seq` do no filesystem I/O at all beyond `write`ing
-    // their result, the same shape `echo`/`true`/`false` already have. `kill` was included once
-    // `sys/modules/signal` (see CLAUDE.md) made real process signaling exist -- the gap that had
-    // blocked it.
-    //
-    // Everything from `ADDGROUP` on is a later, much larger pass: once `SYS_STAT`/`SYS_FSTAT`/
-    // `SYS_LSTAT`/`SYS_GETDENTS` existed (see CLAUDE.md's oxfs section), an exhaustive per-applet
-    // build probe was run against every Kconfig applet symbol BusyBox's own `//applet:` source
-    // markers define (393 candidates) using this exact recipe. **"Builds" is a much weaker bar
-    // than "works"**: musl provides a fairly complete libc surface, so plenty of applets that make
-    // no sense on this kernel (networking, mount, `/proc`-reading, uid/passwd-db tools) still
-    // compile and link cleanly -- they just fail cleanly at runtime (usually `ENOSYS` from an
-    // unregistered syscall). They're kept anyway (build success is the bar this pass used), but
-    // every one is tagged with exactly what it's still missing in `OxideBSD-doc/BUSYBOX_APPLETS.md`, along
-    // with the full list -- and reasons -- for every candidate that didn't even build. Load
-    // addresses use smaller (`0x40000`, not `0x100000`) steps than the original 24, purely to fit
-    // this much larger roster comfortably below `module::MODULE_VA_BASE` (`0x20000000`) -- every
-    // applet built so far stays well under 256 KiB. **All of these have moved twice now** from
-    // their original, smaller values (`0xb00000`-`0x2200000` for the original 24) once the
-    // kernel's own image grew past them, then again -- this array's own base `0x4100000` ->
-    // `0x8100000`, `+0x4000000` -- once the POSIX conformance pilot's own full-corpus expansion
-    // (see `build.rs`'s `discover_posix_test_files`) grew the kernel image past *that* floor too.
-    // See this array's own base and `regress/ring3-smoke/linker.ld`'s doc comment for the full
-    // story of why, and how to re-derive the safe floor before trusting any of these numbers
-    // again.
+    // Two arrays only for history: the first, small batch, and the second, a probe of every
+    // applet that built.
     const BUSYBOX_APPLETS: &[(&str, &str, u64)] = &[
         ("YES", "yes", 0x8600000),
         ("HEAD", "head", 0x8e00000),
@@ -105,7 +51,6 @@
         ("AR", "ar", 0x9ac0000),
         ("ASH", "ash", 0x9bc0000),
         ("AWK", "awk", 0x9c00000),
-        ("BASE32", "base32", 0x9c40000),
         ("BASE64", "base64", 0x9c80000),
         ("BB_ARCH", "arch", 0x9d80000),
         ("BC", "bc", 0x9e00000),
@@ -118,7 +63,6 @@
         ("CHOWN", "chown", 0xa0c0000),
         ("CHROOT", "chroot", 0xa140000),
         ("CKSUM", "cksum", 0xa200000),
-        ("CLEAR", "clear", 0xa240000),
         ("CMP", "cmp", 0xa280000),
         ("COMM", "comm", 0xa2c0000),
         ("CPIO", "cpio", 0xa300000),
@@ -133,70 +77,53 @@
         ("ENV", "env", 0xa9c0000),
         ("EXPAND", "expand", 0xaa40000),
         ("EXPR", "expr", 0xaa80000),
-        ("FACTOR", "factor", 0xaac0000),
         ("FGREP", "fgrep", 0xacc0000),
         ("FIND", "find", 0xad00000),
         ("FLOCK", "flock", 0xad80000),
         ("FOLD", "fold", 0xadc0000),
         ("FSYNC", "fsync", 0xaf00000),
-        ("FTPGET", "ftpget", 0xaf80000),
-        ("FTPPUT", "ftpput", 0xafc0000),
-        ("FUSER", "fuser", 0xb000000),
         ("GETOPT", "getopt", 0xb040000),
         ("GREP", "grep", 0xb0c0000),
         ("GROUPS", "groups", 0xb100000),
         ("GUNZIP", "gunzip", 0xb140000),
         ("GZIP", "gzip", 0xb180000),
         ("HEXDUMP", "hexdump", 0xb240000),
-        ("HOSTID", "hostid", 0xb2c0000),
         ("INSTALL", "install", 0xb480000),
         ("LOGNAME", "logname", 0xb840000),
         ("MD5SUM", "md5sum", 0xbc40000),
-        ("MINIPS", "minips", 0xbd00000),
         ("MKNOD", "mknod", 0xbdc0000),
         ("MKTEMP", "mktemp", 0xbe80000),
         ("NC", "nc", 0xc000000),
-        ("NETCAT", "netcat", 0xc040000),
-        ("NETSTAT", "netstat", 0xc080000),
         ("NICE", "nice", 0xc0c0000),
         ("NL", "nl", 0xc100000),
         ("NOHUP", "nohup", 0xc180000),
-        ("NSLOOKUP", "nslookup", 0xc240000),
         ("NTPD", "ntpd", 0xc280000),
         ("OD", "od", 0xc300000),
         ("PASTE", "paste", 0xc380000),
         ("PATCH", "patch", 0xc3c0000),
         ("PGREP", "pgrep", 0xc400000),
-        ("PIDOF", "pidof", 0xc440000),
         ("PING", "ping", 0xc480000),
         ("PKILL", "pkill", 0xc540000),
         ("PRINTENV", "printenv", 0xc680000),
         ("READLINK", "readlink", 0xc840000),
         ("REALPATH", "realpath", 0xc8c0000),
         ("RENICE", "renice", 0xc980000),
-        ("RESET", "reset", 0xc9c0000),
-        ("RESIZE", "resize", 0xca00000),
         ("REV", "rev", 0xca80000),
         ("SED", "sed", 0xcd40000),
-        ("SETSID", "setsid", 0xcf80000),
         ("SHA1SUM", "sha1sum", 0xd000000),
         ("SHA256SUM", "sha256sum", 0xd040000),
-        ("SHA3SUM", "sha3sum", 0xd080000),
         ("SHA512SUM", "sha512sum", 0xd0c0000),
         ("SPLIT", "split", 0xd240000),
         ("SSL_CLIENT", "ssl_client", 0xd280000),
         ("STAT", "stat", 0xd300000),
         ("STRINGS", "strings", 0xd340000),
         ("STTY", "stty", 0xd380000),
-        ("SU", "su", 0xd3c0000),
         ("SUM", "sum", 0xd440000),
-        ("TAC", "tac", 0xd600000),
         ("TAR", "tar", 0xd640000),
         ("TEE", "tee", 0xd700000),
         ("TELNET", "telnet", 0xd740000),
         ("TIME", "time", 0xd800000),
         ("TIMEOUT", "timeout", 0xd840000),
-        ("TOP", "top", 0xd880000),
         ("TR", "tr", 0xd8c0000),
         ("TRACEROUTE", "traceroute", 0xd900000),
         ("TRUNCATE", "truncate", 0xd980000),
@@ -214,7 +141,6 @@
         ("WHOAMI", "whoami", 0xe040000),
         ("WHOIS", "whois", 0xe080000),
         ("XARGS", "xargs", 0xe0c0000),
-        ("XXD", "xxd", 0xe100000),
         ("XZCAT", "xzcat", 0xe140000),
         ("ZCAT", "zcat", 0xe180000),
         // Appended out of alphabetical order (rest of the list above was already full) --
@@ -228,6 +154,22 @@
         // is just uname() under the hood -- no new syscall required now that SYS_UNAME exists;
         // only its `-d`/`-f`/`-i` flags (real DNS resolution) stay NEEDS_NETWORK.
         ("HOSTNAME", "hostname", 0xe200000),
+        // The 2026-10-14 batch (OxideBSD-doc `BUSYBOX_APPLETS.md` §3): BSD base tools nothing else
+        // provided (`ipcs` waits for a native one over `kern.ipc` sysctls). `who`/`w`/`users`/
+        // `wall`/`last` read the utmpx and wtmpx files musl's utmpx(3) and login(1) keep (see
+        // `configure_busybox_single_applet`); `ps` replaces `minips`.
+        ("ID", "id", 0xe240000),
+        ("IPCRM", "ipcrm", 0xe280000),
+        ("LAST", "last", 0xe300000),
+        ("MESG", "mesg", 0xe340000),
+        ("MKFIFO", "mkfifo", 0xe380000),
+        ("PS", "ps", 0xe3c0000),
+        ("SCRIPT", "script", 0xe400000),
+        ("USERS", "users", 0xe440000),
+        ("UUIDGEN", "uuidgen", 0xe480000),
+        ("W", "w", 0xe4c0000),
+        ("WALL", "wall", 0xe500000),
+        ("WHO", "who", 0xe540000),
     ];
 
     // `BUSYBOX_APPLETS` above is a `&[(&str, &str, u64)]`, not `&[(&str, &str, u64); N]` --
@@ -337,11 +279,8 @@ fn build_busybox_applet(
     }
 
     configure_busybox_single_applet(&out_dir, applet_symbol);
-    // Every applet's config tree can grow a cascade of newly-visible sub-options once its own
-    // symbol flips on (not just HUSH's own FEATURE_EDITING/HUSH_INTERACTIVE tree -- see
-    // `resolve_busybox_new_config_options`'s own doc comment) once the roster covers ~300 applets
-    // instead of two dozen hand-picked ones, so this now runs unconditionally rather than being
-    // special-cased to `applet_symbol == "HUSH"`.
+    // An applet's config tree can grow newly visible sub-options once its own symbol flips on
+    // (`resolve_busybox_new_config_options`), so this runs for every applet.
     resolve_busybox_new_config_options(&busybox_dir, &out_arg);
 
     let musl_gcc = musl_sysroot.join("bin/musl-gcc");
@@ -385,29 +324,6 @@ fn build_busybox_applet(
 /// rather than shelling out to `sed` as BusyBox's own documented recipe does, so a shape this
 /// doesn't expect fails loudly (the `assert!` below) instead of silently doing nothing.
 ///
-/// For `HUSH` specifically (only), also flips on real interactive mode -- `CONFIG_HUSH_INTERACTIVE`
-/// (prompt + `$-`), `CONFIG_HUSH_JOB` (needed to reach `hush`'s own real `FEATURE_EDITING`
-/// initialization at all -- see CLAUDE.md's "Interactive shell" section for the exact code path
-/// traced through `shell/hush.c` that makes this true, and why enabling it doesn't actually
-/// require real job control to work despite the name: `tcgetpgrp` cleanly failing, via this
-/// kernel's own `ENOTTY` for the unimplemented `TIOCGPGRP` request, degrades `hush`'s own job-
-/// control setup into a no-op rather than a crash), `CONFIG_FEATURE_EDITING` (real line editing),
-/// and `CONFIG_FEATURE_EDITING_FANCY_PROMPT` (a real `$PWD $`-style `PS1`, not a blank prompt).
-/// Left off deliberately: `CONFIG_HUSH_SAVEHISTORY`/`CONFIG_FEATURE_EDITING_SAVEHISTORY` (no
-/// `HISTFILE` persistence -- in-session history only, one less thing to get right this pass) and
-/// `CONFIG_FEATURE_EDITING_WINCH` (nothing in this kernel ever sends `SIGWINCH`, so tracking it
-/// would be pure unused surface).
-///
-/// Also for `HUSH` specifically: a second block of flips (below, in the function body -- see its
-/// own comment) turns on real script control flow (`if`/`for`/`while`/`until`/`case`, functions,
-/// command substitution, `$((...))` arithmetic, and most of hush's other real builtins). Without
-/// these, hush could only run a flat sequence of individual commands -- no control flow at all --
-/// since `make allnoconfig` writes an explicit "not set" line for every symbol in the whole
-/// Kconfig tree up front (confirmed empirically), so `resolve_busybox_new_config_options`'s later
-/// `make oldconfig` pass never gets a chance to apply their real `default y` the way it does for a
-/// symbol with no prior answer at all.
-///
-/// Every other applet stays exactly as narrow as it already was.
 fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
     let config_path = out_dir.join(".config");
     let mut config = std::fs::read_to_string(&config_path)
@@ -456,203 +372,10 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
             "CONFIG_UNAME_OSNAME=\"OxideBSD\"".to_string(),
         ));
     }
-    if applet_symbol == "HUSH" {
-        flips.extend([
-            (
-                "# CONFIG_HUSH_INTERACTIVE is not set".to_string(),
-                "CONFIG_HUSH_INTERACTIVE=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_JOB is not set".to_string(),
-                "CONFIG_HUSH_JOB=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_EDITING is not set".to_string(),
-                "CONFIG_FEATURE_EDITING=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_EDITING_FANCY_PROMPT is not set".to_string(),
-                "CONFIG_FEATURE_EDITING_FANCY_PROMPT=y".to_string(),
-            ),
-        ]);
-        // `allnoconfig` writes an explicit "# CONFIG_X is not set" line for every symbol in the
-        // whole Kconfig tree, including ones invisible at the time (e.g. everything under
-        // `if SHELL_HUSH` while `CONFIG_HUSH` was still off) -- confirmed by grepping an already-
-        // built non-shell applet's own `.config` for `CONFIG_FEATURE_SH_MATH` and finding the same
-        // "not set" line there too. That's why `resolve_busybox_new_config_options`'s `make
-        // oldconfig` pass doesn't help here: oldconfig only prompts for symbols with *no* line at
-        // all in `.config`, and every one of these already has an explicit "not set" answer from
-        // the initial allnoconfig run -- it never re-evaluates an already-answered symbol against
-        // its Kconfig `default`, even after growing newly visible via `CONFIG_HUSH`'s own `select
-        // SHELL_HUSH`. Left unflipped, hush had **no real control flow at all**: no `if`/`for`/
-        // `while`/`case`, no functions, no command substitution, no `$((...))` arithmetic -- only
-        // a flat sequence of individual command lines, which is why `sys/modules/oxfs/src/
-        // test_busybox.sh` (see CLAUDE.md's BusyBox section) had to be written as one instead of
-        // using any real script control flow. Flipped directly here, the same
-        // known-shape-text-replacement way as everything else in this function, rather than
-        // relying on oldconfig's default-acceptance (which doesn't apply to these at all).
-        //
-        // Left off deliberately, matching real upstream `default n`/already-documented reasons:
-        // `CONFIG_HUSH_BASH_SOURCE_CURDIR` (explicitly non-standard per its own Kconfig help),
-        // `CONFIG_HUSH_MEMLEAK` (debugging only), `CONFIG_HUSH_SAVEHISTORY` (already left off above
-        // -- no `HISTFILE` persistence), `CONFIG_FEATURE_SH_STANDALONE` (re-execs `/proc/self/exe`,
-        // which doesn't exist on this kernel), `CONFIG_FEATURE_SH_NOFORK` (calls `<applet>_main`
-        // directly instead of fork/exec -- meaningless in a single-applet-per-binary build, and a
-        // real behavior change if it silently did anything), `CONFIG_FEATURE_SH_EMBEDDED_SCRIPTS`
-        // (embeds scripts from a build-time `embed/` directory this codebase doesn't populate --
-        // no benefit here).
-        flips.extend([
-            (
-                "# CONFIG_HUSH_BASH_COMPAT is not set".to_string(),
-                "CONFIG_HUSH_BASH_COMPAT=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_BRACE_EXPANSION is not set".to_string(),
-                "CONFIG_HUSH_BRACE_EXPANSION=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_LINENO_VAR is not set".to_string(),
-                "CONFIG_HUSH_LINENO_VAR=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_TICK is not set".to_string(),
-                "CONFIG_HUSH_TICK=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_IF is not set".to_string(),
-                "CONFIG_HUSH_IF=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_LOOPS is not set".to_string(),
-                "CONFIG_HUSH_LOOPS=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_CASE is not set".to_string(),
-                "CONFIG_HUSH_CASE=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_FUNCTIONS is not set".to_string(),
-                "CONFIG_HUSH_FUNCTIONS=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_LOCAL is not set".to_string(),
-                "CONFIG_HUSH_LOCAL=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_RANDOM_SUPPORT is not set".to_string(),
-                "CONFIG_HUSH_RANDOM_SUPPORT=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_MODE_X is not set".to_string(),
-                "CONFIG_HUSH_MODE_X=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_ECHO is not set".to_string(),
-                "CONFIG_HUSH_ECHO=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_PRINTF is not set".to_string(),
-                "CONFIG_HUSH_PRINTF=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_TEST is not set".to_string(),
-                "CONFIG_HUSH_TEST=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_HELP is not set".to_string(),
-                "CONFIG_HUSH_HELP=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_EXPORT is not set".to_string(),
-                "CONFIG_HUSH_EXPORT=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_EXPORT_N is not set".to_string(),
-                "CONFIG_HUSH_EXPORT_N=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_READONLY is not set".to_string(),
-                "CONFIG_HUSH_READONLY=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_KILL is not set".to_string(),
-                "CONFIG_HUSH_KILL=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_WAIT is not set".to_string(),
-                "CONFIG_HUSH_WAIT=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_COMMAND is not set".to_string(),
-                "CONFIG_HUSH_COMMAND=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_TRAP is not set".to_string(),
-                "CONFIG_HUSH_TRAP=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_TYPE is not set".to_string(),
-                "CONFIG_HUSH_TYPE=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_TIMES is not set".to_string(),
-                "CONFIG_HUSH_TIMES=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_READ is not set".to_string(),
-                "CONFIG_HUSH_READ=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_SET is not set".to_string(),
-                "CONFIG_HUSH_SET=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_UNSET is not set".to_string(),
-                "CONFIG_HUSH_UNSET=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_ULIMIT is not set".to_string(),
-                "CONFIG_HUSH_ULIMIT=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_UMASK is not set".to_string(),
-                "CONFIG_HUSH_UMASK=y".to_string(),
-            ),
-            (
-                "# CONFIG_HUSH_GETOPTS is not set".to_string(),
-                "CONFIG_HUSH_GETOPTS=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_MATH is not set".to_string(),
-                "CONFIG_FEATURE_SH_MATH=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_MATH_64 is not set".to_string(),
-                "CONFIG_FEATURE_SH_MATH_64=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_MATH_BASE is not set".to_string(),
-                "CONFIG_FEATURE_SH_MATH_BASE=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_EXTRA_QUIET is not set".to_string(),
-                "CONFIG_FEATURE_SH_EXTRA_QUIET=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_READ_FRAC is not set".to_string(),
-                "CONFIG_FEATURE_SH_READ_FRAC=y".to_string(),
-            ),
-            (
-                "# CONFIG_FEATURE_SH_HISTFILESIZE is not set".to_string(),
-                "CONFIG_FEATURE_SH_HISTFILESIZE=y".to_string(),
-            ),
-        ]);
-    }
     if applet_symbol == "TAR" || applet_symbol == "CPIO" || applet_symbol == "AR" {
         // These three archive-creation features (`FEATURE_TAR_CREATE`/`FEATURE_CPIO_O`/
         // `FEATURE_AR_CREATE`) all have a real upstream `default y` -- but that default never
-        // applied, for the same root-cause reason CONFIG_HUSH_INTERACTIVE/HUSH_JOB/HUSH_IF/...
-        // needed their own explicit flip above: `allnoconfig` writes an explicit "not set" for
+        // applied: `allnoconfig` writes an explicit "not set" for
         // every symbol in the whole Kconfig tree up front, including ones invisible at the time
         // (`FEATURE_TAR_CREATE` while `CONFIG_TAR` was still off), so the later `oldconfig` pass
         // -- which only prompts for symbols with *no* prior answer at all -- never gets a chance
@@ -660,9 +383,8 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
         // roster-wide BusyBox self-test (`sh /test_busybox.sh`) hit `tar: unrecognized option: c`
         // and `ar: unrecognized option: r` -- this build's `tar`/`cpio`/`ar` could only extract or
         // list, never actually create an archive, silently defeating half of what each tool is
-        // for. Flipped directly here, the same known-shape-text-replacement way as HUSH's own
-        // control-flow symbols, rather than relying on oldconfig's default-acceptance (which
-        // doesn't apply to any of these either).
+        // for. Flipped directly here, by the same text replacement as the applet's own symbol,
+        // rather than relying on oldconfig's default-acceptance (which doesn't apply to these).
         flips.push(match applet_symbol {
             "TAR" => (
                 "# CONFIG_FEATURE_TAR_CREATE is not set".to_string(),
@@ -689,6 +411,30 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
         flips.push((
             "# CONFIG_FEATURE_FANCY_PING is not set".to_string(),
             "CONFIG_FEATURE_FANCY_PING=y".to_string(),
+        ));
+    }
+    if matches!(applet_symbol, "WHO" | "W" | "USERS" | "WALL" | "LAST") {
+        // They depend on `FEATURE_UTMP` (`last` on `FEATURE_WTMP` too), real upstream `default y`
+        // that never applies, the TAR/CPIO/AR block's root cause. musl's utmpx(3) here is real
+        // (OxideBSD-doc `LOGIN.md` §8), so the files have records to read.
+        flips.push((
+            "# CONFIG_FEATURE_UTMP is not set".to_string(),
+            "CONFIG_FEATURE_UTMP=y".to_string(),
+        ));
+        if applet_symbol == "LAST" {
+            flips.push((
+                "# CONFIG_FEATURE_WTMP is not set".to_string(),
+                "CONFIG_FEATURE_WTMP=y".to_string(),
+            ));
+        }
+    }
+    if applet_symbol == "SCRIPT" {
+        // Without `FEATURE_DEVPTS` (upstream `default y`, never applied: the TAR/CPIO/AR root
+        // cause) `xgetpty` scans old BSD `/dev/ptyXX` names; with it, `posix_openpt` opens
+        // `/dev/ptmx`, the only pty interface OxideBSD has. Found live: "can't find free pty".
+        flips.push((
+            "# CONFIG_FEATURE_DEVPTS is not set".to_string(),
+            "CONFIG_FEATURE_DEVPTS=y".to_string(),
         ));
     }
     if applet_symbol == "WGET" {
@@ -720,9 +466,8 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", config_path.display()));
 }
 
-/// Turning on `CONFIG_HUSH_INTERACTIVE`/`CONFIG_HUSH_JOB`/`CONFIG_FEATURE_EDITING` makes a whole
-/// tree of previously-invisible sub-options (`FEATURE_EDITING_MAX_LEN`, `FEATURE_EDITING_HISTORY`,
-/// `HUSH_BASH_COMPAT`, ...) newly visible -- Kconfig only ever emits a symbol into `.config` at
+/// Turning on an applet (or one of its features) can make a tree of previously invisible
+/// sub-options (`FEATURE_EDITING_MAX_LEN`, `FEATURE_EDITING_HISTORY`, ...) newly visible -- Kconfig only ever emits a symbol into `.config` at
 /// `allnoconfig` time if its own dependencies are already satisfied, so none of these existed as
 /// lines `configure_busybox_single_applet`'s direct text-replacement approach could edit at all.
 /// The normal build's own internal `silentoldconfig` step refuses to guess a default for a
@@ -735,11 +480,8 @@ fn configure_busybox_single_applet(out_dir: &Path, applet_symbol: &str) {
 /// stream of blank lines lets `conf` walk through and accept every prompt's own Kconfig-declared
 /// default, `int`/`string` ones included, right through to a clean exit.
 ///
-/// Originally only invoked for `HUSH` itself (`FEATURE_EDITING`/`HUSH_INTERACTIVE`'s own cascade
-/// was the only one the original ~24-applet roster ever hit) -- now runs after every applet's
-/// `configure_busybox_single_applet` call unconditionally, since a much broader roster (see
-/// CLAUDE.md's BusyBox section) hits this same "single symbol flip reveals a whole options
-/// sub-tree" shape for plenty of other applets too (anything pulling in its own `FEATURE_*` tree).
+/// Runs after every applet's `configure_busybox_single_applet`: many applets pull in their own
+/// `FEATURE_*` sub-tree when their symbol flips on.
 /// Cheap to run even when there's nothing new to resolve -- `conf` just exits quickly once no
 /// prompt remains unanswered.
 fn resolve_busybox_new_config_options(busybox_dir: &Path, out_arg: &str) {
