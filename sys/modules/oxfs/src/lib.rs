@@ -590,7 +590,7 @@ fn set_layout(data_blocks: u32, bitmap: u32) {
 /// The disk pool gets nearly all of `u32`; tmpfs, scratch space, gets the top 2^24 numbers.
 /// (Until `SUPERBLOCK_VERSION` 4 the disk pool was a fixed table of 8192 inodes, raised by hand
 /// each time the seeded tree outgrew it.)
-const TMPFS_INODE_BASE: u32 = 0xFF00_0000;
+const TMPFS_INODE_BASE: u32 = MAX_DISK_INODES;
 /// One past the last tmpfs inode number (`u32::MAX` itself is never handed out).
 const TMPFS_INODE_LIMIT: u32 = u32::MAX;
 
@@ -3722,6 +3722,8 @@ const FD_KIND_PIPE: i64 = 2;
 const FD_KIND_SOCKET: i64 = 3;
 const FD_KIND_FIFO: i64 = 4;
 const FD_KIND_MQUEUE: i64 = 5;
+/// A device opened through devfs; the argument is its `st_rdev`.
+const FD_KIND_DEVICE: i64 = 6;
 
 
 
@@ -3819,6 +3821,10 @@ fn stat_real_fd(real_fd: u64, buf_ptr: u64) -> i64 {
         FD_KIND_PIPE => write_synthetic_stat(S_IFIFO | 0o600, 0, arg, buf_ptr),
         FD_KIND_SOCKET => write_synthetic_stat(S_IFSOCK | 0o777, 0, arg, buf_ptr),
         FD_KIND_FIFO => write_stat(arg as u32, buf_ptr),
+        FD_KIND_DEVICE => match dev_node_for(arg as u32) {
+            Some((inode, _, _)) => write_stat(inode, buf_ptr),
+            None => write_synthetic_stat(S_IFCHR | 0o600, arg, 0, buf_ptr),
+        },
         _ => match inode_of_open_file(real_fd) {
             Some(inode_num) => write_stat(inode_num, buf_ptr),
             None => -EBADF,
@@ -3897,7 +3903,7 @@ fn proc_link_target(link: ProcLink, out: &mut [u8; MAX_CWD_PATH]) -> Result<usiz
     let mut arg = 0u64;
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
     match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
-        FD_KIND_TTY => {
+        FD_KIND_TTY | FD_KIND_DEVICE => {
             let (_, name, name_len) = dev_node_for(arg as u32).ok_or(-ENOENT)?;
             let mut b = ByteBuf { buf: &mut out[..], len: 0 };
             b.push_bytes(b"/dev/");
@@ -4470,7 +4476,15 @@ extern "C" fn oxfs_fsync(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
         return -EBADF;
     }
     if find_open_file(real_fd as u64).is_none() {
-        return -EINVAL;
+        // A disk device (a raw partition `newfs_oxfs` or `fsck_oxfs` wrote) has nothing left to
+        // put on the disk: its writes are durable when they return (`drivers::disk`). Anything
+        // else that isn't an oxfs file can't be synchronized (POSIX `EINVAL`).
+        let mut arg = 0u64;
+        // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
+        return match unsafe { oxidebsd_real_fd_kind(real_fd as u64, &mut arg) } {
+            FD_KIND_DEVICE => 0,
+            _ => -EINVAL,
+        };
     }
     if let Some(inode) = inode_of_open_file(real_fd as u64) {
         sync_file(inode);
@@ -7344,6 +7358,10 @@ fn set_clean(clean: bool) {
     unsafe { *core::ptr::addr_of_mut!(CLEAN) = clean };
 }
 
+/// The volume label read at mount (`newfs_oxfs -L`), written back with every superblock; none
+/// for a filesystem the kernel formatted.
+static mut LABEL: [u8; SB_LABEL_LEN] = [0; SB_LABEL_LEN];
+
 fn write_superblock() {
     let table = inode_table(false);
     let sb = Superblock {
@@ -7352,6 +7370,8 @@ fn write_superblock() {
         root_inode: ROOT_INODE,
         // SAFETY: as `set_clean`.
         clean: unsafe { *core::ptr::addr_of!(CLEAN) },
+        // SAFETY: as `set_clean`.
+        label: unsafe { *core::ptr::addr_of!(LABEL) },
         inode_file: table.file,
     };
     let mut block = [0u8; BLOCK_SIZE];
@@ -7369,6 +7389,8 @@ fn write_superblock() {
 /// bitmap stays in the cache, dirty, until `flush_all_to_disk`.
 fn reset_real_pool_for_fresh_format() {
     let blank = [0u8; BLOCK_SIZE];
+    // SAFETY: as `set_clean`.
+    unsafe { *core::ptr::addr_of_mut!(LABEL) = [0; SB_LABEL_LEN] };
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     unsafe { oxidebsd_block_write(0, blank.as_ptr() as u64) };
     bcache::invalidate_all();
@@ -7409,6 +7431,8 @@ fn mount_from_disk() -> bool {
         return false;
     }
     set_layout(data_blocks, bitmap);
+    // SAFETY: inside `module_init` or a remount, before anything writes a superblock.
+    unsafe { *core::ptr::addr_of_mut!(LABEL) = sb.label };
     if !sb.clean {
         log("[oxfs] mount: filesystem was not cleanly unmounted\n");
     }
@@ -7930,6 +7954,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(sbin, b"update", include_bytes!(env!("OXFS_UPDATE_ELF_PATH")));
     ok &= seed_file(sbin, b"fsck", include_bytes!(env!("OXFS_FSCK_ELF_PATH")));
     ok &= seed_file(sbin, b"fsck_oxfs", include_bytes!(env!("OXFS_FSCK_OXFS_ELF_PATH")));
+    ok &= seed_file(sbin, b"newfs_oxfs", include_bytes!(env!("OXFS_NEWFS_OXFS_ELF_PATH")));
     ok &= seed_file(usr_bin, b"du", include_bytes!(env!("OXFS_DU_ELF_PATH")));
     ok &= seed_file(bin, b"ed", include_bytes!(env!("OXFS_ED_ELF_PATH")));
     ok &= seed_file(bin, b"egrep", include_bytes!(env!("OXFS_EGREP_ELF_PATH")));
@@ -8444,6 +8469,7 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"update.8", include_bytes!("../../../../share/man/man8/update.8"));
     ok &= seed_file(man_man8, b"fsck.8", include_bytes!("../../../../share/man/man8/fsck.8"));
     ok &= seed_file(man_man8, b"fsck_oxfs.8", include_bytes!("../../../../share/man/man8/fsck_oxfs.8"));
+    ok &= seed_file(man_man8, b"newfs_oxfs.8", include_bytes!("../../../../share/man/man8/newfs_oxfs.8"));
     ok &= seed_file(man_man8, b"getty.8", include_bytes!("../../../../share/man/man8/getty.8"));
     ok &= seed_file(man_man8, b"init.8", include_bytes!("../../../../share/man/man8/init.8"));
     ok &= seed_file(man_man8, b"makewhatis.8", include_bytes!("../../../../share/man/man8/makewhatis.8"));

@@ -165,6 +165,19 @@ pub(crate) enum FdKind {
     /// A FIFO, by the oxfs inode that names it.
     Fifo(u64),
     Mqueue,
+    /// A device opened through devfs (`devfs::oxidebsd_dev_open`), by number: `major << 8 |
+    /// minor`, as a device node's `st_rdev`. Its driver's callbacks are the description's.
+    Device(u64),
+}
+
+/// Tags a description its driver registered as a plain module-owned one as device `dev`; one
+/// that already has a kind of its own (a terminal's, a pipe's) keeps it.
+pub(crate) fn tag_device(real_fd: u64, dev: u64) {
+    with_description(real_fd, |ops| {
+        if matches!(ops.kind, FdKind::Module) {
+            ops.kind = FdKind::Device(dev);
+        }
+    });
 }
 
 /// Tags `real_fd`'s kind, after it's registered.
@@ -179,6 +192,7 @@ const KIND_PIPE: i64 = 2;
 const KIND_SOCKET: i64 = 3;
 const KIND_FIFO: i64 = 4;
 const KIND_MQUEUE: i64 = 5;
+const KIND_DEVICE: i64 = 6;
 
 /// What description `real_fd` is: one of the `KIND_*` codes, with its argument (a terminal's
 /// packed `major << 8 | minor`, a pipe or socket's id, a FIFO's inode) stored through `arg`.
@@ -197,6 +211,7 @@ pub(crate) extern "C" fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i
             FdKind::Socket(id) => (KIND_SOCKET, id),
             FdKind::Fifo(inode) => (KIND_FIFO, inode),
             FdKind::Mqueue => (KIND_MQUEUE, 0),
+            FdKind::Device(dev) => (KIND_DEVICE, dev),
         }
     };
     // SAFETY: a module-owned out-pointer into its own stack.

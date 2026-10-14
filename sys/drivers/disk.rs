@@ -459,6 +459,28 @@ extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flag
     n as i64
 }
 
+/// `DIOCGSECTORSIZE`: a raw device's sector size (`u32`, always 512). FreeBSD's name in
+/// `<sys/disk.h>`; the number is OxideBSD's own, `_IOR('d', 128, u32)` in musl's encoding.
+pub const DIOCGSECTORSIZE: u64 = 0x8004_6480;
+/// `DIOCGMEDIASIZE`: a raw device's size in bytes (`i64`, FreeBSD's `off_t`), so `newfs_oxfs`
+/// can lay a filesystem out over it. `_IOR('d', 129, i64)`.
+pub const DIOCGMEDIASIZE: u64 = 0x8008_6481;
+
+/// The disk requests `ioctl(2)` answers on a raw device descriptor; `None` when `real_fd` isn't
+/// one or `request` isn't a disk request, so `sys_ioctl` goes on to the others.
+pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> {
+    use crate::memory::usercopy::{UserPtr, copyout_val};
+    if request != DIOCGSECTORSIZE && request != DIOCGMEDIASIZE {
+        return None;
+    }
+    let (_, sectors, _) = RAW_OPEN.lock().get(&real_fd).copied()?;
+    Some(if request == DIOCGSECTORSIZE {
+        copyout_val(&512u32, UserPtr::new(argp)).map(|()| 0)
+    } else {
+        copyout_val(&((sectors * 512) as i64), UserPtr::new(argp)).map(|()| 0)
+    })
+}
+
 extern "C" fn raw_close(real_fd: u64) -> i64 {
     RAW_OPEN.lock().remove(&real_fd);
     0

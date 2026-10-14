@@ -1,0 +1,26 @@
+[package]
+name = "newfs_oxfs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+oxfs_format = { path = "../../lib/liboxfs" }
+
+# ioctl(DIOCGMEDIASIZE), on the target only; the host build sizes a disk by seeking to its end.
+[target.'cfg(target_os = "oxidebsd")'.dependencies]
+libc = "0.2"
+
+# The host build doesn't know OxideBSD's target_os.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("oxidebsd"))'] }
+
+# The libc fork OxideBSD's std is built with (target_os = "oxidebsd"); a [patch] only applies
+# from the workspace root, so each binary repeats lib/libsh's.
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+# Opts out of the root workspace: a std program for x86_64-unknown-oxidebsd, built by build.rs's
+# build_static_std_crate, installed as /sbin/newfs_oxfs; also built for the host.
+[workspace]

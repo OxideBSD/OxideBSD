@@ -8,6 +8,9 @@
 
 #![no_std]
 
+mod writer;
+pub use writer::{BlockDevice, Error, FormatOptions, Writer};
+
 pub const BLOCK_SIZE: usize = 4096;
 /// The mode every fresh inode starts with, before `chmod` or a creation mode sets it.
 pub const FIXED_PERM: u32 = 0o755;
@@ -15,6 +18,8 @@ pub const BITS_PER_BITMAP_BLOCK: u32 = (BLOCK_SIZE * 8) as u32;
 /// Block numbers from here up belong to no disk: the largest oxfs is just under this many data
 /// blocks (~15 TiB), and the oxfs module numbers its in-memory tmpfs blocks from here.
 pub const MAX_DISK_BLOCKS: u32 = 0xF000_0000;
+/// Inode numbers from here up belong to no disk; the oxfs module numbers its tmpfs inodes from here.
+pub const MAX_DISK_INODES: u32 = 0xFF00_0000;
 
 pub const DIRECT_BLOCKS: usize = 12;
 pub const PTRS_PER_INDIRECT: usize = BLOCK_SIZE / 4;
@@ -77,7 +82,9 @@ pub const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
 /// Bumped 5 -> 6 for the buffer cache (`OxideBSD-doc/RAM_FLOOR.md` §3.1.3): the filesystem spans
 /// the whole device, its size (in the superblock) sets the bitmap's length, and data starts after
 /// that many bitmap blocks instead of after a fixed 1 GiB pool's.
-pub const SUPERBLOCK_VERSION: u32 = 6;
+///
+/// Bumped 6 -> 7 for the volume label (`SB_LABEL`, `newfs_oxfs -L`).
+pub const SUPERBLOCK_VERSION: u32 = 7;
 
 /// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
 /// `Inode` itself, since it isn't `#[repr(C)]` and `InodeKind` has no explicit discriminant, so its
@@ -450,6 +457,9 @@ pub const SB_INODE_FILE: usize = 128;
 /// The superblock's state word: `SB_CLEAN` when the last shutdown was orderly.
 pub const SB_STATE: usize = 20;
 pub const SB_CLEAN: u32 = 1;
+/// The volume label: `SB_LABEL_LEN` bytes, NUL-padded (FreeBSD's `fs_volname` is the same size).
+pub const SB_LABEL: usize = 32;
+pub const SB_LABEL_LEN: usize = 32;
 
 /// The superblock's fields, as `Superblock::decode` reads them and `encode` writes them.
 #[derive(Clone, Copy)]
@@ -461,6 +471,8 @@ pub struct Superblock {
     pub root_inode: u32,
     /// The last shutdown was orderly (`SB_CLEAN`).
     pub clean: bool,
+    /// The volume label (`newfs_oxfs -L`), NUL-padded; all zeroes for none.
+    pub label: [u8; SB_LABEL_LEN],
     /// The inode file's own inode record.
     pub inode_file: Inode,
 }
@@ -488,6 +500,7 @@ impl Superblock {
             inode_count: word(12),
             root_inode: word(16),
             clean: word(SB_STATE) == SB_CLEAN,
+            label: block[SB_LABEL..SB_LABEL + SB_LABEL_LEN].try_into().unwrap(),
             inode_file: unpack_inode(&block[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]),
         })
     }
@@ -501,7 +514,14 @@ impl Superblock {
         block[16..20].copy_from_slice(&self.root_inode.to_le_bytes());
         let state = if self.clean { SB_CLEAN } else { 0 };
         block[SB_STATE..SB_STATE + 4].copy_from_slice(&state.to_le_bytes());
+        block[SB_LABEL..SB_LABEL + SB_LABEL_LEN].copy_from_slice(&self.label);
         pack_inode(&self.inode_file, &mut block[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
+    }
+
+    /// The label without its padding.
+    pub fn label(&self) -> &[u8] {
+        let len = self.label.iter().position(|&b| b == 0).unwrap_or(SB_LABEL_LEN);
+        &self.label[..len]
     }
 
     /// Bitmap blocks for this filesystem: one bit per data block.
@@ -533,8 +553,59 @@ pub const fn guid_bytes(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
 }
 
 #[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
+
+    /// A device in memory.
+    struct Mem(Vec<[u8; BLOCK_SIZE]>);
+
+    impl BlockDevice for Mem {
+        type Error = ();
+        fn read_block(&mut self, n: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), ()> {
+            *buf = *self.0.get(n as usize).ok_or(())?;
+            Ok(())
+        }
+        fn write_block(&mut self, n: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), ()> {
+            *self.0.get_mut(n as usize).ok_or(())? = *buf;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn format_makes_root_and_lost_found() {
+        let dev = Mem(std::vec![[0u8; BLOCK_SIZE]; 40_000]);
+        let opts = FormatOptions { label: b"rootfs", inodes: 1000, now: 7 };
+        let mut w = Writer::format(dev, 40_000, &opts).unwrap();
+        // Enough inodes for a directory to outgrow its direct blocks.
+        let big = w.mkdir(ROOT_INODE, b"big", 7).unwrap();
+        for i in 0..(DIRECT_BLOCKS * RECORDS_PER_BLOCK + 3) {
+            let name = std::format!("f{i}");
+            let n = w.alloc_inode().unwrap();
+            w.write_inode(n, &Inode::new(InodeKind::File, 7)).unwrap();
+            w.dir_insert(big, name.as_bytes(), n, 7).unwrap();
+        }
+        assert_ne!(w.read_inode(big).unwrap().indirect, NO_BLOCK);
+        let mut dev = w.finish().unwrap();
+
+        let sb = Superblock::decode(&dev.0[0]).unwrap();
+        assert!(sb.clean && sb.label() == b"rootfs");
+        assert!(sb.inode_count >= 1000 && sb.inode_count % INODES_PER_BLOCK as u32 == 0);
+        let mut w = Writer { dev: &mut dev, sb, next_block: 0, next_inode: 0 };
+        let root = w.read_inode(ROOT_INODE).unwrap();
+        assert!(root.kind == InodeKind::Dir);
+        let b = w.read_data(root.direct[0]).unwrap();
+        let names: Vec<&[u8]> = (0..RECORDS_PER_BLOCK)
+            .filter(|&r| dir_record_used(&b, r))
+            .map(|r| dir_record_name(&b, r))
+            .collect();
+        assert_eq!(names, [&b"."[..], b"..", b"lost+found", b"big"]);
+        let lost = dir_record_inode(&b, 2);
+        assert_eq!(w.read_inode(lost).unwrap().mode, 0o700);
+    }
 
     #[test]
     fn inode_round_trips() {
@@ -566,12 +637,14 @@ mod tests {
             inode_count: 4096,
             root_inode: ROOT_INODE,
             clean: true,
+            label: *b"rootfs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
             inode_file: Inode::new(InodeKind::File, 0),
         };
         let mut block = [0u8; BLOCK_SIZE];
         sb.encode(&mut block);
         let back = Superblock::decode(&block).unwrap();
         assert_eq!((back.data_blocks, back.inode_count, back.clean), (200_000, 4096, true));
+        assert_eq!(back.label(), b"rootfs");
         assert_eq!(back.bitmap_blocks(), 7);
         assert_eq!(back.data_block_offset(), BITMAP_START + 7);
         block[4] ^= 1;

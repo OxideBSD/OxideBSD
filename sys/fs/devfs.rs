@@ -103,7 +103,12 @@ pub(crate) extern "C" fn oxidebsd_dev_open(major: u64, minor: u64, flags: u64) -
     match open {
         Some(open) => {
             let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
-            open(major, minor, flags)
+            let fd = open(major, minor, flags);
+            // Tagged with its number, so `fstat` reports the device (a terminal already is).
+            if fd >= 0 && let Some(real_fd) = crate::fs::fd::real_fd_of(fd as u64) {
+                crate::fs::fd::tag_device(real_fd, major << 8 | minor);
+            }
+            fd
         }
         None => -(crate::syscall::ENXIO as i64),
     }

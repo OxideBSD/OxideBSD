@@ -843,7 +843,8 @@ struct RawFbInfo {
 /// `SYS_IOCTL` (`124`), with musl's (Linux's) request codes. Terminal requests (TTY.md §5.6) act
 /// on the terminal `fd` is a description of, and fail with `ENOTTY` on anything else -- musl's
 /// `isatty()` is `ioctl(fd, TIOCGWINSZ)`, so this is what makes a pipe or a file not a tty.
-/// `FBIOGET_OXIDEBSD` acts on a `/dev/fb0` descriptor. Unknown requests are logged.
+/// `FBIOGET_OXIDEBSD` acts on a `/dev/fb0` descriptor, `DIOCGMEDIASIZE`/`DIOCGSECTORSIZE` on a raw
+/// disk device (`drivers::disk`). Unknown requests are logged.
 pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
     // musl's ioctl() takes the request as an int, so one with bit 31 set (`TIOCGPTN`,
     // 0x80045430) arrives sign-extended; requests are 32 bits.
@@ -862,6 +863,9 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         return Ok(0);
     }
     if let Some(r) = crate::tty::pty::ioctl(real_fd, request, argp) {
+        return r;
+    }
+    if let Some(r) = crate::drivers::disk::ioctl(real_fd, request, argp) {
         return r;
     }
     let Some(tty) = crate::tty::of_real_fd(real_fd) else {

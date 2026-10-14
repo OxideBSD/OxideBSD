@@ -1,0 +1,68 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt NEWFS_OXFS 8
+.Os OxideBSD
+.Sh NAME
+.Nm newfs_oxfs
+.Nd make an oxfs file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl N
+.Op Fl L Ar volname
+.Op Fl i Ar bytes
+.Op Fl s Ar size
+.Ar special
+.Sh DESCRIPTION
+.Nm
+makes an empty oxfs file system on
+.Ar special ,
+a raw disk partition such as
+.Pa /dev/virt0p2
+or an image file.
+The kernel never formats a file system itself.
+.Pp
+The file system covers all of
+.Ar special .
+A disk device's size comes from its
+.Dv DIOCGMEDIASIZE
+.Xr ioctl 2 ,
+an image file's from its length.
+The new file system holds the root directory and
+.Pa /lost+found
+(mode 0700), where
+.Xr fsck_oxfs 8
+reconnects files that lose their names, and is marked clean.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl N
+Print the layout the file system would have, and write nothing.
+.It Fl L Ar volname
+Give the file system a volume label of up to 32 letters, digits,
+.Ql - ,
+.Ql _
+and
+.Ql \&. .
+.It Fl i Ar bytes
+Make one inode for every
+.Ar bytes
+of the file system up front.
+oxfs adds inodes as files need them, a block of 32 at a time, so without
+.Fl i
+only the first block of them is made.
+.It Fl s Ar size
+Use only the first
+.Ar size
+512-byte sectors of
+.Ar special .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr fsck_oxfs 8 ,
+.Xr mount 8
+.Sh BUGS
+A disk device that holds the root file system mounted read-write can't be
+written, so
+.Nm
+can't format it then.
