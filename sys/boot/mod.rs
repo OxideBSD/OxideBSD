@@ -338,17 +338,6 @@ pub fn apply_cmdline(cmdline: &str) {
 /// Path pid 1 is started from.
 pub const INIT_PATH: &[u8] = b"/sbin/init";
 
-/// argv for `/sbin/init`, built the way FreeBSD's and OpenBSD's `start_init()` build it: the path,
-/// then `-s` only if single-user was requested. Init also gets an empty environment (`INIT.md`
-/// §4.2 has it build its own).
-pub fn init_argv() -> &'static [&'static [u8]] {
-    if single_user() {
-        &[INIT_PATH, b"-s"]
-    } else {
-        &[INIT_PATH]
-    }
-}
-
 /// Panics if Limine didn't honor the requested base revision -- called once, first thing, from
 /// `limine_entry_point!`'s generated `kmain`, before anything else touches a Limine response.
 pub fn check_base_revision() {

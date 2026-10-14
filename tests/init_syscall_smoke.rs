@@ -144,25 +144,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     );
 
     // The kernel's supervision of pid 1 (INIT.md §9), as the real boot arms it: the last step
-    // kills init through debug.kill_init, and the kernel restarts the real /sbin/init with -R.
-    const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
-    const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
-    oxidebsd::process::init::register(
-        oxidebsd::process::init::InitProgram {
-            elf: INIT_ELF,
-            argv: &[b"/sbin/init"],
-            restart_argv: &[b"/sbin/init", b"-R"],
-            envp: &[],
-            console: false,
-        },
-        oxidebsd::process::init::InitProgram {
-            elf: EMERGENCY_ELF,
-            argv: &[b"/sbin/emergency"],
-            restart_argv: &[b"/sbin/emergency"],
-            envp: &[],
-            console: true,
-        },
-    );
+    // kills init through debug.kill_init, and the kernel restarts the real /sbin/init with -R,
+    // read from the disk image.
+    oxidebsd::process::init::arm(oxidebsd::process::init::boot_init(), oxidebsd::process::init::boot_emergency());
     const SMOKE_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_SMOKE_ELF_PATH"));
     serial_println!("init_syscall_smoke: spawning init-smoke as pid 1 ({} byte ELF)", SMOKE_ELF.len());
     // Without a controlling terminal, as the real boot starts /sbin/init (kernel_main): a session

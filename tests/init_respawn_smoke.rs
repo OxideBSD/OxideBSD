@@ -1,8 +1,10 @@
-//! The kernel's supervision of pid 1 (INIT.md §9): registers `regress/std/init-respawn-smoke/`
-//! as both init and the emergency program and starts it as pid 1; it checks signal protection,
+//! The kernel's supervision of pid 1 (INIT.md §9): arms `regress/std/init-respawn-smoke/`
+//! (installed as `/usr/tests/init/init-respawn-smoke`) as both init and the emergency program and starts it as pid 1; it checks signal protection,
 //! then dies three ways until the kernel runs it as the emergency program, which reports.
 #![no_std]
 #![no_main]
+
+extern crate alloc;
 
 use core::panic::PanicInfo;
 
@@ -130,22 +132,16 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     const SMOKE_ELF: &[u8] = include_bytes!(env!("INIT_RESPAWN_SMOKE_ELF_PATH"));
     const ENVP: &[&[u8]] = &[b"PATH=/sbin:/bin:/usr/sbin:/usr/bin"];
-    oxidebsd::process::init::register(
-        oxidebsd::process::init::InitProgram {
-            elf: SMOKE_ELF,
-            argv: &[b"init-respawn-smoke", b"init"],
-            restart_argv: &[b"init-respawn-smoke", b"init"],
-            envp: ENVP,
-            console: true,
-        },
-        oxidebsd::process::init::InitProgram {
-            elf: SMOKE_ELF,
-            argv: &[b"init-respawn-smoke", b"emergency"],
-            restart_argv: &[b"init-respawn-smoke", b"emergency"],
-            envp: ENVP,
-            console: true,
-        },
-    );
+    // Restarts read it from the disk image, where it's installed for this test.
+    let program = |mode: &[u8]| oxidebsd::process::init::Program {
+        paths: alloc::vec![b"/usr/tests/init/init-respawn-smoke".to_vec()],
+        args: alloc::vec![mode.to_vec()],
+        restart: oxidebsd::process::init::Restart::Same,
+        env: oxidebsd::process::init::Env::Given(ENVP.iter().map(|e| e.to_vec()).collect()),
+        console: true,
+        shell_fallback: false,
+    };
+    oxidebsd::process::init::arm(program(b"init"), program(b"emergency"));
     serial_println!("init_respawn_smoke: spawning init-respawn-smoke as pid 1 ({} byte ELF)", SMOKE_ELF.len());
     let pid1 = oxidebsd::process::lifecycle::spawn_with(SMOKE_ELF, None, &[b"init-respawn-smoke", b"init"], ENVP)
         .unwrap_or_else(|e| panic!("failed to spawn init-respawn-smoke: {e:?}"));

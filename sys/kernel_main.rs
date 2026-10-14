@@ -229,46 +229,16 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     crate::fs::fd::init();
 
-    // pid 1 is `/sbin/init` (INIT.md), embedded so that a damaged file system can't stop it
-    // (§9.6), started with the boot flags (§4.1) and an empty environment (§4.2), and without a
-    // controlling terminal: its children take the console. A restart after a death gets `-R`
-    // (§9.3); repeated deaths start `/sbin/emergency` (§9.4). If init can't be started at all,
-    // `/bin/sh` runs on the console instead.
-    const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
-    // init=/init_path= on the command line: pid 1 execs those instead (sys/kern/start_init).
-    const START_INIT_ELF: &[u8] = include_bytes!(env!("START_INIT_ELF_PATH"));
-    const SH_ELF: &[u8] = include_bytes!(env!("OXFS_SH_ELF_PATH"));
-    const DEFAULT_ENVP: &[&[u8]] = crate::process::lifecycle::DEFAULT_ENVP;
-    const SH_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], DEFAULT_ENVP[2], b"HOME=/"];
-    const SH_ARGV: &[&[u8]] = &[b"-sh"];
-    const EMERGENCY_ARGV: &[&[u8]] = &[b"/sbin/emergency"];
-    const EMERGENCY_ENVP: &[&[u8]] = &[DEFAULT_ENVP[0], DEFAULT_ENVP[1], b"HOME=/"];
-    const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
-    let init = crate::process::init::pid1_program(INIT_ELF, START_INIT_ELF);
-    crate::process::init::register(
-        init,
-        crate::process::init::InitProgram {
-            elf: EMERGENCY_ELF,
-            argv: EMERGENCY_ARGV,
-            restart_argv: EMERGENCY_ARGV,
-            envp: EMERGENCY_ENVP,
-            console: true,
-        },
-    );
-    match crate::boot::init_paths() {
-        Some(paths) => {
-            serial_println!("[boot] spawning start_init as pid 1, for {}", paths);
-        }
-        None => {
-            serial_println!("[boot] spawning /sbin/init as pid 1 ({} byte ELF)", INIT_ELF.len());
-        }
-    }
-    let pid1 = crate::process::lifecycle::spawn_boot(init.elf, None, init.argv, init.envp, false)
-        .or_else(|e| {
-            serial_println!("[boot] failed to spawn /sbin/init: {:?}; running /bin/sh instead", e);
-            crate::process::lifecycle::spawn_with(SH_ELF, None, SH_ARGV, SH_ENVP)
-        })
-        .unwrap_or_else(|e| panic!("failed to spawn /bin/sh: {e:?}"));
+    // pid 1 is `/sbin/init` (INIT.md), read from the root file system as FreeBSD's start_init
+    // does -- nothing userland is embedded in the kernel (RAM_FLOOR.md §4.6.3) -- started with the
+    // boot flags (§4.1) and an empty environment (§4.2), and without a controlling terminal: its
+    // children take the console. `init=`/`init_path=` name other programs, tried in order. A
+    // restart after a death gets `-R` (§9.3); repeated deaths start `/sbin/emergency` (§9.4). If
+    // nothing can be started, `/bin/sh` runs on the console instead; failing that, there is no
+    // system to run.
+    crate::process::init::arm(crate::process::init::boot_init(), crate::process::init::boot_emergency());
+    let pid1 = crate::process::init::start_pid1()
+        .unwrap_or_else(|| panic!("no init found: nothing in init_path, nor /bin/sh, could be started"));
 
     crate::process::scheduler::start(pid1)
 }

@@ -139,8 +139,8 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `memory_map`), `limine_entry_point!`. No direct `0xb8000` access: the console is the
   framebuffer (`sys/console/framebuffer.rs`), fed by `boot::FbInfo`.
 - Kernel cmdline (`boot::parse_cmdline`): `no-ata`/`no-disk`, `console.underline=color`, `-s`
-  single user, `-D` dual console, `-h` serial console, `init=`/`init_path=` (pid 1 is then the
-  embedded `sys/kern/start_init`, which execs them). Tests and headless runs get `-D`.
+  single user, `-D` dual console, `-h` serial console, `init=`/`init_path=` (programs the kernel
+  tries as pid 1, read from disk; `process::init`). Tests and headless runs get `-D`.
 - **Multiboot2** is a deliberately maintained second boot path (it eases bootloader
   development); don't remove it. Works under Limine's multiboot2 loader and GRUB on BIOS. The full kernel needs
   `OXIDEBSD_FIRMWARE=bios` (UEFI has no contiguous hole for the ~266 MiB image; GRUB 2.14 under
@@ -174,8 +174,8 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
   `PT_INTERP` image: it loads no dynamic linker).
 - **`/bin` and `/sbin` are static** (OpenBSD-style; `build_static_std_crate`, `StdLink::StaticPie`),
-  including `/sbin/init`, `/bin/sh` and `/sbin/emergency`, which the kernel embeds and spawns as
-  pid 1. **Everything else is a dynamic PIE** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
+  including `/sbin/init`, `/bin/sh` and `/sbin/emergency`, which the kernel reads from the root
+  file system and spawns as pid 1 (nothing userland is embedded in it). **Everything else is a dynamic PIE** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
   libunwind, `build_libgcc_s`).
 - **`/sbin/init` has no controlling terminal** (`InitProgram::console`); each child it starts is
   its own session and takes the console with `TIOCSCTTY`. The kernel never lets a session leader

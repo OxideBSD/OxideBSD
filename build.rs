@@ -480,8 +480,8 @@ fn main() {
     // Extends the real std consumer proof into std::thread, signals, and std::net -- see
     // regress/std/std-thread-net-signal-oxidebsd/src/main.rs's own doc comment.
     // The kernel's supervision of pid 1 -- see tests/init_respawn_smoke.rs. Spawned by the kernel
-    // as pid 1, so a static PIE like /bin/sh.
-    build_std_oxidebsd_userland_crate_with_env(
+    // as pid 1, so a static PIE like /bin/sh; installed for the restarts the kernel reads from disk.
+    let init_respawn_smoke_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "regress/std/init-respawn-smoke",
         "INIT_RESPAWN_SMOKE_ELF_PATH",
         &musl_sysroot,
@@ -613,17 +613,8 @@ fn main() {
         &[],
         StdLink::StaticPie,
     );
-    // Embedded in the kernel, never installed: pid 1 when init=/init_path= name other programs
-    // (sys/kern/start_init). Static, as pid 1 must be.
-    build_std_oxidebsd_userland_crate_with_env(
-        "sys/kern/start_init",
-        "START_INIT_ELF_PATH",
-        &musl_sysroot,
-        &[],
-        StdLink::StaticPie,
-    );
-    // Also embedded in the kernel itself, which runs it when init keeps dying (INIT.md §9.4).
-    // What the kernel runs as pid 1 when init keeps dying: static for the same reason as /bin/sh.
+    // What the kernel runs as pid 1 when init keeps dying (INIT.md §9.4), read from the disk:
+    // static for the same reason as /bin/sh.
     let emergency_elf_path = build_std_oxidebsd_userland_crate_with_env(
         "sbin/emergency",
         "OXFS_EMERGENCY_ELF_PATH",
@@ -1019,6 +1010,7 @@ fn main() {
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
         ("OXFS_TZ_SMOKE_ELF_PATH", tz_smoke_elf_path.to_str().unwrap()),
         ("OXFS_INIT_SMOKE_ELF_PATH", init_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_INIT_RESPAWN_SMOKE_ELF_PATH", init_respawn_smoke_elf_path.to_str().unwrap()),
         ("OXFS_CRED_SMOKE_ELF_PATH", cred_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VI_ELF_PATH", vi_elf_path.to_str().unwrap()),
         ("OXFS_NANO_ELF_PATH", nano_elf_path.to_str().unwrap()),

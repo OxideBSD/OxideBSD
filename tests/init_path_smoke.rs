@@ -1,8 +1,7 @@
-//! `init=` and `init_path=` (INIT.md §4.1): with them on the command line, the kernel runs its
-//! embedded `start_init` as pid 1, which must skip `init=`'s missing program and exec
-//! `init_path=`'s, `regress/std/init-smoke/` (`started_by_start_init`), keeping pid 1. That kills
-//! itself through `debug.kill_init`, and the kernel's restart must take the same way, without
-//! `-R`.
+//! `init=` and `init_path=` (INIT.md §4.1): with them on the command line, the kernel must skip
+//! `init=`'s missing program and start `init_path=`'s, `regress/std/init-smoke/`
+//! (`started_by_init_path`), as pid 1, read from the disk. That kills itself through
+//! `debug.kill_init`, and the kernel's restart must take the same way, without `-R`.
 #![no_std]
 #![no_main]
 
@@ -145,24 +144,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
     );
 
-    const INIT_ELF: &[u8] = include_bytes!(env!("OXFS_INIT_ELF_PATH"));
-    const START_INIT_ELF: &[u8] = include_bytes!(env!("START_INIT_ELF_PATH"));
-    const EMERGENCY_ELF: &[u8] = include_bytes!(env!("OXFS_EMERGENCY_ELF_PATH"));
-    let init = oxidebsd::process::init::pid1_program(INIT_ELF, START_INIT_ELF);
-    assert!(init.elf.as_ptr() == START_INIT_ELF.as_ptr(), "init_path= didn't select start_init");
-    oxidebsd::process::init::register(
-        init,
-        oxidebsd::process::init::InitProgram {
-            elf: EMERGENCY_ELF,
-            argv: &[b"/sbin/emergency"],
-            restart_argv: &[b"/sbin/emergency"],
-            envp: &[],
-            console: true,
-        },
-    );
-    serial_println!("init_path_smoke: spawning start_init as pid 1");
-    let pid1 = oxidebsd::process::lifecycle::spawn_boot(init.elf, None, init.argv, init.envp, false)
-        .unwrap_or_else(|e| panic!("failed to spawn start_init: {e:?}"));
+    oxidebsd::process::init::arm(oxidebsd::process::init::boot_init(), oxidebsd::process::init::boot_emergency());
+    serial_println!("init_path_smoke: starting pid 1 from init= and init_path=");
+    let pid1 = oxidebsd::process::init::start_pid1().unwrap_or_else(|| panic!("no init_path program started"));
 
     oxidebsd::process::scheduler::start(pid1)
 }

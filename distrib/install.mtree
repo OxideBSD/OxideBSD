@@ -36,6 +36,7 @@
 ./usr/tests/cred/cred-smoke type=file src=artifact:OXFS_CRED_SMOKE_ELF_PATH
 ./usr/tests/init type=dir
 ./usr/tests/init/init-smoke type=file src=artifact:OXFS_INIT_SMOKE_ELF_PATH
+./usr/tests/init/init-respawn-smoke type=file src=artifact:OXFS_INIT_RESPAWN_SMOKE_ELF_PATH
 ./usr/tests/tz type=dir
 ./usr/tests/tz/run.sh type=file src=regress/tz-syscall-smoke/run.sh
 ./usr/tests/tz/tz-smoke type=file src=artifact:OXFS_TZ_SMOKE_ELF_PATH

@@ -1057,6 +1057,36 @@ fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
     read_exec_head_and_close(fd as u64)
 }
 
+/// A whole program, read from the root file system by path, for the kernel to start as pid 1
+/// (`init::start`; FreeBSD execs it inside process 1, `start_init`). The buffer is the caller's,
+/// dropped once the image is mapped. `ENOEXEC` for anything but a non-empty oxfs file.
+pub(crate) fn read_program(path: &[u8]) -> Result<Vec<u8>, u64> {
+    let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
+    let fd = {
+        let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
+        open(path.as_ptr() as u64, path.len() as u64, 0)
+    };
+    if fd < 0 {
+        return Err(-fd as u64);
+    }
+    let fd = fd as u64;
+    let read = || -> Result<Vec<u8>, u64> {
+        let content = crate::fs::fd::content_id_of(fd).ok_or(ENOEXEC)?;
+        let size = u64::try_from(crate::fs::fd::content_size(content)).map_err(|_| ENOEXEC)?;
+        if size == 0 {
+            return Err(ENOEXEC);
+        }
+        let mut image = alloc::vec![0u8; size as usize];
+        if crate::fs::fd::content_read(content, 0, image.as_mut_ptr() as u64, size) != size as i64 {
+            return Err(EIO);
+        }
+        Ok(image)
+    };
+    let result = read();
+    let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
+    result
+}
+
 /// `open_exec_file`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
 /// `execveat`'s dirfd-relative (and `AT_SYMLINK_NOFOLLOW`) target.
 fn open_exec_file_at(at_ptr: u64, nofollow: bool) -> Result<ExecFile, u64> {

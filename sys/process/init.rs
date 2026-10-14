@@ -2,7 +2,7 @@
 //! user-space signals it has no handler for, and when it dies the kernel records why and starts
 //! it again -- or, after repeated deaths, starts `/sbin/emergency` instead.
 //!
-//! Only armed once `register` names the program to run as pid 1 (the real boot,
+//! Only armed once `arm` names the programs to run as pid 1 (the real boot,
 //! `kernel_main::run_real_system`); test kernels that spawn their own pid 1 keep the old
 //! behavior, where pid 1 is an ordinary process and its exit leaves the system idle.
 
@@ -12,24 +12,137 @@ use alloc::vec::Vec;
 use super::*;
 use crate::memory::with_frame_allocator;
 
-/// What the kernel runs as pid 1.
-#[derive(Clone, Copy)]
-pub struct InitProgram {
-    /// Its image. Embedded in the kernel, so a damaged file system can't stop init from starting.
-    pub elf: &'static [u8],
-    pub argv: &'static [&'static [u8]],
-    /// `argv` for a restart after a death: `/sbin/init` takes `-R` (recovery mode, §9.3).
-    pub restart_argv: &'static [&'static [u8]],
-    pub envp: &'static [&'static [u8]],
+/// What the kernel starts as pid 1, read from the root file system when it's needed (RAM_FLOOR.md
+/// §4.6.3, FreeBSD's `start_init`): nothing userland is embedded in the kernel.
+#[derive(Clone)]
+pub struct Program {
+    /// Tried in order until one starts (`init_path`).
+    pub paths: Vec<Vec<u8>>,
+    /// Arguments after `argv[0]` (the path) for a start.
+    pub args: Vec<Vec<u8>>,
+    /// What a restart after a death passes instead.
+    pub restart: Restart,
+    pub env: Env,
     /// Whether the console becomes its controlling terminal. Not for `/sbin/init`, which runs
     /// without one so that its children can take it (INIT.md §5); a shell or the emergency
     /// program needs it for job control.
     pub console: bool,
+    /// When no path starts, try `/bin/sh` on the console (the boot's init only).
+    pub shell_fallback: bool,
+}
+
+/// A restart's arguments.
+#[derive(Clone)]
+pub enum Restart {
+    /// `-R` (recovery mode, INIT.md §9.3), given only to `/sbin/init`; anything else none.
+    Recovery,
+    /// The same arguments as a start.
+    Same,
+}
+
+/// A program's environment.
+#[derive(Clone)]
+pub enum Env {
+    /// `/sbin/init` starts with an empty one (INIT.md §4.2); anything else `init_path` names gets
+    /// the kernel's default, to pass on.
+    Boot,
+    Given(Vec<Vec<u8>>),
+}
+
+impl Program {
+    fn argv(&self, path: &[u8], restart: bool) -> Vec<Vec<u8>> {
+        let mut argv = alloc::vec![path.to_vec()];
+        match (&self.restart, restart) {
+            (Restart::Recovery, true) => {
+                if path == crate::boot::INIT_PATH {
+                    argv.push(b"-R".to_vec());
+                }
+            }
+            _ => argv.extend(self.args.iter().cloned()),
+        }
+        argv
+    }
+
+    fn envp(&self, path: &[u8]) -> Vec<Vec<u8>> {
+        match &self.env {
+            Env::Boot if path == crate::boot::INIT_PATH => Vec::new(),
+            Env::Boot => lifecycle::DEFAULT_ENVP.iter().map(|e| e.to_vec()).collect(),
+            Env::Given(envp) => envp.clone(),
+        }
+    }
+}
+
+/// The boot's init (INIT.md §4.1): `init=`'s and `init_path=`'s programs (FreeBSD's colon-separated
+/// list), else `/sbin/init`, each with `-s` for a single-user boot.
+pub fn boot_init() -> Program {
+    let paths = match crate::boot::init_paths() {
+        Some(list) => list.split(':').filter(|p| !p.is_empty()).map(|p| p.as_bytes().to_vec()).collect(),
+        None => alloc::vec![crate::boot::INIT_PATH.to_vec()],
+    };
+    let args = if crate::boot::single_user() { alloc::vec![b"-s".to_vec()] } else { Vec::new() };
+    Program { paths, args, restart: Restart::Recovery, env: Env::Boot, console: false, shell_fallback: true }
+}
+
+/// `/sbin/emergency` (INIT.md §9.4), on the console.
+pub fn boot_emergency() -> Program {
+    let env = alloc::vec![lifecycle::DEFAULT_ENVP[0].to_vec(), lifecycle::DEFAULT_ENVP[1].to_vec(), b"HOME=/".to_vec()];
+    Program {
+        paths: alloc::vec![b"/sbin/emergency".to_vec()],
+        args: Vec::new(),
+        restart: Restart::Same,
+        env: Env::Given(env),
+        console: true,
+        shell_fallback: false,
+    }
+}
+
+/// Starts `program` as pid 1 (`restart`: after a death, as `INIT_PID`; else the first process):
+/// the first of its paths that can be read and loaded, else `/bin/sh` on the console if it may
+/// fall back to it. `None` when nothing could be started; each failure is logged.
+fn start(program: &Program, restart: bool) -> Option<Pid> {
+    let spawn = |path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>], console: bool| -> Result<Pid, alloc::string::String> {
+        let image = lifecycle::read_program(path).map_err(|e| alloc::format!("errno {e}"))?;
+        let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+        let envp: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
+        let started = if restart {
+            lifecycle::spawn_as(INIT_PID, &image, &argv, &envp, console)
+        } else {
+            lifecycle::spawn_boot(&image, None, &argv, &envp, console)
+        };
+        started.map_err(|e| alloc::format!("{e:?}"))
+    };
+    for path in &program.paths {
+        match spawn(path, &program.argv(path, restart), &program.envp(path), program.console) {
+            Ok(pid) => {
+                crate::serial_println!("[boot] pid 1: {}", core::str::from_utf8(path).unwrap_or("?"));
+                return Some(pid);
+            }
+            Err(why) => {
+                crate::serial_println!("[boot] pid 1: {}: {}", core::str::from_utf8(path).unwrap_or("?"), why);
+            }
+        }
+    }
+    if program.shell_fallback {
+        crate::serial_println!("[boot] pid 1: no init could be started; trying /bin/sh");
+        let env = alloc::vec![
+            lifecycle::DEFAULT_ENVP[0].to_vec(),
+            lifecycle::DEFAULT_ENVP[1].to_vec(),
+            lifecycle::DEFAULT_ENVP[2].to_vec(),
+            b"HOME=/".to_vec(),
+        ];
+        match spawn(b"/bin/sh", &[b"-sh".to_vec()], &env, true) {
+            Ok(pid) => return Some(pid),
+            Err(why) => {
+                crate::serial_println!("[boot] pid 1: /bin/sh: {}", why);
+            }
+        }
+    }
+    None
 }
 
 struct Supervisor {
-    init: InitProgram,
-    emergency: InitProgram,
+    init: Program,
+    emergency: Program,
     /// Pid 1 is currently the emergency program, not init.
     in_emergency: bool,
 }
@@ -68,40 +181,16 @@ const REPEAT_WINDOW_TICKS: u64 = 30 * crate::cpu::pit::TIMER_HZ as u64;
 /// The most recent ring-3 fault in pid 1, so its death can say where it crashed.
 static LAST_FAULT: Mutex<Option<Fault>> = Mutex::new(None);
 
-/// pid 1's program (INIT.md §4.1, §9.6): the embedded `/sbin/init`, with the boot flags, or,
-/// when the command line names other programs (`boot::init_paths`), the embedded `start_init`,
-/// which execs each in turn. A restart after a death passes `-R` either way; `start_init` gives it
-/// only to `/sbin/init`.
-pub fn pid1_program(init_elf: &'static [u8], start_init_elf: &'static [u8]) -> InitProgram {
-    const INIT_RESTART_ARGV: &[&[u8]] = &[crate::boot::INIT_PATH, b"-R"];
-    let Some(paths) = crate::boot::init_paths() else {
-        return InitProgram {
-            elf: init_elf,
-            argv: crate::boot::init_argv(),
-            restart_argv: INIT_RESTART_ARGV,
-            envp: &[],
-            console: false,
-        };
-    };
-    let paths: &'static [u8] = alloc::boxed::Box::leak(paths.into_bytes().into_boxed_slice());
-    let mut argv: Vec<&'static [u8]> = alloc::vec![b"start_init", paths];
-    if crate::boot::single_user() {
-        argv.push(b"-s");
-    }
-    let restart: Vec<&'static [u8]> = alloc::vec![b"start_init", paths, b"-R"];
-    InitProgram {
-        elf: start_init_elf,
-        argv: alloc::boxed::Box::leak(argv.into_boxed_slice()),
-        restart_argv: alloc::boxed::Box::leak(restart.into_boxed_slice()),
-        // Passed on to whatever it runs; /sbin/init builds its own (INIT.md §4.2).
-        envp: lifecycle::DEFAULT_ENVP,
-        console: false,
-    }
+/// Arms supervision of pid 1 (§9), which will restart `init`, or after repeated deaths start
+/// `emergency`; called once, before pid 1 starts.
+pub fn arm(init: Program, emergency: Program) {
+    *SUPERVISOR.lock() = Some(Supervisor { init, emergency, in_emergency: false });
 }
 
-/// Arms supervision; called once, before pid 1 is spawned.
-pub fn register(init: InitProgram, emergency: InitProgram) {
-    *SUPERVISOR.lock() = Some(Supervisor { init, emergency, in_emergency: false });
+/// Starts the armed init as the first process (`kernel_main`): `None` when no program could be.
+pub fn start_pid1() -> Option<Pid> {
+    let init = SUPERVISOR.lock().as_ref().map(|s| s.init.clone())?;
+    start(&init, false)
 }
 
 fn armed() -> bool {
@@ -130,16 +219,14 @@ pub(crate) fn note_fault(pid: Pid, ip: u64, addr: Option<u64>) {
 /// self-exit), so its entry can't be dropped here: the pid-1 entry is moved to a fresh pid and
 /// reaped later like any exited thread, which frees pid 1 for the replacement started here.
 pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
-    let (cause, elf, argv, envp, console, emergency) = {
+    let (cause, program, emergency) = {
         let mut guard = SUPERVISOR.lock();
         let Some(sup) = guard.as_mut() else { return false };
         let (cause, emergency) = record_death(code, sup.in_emergency);
         sup.in_emergency = emergency;
-        let p = if emergency { &sup.emergency } else { &sup.init };
         // Init restarts in recovery mode, even after the emergency program: services the
         // operator left running must not be started twice.
-        let argv = if emergency { p.argv } else { p.restart_argv };
-        (cause, p.elf, argv, p.envp, p.console, emergency)
+        (cause, if emergency { sup.emergency.clone() } else { sup.init.clone() }, emergency)
     };
 
     retire_old_pid1(exiting);
@@ -149,10 +236,11 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
         describe(cause),
         if emergency { "it keeps dying; starting /sbin/emergency" } else { "starting it again" }
     );
-    match lifecycle::spawn_as(INIT_PID, elf, argv, envp, console) {
-        Ok(_) => adopt_orphans(),
-        Err(e) => {
-            crate::serial_println!("init: could not start pid 1: {:?}; the system is idle", e);
+    // Read from the root file system now, as FreeBSD's start_init would.
+    match start(&program, true) {
+        Some(_) => adopt_orphans(),
+        None => {
+            crate::serial_println!("init: could not start pid 1; the system is idle");
         }
     }
     true

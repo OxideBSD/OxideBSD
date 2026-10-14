@@ -1,12 +1,15 @@
-//! Kernel command-line parsing (`boot::parse_cmdline`) and the argv pid 1 gets (`boot::init_argv`).
+//! Kernel command-line parsing (`boot::parse_cmdline`) and what pid 1 is started as
+//! (`process::init::boot_init`).
 //! The last check follows whatever this boot's own command line was, so running this binary with
 //! `OXIDEBSD_KERNEL_CMDLINE=-s` exercises the real Limine path end to end.
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
-use oxidebsd::boot::{BootFlags, BootInfo, init_argv, parse_cmdline, single_user};
+use oxidebsd::boot::{BootFlags, BootInfo, parse_cmdline, single_user};
 use oxidebsd::limine_entry_point;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
@@ -30,11 +33,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
     assert_eq!(parse_cmdline("-sD"), BootFlags { single_user: true, dual_console: true, ..none });
     assert_eq!(parse_cmdline("-h"), BootFlags { serial_console: true, ..none });
 
-    let argv = init_argv();
+    let init = oxidebsd::process::init::boot_init();
+    assert!(init.paths == [b"/sbin/init".to_vec()], "pid 1's path");
     if single_user() {
-        assert_eq!(argv, &[&b"/sbin/init"[..], &b"-s"[..]]);
+        assert!(init.args == [b"-s".to_vec()], "single-user boot without -s");
     } else {
-        assert_eq!(argv, &[&b"/sbin/init"[..]]);
+        assert!(init.args.is_empty(), "boot without -s passed arguments");
     }
     serial_println!("boot_flags: [ok] (single_user = {})", single_user());
 
