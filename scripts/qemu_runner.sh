@@ -51,7 +51,11 @@ cp "$STAGE_DIR/limine-bios-cd.bin" "$ISO_ROOT/boot/limine/"
 cp "$STAGE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/limine/"
 cp "$STAGE_DIR/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/"
 cp "$STAGE_DIR/BOOTIA32.EFI" "$ISO_ROOT/EFI/BOOT/"
-cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
+# The kernel without its debug sections (FreeBSD ships `kernel` and keeps `kernel.debug`): the
+# bootloader reads the whole file into memory first, and the ~29 MiB of DWARF alone kept Limine
+# from loading it in 128 MB (RAM_FLOOR.md). gdb still uses the full ELF in target/.
+OBJCOPY="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy"
+"$OBJCOPY" --strip-debug "$KERNEL_ELF" "$ISO_ROOT/boot/kernel"
 # /etc/fstab compiled by build.rs (fsconf_mkdb), for the kernel to find the root by.
 if [ -f target/boot/fsconf ]; then
     cp target/boot/fsconf "$ISO_ROOT/boot/fsconf"
