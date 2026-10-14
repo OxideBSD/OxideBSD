@@ -57,6 +57,11 @@ case "$TEST_NAME" in
         QEMU_PASS_PATTERN="login:"
         QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM"
         ;;
+    oom_syscall_smoke)
+        # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
+        export OXIDEBSD_QEMU_MEM
+        ;;
 esac
 
 # --- Stage a fresh ISO root and build the hybrid image ---

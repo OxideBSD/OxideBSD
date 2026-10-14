@@ -1262,6 +1262,7 @@ pub mod init;
 pub mod lifecycle;
 pub mod limits;
 pub mod mm;
+pub mod oom;
 pub mod procfs;
 pub mod signals;
 pub mod timers;

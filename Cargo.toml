@@ -42,6 +42,7 @@ members = [
   "regress/usermem-syscall-smoke",
   "regress/wx-syscall-smoke",
   "regress/cow-syscall-smoke",
+  "regress/oom-syscall-smoke",
   "regress/trap-syscall-smoke",
   "regress/meltdown-poc",
   "regress/sigaltstack-syscall-smoke",
@@ -276,6 +277,10 @@ harness = false
 
 [[test]]
 name = "cow_syscall_smoke"
+harness = false
+
+[[test]]
+name = "oom_syscall_smoke"
 harness = false
 
 [[test]]

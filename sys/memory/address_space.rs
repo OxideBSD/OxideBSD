@@ -233,10 +233,58 @@ impl AddressSpace {
         let mut child = Self::build_from_active(physical_memory_offset, frame_allocator, true)?;
         // The child aliases the parent's cached frames (they're `SHARED_LEAF`), so uses them too.
         child.cached = Arc::new(Mutex::new(pagecache::fork_uses(&self.cached)));
+        // The fault trampoline's scratch page is written on the way to delivering every fault
+        // signal, SIGKILL from the OOM killer included: shared copy-on-write, that write could
+        // itself need a frame there isn't, and the signal would never land. Each side gets its own
+        // now, while a failure can still fail the fork.
+        let scratch = VirtAddr::new(crate::process::fault_trampoline::FAULT_SCRATCH_VA);
+        if self.unshare(&child, scratch, physical_memory_offset, frame_allocator).is_err() {
+            // SAFETY: the child was never active.
+            unsafe { child.teardown(physical_memory_offset, frame_allocator) };
+            return Err(());
+        }
         // The parent's writable private pages just became copy-on-write: drop the TLB entries
         // that still let it write them.
         x86_64::instructions::tlb::flush_all();
         Ok(child)
+    }
+
+    /// Ends the sharing of the private page at `va` between `self` and `child`, just forked from
+    /// it: the child gets a copy, the parent the frame (writable again if it was). Nothing to do
+    /// if the page isn't mapped or isn't copy-on-write.
+    fn unshare(
+        &self,
+        child: &AddressSpace,
+        va: VirtAddr,
+        physical_memory_offset: VirtAddr,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    ) -> Result<(), ()> {
+        // SAFETY: both live tables; the child isn't active and the caller is the only user of
+        // either during fork.
+        let (parent_l4, child_l4) = unsafe {
+            (
+                frame_to_page_table(*self.level_4_frame, physical_memory_offset),
+                frame_to_page_table(*child.level_4_frame, physical_memory_offset),
+            )
+        };
+        let Some(parent) = leaf_entry(parent_l4, physical_memory_offset, va) else { return Ok(()) };
+        let flags = parent.flags();
+        if !flags.contains(PageTableFlags::PRESENT) || !flags.contains(COW_LEAF) {
+            return Ok(());
+        }
+        let old = parent.frame().map_err(|_| ())?;
+        let own = (flags - COW_LEAF) | PageTableFlags::WRITABLE;
+        let copy = frame_allocator.allocate_frame().ok_or(())?;
+        let src = (physical_memory_offset + old.start_address().as_u64()).as_ptr::<u8>();
+        let dst = (physical_memory_offset + copy.start_address().as_u64()).as_mut_ptr::<u8>();
+        // SAFETY: the shared frame and one just allocated, through the physical-memory window.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+        parent.set_flags(own);
+        let child_entry = leaf_entry(child_l4, physical_memory_offset, va).ok_or(())?;
+        child_entry.set_addr(copy.start_address(), own);
+        // The child's reference to the old frame is gone; the parent's is the only one left.
+        super::refs::release(old);
+        Ok(())
     }
 
     /// Shared implementation behind `new_excluding_user`/`fork`: allocates a fresh level 4 table
@@ -453,6 +501,16 @@ impl AddressSpace {
 }
 
 impl AddressSpace {
+    /// How many private pages (present or `PROT_NONE`, not `SHARED_LEAF`) this address space maps:
+    /// the OOM killer's measure of a process (COW.md §6.1). A page fork still shares counts for
+    /// each sharer, as resident memory does in `ps`.
+    pub fn private_pages(&self, physical_memory_offset: VirtAddr) -> u64 {
+        // SAFETY: read only; single core, and the caller holds the process table, so the address
+        // space can't be torn down under the walk.
+        let table = unsafe { frame_to_page_table(*self.level_4_frame, physical_memory_offset) };
+        count_private_level(table, 4, physical_memory_offset)
+    }
+
     /// Records that this address space maps frames of page cache entry `id`.
     pub fn use_cached(&self, id: EntryId) {
         pagecache::add_use(&self.cached, id);
@@ -588,6 +646,29 @@ fn free_table_level(
         // SAFETY: this now-emptied table structure frame is exclusively this address space's own.
         unsafe { frame_allocator.deallocate_frame(frame) };
     }
+}
+
+/// `AddressSpace::private_pages`'s walk (`count_table_level` without the shared pages).
+fn count_private_level(table: &PageTable, level: u8, physical_memory_offset: VirtAddr) -> u64 {
+    let mut pages = 0;
+    for entry in table.iter() {
+        if level == 1 && is_prot_none(entry) {
+            pages += u64::from(!entry.flags().contains(SHARED_LEAF));
+            continue;
+        }
+        let flags = entry.flags();
+        if !flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) {
+            continue;
+        }
+        if level == 1 {
+            pages += u64::from(!flags.contains(SHARED_LEAF));
+            continue;
+        }
+        // SAFETY: a present user table entry below the leaf level, read only.
+        let next = unsafe { frame_to_page_table(PhysFrame::containing_address(entry.addr()), physical_memory_offset) };
+        pages += count_private_level(next, level - 1, physical_memory_offset);
+    }
+    pages
 }
 
 /// A private page's flags once fork shares it: a writable page keeps the right to write as

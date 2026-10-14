@@ -80,12 +80,14 @@ pub fn try_resolve_cow(fault_addr: u64) -> Option<bool> {
     Some(true)
 }
 
-pub fn try_grow_user_stack(fault_addr: u64) -> bool {
+/// A not-present fault inside the stack reserve: maps the page. `None` when the fault isn't stack
+/// growth; `Some(false)` when there was no frame for it (the OOM killer's case).
+pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
     let reserve_bottom = USER_STACK_TOP - USER_STACK_RESERVE;
     if !(reserve_bottom..USER_STACK_TOP).contains(&fault_addr)
         || scheduler::current_pid() == 0
     {
-        return false;
+        return None;
     }
     let phys_offset = memory::phys_mem_offset();
     let (l4_frame, _) = x86_64::registers::control::Cr3::read();
@@ -101,7 +103,7 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
     if memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
         .is_some_and(|e| !e.is_unused())
     {
-        return false;
+        return None;
     }
     let parent = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     // Executable only if the stack exec mapped at exec is (`lifecycle::map_user_stack`, from the
@@ -113,9 +115,9 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
         TranslateResult::Mapped { flags, .. } if !flags.contains(PageTableFlags::NO_EXECUTE)
     );
     let leaf = parent | if exec { PageTableFlags::empty() } else { crate::cpu::nx::no_execute() };
-    memory::try_with_frame_allocator(|fa| {
+    let mapped = memory::try_with_frame_allocator(|fa| {
         let Some(frame) = fa.allocate_frame() else {
-            return false;
+            return Some(false);
         };
         let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
         // SAFETY: a freshly allocated, unused frame; stack pages must start zeroed.
@@ -123,9 +125,12 @@ pub fn try_grow_user_stack(fault_addr: u64) -> bool {
         // SAFETY: `page` is unmapped (checked above) and inside this process's own stack reserve.
         unsafe { mapper.map_to_with_table_flags(page, frame, leaf, parent, fa) }
             .map(|flush| flush.flush())
-            .is_ok()
-    })
-    .unwrap_or(false)
+            .ok()
+            .map(|()| true)
+    });
+    // No frame: out of memory. A table frame `map_to` couldn't get, or the allocator lock held by
+    // the interrupted code: a plain fault.
+    mapped.flatten()
 }
 
 const MMAP_REGION_BASE: u64 = 0x_2000_0000_0000;

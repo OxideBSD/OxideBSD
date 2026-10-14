@@ -284,21 +284,33 @@ fn page_fault_handler(frame: &mut TrapFrame) {
         return;
     }
     // A write to a copy-on-write page, from ring 3 or from a copy routine in ring 0 (COW.md §4.2),
-    // gets the writer its own copy and retries. Out of memory, it falls through to the fault paths
-    // below (SIGSEGV in ring 3, EFAULT from a copy routine) until the OOM killer exists.
-    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION | PageFaultErrorCode::CAUSED_BY_WRITE)
-        && let Ok(fault_addr) = Cr2::read()
-        && crate::process::mm::try_resolve_cow(fault_addr.as_u64()) == Some(true)
-    {
-        return;
-    }
-    // Stack growth first, for either ring -- see `mm::try_grow_user_stack`. A not-present fault
-    // inside the stack reserve just gets its page and retries the instruction.
-    if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
-        && let Ok(fault_addr) = Cr2::read()
-        && crate::process::mm::try_grow_user_stack(fault_addr.as_u64())
-    {
-        return;
+    // gets the writer its own copy and retries; a not-present fault in the stack reserve, from
+    // either ring, gets its page (`mm::try_grow_user_stack`). With no frame for either, the OOM
+    // killer frees one (COW.md §6) or the fault goes the usual way below.
+    if let Ok(fault_addr) = Cr2::read() {
+        let addr = fault_addr.as_u64();
+        let resolved = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+            if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) {
+                crate::process::mm::try_resolve_cow(addr)
+            } else {
+                None
+            }
+        } else {
+            crate::process::mm::try_grow_user_stack(addr)
+        };
+        match resolved {
+            Some(true) => return,
+            Some(false) => match crate::process::oom::out_of_memory(frame.from_user()) {
+                crate::process::oom::Outcome::Retry => return,
+                crate::process::oom::Outcome::KillFaulter => {
+                    if user_fault(frame, "page fault, out of memory", crate::process::SIGKILL, Some(addr)) {
+                        return;
+                    }
+                }
+                crate::process::oom::Outcome::Fail => {}
+            },
+            None => {}
+        }
     }
     let interrupted_ring3 = frame.from_user();
     if interrupted_ring3 && let Ok(fault_addr) = Cr2::read() {

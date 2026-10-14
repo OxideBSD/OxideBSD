@@ -367,6 +367,10 @@ name = "ninja-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "oom-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "openssl-syscall-smoke"
 version = "0.1.0"
 
