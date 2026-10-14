@@ -21,35 +21,14 @@
 //! file with links left, is reconnected in `/lost+found` as `#<inode>` (made if missing, as
 //! newfs makes it); a file with no links left was removed while open, and is freed.
 //!
-//! The on-disk format is oxfs's (`sys/modules/oxfs/src/lib.rs`: `SUPERBLOCK_VERSION`,
-//! `pack_inode`, `write_dir_record`, `layout_for`); keep this reader in step with it until the
-//! format lives in a crate both share (RAM_FLOOR.md §4).
+//! The on-disk format is `lib/liboxfs`'s, shared with the oxfs module (RAM_FLOOR.md §4.1).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::process::ExitCode;
 
-const BLOCK: usize = 4096;
-const MAGIC: &[u8; 4] = b"OXFS";
-const VERSION: u32 = 6;
-const SB_STATE: usize = 20;
-const SB_CLEAN: u32 = 1;
-const SB_INODE_FILE: usize = 128;
-const INODE_STRIDE: usize = 128;
-const INODES_PER_BLOCK: usize = BLOCK / INODE_STRIDE;
-const BITS_PER_BITMAP_BLOCK: u32 = (BLOCK * 8) as u32;
-const BITMAP_START: u32 = 1;
-const DIRECT: usize = 12;
-const PTRS: usize = BLOCK / 4;
-const NO_BLOCK: u32 = u32::MAX;
-const NAME_MAX: usize = 255;
-const RECORD: usize = 6 + NAME_MAX;
-const RECORDS_PER_BLOCK: usize = BLOCK / RECORD;
-const ROOT: u32 = 0;
-/// Inode kinds (`pack_inode`'s tag byte).
-const FREE: u8 = 0;
-const DIR: u8 = 2;
+use oxfs_format::*;
 
 /// Exit statuses, as `fsck_ffs`'s.
 const EXIT_OK: u8 = 0;
@@ -66,33 +45,6 @@ enum Mode {
     No,
 }
 
-/// One inode record's fields fsck looks at; the record's bytes are kept to write back.
-#[derive(Clone)]
-struct Inode {
-    raw: [u8; INODE_STRIDE],
-}
-
-impl Inode {
-    fn kind(&self) -> u8 {
-        self.raw[0]
-    }
-    fn direct(&self, i: usize) -> u32 {
-        u32_at(&self.raw, 9 + i * 4)
-    }
-    fn indirect(&self) -> u32 {
-        u32_at(&self.raw, 57)
-    }
-    fn double_indirect(&self) -> u32 {
-        u32_at(&self.raw, 61)
-    }
-    fn nlink(&self) -> u16 {
-        u16::from_le_bytes([self.raw[75], self.raw[76]])
-    }
-    fn set_nlink(&mut self, n: u16) {
-        self.raw[75..77].copy_from_slice(&n.to_le_bytes());
-    }
-}
-
 fn u32_at(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
 }
@@ -103,7 +55,7 @@ struct Fs {
     data_blocks: u32,
     data_offset: u32,
     bitmap_blocks: u32,
-    sb: [u8; BLOCK],
+    sb: Superblock,
     inode_file: Inode,
     inodes: Vec<Inode>,
     /// Inode numbers whose records changed, to write back.
@@ -112,21 +64,21 @@ struct Fs {
 }
 
 impl Fs {
-    fn read_device_block(&self, n: u64) -> std::io::Result<[u8; BLOCK]> {
-        let mut b = [0u8; BLOCK];
-        self.dev.read_exact_at(&mut b, n * BLOCK as u64)?;
+    fn read_device_block(&self, n: u64) -> std::io::Result<[u8; BLOCK_SIZE]> {
+        let mut b = [0u8; BLOCK_SIZE];
+        self.dev.read_exact_at(&mut b, n * BLOCK_SIZE as u64)?;
         Ok(b)
     }
 
-    fn write_device_block(&self, n: u64, b: &[u8; BLOCK]) -> std::io::Result<()> {
-        self.dev.write_all_at(b, n * BLOCK as u64)
+    fn write_device_block(&self, n: u64, b: &[u8; BLOCK_SIZE]) -> std::io::Result<()> {
+        self.dev.write_all_at(b, n * BLOCK_SIZE as u64)
     }
 
-    fn read_block(&self, n: u32) -> std::io::Result<[u8; BLOCK]> {
+    fn read_block(&self, n: u32) -> std::io::Result<[u8; BLOCK_SIZE]> {
         self.read_device_block(self.data_offset as u64 + n as u64)
     }
 
-    fn write_block(&self, n: u32, b: &[u8; BLOCK]) -> std::io::Result<()> {
+    fn write_block(&self, n: u32, b: &[u8; BLOCK_SIZE]) -> std::io::Result<()> {
         self.write_device_block(self.data_offset as u64 + n as u64, b)
     }
 
@@ -135,8 +87,8 @@ impl Fs {
     fn blocks_of(&self, inode: &Inode) -> Result<(Vec<u32>, Vec<u32>), u32> {
         let (mut data, mut index) = (Vec::new(), Vec::new());
         let ok = |b: u32| b < self.data_blocks;
-        for i in 0..DIRECT {
-            let b = inode.direct(i);
+        for i in 0..DIRECT_BLOCKS {
+            let b = inode.direct[i];
             if b != NO_BLOCK {
                 if !ok(b) {
                     return Err(b);
@@ -144,11 +96,11 @@ impl Fs {
                 data.push(b);
             }
         }
-        if inode.indirect() != NO_BLOCK {
-            self.walk_index(inode.indirect(), 0, &mut data, &mut index)?;
+        if inode.indirect != NO_BLOCK {
+            self.walk_index(inode.indirect, 0, &mut data, &mut index)?;
         }
-        if inode.double_indirect() != NO_BLOCK {
-            self.walk_index(inode.double_indirect(), 1, &mut data, &mut index)?;
+        if inode.double_indirect != NO_BLOCK {
+            self.walk_index(inode.double_indirect, 1, &mut data, &mut index)?;
         }
         Ok((data, index))
     }
@@ -160,7 +112,7 @@ impl Fs {
         }
         index.push(ib);
         let block = self.read_block(ib).map_err(|_| ib)?;
-        for slot in 0..PTRS {
+        for slot in 0..PTRS_PER_INDIRECT {
             let p = u32_at(&block, slot * 4);
             if p == NO_BLOCK {
                 continue;
@@ -220,16 +172,15 @@ fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode)
             let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
             let mut changed = false;
             for r in 0..RECORDS_PER_BLOCK {
-                let off = r * RECORD;
-                if buf[off] == 0 {
+                if !dir_record_used(&buf, r) {
                     continue;
                 }
-                let len = buf[off + 1] as usize;
-                let target = u32_at(&buf, off + 2);
-                let name = String::from_utf8_lossy(&buf[off + 6..off + 6 + len.min(NAME_MAX)]).into_owned();
-                let bad = if len == 0 || len > NAME_MAX {
+                let len = dir_record_name_len(&buf, r);
+                let target = dir_record_inode(&buf, r);
+                let name = String::from_utf8_lossy(dir_record_name(&buf, r)).into_owned();
+                let bad = if len == 0 {
                     Some(format!("directory {dir}: a record with a bad name length {len}"))
-                } else if target >= count || fs.inodes[target as usize].kind() == FREE {
+                } else if target >= count || fs.inodes[target as usize].kind == InodeKind::Free {
                     Some(format!("directory {dir}: {name} names inode {target}, which is free"))
                 } else if name == "." && target != dir {
                     Some(format!("directory {dir}: . names inode {target}"))
@@ -243,7 +194,7 @@ fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode)
                     tree.serious = true;
                     if mode == Mode::Yes {
                         println!("  REMOVED");
-                        buf[off] = 0;
+                        clear_dir_record(&mut buf, r);
                         changed = true;
                     }
                     continue;
@@ -252,7 +203,7 @@ fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode)
                     continue;
                 }
                 tree.names[target as usize] += 1;
-                if fs.inodes[target as usize].kind() == DIR {
+                if fs.inodes[target as usize].kind == InodeKind::Dir {
                     if tree.reached[target as usize] {
                         fs.problem(&format!("directory {target} ({name}) has more than one name"));
                         tree.serious = true;
@@ -276,9 +227,8 @@ fn dotdot(fs: &Fs, dir: u32) -> Option<u32> {
     for block in data {
         let buf = fs.read_block(block).ok()?;
         for r in 0..RECORDS_PER_BLOCK {
-            let off = r * RECORD;
-            if buf[off] != 0 && buf[off + 1] == 2 && &buf[off + 6..off + 8] == b".." {
-                return Some(u32_at(&buf, off + 2));
+            if dir_record_used(&buf, r) && dir_record_name(&buf, r) == b".." {
+                return Some(dir_record_inode(&buf, r));
             }
         }
     }
@@ -291,9 +241,8 @@ fn set_dotdot(fs: &Fs, dir: u32, parent: u32) -> Result<(), String> {
     for block in data {
         let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
         for r in 0..RECORDS_PER_BLOCK {
-            let off = r * RECORD;
-            if buf[off] != 0 && buf[off + 1] == 2 && &buf[off + 6..off + 8] == b".." {
-                buf[off + 2..off + 6].copy_from_slice(&parent.to_le_bytes());
+            if dir_record_used(&buf, r) && dir_record_name(&buf, r) == b".." {
+                write_dir_record(&mut buf, r, b"..", parent);
                 return fs.write_block(block, &buf).map_err(|e| e.to_string());
             }
         }
@@ -303,15 +252,13 @@ fn set_dotdot(fs: &Fs, dir: u32, parent: u32) -> Result<(), String> {
 
 /// `/lost+found`: the root's record of that name, if it's a directory phase 2 reached.
 fn find_lost_found(fs: &Fs, tree: &Tree) -> Result<Option<u32>, String> {
-    let (data, _) = fs.blocks_of(&fs.inodes[ROOT as usize]).map_err(|b| format!("bad block {b}"))?;
+    let (data, _) = fs.blocks_of(&fs.inodes[ROOT_INODE as usize]).map_err(|b| format!("bad block {b}"))?;
     for block in data {
         let buf = fs.read_block(block).map_err(|e| e.to_string())?;
         for r in 0..RECORDS_PER_BLOCK {
-            let off = r * RECORD;
-            let len = buf[off + 1] as usize;
-            if buf[off] != 0 && &buf[off + 6..off + 6 + len.min(NAME_MAX)] == b"lost+found" {
-                let n = u32_at(&buf, off + 2);
-                let ok = (n as usize) < fs.inodes.len() && fs.inodes[n as usize].kind() == DIR && tree.reached[n as usize];
+            if dir_record_used(&buf, r) && dir_record_name(&buf, r) == b"lost+found" {
+                let n = dir_record_inode(&buf, r);
+                let ok = (n as usize) < fs.inodes.len() && fs.inodes[n as usize].kind == InodeKind::Dir && tree.reached[n as usize];
                 return Ok(ok.then_some(n));
             }
         }
@@ -330,66 +277,47 @@ fn take_block(used: &mut [bool]) -> Option<u32> {
 /// only) if it's full. `false` when it can't grow.
 fn insert_record(fs: &mut Fs, used: &mut [bool], dir: u32, name: &[u8], target: u32) -> Result<bool, String> {
     let (data, _) = fs.blocks_of(&fs.inodes[dir as usize]).map_err(|b| format!("bad block {b}"))?;
-    let mut record = [0u8; RECORD];
-    record[0] = 1;
-    record[1] = name.len() as u8;
-    record[2..6].copy_from_slice(&target.to_le_bytes());
-    record[6..6 + name.len()].copy_from_slice(name);
     for block in data {
         let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
-        if let Some(r) = (0..RECORDS_PER_BLOCK).find(|r| buf[r * RECORD] == 0) {
-            buf[r * RECORD..(r + 1) * RECORD].copy_from_slice(&record);
+        if let Some(r) = (0..RECORDS_PER_BLOCK).find(|&r| !dir_record_used(&buf, r)) {
+            write_dir_record(&mut buf, r, name, target);
             fs.write_block(block, &buf).map_err(|e| e.to_string())?;
             return Ok(true);
         }
     }
-    let Some(slot) = (0..DIRECT).find(|&i| fs.inodes[dir as usize].direct(i) == NO_BLOCK) else {
+    let Some(slot) = (0..DIRECT_BLOCKS).find(|&i| fs.inodes[dir as usize].direct[i] == NO_BLOCK) else {
         return Ok(false);
     };
     let Some(block) = take_block(used) else { return Ok(false) };
-    let mut buf = [0u8; BLOCK];
-    buf[..RECORD].copy_from_slice(&record);
+    let mut buf = [0u8; BLOCK_SIZE];
+    write_dir_record(&mut buf, 0, name, target);
     fs.write_block(block, &buf).map_err(|e| e.to_string())?;
-    fs.inodes[dir as usize].raw[9 + slot * 4..13 + slot * 4].copy_from_slice(&block.to_le_bytes());
+    fs.inodes[dir as usize].direct[slot] = block;
     fs.dirty_inodes.insert(dir);
     Ok(true)
 }
 
 /// Makes `/lost+found` (mode 0700) in a free inode slot and a free block, as newfs would have.
 fn make_lost_found(fs: &mut Fs, tree: &mut Tree, used: &mut [bool]) -> Result<Option<u32>, String> {
-    let Some(n) = (1..fs.inodes.len() as u32).find(|&n| fs.inodes[n as usize].kind() == FREE) else {
+    let Some(n) = (1..fs.inodes.len() as u32).find(|&n| fs.inodes[n as usize].kind == InodeKind::Free) else {
         return Ok(None);
     };
     let Some(block) = take_block(used) else { return Ok(None) };
-    let mut buf = [0u8; BLOCK];
-    for (r, (name, target)) in [(&b"."[..], n), (&b".."[..], ROOT)].into_iter().enumerate() {
-        let off = r * RECORD;
-        buf[off] = 1;
-        buf[off + 1] = name.len() as u8;
-        buf[off + 2..off + 6].copy_from_slice(&target.to_le_bytes());
-        buf[off + 6..off + 6 + name.len()].copy_from_slice(name);
+    let mut buf = [0u8; BLOCK_SIZE];
+    for (r, (name, target)) in [(&b"."[..], n), (&b".."[..], ROOT_INODE)].into_iter().enumerate() {
+        write_dir_record(&mut buf, r, name, target);
     }
     fs.write_block(block, &buf).map_err(|e| e.to_string())?;
-    let mut raw = [0u8; INODE_STRIDE];
-    raw[0] = DIR;
-    for i in 0..DIRECT {
-        raw[9 + i * 4..13 + i * 4].copy_from_slice(&NO_BLOCK.to_le_bytes());
-    }
-    raw[9..13].copy_from_slice(&block.to_le_bytes());
-    raw[57..61].copy_from_slice(&NO_BLOCK.to_le_bytes());
-    raw[61..65].copy_from_slice(&NO_BLOCK.to_le_bytes());
-    raw[65..67].copy_from_slice(&0o700u16.to_le_bytes());
-    raw[75..77].copy_from_slice(&1u16.to_le_bytes());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
-    for off in [82, 90, 98] {
-        raw[off..off + 8].copy_from_slice(&now.to_le_bytes());
-    }
-    fs.inodes[n as usize].raw = raw;
+    let mut inode = Inode::new(InodeKind::Dir, now);
+    inode.direct[0] = block;
+    inode.mode = 0o700;
+    fs.inodes[n as usize] = inode;
     fs.dirty_inodes.insert(n);
-    if !insert_record(fs, used, ROOT, b"lost+found", n)? {
-        fs.inodes[n as usize].raw = [0; INODE_STRIDE];
+    if !insert_record(fs, used, ROOT_INODE, b"lost+found", n)? {
+        fs.inodes[n as usize] = Inode::FREE;
         return Ok(None);
     }
     tree.reached[n as usize] = true;
@@ -419,7 +347,7 @@ fn reconnect(
 ) -> Result<Option<u32>, String> {
     if mode == Mode::No {
         tree.names[n as usize] += 1;
-        return Ok(Some(lost.inode.unwrap_or(ROOT)));
+        return Ok(Some(lost.inode.unwrap_or(ROOT_INODE)));
     }
     ensure_lost_found(fs, tree, lost, used, mode)?;
     let Some(lf) = lost.inode else { return Ok(None) };
@@ -488,33 +416,30 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
         }
         Err(e) => return Err(e.to_string()),
     };
-    let mut sb = [0u8; BLOCK];
-    dev.read_exact_at(&mut sb, 0).map_err(|e| format!("can't read the superblock: {e}"))?;
-    if &sb[0..4] != MAGIC {
-        return Err("not an oxfs file system (no superblock)".into());
-    }
-    let version = u32_at(&sb, 4);
-    if version != VERSION {
-        return Err(format!("superblock version {version}; this fsck_oxfs reads {VERSION}"));
-    }
-    let clean = u32_at(&sb, SB_STATE) == SB_CLEAN;
-    if clean && mode == Mode::Preen && !force {
+    let mut block = [0u8; BLOCK_SIZE];
+    dev.read_exact_at(&mut block, 0).map_err(|e| format!("can't read the superblock: {e}"))?;
+    let sb = match Superblock::decode(&block) {
+        Ok(sb) => sb,
+        Err(SuperblockError::NotOxfs) => return Err("not an oxfs file system (no superblock)".into()),
+        Err(SuperblockError::Version(v)) => {
+            return Err(format!("superblock version {v}; this fsck_oxfs reads {SUPERBLOCK_VERSION}"));
+        }
+    };
+    if sb.clean && mode == Mode::Preen && !force {
         println!("{device}: clean");
         return Ok(EXIT_OK);
     }
-    let data_blocks = u32_at(&sb, 8);
-    let bitmap_blocks = data_blocks.div_ceil(BITS_PER_BITMAP_BLOCK);
-    let count = u32_at(&sb, 12);
-    let mut inode_file = Inode { raw: [0; INODE_STRIDE] };
-    inode_file.raw.copy_from_slice(&sb[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
+    let data_blocks = sb.data_blocks;
+    let bitmap_blocks = sb.bitmap_blocks();
+    let count = sb.inode_count;
     let mut fs = Fs {
         dev,
         writable,
         data_blocks,
-        data_offset: BITMAP_START + bitmap_blocks,
+        data_offset: sb.data_block_offset(),
         bitmap_blocks,
         sb,
-        inode_file,
+        inode_file: sb.inode_file,
         inodes: Vec::new(),
         dirty_inodes: BTreeSet::new(),
         errors: 0,
@@ -526,7 +451,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     let (inode_file_data, inode_file_index) = fs
         .blocks_of(&fs.inode_file)
         .map_err(|b| format!("the inode file points at block {b}, past the end"))?;
-    let mut data = [0u8; BLOCK];
+    let mut data = [0u8; BLOCK_SIZE];
     for n in 0..count {
         let Some(&block) = inode_file_data.get(n as usize / INODES_PER_BLOCK) else {
             return Err(format!("the inode file is shorter than its {count} inodes"));
@@ -535,9 +460,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
         if off == 0 {
             data = fs.read_block(block).map_err(|e| e.to_string())?;
         }
-        let mut raw = [0u8; INODE_STRIDE];
-        raw.copy_from_slice(&data[off..off + INODE_STRIDE]);
-        fs.inodes.push(Inode { raw });
+        fs.inodes.push(unpack_inode(&data[off..off + INODE_STRIDE]));
     }
     let mut serious = false;
 
@@ -547,7 +470,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
         owner.insert(*b, u32::MAX);
     }
     for n in 0..count {
-        if fs.inodes[n as usize].kind() == FREE {
+        if fs.inodes[n as usize].kind == InodeKind::Free {
             continue;
         }
         let inode = fs.inodes[n as usize].clone();
@@ -571,19 +494,19 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
             serious = true;
             if mode == Mode::Yes {
                 println!("  CLEARED inode {n}");
-                fs.inodes[n as usize].raw = [0; INODE_STRIDE];
+                fs.inodes[n as usize] = Inode::FREE;
                 fs.dirty_inodes.insert(n);
             }
         }
     }
 
     println!("** Phase 2 - Check Pathnames");
-    if fs.inodes.get(ROOT as usize).is_none_or(|i| i.kind() != DIR) {
+    if fs.inodes.get(ROOT_INODE as usize).is_none_or(|i| i.kind != InodeKind::Dir) {
         return Err("the root inode isn't a directory".into());
     }
     let mut tree = Tree { names: vec![0; count as usize], reached: vec![false; count as usize], serious: false };
-    tree.reached[ROOT as usize] = true;
-    walk(&mut fs, &mut tree, ROOT, Some(ROOT), mode)?;
+    tree.reached[ROOT_INODE as usize] = true;
+    walk(&mut fs, &mut tree, ROOT_INODE, Some(ROOT_INODE), mode)?;
     serious |= tree.serious;
 
     // Preen repairs only what a crash leaves; past phases 1-2 it would act on a tree it can't
@@ -606,7 +529,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     // phase 2 walks the tree, so they have their names again.
     loop {
         let pending: Vec<u32> = (1..count)
-            .filter(|&n| fs.inodes[n as usize].kind() == DIR && !tree.reached[n as usize])
+            .filter(|&n| fs.inodes[n as usize].kind == InodeKind::Dir && !tree.reached[n as usize])
             .collect();
         let Some(&first) = pending.first() else { break };
         let top = pending
@@ -638,14 +561,14 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     // links left was unlinked while open, and is freed, as the kernel's orphan sweep would.
     for n in 1..count {
         let inode = &fs.inodes[n as usize];
-        if inode.kind() == FREE || inode.kind() == DIR || tree.names[n as usize] > 0 {
+        if inode.kind == InodeKind::Free || inode.kind == InodeKind::Dir || tree.names[n as usize] > 0 {
             continue;
         }
         fs.errors += 1;
-        if inode.nlink() == 0 {
+        if inode.nlink == 0 {
             println!("UNREF inode {n}{}", if mode == Mode::No { "" } else { " (CLEARED)" });
             if mode != Mode::No {
-                fs.inodes[n as usize].raw = [0; INODE_STRIDE];
+                fs.inodes[n as usize] = Inode::FREE;
                 fs.dirty_inodes.insert(n);
             }
             continue;
@@ -661,19 +584,19 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     println!("** Phase 4 - Check Reference Counts");
     for n in 0..count {
         let inode = &fs.inodes[n as usize];
-        if inode.kind() == FREE {
+        if inode.kind == InodeKind::Free {
             continue;
         }
-        let want = if inode.kind() == DIR { 1 } else { tree.names[n as usize].max(1) as u16 };
-        if inode.nlink() != want {
+        let want = if inode.kind == InodeKind::Dir { 1 } else { tree.names[n as usize].max(1) as u16 };
+        if inode.nlink != want {
             println!(
                 "LINK COUNT inode {n}: {} should be {want}{}",
-                inode.nlink(),
+                inode.nlink,
                 if mode == Mode::No { "" } else { " (ADJUSTED)" }
             );
             fs.errors += 1;
             if mode != Mode::No {
-                fs.inodes[n as usize].set_nlink(want);
+                fs.inodes[n as usize].nlink = want;
                 fs.dirty_inodes.insert(n);
             }
         }
@@ -684,7 +607,7 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
     for b in inode_file_data.iter().chain(&inode_file_index) {
         used[*b as usize] = true;
     }
-    for inode in fs.inodes.iter().filter(|i| i.kind() != FREE) {
+    for inode in fs.inodes.iter().filter(|i| i.kind != InodeKind::Free) {
         if let Ok((data, index)) = fs.blocks_of(inode) {
             for b in data.iter().chain(&index) {
                 used[*b as usize] = true;
@@ -720,29 +643,29 @@ fn check(device: &str, mode: Mode, force: bool) -> Result<u8, String> {
 
     if fs.writable {
         // Inode records, written back a whole block at a time.
-        let mut blocks: BTreeMap<u32, [u8; BLOCK]> = BTreeMap::new();
+        let mut blocks: BTreeMap<u32, [u8; BLOCK_SIZE]> = BTreeMap::new();
         for &n in &fs.dirty_inodes {
             let Some((block, off)) = fs.inode_location(n) else { continue };
             if !blocks.contains_key(&block) {
                 blocks.insert(block, fs.read_block(block).map_err(|e| e.to_string())?);
             }
-            blocks.get_mut(&block).unwrap()[off..off + INODE_STRIDE].copy_from_slice(&fs.inodes[n as usize].raw);
+            pack_inode(&fs.inodes[n as usize], &mut blocks.get_mut(&block).unwrap()[off..off + INODE_STRIDE]);
         }
         for (block, data) in &blocks {
             fs.write_block(*block, data).map_err(|e| e.to_string())?;
         }
     }
 
-    let in_use = fs.inodes.iter().filter(|i| i.kind() != FREE).count();
+    let in_use = fs.inodes.iter().filter(|i| i.kind != InodeKind::Free).count();
     println!("{in_use} files, {} used, {free} free", data_blocks as u64 - free);
     if serious && mode != Mode::Yes {
         println!("\nUNEXPECTED INCONSISTENCY; RUN fsck_oxfs MANUALLY (with -y to repair).");
         return Ok(EXIT_UNRESOLVED);
     }
     if fs.writable {
-        let mut sb = fs.sb;
-        sb[SB_STATE..SB_STATE + 4].copy_from_slice(&SB_CLEAN.to_le_bytes());
-        fs.write_device_block(0, &sb).map_err(|e| e.to_string())?;
+        let mut block = [0u8; BLOCK_SIZE];
+        Superblock { clean: true, ..fs.sb }.encode(&mut block);
+        fs.write_device_block(0, &block).map_err(|e| e.to_string())?;
         if fs.errors > 0 {
             println!("\n***** FILE SYSTEM WAS MODIFIED *****");
         }

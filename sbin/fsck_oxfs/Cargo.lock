@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "fsck_oxfs"
 version = "0.1.0"
+dependencies = [
+ "oxfs_format",
+]
+
+[[package]]
+name = "oxfs_format"
+version = "0.1.0"

@@ -10,11 +10,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// oxfs's GPT partition type GUID, generated for OxideBSD (2026-10-13), as text:
-/// `06026785-76ab-42c2-afe2-66ea3af562b8`.
-pub const OXFS_TYPE_GUID: [u8; 16] = guid_bytes(0x0602_6785, 0x76ab, 0x42c2, [0xaf, 0xe2, 0x66, 0xea, 0x3a, 0xf5, 0x62, 0xb8]);
-/// oxfs's MBR partition type byte.
-pub const OXFS_MBR_TYPE: u8 = 0xA2;
+use oxfs_format::{OXFS_MBR_TYPE, OXFS_TYPE_GUID};
+
 /// An MBR entry of this type covers a GPT disk (the protective MBR).
 const MBR_GPT_PROTECTIVE: u8 = 0xEE;
 const SECTOR: usize = 512;
@@ -24,14 +21,6 @@ const GPT_ENTRY_SIZE: u32 = 128;
 const GPT_ENTRY_SECTORS: u64 = (GPT_ENTRIES * GPT_ENTRY_SIZE) as u64 / SECTOR as u64;
 /// Where the written partition starts: 1 MiB, the usual alignment.
 const FIRST_PARTITION_LBA: u64 = 2048;
-
-/// A GUID's on-disk bytes: the first three fields little-endian, the rest as written.
-const fn guid_bytes(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
-    let a = a.to_le_bytes();
-    let b = b.to_le_bytes();
-    let c = c.to_le_bytes();
-    [a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]
-}
 
 /// Which table a partition came from (and so how it's named).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

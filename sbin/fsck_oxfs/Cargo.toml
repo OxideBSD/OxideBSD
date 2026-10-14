@@ -8,3 +8,6 @@ publish = false
 # Opts out of the root workspace: a std program for x86_64-unknown-oxidebsd, built by build.rs's
 # build_std_oxidebsd_userland_crate.
 [workspace]
+
+[dependencies]
+oxfs_format = { path = "../../lib/liboxfs" }

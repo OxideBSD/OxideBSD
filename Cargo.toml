@@ -97,7 +97,7 @@ members = [
   "sys/modules/sysctl",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcertstore"]
+exclude = ["lib/libcertstore", "lib/liboxfs"]
 
 [package]
 name = "oxidebsd"
@@ -131,6 +131,8 @@ spin = "0.9"
 x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 chacha20 = { version = "0.10", default-features = false, features = ["cipher"] }
+# oxfs's on-disk format: the partition type IDs (sys/drivers/part.rs).
+oxfs_format = { path = "lib/liboxfs" }
 
 [build-dependencies]
 # The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.

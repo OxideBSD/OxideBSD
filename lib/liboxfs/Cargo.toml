@@ -1,0 +1,11 @@
+[package]
+name = "oxfs_format"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# oxfs's on-disk format (RAM_FLOOR.md §4.1): the oxfs module, the kernel, fsck_oxfs and the host
+# image tools all depend on it. No dependencies; its own workspace, testable on the host, like
+# lib/libfstab.
+[workspace]

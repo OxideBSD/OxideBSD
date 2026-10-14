@@ -557,6 +557,12 @@ fn main() {
     let update_elf_path =
         build_static_std_crate("sbin/update", "OXFS_UPDATE_ELF_PATH", &musl_sysroot);
     let fsck_elf_path = build_static_std_crate("sbin/fsck", "OXFS_FSCK_ELF_PATH", &musl_sysroot);
+    // fsck_oxfs, the oxfs module and the kernel's partition code share oxfs's on-disk format,
+    // lib/liboxfs (RAM_FLOOR.md §4.1).
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/liboxfs/src").display()
+    );
     let fsck_oxfs_elf_path =
         build_static_std_crate("sbin/fsck_oxfs", "OXFS_FSCK_OXFS_ELF_PATH", &musl_sysroot);
     let nologin_elf_path =
@@ -5318,6 +5324,33 @@ fn find_artifact_file(cargo_json_stdout: &str, crate_name: &str, suffix: &str) -
     None
 }
 
+/// The rlibs of the repository's own `lib/` crates a module depends on (`oxfs` on `lib/liboxfs`),
+/// from cargo's JSON build output: `--emit=obj` emits only the module crate's own code, so the
+/// partial link has to pull theirs in, as it does `core`'s.
+fn module_lib_rlibs(cargo_json_stdout: &str) -> Vec<PathBuf> {
+    let lib_dir = format!("\"manifest_path\":\"{}/lib/", env!("CARGO_MANIFEST_DIR"));
+    let mut rlibs = Vec::new();
+    for line in cargo_json_stdout.lines() {
+        if !line.contains("\"reason\":\"compiler-artifact\"") || !line.contains(&lib_dir) {
+            continue;
+        }
+        let Some(list_start) = line.find("\"filenames\":[") else {
+            continue;
+        };
+        let list_start = list_start + "\"filenames\":[".len();
+        let Some(list_len) = line[list_start..].find(']') else {
+            continue;
+        };
+        for raw in line[list_start..list_start + list_len].split(',') {
+            let path = raw.trim().trim_matches('"');
+            if path.ends_with(".rlib") {
+                rlibs.push(PathBuf::from(path));
+            }
+        }
+    }
+    rlibs
+}
+
 /// Last-resort fallback for getting a module's compiled object code when cargo's own `--emit=obj`
 /// passthrough produces nothing usable (see `find_artifact_file`'s own doc comment for when this
 /// happens). An `.rlib` is itself just an `ar` archive whose members are the crate's real compiled
@@ -5424,6 +5457,7 @@ fn partial_link(
     let core_rlib = find_rlib("core");
     let alloc_rlib = find_rlib("alloc");
     let compiler_builtins_rlib = find_rlib("compiler_builtins");
+    let lib_rlibs = module_lib_rlibs(cargo_json_stdout);
 
     let status = Command::new(&lld)
         .args([
@@ -5439,6 +5473,7 @@ fn partial_link(
             "--start-group",
         ])
         .args([&core_rlib, &alloc_rlib, &compiler_builtins_rlib])
+        .args(&lib_rlibs)
         .arg("--end-group")
         .status()
         .unwrap_or_else(|e| panic!("failed to run rust-lld for module {crate_name}: {e}"));

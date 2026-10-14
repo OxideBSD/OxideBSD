@@ -65,6 +65,10 @@
 
 mod bcache;
 
+// The on-disk format: layout constants, `Inode`, `pack_inode`/`unpack_inode`, directory records
+// and the superblock (`lib/liboxfs`, shared with fsck_oxfs and the host tools).
+use oxfs_format::*;
+
 unsafe extern "C" {
     fn oxidebsd_log(ptr: *const u8, len: u64);
     fn oxidebsd_register_syscall(
@@ -453,7 +457,6 @@ const S_IFSOCK: u32 = 0o140000;
 /// Real POSIX mask isolating the type bits above out of a raw `mode_t` -- used by `oxfs_mknod` to
 /// read the caller's requested node type back out of its own `mode` argument.
 const S_IFMT: u32 = 0o170000;
-const FIXED_PERM: u32 = 0o755;
 
 /// Real `d_type` values (`include/dirent.h` on the `oxidebsd` musl branch) for `SYS_GETDENTS`'s
 /// own wire format -- see `write_dirent_record`'s own doc comment.
@@ -545,7 +548,6 @@ const EXDEV: i64 = 18;
 /// the deliberately small, honestly documented scope boundary this represents.
 const ENXIO: i64 = 6;
 
-const BLOCK_SIZE: usize = 4096;
 /// The disk filesystem's size in data blocks, from its superblock (or, at format, from the
 /// device: `layout_for`). Block numbers `0..disk_blocks()` are the disk pool's; tmpfs's start at
 /// `TMPFS_BLOCK_BASE`, far above any disk this can describe. (Until the 128 MB floor,
@@ -556,7 +558,6 @@ static mut DISK_BLOCKS: u32 = 0;
 static mut BITMAP_BLOCKS: u32 = 0;
 /// Device block holding data block `0`: right after the superblock and the bitmap.
 static mut DATA_BLOCK_OFFSET: u32 = 0;
-const BITS_PER_BITMAP_BLOCK: u32 = (BLOCK_SIZE * 8) as u32;
 
 fn disk_blocks() -> u32 {
     // SAFETY: set once at mount or format, inside `module_init`.
@@ -573,13 +574,6 @@ fn data_block_offset() -> u32 {
     unsafe { *core::ptr::addr_of!(DATA_BLOCK_OFFSET) }
 }
 
-/// `(data blocks, bitmap blocks)` for a device of `device_blocks` blocks: the superblock, then
-/// as few bitmap blocks as cover the data blocks after them. Capped below `TMPFS_BLOCK_BASE`.
-fn layout_for(device_blocks: u64) -> (u32, u32) {
-    let usable = device_blocks.saturating_sub(BITMAP_START as u64).min(TMPFS_BLOCK_BASE as u64 - 1);
-    let bitmap = usable.div_ceil(BITS_PER_BITMAP_BLOCK as u64 + 1);
-    ((usable - bitmap) as u32, bitmap as u32)
-}
 
 fn set_layout(data_blocks: u32, bitmap: u32) {
     // SAFETY: inside `module_init`, before any syscall.
@@ -599,29 +593,6 @@ fn set_layout(data_blocks: u32, bitmap: u32) {
 const TMPFS_INODE_BASE: u32 = 0xFF00_0000;
 /// One past the last tmpfs inode number (`u32::MAX` itself is never handed out).
 const TMPFS_INODE_LIMIT: u32 = u32::MAX;
-const DIRECT_BLOCKS: usize = 12;
-const PTRS_PER_INDIRECT: usize = BLOCK_SIZE / 4;
-/// A double-indirect block's own fan-out: `PTRS_PER_INDIRECT` pointers to *index* blocks, each in
-/// turn holding `PTRS_PER_INDIRECT` pointers to real data blocks -- `1024 * 1024 = 1,048,576` data
-/// blocks reachable through one double-indirect pointer, i.e. exactly `1024^2 * BLOCK_SIZE` = 4
-/// GiB. See `Inode::double_indirect`'s own doc comment for why this (and not a bigger, triple-
-/// indirect scheme) is the right amount of addressing to add.
-const PTRS_PER_DOUBLE_INDIRECT: usize = PTRS_PER_INDIRECT * PTRS_PER_INDIRECT;
-/// Real per-file addressing ceiling once `Inode::double_indirect` is in play: `DIRECT_BLOCKS` +
-/// one single-indirect block's worth + one double-indirect block's worth of data blocks, all
-/// `BLOCK_SIZE` bytes each -- `(12 + 1024 + 1048576) * 4096` = 4,299,198,464 bytes, ~4.1 GiB.
-/// Informational only (nothing indexes by it directly; `inode_block_at`/`inode_ensure_block_at`
-/// derive the same three tiers from `DIRECT_BLOCKS`/`PTRS_PER_INDIRECT`/`PTRS_PER_DOUBLE_INDIRECT`
-/// directly) -- kept as a single named place this file's own doc comments can point at.
-#[allow(dead_code)]
-const MAX_FILE_SIZE: usize =
-    (DIRECT_BLOCKS + PTRS_PER_INDIRECT + PTRS_PER_DOUBLE_INDIRECT) * BLOCK_SIZE;
-/// Sentinel for "no block"/"no indirect block" -- block numbers are plain indices into `BLOCKS`
-/// starting at `0` (unlike FAT32's cluster numbering, which reserves `0`/`1`), so `0` itself can't
-/// double as the sentinel the way it does there.
-const NO_BLOCK: u32 = u32::MAX;
-
-const ROOT_INODE: u32 = 0;
 
 /// A second, purely in-memory pool for tmpfs mounts and devfs, whose `/dev/shm` holds POSIX
 /// shared memory; not persisted. Its size is fixed at boot from RAM (`tmpfs_pool_blocks`):
@@ -631,59 +602,10 @@ const ROOT_INODE: u32 = 0;
 /// every accessor (`read_block`/`write_block`/`read_inode`/`dir_lookup`/...) works over one number
 /// space and only the allocators (`inode_ensure_block_at`, `alloc_inode_in`), `block_ptr` and the
 /// disk-persistence hooks need to know which pool a number is in.
-const TMPFS_BLOCK_BASE: u32 = 0xF000_0000;
+const TMPFS_BLOCK_BASE: u32 = MAX_DISK_BLOCKS;
 const TMPFS_MIN_BLOCKS: usize = 2048;
 const TMPFS_MAX_BLOCKS: usize = 16384;
 
-// --- Real disk persistence (see src/ata.rs) --------------------------------------------------
-//
-// Physical disk block layout: block `0` is the superblock (which also holds the inode file's own
-// inode record, see `InodeTable`), `[BITMAP_START,
-// BITMAP_START + bitmap_blocks())` is the block-used bitmap, and data starts at
-// `data_block_offset()` -- data block `i` is device block `data_block_offset() + i`. Inodes are packed at a fixed
-// 128-byte stride, `INODES_PER_BLOCK` to a block of the inode file (real packed content is 106 bytes -- 1 tag + 8 size + 48 direct + 4 indirect + 4
-// double_indirect + 2 mode + 4 uid + 4 gid + 2 nlink + 4 rdev + 1 device_char + 8 mtime + 8 ctime +
-// 8 atime -- rounded up to a power-of-two stride that divides BLOCK_SIZE evenly, leaving headroom
-// for future fields); one bitmap bit per data block, sized with the filesystem (`layout_for`).
-
-/// Marks a real, formatted oxfs disk. Absence/mismatch (an unformatted/all-zero disk, or one some
-/// other filesystem wrote) means the same thing either way: format fresh rather than try to
-/// interpret unknown content -- see `mount_from_disk`.
-const SUPERBLOCK_MAGIC: [u8; 4] = *b"OXFS";
-/// Bumped 1 -> 2 for the real max-file-size redesign: `Inode`'s own packed on-disk shape changed
-/// (`size` widened to 64-bit, a new `double_indirect` block pointer added -- see that field's own
-/// doc comment), and the block-used bitmap's own on-disk span changed (`BITMAP_BLOCKS`, no longer
-/// hardcoded to one block). A disk formatted under version 1 has the wrong bytes at every offset
-/// this build now expects -- `mount_from_disk`'s own layout check (below) already treats any
-/// mismatch here exactly like a `NUM_BLOCKS` change: a clean, automatic reformat, not
-/// a crash or silent misread. Any content on an existing `target/oxfs_disk.img` besides the
-/// seeded-at-boot roster (BusyBox/musl/Clang/LLVM/POSIX corpus, all reseeded fresh on format) is
-/// lost.
-///
-/// Bumped 2 -> 3 for `NAME_MAX` 40 -> 255 (see that constant's own doc comment) -- `DIR_RECORD_SIZE`
-/// changed (`6 + NAME_MAX`, 46 -> 261 bytes), so every existing directory record's on-disk stride
-/// is wrong under the old layout. Same automatic-reformat treatment as the 1 -> 2 bump.
-///
-/// Bumped 3 -> 4 for the dynamic inode table: inodes live in an inode file in the block pool
-/// (`InodeTable`), whose own inode record is in the superblock; the fixed inode-table region after
-/// the superblock is gone, so the bitmap now starts at block 1.
-///
-/// Bumped 4 -> 5 for `Inode::shm`, one byte after `atime` in the packed inode.
-///
-/// Bumped 5 -> 6 for the buffer cache (`OxideBSD-doc/RAM_FLOOR.md` §3.1.3): the filesystem spans
-/// the whole device, its size (in the superblock) sets the bitmap's length, and data starts after
-/// that many bitmap blocks instead of after a fixed 1 GiB pool's.
-const SUPERBLOCK_VERSION: u32 = 6;
-
-/// Real packed size (see the section doc comment above) -- **never** a raw transmute/memcpy of
-/// `Inode` itself, since it isn't `#[repr(C)]` and `InodeKind` has no explicit discriminant, so its
-/// true in-memory layout isn't guaranteed across compiler versions/profiles. `pack_inode`/
-/// `unpack_inode` do this by hand instead, the same raw-byte-offset idiom `write_dir_record`/
-/// `dir_record_inode` already established for directory records.
-const INODE_STRIDE: usize = 128;
-const INODES_PER_BLOCK: usize = BLOCK_SIZE / INODE_STRIDE;
-/// The bitmap's first device block, right after the superblock.
-const BITMAP_START: u32 = 1;
 
 /// Gates `write_block`/`write_inode`/`set_block_used`'s own write-through persistence (see those
 /// functions below). Deliberately `false` for the *entire* duration of `format_fresh_filesystem`
@@ -713,25 +635,6 @@ fn block_device_present() -> bool {
     unsafe { oxidebsd_block_device_present() != 0 }
 }
 
-// 26 -> 40 (`DIR_RECORD_SIZE` 32 -> 46 alongside it, `6 + NAME_MAX`): the full Open POSIX Test
-// Suite corpus (see `build.rs`'s `discover_posix_test_files`) seeds real directory names up to 32
-// bytes (`pthread_mutexattr_setprioceiling`/`pthread_mutexattr_getprioceiling`) -- found live as a
-// real `module_init` panic when the pilot corpus expanded past the old 488-file curated subset
-// (which happened to never include a name that long).
-//
-// 40 -> 255 (real musl `NAME_MAX`, `external/mit/musl/include/limits.h`) -- found live
-// self-hosting bmake's own build (see CLAUDE.md's bmake section): `dir_insert`'s own length check
-// silently rejected `varname-dot-make-meta-ignore_patterns.exp` (41 bytes, one past the old
-// limit), and returning `EINVAL` for it (see that check's own fix, `NameTooLong` not
-// `InvalidPath`) was enough to abort BusyBox tar's whole extraction rather than being skipped or
-// reported as `ENAMETOOLONG`. Matching musl's own compiled-in `NAME_MAX` closes the mismatch for
-// real, not just this one filename -- any future seeded/user-created name up to what musl itself
-// tells userland is legal should actually be legal here too. `RECORDS_PER_BLOCK` drops from 89 to
-// 15 as a result (`DIR_RECORD_SIZE` growing 46 -> 261) -- a real, accepted directory-density
-// tradeoff for genuinely supporting POSIX's real name-length ceiling, not a bug.
-const NAME_MAX: usize = 255;
-const DIR_RECORD_SIZE: usize = 6 + NAME_MAX;
-const RECORDS_PER_BLOCK: usize = BLOCK_SIZE / DIR_RECORD_SIZE;
 
 /// Synthetic `/proc/<pid>/{stat,cmdline,status}` content buffer -- comfortably covers any of the
 /// three for this kernel's simple, single-threaded processes; longer content silently truncates
@@ -815,161 +718,6 @@ fn self_check_fixture(name: &[u8]) -> Option<u32> {
     dir_lookup(dir_lookup(dir_lookup(usr, b"tests")?, b"oxfs")?, name)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum InodeKind {
-    Free,
-    File,
-    Dir,
-    /// A real symlink -- its target path string is stored exactly like a regular file's content
-    /// (`write_inode_data`/`read_inode_at`, `inode.size` = target byte length), no separate
-    /// storage mechanism needed. See `resolve_path_impl`'s own doc comment for how this is
-    /// followed during path resolution.
-    Symlink,
-    /// A real, listable device node (`SYS_MKNOD`) -- unlike `/dev/{random,urandom,null,zero}`'s
-    /// existing magic-path interception in `dev_open` (not backed by any inode at all), this is a
-    /// genuine directory entry reporting `S_IFCHR`/`S_IFBLK` and a real `st_rdev` via `stat`. See
-    /// `oxfs_mknod`'s own doc comment for the (deliberately small) set of major:minor pairs that
-    /// actually work when opened.
-    Device,
-    /// A named pipe (`mkfifo`). Holds no data of its own: `open()` hands it to the kernel's pipe
-    /// code, keyed by inode number.
-    Fifo,
-    /// A local socket's name (`bind(2)` on an `AF_UNIX` path, UNIX.md §5.2). Holds no data; the
-    /// kernel maps the inode number to the socket bound to it, if any.
-    Socket,
-}
-
-#[derive(Clone, Copy)]
-struct Inode {
-    kind: InodeKind,
-    /// Real content length in bytes. Widened `u32` -> `u64` alongside `double_indirect` below --
-    /// `MAX_FILE_SIZE` (~4.1 GiB) exceeds `u32::MAX` by design (a 4 GiB file wouldn't otherwise be
-    /// representable at all), so this has to grow with the addressing scheme it now needs to
-    /// describe.
-    size: u64,
-    direct: [u32; DIRECT_BLOCKS],
-    indirect: u32,
-    /// Real double-indirect block pointer, added alongside `size`'s widening to close this
-    /// filesystem's real max-file-size gap: `direct` + `indirect` alone address only
-    /// `(DIRECT_BLOCKS + PTRS_PER_INDIRECT) * BLOCK_SIZE` ~= 4.04 MiB per file -- an arbitrary,
-    /// far-too-low architectural cap unrelated to how much of the real block pool is actually
-    /// free. One double-indirect pointer (an index block of `PTRS_PER_INDIRECT` pointers, each to
-    /// its own index block of `PTRS_PER_INDIRECT` pointers to real data blocks) adds exactly
-    /// `PTRS_PER_INDIRECT^2 * BLOCK_SIZE` = 4 GiB of further addressable space -- chosen
-    /// specifically because `1024^2` (`PTRS_PER_INDIRECT` squared) lands on exactly 4 GiB with
-    /// this filesystem's existing `BLOCK_SIZE`/4-byte-pointer shape, satisfying "at least 4 GiB"
-    /// with one added tier rather than needing a third, triple-indirect one. See
-    /// `inode_block_at`/`inode_ensure_block_at` for how the three tiers (direct, single-, double-
-    /// indirect) are actually walked/allocated, and `MAX_FILE_SIZE`'s own doc comment for the real,
-    /// combined total. `NO_BLOCK` until a file's own content actually reaches past the single-
-    /// indirect tier -- the overwhelming majority of real files here never allocate this at all.
-    double_indirect: u32,
-    /// Real per-inode permission bits, setuid/setgid/sticky included (creation takes the low nine,
-    /// less the umask; `chmod` sets all twelve, see `set_mode`). Defaults to `FIXED_PERM` (`0o755`),
-    /// the same fixed value every inode used to report unconditionally before this field existed
-    /// -- so a freshly seeded/created file behaves identically to the old hardcoded-everywhere
-    /// scheme until something actually calls `chmod`.
-    mode: u16,
-    /// Real per-inode ownership -- `0` (root) by default, matching every seeded boot file (there's
-    /// no login mechanism, so root is the only uid that has ever created anything on this
-    /// filesystem so far). See `check_access`'s own doc comment for how these two fields, plus the
-    /// caller's own uid/gid (via `oxidebsd_current_uid`/`_gid`), combine into an actual permission
-    /// decision.
-    uid: u32,
-    gid: u32,
-    /// Real hard-link count -- meaningful only for `File`/`Device` (see `SYS_LINK`'s own doc
-    /// comment); `Dir`/`Symlink` keep reporting their existing hardcoded `write_stat` values
-    /// unchanged (real subdirectory-count-based `Dir` nlink stays a documented, separate gap).
-    /// `Inode::new` seeds this to `1` (the one directory entry about to be inserted for it);
-    /// `write_stat` floors a decoded `0` (an on-disk inode written before this field existed, whose
-    /// zero-padded stride tail decodes as `0`) back up to `1` rather than reporting a bogus
-    /// zero-link count.
-    nlink: u16,
-    /// Packed major/minor for an `InodeKind::Device` entry (`0` for everything else) -- decoded
-    /// from the caller's raw `dev` argument using the same formula musl's own
-    /// `makedev()`/`major()`/`minor()` macros use. See `oxfs_mknod`'s own doc comment.
-    rdev: u32,
-    /// `true` for a character device, `false` for a block device -- only meaningful for
-    /// `InodeKind::Device`.
-    device_char: bool,
-    /// Real, whole-second Unix epoch `st_mtime`/`st_ctime` (`oxidebsd_unix_time`, see that
-    /// import's own doc comment) -- previously both hardcoded `0` in `write_stat` (no clock/RTC
-    /// source existed at the time). `write_inode_data`/`resize_inode_data` are this filesystem's
-    /// only two real content-mutation choke points (every write -- a plain `write()`'s deferred
-    /// commit, `fsync`/`close`, and a real fd-backed `MAP_SHARED` mapping's own `msync`/`munmap`/
-    /// exit writeback via `oxfs_inode_content_write` -- ultimately goes through one of them), so
-    /// bumping both there covers every real write path uniformly, mmap included (`mmap/14-1.c` in
-    /// the POSIX conformance pilot). Real POSIX ties `st_mtime`/`st_ctime` to slightly different
-    /// events (`st_ctime` also updates on a pure metadata change like `chmod`/`chown`, with no
-    /// content write at all) -- not implemented here, a separate, narrower gap than what this field
-    /// closes: nothing in this port's roster checks `st_ctime` after a metadata-only change.
-    mtime: i64,
-    ctime: i64,
-    /// Real, whole-second Unix epoch `st_atime` -- previously a permanent `0` placeholder (see this
-    /// field's own prior doc comment, now stale: "no test or real caller in this port needs it").
-    /// `mmap/13-1.c` (Open POSIX Test Suite) is a genuine, real POSIX "shall" requirement this
-    /// kernel was actually violating: "The initial read or write reference to a mapped region shall
-    /// cause the file's st_atime field to be marked for update if it has not already been marked
-    /// for update" (the same clause also explicitly permits marking it "at any time between the
-    /// mmap() call and the corresponding munmap() call" -- this kernel doesn't do real demand
-    /// paging for file-backed mmap (every covered page is eagerly populated at `mmap()` time, see
-    /// `process::mm::do_mmap_file_backed`), so bumping atime at that one real population read,
-    /// rather than tracking each page's own first-touch, is a spec-legal choice, not a shortcut).
-    /// Bumped by `touch_atime` from two real read paths: `oxfs_read`'s own `OpenFile::FileRead` arm
-    /// (a plain `read()`) and `oxfs_inode_content_read` (the `mmap` population/re-population read
-    /// `process::mm::do_mmap_file_backed` calls by content identity, see that accessor's own doc
-    /// comment) -- both real "read reference" events, not just this one pilot test's own narrow
-    /// need. `touch_atime` skips the write-through if the whole-second value hasn't changed since
-    /// the last touch (a real, common Unix optimization, not a fake pass condition -- POSIX only
-    /// requires atime be "marked for update," not persisted with per-read precision).
-    atime: i64,
-    /// A POSIX shared memory object: a file created in `/dev/shm` (musl's `shm_open`). Set once at
-    /// creation and kept after `shm_unlink`, since the usual idiom unlinks at once and keeps using
-    /// the fd; `process::mm::do_mmap_file_backed` bounds a mapping of one at its size. Packed after
-    /// `atime`; a slot written before it existed reads `false`.
-    shm: bool,
-}
-
-impl Inode {
-    const FREE: Inode = Inode {
-        kind: InodeKind::Free,
-        size: 0,
-        direct: [NO_BLOCK; DIRECT_BLOCKS],
-        indirect: NO_BLOCK,
-        double_indirect: NO_BLOCK,
-        mode: FIXED_PERM as u16,
-        uid: 0,
-        gid: 0,
-        nlink: 0,
-        rdev: 0,
-        device_char: false,
-        mtime: 0,
-        ctime: 0,
-        atime: 0,
-        shm: false,
-    };
-
-    fn new(kind: InodeKind) -> Inode {
-        let now = unsafe { oxidebsd_unix_time() };
-        Inode {
-            kind,
-            size: 0,
-            direct: [NO_BLOCK; DIRECT_BLOCKS],
-            indirect: NO_BLOCK,
-            double_indirect: NO_BLOCK,
-            mode: FIXED_PERM as u16,
-            uid: 0,
-            gid: 0,
-            nlink: 1,
-            rdev: 0,
-            device_char: false,
-            mtime: now,
-            ctime: now,
-            atime: now,
-            shm: false,
-        }
-    }
-}
 
 /// `static mut`, not `static` -- same requirement `modules/fat32`'s own `DISK`/`OPEN_FILES` have
 /// (see that module's doc comment): every read happens from within this module's own exported,
@@ -984,6 +732,11 @@ static mut FREE_COUNTS: *mut u32 = core::ptr::null_mut();
 static mut TMPFS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
 static mut TMPFS_BLOCKS: u32 = 0;
 static mut TMPFS_BLOCK_USED: [bool; TMPFS_MAX_BLOCKS] = [false; TMPFS_MAX_BLOCKS];
+
+/// A fresh inode of `kind`, stamped with the current time.
+fn fresh_inode(kind: InodeKind) -> Inode {
+    Inode::new(kind, unsafe { oxidebsd_unix_time() })
+}
 
 fn is_tmpfs_block(n: u32) -> bool {
     n >= TMPFS_BLOCK_BASE
@@ -2469,36 +2222,6 @@ fn write_dirent_record(out: &mut [u8], ino: u64, off_cookie: i64, dtype: u8, nam
     }
 }
 
-fn dir_record_used(block: &[u8; BLOCK_SIZE], idx: usize) -> bool {
-    block[idx * DIR_RECORD_SIZE] != 0
-}
-
-fn dir_record_name_len(block: &[u8; BLOCK_SIZE], idx: usize) -> usize {
-    block[idx * DIR_RECORD_SIZE + 1] as usize
-}
-
-fn dir_record_name(block: &[u8; BLOCK_SIZE], idx: usize) -> &[u8] {
-    let len = dir_record_name_len(block, idx);
-    let start = idx * DIR_RECORD_SIZE + 6;
-    &block[start..start + len]
-}
-
-fn dir_record_inode(block: &[u8; BLOCK_SIZE], idx: usize) -> u32 {
-    let off = idx * DIR_RECORD_SIZE + 2;
-    u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]])
-}
-
-fn write_dir_record(block: &mut [u8; BLOCK_SIZE], idx: usize, name: &[u8], inode: u32) {
-    let off = idx * DIR_RECORD_SIZE;
-    block[off] = 1;
-    block[off + 1] = name.len() as u8;
-    block[off + 2..off + 6].copy_from_slice(&inode.to_le_bytes());
-    block[off + 6..off + 6 + name.len()].copy_from_slice(name);
-}
-
-fn clear_dir_record(block: &mut [u8; BLOCK_SIZE], idx: usize) {
-    block[idx * DIR_RECORD_SIZE] = 0;
-}
 
 /// Looks `name` up directly inside `dir_inode` (no path walking -- see `resolve_path`/
 /// `resolve_parent` for that). `name` may be `.`/`..`, both stored as real records like any other
@@ -4548,7 +4271,7 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
             let Some(new_inode) = alloc_inode_in(parent) else {
                 return -ENOSPC;
             };
-            let mut inode = Inode::new(InodeKind::File);
+            let mut inode = fresh_inode(InodeKind::File);
             inode.uid = uid as u32;
             inode.gid = new_entry_gid(parent);
             // `mode & ~umask` (`shm_open/18-1.c` sets a umask and checks for it).
@@ -5176,7 +4899,7 @@ fn mkdir_path(path: &[u8], mode: u64) -> i64 {
     let Some(new_inode) = alloc_inode_in(parent) else {
         return -ENOSPC;
     };
-    let mut inode = Inode::new(InodeKind::Dir);
+    let mut inode = fresh_inode(InodeKind::Dir);
     inode.mode = ((mode as u16) & 0o1777) & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
     inode.gid = new_entry_gid(parent);
@@ -5412,7 +5135,7 @@ fn make_node(path: &[u8], kind: InodeKind, perm: u16, dev: u32, device_char: boo
     let Some(new_inode) = alloc_inode_in(parent) else {
         return Err(-ENOSPC);
     };
-    let mut inode = Inode::new(kind);
+    let mut inode = fresh_inode(kind);
     inode.mode = perm & !(unsafe { oxidebsd_current_umask() } as u16);
     inode.uid = uid as u32;
     inode.gid = new_entry_gid(parent);
@@ -5913,7 +5636,7 @@ fn symlink_path(target: &[u8], linkpath: &[u8]) -> i64 {
     let Some(new_inode) = alloc_inode_in(parent) else {
         return -ENOSPC;
     };
-    let mut inode = Inode::new(InodeKind::Symlink);
+    let mut inode = fresh_inode(InodeKind::Symlink);
     inode.uid = unsafe { oxidebsd_current_uid() } as u32;
     inode.gid = new_entry_gid(parent);
     write_inode(new_inode, inode);
@@ -6728,7 +6451,7 @@ fn mount_tmpfs(target: &[u8], nosuid: bool, wxallowed: bool) -> i64 {
     let Some(new_root) = alloc_tmpfs_inode() else {
         return -ENOSPC;
     };
-    write_inode(new_root, Inode::new(InodeKind::Dir));
+    write_inode(new_root, fresh_inode(InodeKind::Dir));
     if dir_insert(new_root, b".", new_root).is_err() || dir_insert(new_root, b"..", parent).is_err()
     {
         return -EIO;
@@ -7003,7 +6726,7 @@ fn devfs_dir(parent: u32, name: &[u8], mode: u16) -> Option<u32> {
         return Some(existing);
     }
     let dir = alloc_tmpfs_inode()?;
-    let mut inode = Inode::new(InodeKind::Dir);
+    let mut inode = fresh_inode(InodeKind::Dir);
     inode.mode = mode;
     write_inode(dir, inode);
     dir_insert(dir, b".", dir).ok()?;
@@ -7054,7 +6777,7 @@ fn devfs_sync() {
             continue;
         }
         let Some(node) = alloc_tmpfs_inode() else { break };
-        let mut inode = Inode::new(InodeKind::Device);
+        let mut inode = fresh_inode(InodeKind::Device);
         inode.mode = e.mode as u16;
         inode.uid = e.uid;
         inode.gid = e.gid;
@@ -7118,7 +6841,7 @@ fn mount_devfs() -> bool {
     let mountpoint = ensure_dir(ROOT_INODE, b"dev");
     let Some(slot) = free_mount_slot() else { return false };
     let Some(root) = alloc_tmpfs_inode() else { return false };
-    write_inode(root, Inode::new(InodeKind::Dir));
+    write_inode(root, fresh_inode(InodeKind::Dir));
     if dir_insert(root, b".", root).is_err() || dir_insert(root, b"..", ROOT_INODE).is_err() {
         return false;
     }
@@ -7585,147 +7308,7 @@ impl ByteBuf<'_> {
 // See this file's own "Real disk persistence" constants section (near `ROOT_INODE`) for the
 // physical block layout these functions read/write.
 
-/// Packs one `Inode` into `out` (exactly `INODE_STRIDE` bytes) using explicit byte offsets, the
-/// same idiom `write_dir_record` already established for directory records -- see
-/// `INODE_STRIDE`'s own doc comment for why this can't be a raw transmute/memcpy.
-fn pack_inode(inode: &Inode, out: &mut [u8]) {
-    out[0] = match inode.kind {
-        InodeKind::Free => 0,
-        InodeKind::File => 1,
-        InodeKind::Dir => 2,
-        InodeKind::Symlink => 3,
-        InodeKind::Device => 4,
-        InodeKind::Fifo => 5,
-        InodeKind::Socket => 6,
-    };
-    // `size` widened 4 -> 8 bytes (real `u64`, see `Inode::size`'s own doc comment) -- every offset
-    // from here on shifts +4 relative to `SUPERBLOCK_VERSION`'s prior (version 1) on-disk shape.
-    out[1..9].copy_from_slice(&inode.size.to_le_bytes());
-    for (i, d) in inode.direct.iter().enumerate() {
-        let off = 9 + i * 4;
-        out[off..off + 4].copy_from_slice(&d.to_le_bytes());
-    }
-    let indirect_off = 9 + DIRECT_BLOCKS * 4;
-    out[indirect_off..indirect_off + 4].copy_from_slice(&inode.indirect.to_le_bytes());
-    // New field (see `Inode::double_indirect`'s own doc comment) -- inserted right after
-    // `indirect`, shifting every following offset +4 again relative to version 1.
-    let double_indirect_off = indirect_off + 4;
-    out[double_indirect_off..double_indirect_off + 4]
-        .copy_from_slice(&inode.double_indirect.to_le_bytes());
-    let mode_off = double_indirect_off + 4;
-    out[mode_off..mode_off + 2].copy_from_slice(&inode.mode.to_le_bytes());
-    let uid_off = mode_off + 2;
-    out[uid_off..uid_off + 4].copy_from_slice(&inode.uid.to_le_bytes());
-    let gid_off = uid_off + 4;
-    out[gid_off..gid_off + 4].copy_from_slice(&inode.gid.to_le_bytes());
-    let nlink_off = gid_off + 4;
-    out[nlink_off..nlink_off + 2].copy_from_slice(&inode.nlink.to_le_bytes());
-    let rdev_off = nlink_off + 2;
-    out[rdev_off..rdev_off + 4].copy_from_slice(&inode.rdev.to_le_bytes());
-    let device_char_off = rdev_off + 4;
-    out[device_char_off] = inode.device_char as u8;
-    let mtime_off = device_char_off + 1;
-    out[mtime_off..mtime_off + 8].copy_from_slice(&inode.mtime.to_le_bytes());
-    let ctime_off = mtime_off + 8;
-    out[ctime_off..ctime_off + 8].copy_from_slice(&inode.ctime.to_le_bytes());
-    let atime_off = ctime_off + 8;
-    out[atime_off..atime_off + 8].copy_from_slice(&inode.atime.to_le_bytes());
-    let shm_off = atime_off + 8;
-    out[shm_off] = inode.shm as u8;
-    for b in &mut out[shm_off + 1..] {
-        *b = 0;
-    }
-}
 
-/// `pack_inode`'s inverse.
-fn unpack_inode(data: &[u8]) -> Inode {
-    let kind = match data[0] {
-        1 => InodeKind::File,
-        2 => InodeKind::Dir,
-        3 => InodeKind::Symlink,
-        4 => InodeKind::Device,
-        5 => InodeKind::Fifo,
-        6 => InodeKind::Socket,
-        _ => InodeKind::Free,
-    };
-    let size = u64::from_le_bytes(data[1..9].try_into().unwrap());
-    let mut direct = [NO_BLOCK; DIRECT_BLOCKS];
-    for (i, d) in direct.iter_mut().enumerate() {
-        let off = 9 + i * 4;
-        *d = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-    }
-    let indirect_off = 9 + DIRECT_BLOCKS * 4;
-    let indirect = u32::from_le_bytes([
-        data[indirect_off],
-        data[indirect_off + 1],
-        data[indirect_off + 2],
-        data[indirect_off + 3],
-    ]);
-    let double_indirect_off = indirect_off + 4;
-    let double_indirect = u32::from_le_bytes([
-        data[double_indirect_off],
-        data[double_indirect_off + 1],
-        data[double_indirect_off + 2],
-        data[double_indirect_off + 3],
-    ]);
-    let mode_off = double_indirect_off + 4;
-    let mode = u16::from_le_bytes([data[mode_off], data[mode_off + 1]]);
-    let uid_off = mode_off + 2;
-    let uid = u32::from_le_bytes([
-        data[uid_off],
-        data[uid_off + 1],
-        data[uid_off + 2],
-        data[uid_off + 3],
-    ]);
-    let gid_off = uid_off + 4;
-    let gid = u32::from_le_bytes([
-        data[gid_off],
-        data[gid_off + 1],
-        data[gid_off + 2],
-        data[gid_off + 3],
-    ]);
-    let nlink_off = gid_off + 4;
-    let nlink = u16::from_le_bytes([data[nlink_off], data[nlink_off + 1]]);
-    let rdev_off = nlink_off + 2;
-    let rdev = u32::from_le_bytes([
-        data[rdev_off],
-        data[rdev_off + 1],
-        data[rdev_off + 2],
-        data[rdev_off + 3],
-    ]);
-    let device_char_off = rdev_off + 4;
-    let device_char = data[device_char_off] != 0;
-    let mtime_off = device_char_off + 1;
-    let mtime = i64::from_le_bytes(data[mtime_off..mtime_off + 8].try_into().unwrap());
-    let ctime_off = mtime_off + 8;
-    let ctime = i64::from_le_bytes(data[ctime_off..ctime_off + 8].try_into().unwrap());
-    // A pre-existing on-disk inode written before this field existed decodes a zeroed tail here --
-    // an honest `0` (Unix epoch), not an invalid value the way a decoded `nlink == 0` would be, so
-    // no flooring is needed the way Inode::nlink's own doc comment describes for that field.
-    let atime_off = ctime_off + 8;
-    let atime = i64::from_le_bytes(data[atime_off..atime_off + 8].try_into().unwrap());
-    let shm = data[atime_off + 8] != 0;
-    Inode {
-        kind,
-        size,
-        direct,
-        indirect,
-        double_indirect,
-        mode,
-        uid,
-        gid,
-        nlink,
-        rdev,
-        device_char,
-        mtime,
-        ctime,
-        atime,
-        shm,
-    }
-}
-
-/// Where the superblock keeps the disk inode file's own inode record.
-const SB_INODE_FILE: usize = 128;
 
 /// Whether the root file system is mounted read-only (`OxideBSD-doc/RAM_FLOOR.md` §3.4.3): from
 /// boot on the real boot path until `/etc/rc` remounts it read-write (`mount -u`), or after a
@@ -7755,9 +7338,6 @@ fn set_root_rdonly(rdonly: bool) {
 /// Whether the filesystem is clean on the disk (§3.4.1): cleared by mount, before anything else is
 /// written, and set by an orderly shutdown (`oxfs_shutdown`) once every delayed write is out.
 static mut CLEAN: bool = false;
-/// The superblock's state word: `SB_CLEAN` when the last shutdown was orderly.
-const SB_STATE: usize = 20;
-const SB_CLEAN: u32 = 1;
 
 fn set_clean(clean: bool) {
     // SAFETY: single-core, syscall-serialized.
@@ -7765,17 +7345,17 @@ fn set_clean(clean: bool) {
 }
 
 fn write_superblock() {
-    let mut block = [0u8; BLOCK_SIZE];
-    // SAFETY: as `set_clean`.
-    let state = if unsafe { *core::ptr::addr_of!(CLEAN) } { SB_CLEAN } else { 0 };
-    block[SB_STATE..SB_STATE + 4].copy_from_slice(&state.to_le_bytes());
-    block[0..4].copy_from_slice(&SUPERBLOCK_MAGIC);
-    block[4..8].copy_from_slice(&SUPERBLOCK_VERSION.to_le_bytes());
-    block[8..12].copy_from_slice(&disk_blocks().to_le_bytes());
     let table = inode_table(false);
-    block[12..16].copy_from_slice(&table.count.to_le_bytes());
-    block[16..20].copy_from_slice(&ROOT_INODE.to_le_bytes());
-    pack_inode(&table.file, &mut block[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
+    let sb = Superblock {
+        data_blocks: disk_blocks(),
+        inode_count: table.count,
+        root_inode: ROOT_INODE,
+        // SAFETY: as `set_clean`.
+        clean: unsafe { *core::ptr::addr_of!(CLEAN) },
+        inode_file: table.file,
+    };
+    let mut block = [0u8; BLOCK_SIZE];
+    sb.encode(&mut block);
     // Written straight to the disk, never through the cache: it's the commit record of a format
     // (`flush_all_to_disk`), and nothing reads it after mount.
     unsafe {
@@ -7813,19 +7393,23 @@ fn mount_from_disk() -> bool {
     if unsafe { oxidebsd_block_read(0, sb.as_mut_ptr() as u64) } != 0 {
         return false;
     }
-    if sb[0..4] != SUPERBLOCK_MAGIC {
-        return false;
-    }
-    let stored_version = u32::from_le_bytes(sb[4..8].try_into().unwrap());
-    let data_blocks = u32::from_le_bytes(sb[8..12].try_into().unwrap());
+    let sb = match Superblock::decode(&sb) {
+        Ok(sb) => sb,
+        Err(SuperblockError::NotOxfs) => return false,
+        Err(SuperblockError::Version(_)) => {
+            log("[oxfs] mount: on-disk layout doesn't match this build or disk -- falling back to format\n");
+            return false;
+        }
+    };
+    let data_blocks = sb.data_blocks;
     let (_, bitmap_most) = layout_for(unsafe { oxidebsd_block_device_blocks() });
-    let bitmap = data_blocks.div_ceil(BITS_PER_BITMAP_BLOCK);
-    if stored_version != SUPERBLOCK_VERSION || bitmap > bitmap_most {
+    let bitmap = sb.bitmap_blocks();
+    if bitmap > bitmap_most {
         log("[oxfs] mount: on-disk layout doesn't match this build or disk -- falling back to format\n");
         return false;
     }
     set_layout(data_blocks, bitmap);
-    if u32::from_le_bytes(sb[SB_STATE..SB_STATE + 4].try_into().unwrap()) != SB_CLEAN {
+    if !sb.clean {
         log("[oxfs] mount: filesystem was not cleanly unmounted\n");
     }
     let mut used = 0u32;
@@ -7839,9 +7423,8 @@ fn mount_from_disk() -> bool {
         used += set;
     }
 
-    let count = u32::from_le_bytes(sb[12..16].try_into().unwrap());
-    let file = unpack_inode(&sb[SB_INODE_FILE..SB_INODE_FILE + INODE_STRIDE]);
-    *inode_table(false) = InodeTable { file, count, free: 0, hint: 0 };
+    let count = sb.inode_count;
+    *inode_table(false) = InodeTable { file: sb.inode_file, count, free: 0, hint: 0 };
     let free = (0..count).filter(|&n| read_inode(n).kind == InodeKind::Free).count() as u32;
     inode_table(false).free = free;
 
@@ -7901,7 +7484,7 @@ fn seed_file(parent: u32, name: &[u8], content: &[u8]) -> bool {
     let Some(inode) = alloc_inode() else {
         return false;
     };
-    let mut node = Inode::new(InodeKind::File);
+    let mut node = fresh_inode(InodeKind::File);
     node.mode = seed_mode(content);
     write_inode(inode, node);
     write_inode_data(inode, content) && dir_insert(parent, name, inode).is_ok()
@@ -7935,7 +7518,7 @@ fn seed_symlink(parent: u32, name: &[u8], target: &[u8]) -> bool {
     let Some(inode) = alloc_inode() else {
         return false;
     };
-    write_inode(inode, Inode::new(InodeKind::Symlink));
+    write_inode(inode, fresh_inode(InodeKind::Symlink));
     write_inode_data(inode, target) && dir_insert(parent, name, inode).is_ok()
 }
 
@@ -7962,7 +7545,7 @@ fn ensure_dir(parent: u32, name: &[u8]) -> u32 {
         return existing;
     }
     let inode = alloc_inode().expect("oxfs: failed to allocate a directory inode");
-    write_inode(inode, Inode::new(InodeKind::Dir));
+    write_inode(inode, fresh_inode(InodeKind::Dir));
     dir_insert(inode, b".", inode).expect("oxfs: failed to seed a directory's . entry");
     dir_insert(inode, b"..", parent).expect("oxfs: failed to seed a directory's .. entry");
     dir_insert(parent, name, inode)
@@ -8138,7 +7721,7 @@ fn format_fresh_filesystem() -> bool {
         root, ROOT_INODE,
         "oxfs: root must be the first inode allocated"
     );
-    write_inode(root, Inode::new(InodeKind::Dir));
+    write_inode(root, fresh_inode(InodeKind::Dir));
     dir_insert(root, b".", root).expect("oxfs: failed to seed root's . entry");
     dir_insert(root, b"..", root).expect("oxfs: failed to seed root's .. entry");
 
@@ -8147,7 +7730,7 @@ fn format_fresh_filesystem() -> bool {
     // All executables live under /bin, not root -- matches `sys/process.rs`'s pid-1 `PATH=/bin`
     // envp, so a bare command name (`ls`, not `/ls`) resolves via musl's real `execvp` search.
     let bin = alloc_inode().expect("oxfs: failed to allocate /bin inode");
-    write_inode(bin, Inode::new(InodeKind::Dir));
+    write_inode(bin, fresh_inode(InodeKind::Dir));
     dir_insert(bin, b".", bin).expect("oxfs: failed to seed /bin's . entry");
     dir_insert(bin, b"..", root).expect("oxfs: failed to seed /bin's .. entry");
     dir_insert(root, b"bin", bin).expect("oxfs: failed to insert /bin into root");
@@ -8590,7 +8173,7 @@ fn format_fresh_filesystem() -> bool {
     // that constant directly, it's a separate no_std module build, see CLAUDE.md's module-loading
     // section).
     let etc = alloc_inode().expect("oxfs: failed to allocate /etc inode");
-    write_inode(etc, Inode::new(InodeKind::Dir));
+    write_inode(etc, fresh_inode(InodeKind::Dir));
     dir_insert(etc, b".", etc).expect("oxfs: failed to seed /etc's . entry");
     dir_insert(etc, b"..", root).expect("oxfs: failed to seed /etc's .. entry");
     dir_insert(root, b"etc", etc).expect("oxfs: failed to insert /etc into root");
@@ -8681,13 +8264,13 @@ fn format_fresh_filesystem() -> bool {
     // /home/user -- real, owned by uid/gid 1000 -- so `su -`/`login`'s own real chdir-to-home
     // lands somewhere that's actually theirs (permission-checked, not just root's own `/`).
     let home = alloc_inode().expect("oxfs: failed to allocate /home inode");
-    write_inode(home, Inode::new(InodeKind::Dir));
+    write_inode(home, fresh_inode(InodeKind::Dir));
     dir_insert(home, b".", home).expect("oxfs: failed to seed /home's . entry");
     dir_insert(home, b"..", root).expect("oxfs: failed to seed /home's .. entry");
     dir_insert(root, b"home", home).expect("oxfs: failed to insert /home into root");
 
     let user_home = alloc_inode().expect("oxfs: failed to allocate /home/user inode");
-    write_inode(user_home, Inode::new(InodeKind::Dir));
+    write_inode(user_home, fresh_inode(InodeKind::Dir));
     dir_insert(user_home, b".", user_home).expect("oxfs: failed to seed /home/user's . entry");
     dir_insert(user_home, b"..", home).expect("oxfs: failed to seed /home/user's .. entry");
     dir_insert(home, b"user", user_home).expect("oxfs: failed to insert /home/user into /home");

@@ -365,9 +365,16 @@ version = "0.1.0"
 [[package]]
 name = "oxfs"
 version = "0.1.0"
+dependencies = [
+ "oxfs_format",
+]
 
 [[package]]
 name = "oxfs-persistence-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "oxfs_format"
 version = "0.1.0"
 
 [[package]]
@@ -378,6 +385,7 @@ dependencies = [
  "libcertstore",
  "limine",
  "linked_list_allocator",
+ "oxfs_format",
  "pc-keyboard",
  "sha2",
  "spin",
