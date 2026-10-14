@@ -528,9 +528,10 @@ fn free_table_level(
     for i in 0..512usize {
         let entry = &table[i];
         if level == 1 && is_prot_none(entry) {
-            if !entry.flags().contains(SHARED_LEAF) {
-                // SAFETY: a private PROT_NONE leaf, owned like any other private leaf.
-                unsafe { frame_allocator.deallocate_frame(PhysFrame::<Size4KiB>::containing_address(entry.addr())) };
+            let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
+            if !entry.flags().contains(SHARED_LEAF) && super::refs::release(frame) {
+                // SAFETY: a private PROT_NONE leaf no other address space maps (`refs`).
+                unsafe { frame_allocator.deallocate_frame(frame) };
             }
             continue;
         }
@@ -549,9 +550,12 @@ fn free_table_level(
             // doc comment), safe to free directly.
             if !entry.flags().contains(SHARED_LEAF) {
                 let frame = entry.frame().expect("present leaf entry must have a frame");
-                // SAFETY: private leaf, exclusively owned by this address space -- see
-                // AddressSpace::teardown's own doc comment.
-                unsafe { frame_allocator.deallocate_frame(frame) };
+                // A private frame forked address spaces still share stays (`refs`).
+                if super::refs::release(frame) {
+                    // SAFETY: private leaf no other address space maps -- see
+                    // AddressSpace::teardown's own doc comment.
+                    unsafe { frame_allocator.deallocate_frame(frame) };
+                }
             }
             continue;
         }

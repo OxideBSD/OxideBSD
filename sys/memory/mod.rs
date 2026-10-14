@@ -6,6 +6,7 @@ pub mod address_space;
 pub mod allocator;
 pub mod kstack;
 pub mod pagecache;
+pub mod refs;
 pub mod usercopy;
 pub mod vm_meter;
 pub mod wx;
@@ -139,6 +140,13 @@ impl BootInfoFrameAllocator {
         // call returns, and `process::kernel_stack_size`/`user_stack_pages` read it lazily, the
         // first time a process is ever created (always after this point).
         USABLE_RAM_BYTES.store(usable_bytes, Ordering::Relaxed);
+        let frame_limit = memory_map
+            .iter()
+            .filter(|region| region.type_ == MEMMAP_USABLE)
+            .map(|region| (region.base + region.length) / 4096)
+            .max()
+            .unwrap_or(0);
+        refs::FRAME_LIMIT.store(frame_limit, Ordering::Relaxed);
         serial_println!(
             "[boot] frame allocator ready: {} usable region(s), {} KiB total",
             usable_regions,

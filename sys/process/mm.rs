@@ -1234,8 +1234,8 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
             let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
             let shared = entry.flags().contains(memory::address_space::SHARED_LEAF);
             entry.set_unused();
-            if !shared {
-                // SAFETY: a private PROT_NONE leaf, just removed: no page table maps it now.
+            if !shared && memory::refs::release(frame) {
+                // SAFETY: a private PROT_NONE leaf, just removed, no other address space maps.
                 with_frame_allocator(|fa| unsafe { fa.deallocate_frame(frame) });
             }
             continue;
@@ -1253,11 +1253,9 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         }
         if let Ok((frame, flush)) = mapper.unmap(page) {
             flush.flush();
-            if !is_shared_leaf {
-                // SAFETY: this frame was exclusively backing this one now-removed mapping (a
-                // private/anonymous page, never a SHARED_LEAF one, checked above) -- no other
-                // page table can be viewing it, same ownership guarantee `AddressSpace::teardown`'s
-                // own per-leaf free already relies on.
+            if !is_shared_leaf && memory::refs::release(frame) {
+                // SAFETY: a private page no other address space maps any more (`memory::refs`),
+                // never a SHARED_LEAF one (checked above).
                 with_frame_allocator(|fa| unsafe { fa.deallocate_frame(frame) });
             }
         }
