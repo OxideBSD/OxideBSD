@@ -55,7 +55,8 @@ case "$TEST_NAME" in
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
         export OXIDEBSD_QEMU_MEM
         QEMU_PASS_PATTERN="login:"
-        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM"
+        # A service rc couldn't start, or any user process faulting, is a failure too.
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]"
         ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.

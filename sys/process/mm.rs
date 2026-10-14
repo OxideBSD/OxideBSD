@@ -837,6 +837,17 @@ fn do_mmap_file_backed(
     };
     let mut cached_pages: Vec<bool> = Vec::new();
 
+    // Used by this address space before any page is filled, as exec's are (`exec_cache_entry`):
+    // filling allocates, an allocation may reclaim from the cache, and an entry nothing uses yet
+    // is fair game -- found at 24 MB, reclaim freed the very entry being filled, frames this
+    // mapping then mapped while the allocator handed them out again. A failed mmap leaves the use
+    // until the address space goes, which only keeps the entry from being reclaimed early.
+    if let Some(id) = cache_entry {
+        let table = PROCESS_TABLE.lock();
+        if let Some(space) = table.get(&caller_pid).and_then(|me| me.address_space.as_ref()) {
+            space.use_cached(id);
+        }
+    }
     let frames: Vec<PhysFrame<Size4KiB>> = if let Some(id) = cache_entry {
         // The frame allocator only around each allocation: the reads can sleep on the disk
         // (COW.md §4.4).
@@ -1023,9 +1034,6 @@ fn do_mmap_file_backed(
         .get_mut(&caller_pid)
         .expect("mmap: current process missing from table");
     let address_space = me.address_space.as_ref().expect("mm: caller has no address space");
-    if let Some(id) = cache_entry {
-        address_space.use_cached(id);
-    }
     // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
     // address space.
     let mut mapper = unsafe { address_space.mapper(phys_offset) };
