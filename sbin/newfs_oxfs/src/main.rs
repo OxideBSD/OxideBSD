@@ -77,6 +77,7 @@ fn describe(e: oxfs_format::Error<std::io::Error>) -> String {
         Error::NoSpace => "out of blocks".into(),
         Error::NoInodes => "too many inodes for its size (-i)".into(),
         Error::LabelTooLong => "volume label too long".into(),
+        Error::Exists => "a name given twice in one directory".into(),
         Error::BadName | Error::Superblock(_) => format!("{e:?}"),
     }
 }

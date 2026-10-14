@@ -27,6 +27,8 @@ pub enum Error<E> {
     NoInodes,
     /// A name longer than `NAME_MAX`, or empty.
     BadName,
+    /// The directory already has an entry of that name.
+    Exists,
     /// The label is longer than `SB_LABEL_LEN`.
     LabelTooLong,
     /// A superblock that doesn't decode.
@@ -313,32 +315,52 @@ impl<D: BlockDevice> Writer<D> {
         }
     }
 
+    /// The inode directory `dir` names `name`, if any.
+    pub fn lookup(&mut self, dir: u32, name: &[u8]) -> Result<Option<u32>, Error<D::Error>> {
+        let inode = self.read_inode(dir)?;
+        let mut i = 0;
+        while let Some(blk) = self.block_at(&inode, i)? {
+            let b = self.read_data(blk)?;
+            if let Some(r) = (0..RECORDS_PER_BLOCK).find(|&r| dir_record_used(&b, r) && dir_record_name(&b, r) == name) {
+                return Ok(Some(dir_record_inode(&b, r)));
+            }
+            i += 1;
+        }
+        Ok(None)
+    }
+
     /// Adds the record `name -> target` to directory `dir`, in its first free slot or a new block,
-    /// and stamps the directory's times with `now`.
+    /// and stamps the directory's times with `now`. A name already there is refused (`Exists`).
     pub fn dir_insert(&mut self, dir: u32, name: &[u8], target: u32, now: i64) -> Result<(), Error<D::Error>> {
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(Error::BadName);
         }
         let mut inode = self.read_inode(dir)?;
+        // The first free slot, found while every block is checked for the name.
+        let mut free = None;
         let mut i = 0;
-        loop {
-            match self.block_at(&inode, i)? {
-                Some(blk) => {
-                    let mut b = self.read_data(blk)?;
-                    if let Some(r) = (0..RECORDS_PER_BLOCK).find(|&r| !dir_record_used(&b, r)) {
-                        write_dir_record(&mut b, r, name, target);
-                        self.write_data(blk, &b)?;
-                        break;
-                    }
-                    i += 1;
+        while let Some(blk) = self.block_at(&inode, i)? {
+            let b = self.read_data(blk)?;
+            for r in 0..RECORDS_PER_BLOCK {
+                if !dir_record_used(&b, r) {
+                    free.get_or_insert((blk, r));
+                } else if dir_record_name(&b, r) == name {
+                    return Err(Error::Exists);
                 }
-                None => {
-                    let blk = self.ensure_block(&mut inode, i)?;
-                    let mut b = [0u8; BLOCK_SIZE];
-                    write_dir_record(&mut b, 0, name, target);
-                    self.write_data(blk, &b)?;
-                    break;
-                }
+            }
+            i += 1;
+        }
+        match free {
+            Some((blk, r)) => {
+                let mut b = self.read_data(blk)?;
+                write_dir_record(&mut b, r, name, target);
+                self.write_data(blk, &b)?;
+            }
+            None => {
+                let blk = self.ensure_block(&mut inode, i)?;
+                let mut b = [0u8; BLOCK_SIZE];
+                write_dir_record(&mut b, 0, name, target);
+                self.write_data(blk, &b)?;
             }
         }
         inode.mtime = now;

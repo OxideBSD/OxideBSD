@@ -318,6 +318,10 @@ name = "mq-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "mtree"
+version = "0.1.0"
+
+[[package]]
 name = "multiboot2-boot-smoke"
 version = "0.1.0"
 dependencies = [
@@ -385,6 +389,7 @@ dependencies = [
  "libcertstore",
  "limine",
  "linked_list_allocator",
+ "mtree",
  "oxfs_format",
  "pc-keyboard",
  "sha2",

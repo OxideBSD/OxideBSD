@@ -1,0 +1,12 @@
+# Which dist set each installed path belongs to (OxideBSD-doc RAM_FLOOR.md §4.3.2), as NetBSD's
+# distrib/sets/lists do. One pattern per line: `*` matches within a path component, `**` any
+# number of components. A path belongs to the set whose matching pattern is the most specific:
+# an exact path over any pattern, then the longer pattern. A path no list claims, or two claim
+# equally, fails the build.
+#
+# tests: the regression fixtures and the POSIX test corpus; dev and test images only.
+./usr/tests
+./usr/tests/**
+./usr/src
+./usr/src/**
+./etc/mtree/tests.mtree

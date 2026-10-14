@@ -8204,7 +8204,7 @@ fn format_fresh_filesystem() -> bool {
     dir_insert(etc, b".", etc).expect("oxfs: failed to seed /etc's . entry");
     dir_insert(etc, b"..", root).expect("oxfs: failed to seed /etc's .. entry");
     dir_insert(root, b"etc", etc).expect("oxfs: failed to insert /etc into root");
-    ok &= seed_file(etc, b"resolv.conf", b"nameserver 10.0.2.3\n");
+    ok &= seed_file(etc, b"resolv.conf", include_bytes!("../../../../etc/resolv.conf"));
     ok &= seed_file(etc, b"hosts", include_bytes!("../../../../etc/hosts"));
     // rc(8): the boot and shutdown scripts and the rc.d services, from the source tree's etc/
     // (INIT.md in OxideBSD-doc).
@@ -8616,18 +8616,14 @@ fn format_fresh_filesystem() -> bool {
     // also build. hello.c prints rather than just returning, so it goes through musl's stdio.
     let examples = ensure_dir(ensure_dir(usr, b"share"), b"examples");
     let examples_clang = ensure_dir(examples, b"clang");
-    ok &= seed_file(
-        examples_clang,
-        b"hello.c",
-        b"#include <stdio.h>\nint main(void) {\n    printf(\"hello, OxideBSD\\n\");\n    return 0;\n}\n",
-    );
+    ok &= seed_file(examples_clang, b"hello.c", include_bytes!("../../../../share/examples/clang/hello.c"));
     // The C++ counterpart: STL, exceptions/RTTI, std::thread, std::filesystem.
-    ok &= seed_file(examples_clang, b"hello.cpp", include_bytes!("hello.cpp"));
+    ok &= seed_file(examples_clang, b"hello.cpp", include_bytes!("../../../../share/examples/clang/hello.cpp"));
     // A tiny ninja project: two `clang -c` jobs and a link.
     let examples_ninja = ensure_dir(examples, b"ninja");
-    ok &= seed_file(examples_ninja, b"build.ninja", include_bytes!("ninja-demo/build.ninja"));
-    ok &= seed_file(examples_ninja, b"main.c", include_bytes!("ninja-demo/main.c"));
-    ok &= seed_file(examples_ninja, b"greet.c", include_bytes!("ninja-demo/greet.c"));
+    ok &= seed_file(examples_ninja, b"build.ninja", include_bytes!("../../../../share/examples/ninja/build.ninja"));
+    ok &= seed_file(examples_ninja, b"main.c", include_bytes!("../../../../share/examples/ninja/main.c"));
+    ok &= seed_file(examples_ninja, b"greet.c", include_bytes!("../../../../share/examples/ninja/greet.c"));
     // lib/libsh's differential corpus plus dash's output for each, for tests/sh_syscall_smoke.rs
     // (`run.sh <shell>` runs every script under that shell and compares).
     let sh_smoke = ensure_dir(usr_tests, b"sh");

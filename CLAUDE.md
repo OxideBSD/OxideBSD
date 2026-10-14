@@ -305,8 +305,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
   (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
   seeding a node; every device node opens through `oxidebsd_dev_open` by number.
-- New seeded files need a `seed_file` call in oxfs's `module_init`. Seed modes: `0755` only for
-  ELFs and `#!` scripts.
+- A new installed file goes in `distrib/install.mtree` (and a set in `distrib/sets/lists/*`;
+  the build fails on an unlisted path) **and**, until RAM_FLOOR B5 removes seeding, a `seed_file`
+  call in oxfs's `module_init`. Modes: `0755` only for ELFs and `#!` scripts (the default).
 - The mount redirect only fires inside `resolve_path_impl`'s component loop.
 - Disk: virtio-blk, else IDE secondary master (DMA, else PIO). The boot ISO is on virtio-scsi.
   `no-ata` protects real hardware from being formatted.

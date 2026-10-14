@@ -32,7 +32,8 @@ finds and repairs these in five phases:
 every inode's blocks are checked against the size of the file system and
 against each other;
 .It
-the directory tree is walked from the root, checking every name;
+the directory tree is walked from the root, checking every name (one directory
+holding two of the same name is an error);
 .It
 inodes with no name are found: a directory, or a file with links left, is
 reconnected in

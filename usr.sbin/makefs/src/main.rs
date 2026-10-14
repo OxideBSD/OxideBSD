@@ -329,6 +329,7 @@ fn describe(e: oxfs_format::Error<std::io::Error>) -> String {
         Error::NoInodes => "out of inodes".into(),
         Error::BadName => "a name is empty or longer than 255 bytes".into(),
         Error::LabelTooLong => "volume label too long".into(),
+        Error::Exists => "a name given twice in one directory".into(),
         Error::Superblock(e) => format!("{e:?}"),
     }
 }
@@ -399,6 +400,13 @@ fn build(image: &Path, tree: &Tree, size: u64, label: &[u8], timestamp: Option<i
             None => (&path[..0], &path[..]),
         };
         let parent = numbers[parent];
+        // The format made /lost+found; a source naming it gives it its attributes.
+        if parent == ROOT_INODE && name == b"lost+found" && matches!(node.body, Body::Dir) {
+            let n = w.lookup(ROOT_INODE, name).map_err(describe)?.expect("the format makes /lost+found");
+            dirs.push((n, node));
+            numbers.insert(path.clone(), n);
+            continue;
+        }
         if let Some(&n) = node.host_id.as_ref().and_then(|id| by_host.get(id)) {
             w.link(parent, name, n, time(node)).map_err(describe)?;
             continue;

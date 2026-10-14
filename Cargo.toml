@@ -97,7 +97,7 @@ members = [
   "sys/modules/sysctl",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcertstore", "lib/liboxfs"]
+exclude = ["lib/libcertstore", "lib/liboxfs", "lib/libmtree"]
 
 [package]
 name = "oxidebsd"
@@ -137,6 +137,9 @@ oxfs_format = { path = "lib/liboxfs" }
 [build-dependencies]
 # The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.
 libcertstore = { path = "lib/libcertstore" }
+# The install step (build_install.rs): mtree(5) specifications and their file digests.
+mtree = { path = "lib/libmtree" }
+sha2 = "0.10"
 
 [[test]]
 name = "basic_boot"

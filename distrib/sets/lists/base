@@ -1,0 +1,36 @@
+# Which dist set each installed path belongs to (OxideBSD-doc RAM_FLOOR.md §4.3.2), as NetBSD's
+# distrib/sets/lists do. One pattern per line: `*` matches within a path component, `**` any
+# number of components. A path belongs to the set whose matching pattern is the most specific:
+# an exact path over any pattern, then the longer pattern. A path no list claims, or two claim
+# equally, fails the build.
+#
+# base: everything a console install runs (§1).
+.
+./bin
+./bin/**
+./dev
+./etc
+./etc/**
+./home
+./home/**
+./lib
+./lib/**
+./lost+found
+./sbin
+./sbin/**
+./tmp
+./usr
+./usr/bin
+./usr/bin/**
+./usr/games
+./usr/games/**
+./usr/lib
+./usr/lib/**
+./usr/libexec
+./usr/libexec/**
+./usr/sbin
+./usr/sbin/**
+./usr/share
+./usr/share/**
+./var
+./var/**

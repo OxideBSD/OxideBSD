@@ -168,6 +168,8 @@ fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode)
     while let Some((dir, parent)) = queue.pop() {
         let inode = fs.inodes[dir as usize].clone();
         let Ok((data, _)) = fs.blocks_of(&inode) else { continue };
+        // Names already met in this directory: a second record of one is an error.
+        let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
         for block in data {
             let mut buf = fs.read_block(block).map_err(|e| e.to_string())?;
             let mut changed = false;
@@ -186,6 +188,8 @@ fn walk(fs: &mut Fs, tree: &mut Tree, dir: u32, parent: Option<u32>, mode: Mode)
                     Some(format!("directory {dir}: . names inode {target}"))
                 } else if name == ".." && parent.is_some_and(|p| target != p) {
                     Some(format!("directory {dir}: .. names inode {target}, not {}", parent.unwrap()))
+                } else if !seen.insert(dir_record_name(&buf, r).to_vec()) {
+                    Some(format!("directory {dir}: a second record named {name} (inode {target})"))
                 } else {
                     None
                 };

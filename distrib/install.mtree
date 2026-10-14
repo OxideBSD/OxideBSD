@@ -1,0 +1,552 @@
+#mtree v2.0
+#
+# distrib/install.mtree: everything the build installs into the system's file tree
+# (OxideBSD-doc RAM_FLOOR.md §4.3), read by build.rs, which stages it into target/destdir and
+# splits it into dist sets by distrib/sets/lists/*. mtree(5) syntax, plus:
+#
+#   src=artifact:NAME   a build product, by the name build.rs gives it
+#   src=gen:NAME        a file list build.rs generates (zoneinfo, OpenSSL, the POSIX corpus...)
+#   src=path            a file in this source tree
+#   type=tree           installs a generated list under this directory
+#   hardlink=./path     another name for an entry above
+#
+# A file's mode defaults to 0755 for an ELF executable or shared object and a #! script, 0644
+# otherwise; a directory's to 0755. Everything is root's unless it says otherwise.
+#
+/set uid=0 gid=0
+. type=dir
+./bin type=dir
+./sbin type=dir
+./lost+found type=dir mode=0700
+./usr type=dir
+./usr/bin type=dir
+./usr/sbin type=dir
+./usr/libexec type=dir
+./usr/games type=dir
+./usr/tests type=dir
+./usr/tests/oxfs type=dir
+./usr/tests/oxfs/hello.txt type=file src=regress/oxfs-fixtures/hello.txt
+./usr/tests/oxfs/big.txt type=file src=regress/oxfs-fixtures/big.txt
+./usr/tests/smoke type=file src=artifact:OXFS_SMOKE_ELF_PATH
+./usr/tests/rc type=dir
+./usr/tests/rc/run.sh type=file src=regress/rc-syscall-smoke/run.sh
+./usr/tests/devfs type=dir
+./usr/tests/devfs/run.sh type=file src=regress/devfs-syscall-smoke/run.sh
+./usr/tests/cred type=dir
+./usr/tests/cred/cred-smoke type=file src=artifact:OXFS_CRED_SMOKE_ELF_PATH
+./usr/tests/init type=dir
+./usr/tests/init/init-smoke type=file src=artifact:OXFS_INIT_SMOKE_ELF_PATH
+./usr/tests/tz type=dir
+./usr/tests/tz/run.sh type=file src=regress/tz-syscall-smoke/run.sh
+./usr/tests/tz/tz-smoke type=file src=artifact:OXFS_TZ_SMOKE_ELF_PATH
+./usr/tests/openssl type=dir
+./usr/tests/openssl/run.sh type=file src=regress/openssl-syscall-smoke/run.sh
+./usr/tests/openssl/openssl-smoke type=file src=artifact:OXFS_OPENSSL_SMOKE_ELF_PATH
+./usr/tests/openssl/openssl-rs-smoke type=file src=artifact:OXFS_OPENSSL_RS_SMOKE_ELF_PATH
+./usr/tests/net type=dir
+./usr/tests/net/run.sh type=file src=regress/loopback-syscall-smoke/run.sh
+./usr/tests/net/loopback-smoke type=file src=artifact:OXFS_LOOPBACK_SMOKE_ELF_PATH
+./usr/tests/syslog type=dir
+./usr/tests/syslog/run.sh type=file src=regress/syslog-syscall-smoke/run.sh
+./usr/tests/bin type=dir
+./usr/tests/bin/run.sh type=file src=regress/bin-syscall-smoke/run.sh
+./usr/tests/cron type=dir
+./usr/tests/cron/run.sh type=file src=regress/cron-syscall-smoke/run.sh
+./usr/tests/musl type=file src=artifact:OXFS_MUSL_ELF_PATH
+./usr/tests/std-hello-oxidebsd type=file src=artifact:OXFS_STD_HELLO_OXIDEBSD_ELF_PATH
+./usr/tests/std-process-fs-oxidebsd type=file src=artifact:OXFS_STD_PROCESS_FS_OXIDEBSD_ELF_PATH
+./usr/tests/std-thread-net-signal-oxidebsd type=file src=artifact:OXFS_STD_THREAD_NET_SIGNAL_OXIDEBSD_ELF_PATH
+./usr/tests/float-smoke type=file src=artifact:OXFS_FLOAT_SMOKE_ELF_PATH
+./usr/games/doom type=file src=artifact:OXFS_DOOM_ELF_PATH
+./usr/share type=dir
+./usr/share/games type=dir
+./usr/share/games/doom type=dir
+./usr/share/games/doom/doom1.wad type=file src=artifact:OXFS_DOOM1_WAD_PATH
+./sbin/lsoxmod type=file src=artifact:OXFS_LSOXMOD_ELF_PATH
+./sbin/lsmod type=link link=lsoxmod
+./usr/bin/clang type=file src=artifact:OXFS_CLANG_ELF_PATH
+./usr/bin/clang++ type=link link=clang
+./usr/bin/ld.lld type=file src=artifact:OXFS_LLD_ELF_PATH
+./usr/bin/bmake type=file src=artifact:OXFS_BMAKE_ELF_PATH
+./usr/bin/make type=link link=/usr/bin/bmake
+./bin/true type=file src=artifact:OXFS_TRUE_ELF_PATH
+./bin/echo type=file src=artifact:OXFS_ECHO_ELF_PATH
+./bin/cat type=file src=artifact:OXFS_CAT_ELF_PATH
+./bin/sh type=file src=artifact:OXFS_SH_ELF_PATH
+./bin/false type=file src=artifact:OXFS_FALSE_ELF_PATH
+./usr/bin/yes type=file src=artifact:OXFS_YES_ELF_PATH
+./usr/bin/more type=file src=artifact:OXFS_MORE_ELF_PATH
+./bin/mkdir type=file src=artifact:OXFS_MKDIR_ELF_PATH
+./bin/rmdir type=file src=artifact:OXFS_RMDIR_ELF_PATH
+./bin/rm type=file src=artifact:OXFS_RM_ELF_PATH
+./bin/mv type=file src=artifact:OXFS_MV_ELF_PATH
+./bin/cp type=file src=artifact:OXFS_CP_ELF_PATH
+./bin/touch type=file src=artifact:OXFS_TOUCH_ELF_PATH
+./bin/vi type=file src=artifact:OXFS_VI_ELF_PATH
+./usr/bin/head type=file src=artifact:OXFS_HEAD_ELF_PATH
+./usr/bin/tail type=file src=artifact:OXFS_TAIL_ELF_PATH
+./usr/bin/wc type=file src=artifact:OXFS_WC_ELF_PATH
+./usr/bin/basename type=file src=artifact:OXFS_BASENAME_ELF_PATH
+./usr/bin/dirname type=file src=artifact:OXFS_DIRNAME_ELF_PATH
+./usr/bin/printf type=file src=artifact:OXFS_PRINTF_ELF_PATH
+./usr/bin/seq type=file src=artifact:OXFS_SEQ_ELF_PATH
+./usr/bin/cut type=file src=artifact:OXFS_CUT_ELF_PATH
+./usr/bin/sort type=file src=artifact:OXFS_SORT_ELF_PATH
+./usr/bin/uniq type=file src=artifact:OXFS_UNIQ_ELF_PATH
+./bin/kill type=file src=artifact:OXFS_KILL_ELF_PATH
+./usr/bin/ar type=file src=artifact:OXFS_AR_ELF_PATH
+./bin/ash type=file src=artifact:OXFS_ASH_ELF_PATH
+./usr/bin/awk type=file src=artifact:OXFS_AWK_ELF_PATH
+./usr/bin/base32 type=file src=artifact:OXFS_BASE32_ELF_PATH
+./usr/bin/base64 type=file src=artifact:OXFS_BASE64_ELF_PATH
+./usr/bin/arch type=file src=artifact:OXFS_ARCH_ELF_PATH
+./sbin/sysctl type=file src=artifact:OXFS_SBIN_SYSCTL_ELF_PATH
+./usr/bin/bc type=file src=artifact:OXFS_BC_ELF_PATH
+./usr/bin/bunzip2 type=file src=artifact:OXFS_BUNZIP2_ELF_PATH
+./usr/bin/bzcat type=file src=artifact:OXFS_BZCAT_ELF_PATH
+./usr/bin/bzip2 type=file src=artifact:OXFS_BZIP2_ELF_PATH
+./usr/bin/cal type=file src=artifact:OXFS_CAL_ELF_PATH
+./usr/bin/chat type=file src=artifact:OXFS_CHAT_ELF_PATH
+./usr/bin/chgrp type=file src=artifact:OXFS_CHGRP_ELF_PATH
+./bin/chmod type=file src=artifact:OXFS_CHMOD_ELF_PATH
+./usr/bin/chown type=file src=artifact:OXFS_CHOWN_ELF_PATH
+./usr/sbin/chroot type=file src=artifact:OXFS_CHROOT_ELF_PATH
+./usr/bin/cksum type=file src=artifact:OXFS_CKSUM_ELF_PATH
+./usr/bin/clear type=file src=artifact:OXFS_CLEAR_ELF_PATH
+./usr/bin/cmp type=file src=artifact:OXFS_CMP_ELF_PATH
+./usr/bin/comm type=file src=artifact:OXFS_COMM_ELF_PATH
+./usr/bin/cpio type=file src=artifact:OXFS_CPIO_ELF_PATH
+./usr/bin/crontab type=file src=artifact:OXFS_CRONTAB_ELF_PATH
+./bin/date type=file src=artifact:OXFS_DATE_ELF_PATH
+./usr/bin/dc type=file src=artifact:OXFS_DC_ELF_PATH
+./bin/dd type=file src=artifact:OXFS_DD_ELF_PATH
+./bin/df type=file src=artifact:OXFS_DF_ELF_PATH
+./usr/bin/diff type=file src=artifact:OXFS_DIFF_ELF_PATH
+./sbin/dmesg type=file src=artifact:OXFS_SBIN_DMESG_ELF_PATH
+./sbin/update type=file src=artifact:OXFS_UPDATE_ELF_PATH
+./sbin/fsck type=file src=artifact:OXFS_FSCK_ELF_PATH
+./sbin/fsck_oxfs type=file src=artifact:OXFS_FSCK_OXFS_ELF_PATH
+./sbin/newfs_oxfs type=file src=artifact:OXFS_NEWFS_OXFS_ELF_PATH
+./usr/bin/du type=file src=artifact:OXFS_DU_ELF_PATH
+./bin/ed type=file src=artifact:OXFS_ED_ELF_PATH
+./bin/egrep type=file src=artifact:OXFS_EGREP_ELF_PATH
+./usr/bin/env type=file src=artifact:OXFS_ENV_ELF_PATH
+./usr/bin/expand type=file src=artifact:OXFS_EXPAND_ELF_PATH
+./bin/expr type=file src=artifact:OXFS_EXPR_ELF_PATH
+./usr/bin/factor type=file src=artifact:OXFS_FACTOR_ELF_PATH
+./bin/fgrep type=file src=artifact:OXFS_FGREP_ELF_PATH
+./usr/bin/find type=file src=artifact:OXFS_FIND_ELF_PATH
+./usr/bin/flock type=file src=artifact:OXFS_FLOCK_ELF_PATH
+./usr/bin/fold type=file src=artifact:OXFS_FOLD_ELF_PATH
+./usr/bin/fsync type=file src=artifact:OXFS_FSYNC_ELF_PATH
+./usr/bin/ftpget type=file src=artifact:OXFS_FTPGET_ELF_PATH
+./usr/bin/ftpput type=file src=artifact:OXFS_FTPPUT_ELF_PATH
+./usr/bin/fuser type=file src=artifact:OXFS_FUSER_ELF_PATH
+./usr/bin/getopt type=file src=artifact:OXFS_GETOPT_ELF_PATH
+./usr/libexec/getty type=file src=artifact:OXFS_GETTY_ELF_PATH
+./usr/sbin/pwd_mkdb type=file src=artifact:OXFS_PWD_MKDB_ELF_PATH
+./usr/sbin/fsconf_mkdb type=file src=artifact:OXFS_FSCONF_MKDB_ELF_PATH
+./usr/sbin/makefs type=file src=artifact:OXFS_MAKEFS_ELF_PATH
+./usr/bin/mkimg type=file src=artifact:OXFS_MKIMG_ELF_PATH
+./bin/grep type=file src=artifact:OXFS_GREP_ELF_PATH
+./usr/bin/groups type=file src=artifact:OXFS_GROUPS_ELF_PATH
+./bin/gunzip type=file src=artifact:OXFS_GUNZIP_ELF_PATH
+./bin/gzip type=file src=artifact:OXFS_GZIP_ELF_PATH
+./usr/bin/hexdump type=file src=artifact:OXFS_HEXDUMP_ELF_PATH
+./usr/bin/hostid type=file src=artifact:OXFS_HOSTID_ELF_PATH
+./usr/bin/install type=file src=artifact:OXFS_INSTALL_ELF_PATH
+./bin/link type=file src=artifact:OXFS_LINK_ELF_PATH
+./bin/ln type=file src=artifact:OXFS_LN_ELF_PATH
+./usr/bin/logger type=file src=artifact:OXFS_LOGGER_ELF_PATH
+./usr/bin/login type=file src=artifact:OXFS_LOGIN_ELF_PATH
+./usr/bin/logname type=file src=artifact:OXFS_LOGNAME_ELF_PATH
+./bin/ls type=file src=artifact:OXFS_LS_ELF_PATH
+./usr/bin/man type=file src=artifact:OXFS_MAN_ELF_PATH
+./usr/bin/oxdoc type=file src=artifact:OXFS_OXDOC_ELF_PATH
+./usr/bin/apropos type=file src=artifact:OXFS_APROPOS_ELF_PATH
+./usr/bin/whatis type=link link=apropos
+./usr/sbin/makewhatis type=file src=artifact:OXFS_MAKEWHATIS_ELF_PATH
+./usr/bin/less type=link link=more
+./usr/bin/md5sum type=file src=artifact:OXFS_MD5SUM_ELF_PATH
+./usr/bin/minips type=file src=artifact:OXFS_MINIPS_ELF_PATH
+./sbin/mknod type=file src=artifact:OXFS_MKNOD_ELF_PATH
+./usr/bin/mktemp type=file src=artifact:OXFS_MKTEMP_ELF_PATH
+./sbin/mount type=file src=artifact:OXFS_MOUNT_ELF_PATH
+./sbin/mount_nullfs type=file hardlink=./sbin/mount
+./usr/bin/nc type=file src=artifact:OXFS_NC_ELF_PATH
+./usr/bin/netcat type=file src=artifact:OXFS_NETCAT_ELF_PATH
+./usr/bin/netstat type=file src=artifact:OXFS_NETSTAT_ELF_PATH
+./usr/sbin/newsyslog type=file src=artifact:OXFS_NEWSYSLOG_ELF_PATH
+./usr/bin/nice type=file src=artifact:OXFS_NICE_ELF_PATH
+./usr/bin/nl type=file src=artifact:OXFS_NL_ELF_PATH
+./usr/bin/nohup type=file src=artifact:OXFS_NOHUP_ELF_PATH
+./bin/nproc type=file src=artifact:OXFS_NPROC_ELF_PATH
+./usr/bin/nslookup type=file src=artifact:OXFS_NSLOOKUP_ELF_PATH
+./usr/sbin/ntpd type=file src=artifact:OXFS_NTPD_ELF_PATH
+./usr/bin/od type=file src=artifact:OXFS_OD_ELF_PATH
+./usr/bin/passwd type=file src=artifact:OXFS_PASSWD_ELF_PATH
+./usr/bin/paste type=file src=artifact:OXFS_PASTE_ELF_PATH
+./usr/bin/patch type=file src=artifact:OXFS_PATCH_ELF_PATH
+./bin/pgrep type=file src=artifact:OXFS_PGREP_ELF_PATH
+./usr/bin/pidof type=file src=artifact:OXFS_PIDOF_ELF_PATH
+./sbin/ping type=file src=artifact:OXFS_PING_ELF_PATH
+./bin/pkill type=file src=artifact:OXFS_PKILL_ELF_PATH
+./usr/bin/printenv type=file src=artifact:OXFS_PRINTENV_ELF_PATH
+./bin/pwd type=file src=artifact:OXFS_PWD_ELF_PATH
+./usr/bin/readlink type=file src=artifact:OXFS_READLINK_ELF_PATH
+./bin/realpath type=file src=artifact:OXFS_REALPATH_ELF_PATH
+./usr/bin/renice type=file src=artifact:OXFS_RENICE_ELF_PATH
+./usr/bin/reset type=file src=artifact:OXFS_RESET_ELF_PATH
+./usr/bin/resize type=file src=artifact:OXFS_RESIZE_ELF_PATH
+./usr/bin/rev type=file src=artifact:OXFS_REV_ELF_PATH
+./bin/sed type=file src=artifact:OXFS_SED_ELF_PATH
+./usr/bin/setsid type=file src=artifact:OXFS_SETSID_ELF_PATH
+./usr/bin/sha1sum type=file src=artifact:OXFS_SHA1SUM_ELF_PATH
+./usr/bin/sha256sum type=file src=artifact:OXFS_SHA256SUM_ELF_PATH
+./usr/bin/sha3sum type=file src=artifact:OXFS_SHA3SUM_ELF_PATH
+./usr/bin/sha512sum type=file src=artifact:OXFS_SHA512SUM_ELF_PATH
+./bin/sleep type=file src=artifact:OXFS_SLEEP_ELF_PATH
+./usr/bin/split type=file src=artifact:OXFS_SPLIT_ELF_PATH
+./usr/bin/ssl_client type=file src=artifact:OXFS_SSL_CLIENT_ELF_PATH
+./usr/bin/stat type=file src=artifact:OXFS_STAT_ELF_PATH
+./usr/bin/strings type=file src=artifact:OXFS_STRINGS_ELF_PATH
+./bin/stty type=file src=artifact:OXFS_STTY_ELF_PATH
+./usr/bin/sudo type=file src=artifact:OXFS_SUDO_ELF_PATH mode=4755
+./usr/bin/su type=file src=artifact:OXFS_SUDO_RS_SU_ELF_PATH mode=4755
+./usr/sbin/visudo type=file src=artifact:OXFS_VISUDO_ELF_PATH
+./usr/bin/sudoedit type=link link=sudo
+./usr/bin/sum type=file src=artifact:OXFS_SUM_ELF_PATH
+./bin/sync type=file src=artifact:OXFS_SYNC_ELF_PATH
+./usr/sbin/syslogd type=file src=artifact:OXFS_SYSLOGD_ELF_PATH
+./usr/sbin/cron type=file src=artifact:OXFS_CRON_ELF_PATH
+./usr/sbin/periodic type=file src=usr.sbin/periodic/periodic.sh
+./usr/sbin/tzsetup type=file src=artifact:OXFS_TZSETUP_ELF_PATH
+./usr/bin/zdump type=file src=artifact:OXFS_ZDUMP_ELF_PATH
+./usr/sbin/zic type=file src=artifact:OXFS_ZIC_ELF_PATH
+./usr/sbin/certctl type=file src=artifact:OXFS_CERTCTL_ELF_PATH
+./usr/bin/tac type=file src=artifact:OXFS_TAC_ELF_PATH
+./bin/tar type=file src=artifact:OXFS_TAR_ELF_PATH
+./usr/bin/tee type=file src=artifact:OXFS_TEE_ELF_PATH
+./usr/bin/telnet type=file src=artifact:OXFS_TELNET_ELF_PATH
+./bin/test type=file src=artifact:OXFS_TEST_ELF_PATH
+./bin/[ type=file hardlink=./bin/test
+./usr/bin/time type=file src=artifact:OXFS_TIME_ELF_PATH
+./bin/timeout type=file src=artifact:OXFS_TIMEOUT_ELF_PATH
+./usr/bin/top type=file src=artifact:OXFS_TOP_ELF_PATH
+./usr/bin/tr type=file src=artifact:OXFS_TR_ELF_PATH
+./usr/bin/traceroute type=file src=artifact:OXFS_TRACEROUTE_ELF_PATH
+./usr/bin/truncate type=file src=artifact:OXFS_TRUNCATE_ELF_PATH
+./usr/bin/tsort type=file src=artifact:OXFS_TSORT_ELF_PATH
+./usr/bin/tty type=file src=artifact:OXFS_TTY_ELF_PATH
+./sbin/umount type=file src=artifact:OXFS_UMOUNT_ELF_PATH
+./usr/bin/uncompress type=file src=artifact:OXFS_UNCOMPRESS_ELF_PATH
+./usr/bin/unexpand type=file src=artifact:OXFS_UNEXPAND_ELF_PATH
+./bin/unlink type=file src=artifact:OXFS_UNLINK_ELF_PATH
+./usr/bin/unxz type=file src=artifact:OXFS_UNXZ_ELF_PATH
+./usr/bin/unzip type=file src=artifact:OXFS_UNZIP_ELF_PATH
+./usr/bin/uptime type=file src=artifact:OXFS_UPTIME_ELF_PATH
+./usr/bin/uudecode type=file src=artifact:OXFS_UUDECODE_ELF_PATH
+./usr/bin/uuencode type=file src=artifact:OXFS_UUENCODE_ELF_PATH
+./usr/bin/wget type=file src=artifact:OXFS_WGET_ELF_PATH
+./usr/bin/which type=file src=artifact:OXFS_WHICH_ELF_PATH
+./usr/bin/whoami type=file src=artifact:OXFS_WHOAMI_ELF_PATH
+./usr/bin/whois type=file src=artifact:OXFS_WHOIS_ELF_PATH
+./usr/bin/xargs type=file src=artifact:OXFS_XARGS_ELF_PATH
+./usr/bin/xxd type=file src=artifact:OXFS_XXD_ELF_PATH
+./usr/bin/xzcat type=file src=artifact:OXFS_XZCAT_ELF_PATH
+./bin/zcat type=file src=artifact:OXFS_ZCAT_ELF_PATH
+./usr/bin/uname type=file src=artifact:OXFS_UNAME_ELF_PATH
+./bin/hostname type=file src=artifact:OXFS_HOSTNAME_ELF_PATH
+./etc type=dir
+./etc/resolv.conf type=file src=etc/resolv.conf
+./etc/hosts type=file src=etc/hosts
+./etc/rc type=file src=etc/rc
+./etc/rc.shutdown type=file src=etc/rc.shutdown
+./etc/rc.subr type=file src=etc/rc.subr
+./etc/rc.conf type=file src=etc/rc.conf
+./etc/ttys type=file src=etc/ttys
+./etc/defaults type=dir
+./etc/defaults/rc.conf type=file src=etc/defaults/rc.conf
+./etc/rc.d type=dir
+./etc/rc.d/FILESYSTEMS type=file src=etc/rc.d/FILESYSTEMS
+./etc/rc.d/root type=file src=etc/rc.d/root
+./etc/rc.d/fsck type=file src=etc/rc.d/fsck
+./etc/rc.d/NETWORKING type=file src=etc/rc.d/NETWORKING
+./etc/rc.d/SERVERS type=file src=etc/rc.d/SERVERS
+./etc/rc.d/DAEMON type=file src=etc/rc.d/DAEMON
+./etc/rc.d/LOGIN type=file src=etc/rc.d/LOGIN
+./etc/rc.d/cleanvar type=file src=etc/rc.d/cleanvar
+./etc/rc.d/hostname type=file src=etc/rc.d/hostname
+./etc/rc.d/tmp type=file src=etc/rc.d/tmp
+./etc/rc.d/sysctl type=file src=etc/rc.d/sysctl
+./etc/rc.d/devfs type=file src=etc/rc.d/devfs
+./etc/rc.d/newsyslog type=file src=etc/rc.d/newsyslog
+./etc/rc.d/syslogd type=file src=etc/rc.d/syslogd
+./etc/rc.d/cron type=file src=etc/rc.d/cron
+./etc/rc.d/update type=file src=etc/rc.d/update
+./etc/rc.d/mountcritlocal type=file src=etc/rc.d/mountcritlocal
+./etc/sysctl.conf type=file src=etc/sysctl.conf
+./etc/devfs.conf type=file src=etc/devfs.conf
+./etc/syslog.conf type=file src=etc/syslog.conf
+./etc/syslog.d type=dir
+./etc/newsyslog.conf type=file src=etc/newsyslog.conf
+./etc/newsyslog.conf.d type=dir
+./etc/passwd type=file src=etc/passwd
+./etc/group type=file src=etc/group
+./etc/master.passwd type=file src=etc/master.passwd mode=0600
+./etc/gettytab type=file src=etc/gettytab
+./etc/login.conf type=file src=etc/login.conf
+./etc/motd type=file src=etc/motd
+./etc/profile type=file src=etc/profile
+./etc/man.conf type=file src=etc/man.conf
+./etc/pam.d type=dir
+./etc/pam.d/login type=file src=etc/pam.d/login
+./etc/pam.d/other type=file src=etc/pam.d/other
+./etc/pam.d/passwd type=file src=etc/pam.d/passwd
+./etc/pam.d/system type=file src=etc/pam.d/system
+./etc/pam.d/cron type=file src=etc/pam.d/cron
+./etc/pam.d/sudo type=file src=etc/pam.d/sudo
+./etc/pam.d/su type=file src=etc/pam.d/su
+./etc/sudoers type=file src=etc/sudoers mode=0440
+./home type=dir
+./home/user type=dir mode=0700 uid=1000 gid=1000
+./var type=dir
+./var/run type=dir
+./var/log type=dir
+./var/mail type=dir
+./var/backups type=dir
+./var/cron type=dir
+./var/cron/tabs type=dir mode=0700
+./tmp type=dir mode=1777
+./dev type=dir
+./etc/crontab type=file src=etc/crontab
+./etc/fstab type=file src=etc/fstab
+./etc/cron.d type=dir
+./etc/defaults/periodic.conf type=file src=etc/defaults/periodic.conf
+./etc/periodic type=dir
+./etc/periodic/daily type=dir
+./etc/periodic/daily/110.clean-tmps type=file src=etc/periodic/daily/110.clean-tmps
+./etc/periodic/daily/200.backup-passwd type=file src=etc/periodic/daily/200.backup-passwd
+./etc/periodic/daily/400.status-disks type=file src=etc/periodic/daily/400.status-disks
+./etc/periodic/daily/430.status-uptime type=file src=etc/periodic/daily/430.status-uptime
+./etc/periodic/daily/999.local type=file src=etc/periodic/daily/999.local
+./etc/periodic/weekly type=dir
+./etc/periodic/weekly/999.local type=file src=etc/periodic/weekly/999.local
+./etc/periodic/monthly type=dir
+./etc/periodic/monthly/999.local type=file src=etc/periodic/monthly/999.local
+./sbin/init type=file src=artifact:OXFS_INIT_ELF_PATH
+./sbin/init_sh type=file src=artifact:OXFS_INIT_SH_ELF_PATH
+./sbin/rcorder type=file src=artifact:OXFS_RCORDER_ELF_PATH
+./sbin/reboot type=file src=artifact:OXFS_REBOOT_ELF_PATH
+./sbin/halt type=file hardlink=./sbin/reboot
+./sbin/poweroff type=file hardlink=./sbin/reboot
+./sbin/shutdown type=file src=artifact:OXFS_SHUTDOWN_ELF_PATH
+./sbin/emergency type=file src=artifact:OXFS_EMERGENCY_ELF_PATH
+./sbin/nologin type=file src=artifact:OXFS_NOLOGIN_ELF_PATH
+./usr/include type=dir
+./usr/include type=tree src=gen:MUSL_INCLUDE_FILES
+./usr/lib type=dir
+./usr/lib type=tree src=gen:MUSL_LIB_FILES
+./usr/share/man type=dir
+./usr/share/man/man1 type=dir
+./usr/share/man/oxdoc.db type=file src=artifact:OXFS_MAN_DB_PATH
+./usr/share/man/man1/apropos.1 type=file src=share/man/man1/apropos.1
+./usr/share/man/man1/whatis.1 type=file hardlink=./usr/share/man/man1/apropos.1
+./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
+./usr/share/man/man1/less.1 type=file src=share/man/man1/more.1
+./usr/share/man/man1/logger.1 type=file src=share/man/man1/logger.1
+./usr/share/man/man1/crontab.1 type=file src=share/man/man1/crontab.1
+./usr/share/man/man1/chmod.1 type=file src=share/man/man1/chmod.1
+./usr/share/man/man1/kill.1 type=file src=share/man/man1/kill.1
+./usr/share/man/man1/link.1 type=file src=share/man/man1/link.1
+./usr/share/man/man1/nproc.1 type=file src=share/man/man1/nproc.1
+./usr/share/man/man1/rmdir.1 type=file src=share/man/man1/rmdir.1
+./usr/share/man/man1/sleep.1 type=file src=share/man/man1/sleep.1
+./usr/share/man/man1/test.1 type=file src=share/man/man1/test.1
+./usr/share/man/man1/unlink.1 type=file src=share/man/man1/unlink.1
+./usr/share/man/man1/man.1 type=file src=share/man/man1/man.1
+./usr/share/man/man1/more.1 type=file hardlink=./usr/share/man/man1/less.1
+./usr/share/man/man1/oxdoc.1 type=file src=share/man/man1/oxdoc.1
+./usr/share/man/man1/passwd.1 type=file src=share/man/man1/passwd.1
+./usr/share/man/man2 type=dir
+./usr/share/man/man2/accept.2 type=file src=share/man/man2/accept.2
+./usr/share/man/man2/nmount.2 type=file src=share/man/man2/nmount.2
+./usr/share/man/man2/accept4.2 type=file hardlink=./usr/share/man/man2/accept.2
+./usr/share/man/man2/bind.2 type=file src=share/man/man2/bind.2
+./usr/share/man/man2/connect.2 type=file src=share/man/man2/connect.2
+./usr/share/man/man2/getsockname.2 type=file src=share/man/man2/getsockname.2
+./usr/share/man/man2/getpeername.2 type=file hardlink=./usr/share/man/man2/getsockname.2
+./usr/share/man/man2/getsockopt.2 type=file src=share/man/man2/getsockopt.2
+./usr/share/man/man2/setsockopt.2 type=file hardlink=./usr/share/man/man2/getsockopt.2
+./usr/share/man/man2/listen.2 type=file src=share/man/man2/listen.2
+./usr/share/man/man2/recvmsg.2 type=file src=share/man/man2/recvmsg.2
+./usr/share/man/man2/recv.2 type=file hardlink=./usr/share/man/man2/recvmsg.2
+./usr/share/man/man2/recvfrom.2 type=file hardlink=./usr/share/man/man2/recvmsg.2
+./usr/share/man/man2/sendmsg.2 type=file src=share/man/man2/sendmsg.2
+./usr/share/man/man2/send.2 type=file hardlink=./usr/share/man/man2/sendmsg.2
+./usr/share/man/man2/sendto.2 type=file hardlink=./usr/share/man/man2/sendmsg.2
+./usr/share/man/man2/shutdown.2 type=file src=share/man/man2/shutdown.2
+./usr/share/man/man2/socket.2 type=file src=share/man/man2/socket.2
+./usr/share/man/man2/socketpair.2 type=file src=share/man/man2/socketpair.2
+./usr/share/man/man3 type=dir
+./usr/share/man/man3/getpeereid.3 type=file src=share/man/man3/getpeereid.3
+./usr/share/man/man3/sysctl.3 type=file src=share/man/man3/sysctl.3
+./usr/share/man/man3/sysctlbyname.3 type=file hardlink=./usr/share/man/man3/sysctl.3
+./usr/share/man/man3/sysctlnametomib.3 type=file hardlink=./usr/share/man/man3/sysctl.3
+./usr/share/man/man4 type=dir
+./usr/share/man/man4/devfs.4 type=file src=share/man/man4/devfs.4
+./usr/share/man/man4/klog.4 type=file src=share/man/man4/klog.4
+./usr/share/man/man4/pts.4 type=file src=share/man/man4/pts.4
+./usr/share/man/man4/unix.4 type=file src=share/man/man4/unix.4
+./usr/share/man/man5 type=dir
+./usr/share/man/man5/devfs.conf.5 type=file src=share/man/man5/devfs.conf.5
+./usr/share/man/man5/fsconf.5 type=file src=share/man/man5/fsconf.5
+./usr/share/man/man5/gettytab.5 type=file src=share/man/man5/gettytab.5
+./usr/share/man/man5/login.conf.5 type=file src=share/man/man5/login.conf.5
+./usr/share/man/man5/man.conf.5 type=file src=share/man/man5/man.conf.5
+./usr/share/man/man5/newsyslog.conf.5 type=file src=share/man/man5/newsyslog.conf.5
+./usr/share/man/man5/passwd.5 type=file src=share/man/man5/passwd.5
+./usr/share/man/man5/master.passwd.5 type=file hardlink=./usr/share/man/man5/passwd.5
+./usr/share/man/man5/rc.conf.5 type=file src=share/man/man5/rc.conf.5
+./usr/share/man/man5/sysctl.conf.5 type=file src=share/man/man5/sysctl.conf.5
+./usr/share/man/man5/syslog.conf.5 type=file src=share/man/man5/syslog.conf.5
+./usr/share/man/man5/crontab.5 type=file src=share/man/man5/crontab.5
+./usr/share/man/man5/fstab.5 type=file src=share/man/man5/fstab.5
+./usr/share/man/man5/periodic.conf.5 type=file src=share/man/man5/periodic.conf.5
+./usr/share/man/man5/tzfile.5 type=file src=external/public-domain/tz/tzfile.5
+./usr/share/man/man5/ttys.5 type=file src=share/man/man5/ttys.5
+./usr/share/man/man7 type=dir
+./usr/share/man/man7/eqn.7 type=file src=share/man/man7/eqn.7
+./usr/share/man/man7/hier.7 type=file src=share/man/man7/hier.7
+./usr/share/man/man7/man.7 type=file src=share/man/man7/man.7
+./usr/share/man/man7/mdoc.7 type=file src=share/man/man7/mdoc.7
+./usr/share/man/man7/roff.7 type=file src=share/man/man7/roff.7
+./usr/share/man/man7/tbl.7 type=file src=share/man/man7/tbl.7
+./usr/share/man/man8 type=dir
+./usr/share/man/man8/emergency.8 type=file src=share/man/man8/emergency.8
+./usr/share/man/man8/dmesg.8 type=file src=share/man/man8/dmesg.8
+./usr/share/man/man8/update.8 type=file src=share/man/man8/update.8
+./usr/share/man/man8/fsck.8 type=file src=share/man/man8/fsck.8
+./usr/share/man/man8/fsck_oxfs.8 type=file src=share/man/man8/fsck_oxfs.8
+./usr/share/man/man8/newfs_oxfs.8 type=file src=share/man/man8/newfs_oxfs.8
+./usr/share/man/man8/getty.8 type=file src=share/man/man8/getty.8
+./usr/share/man/man8/init.8 type=file src=share/man/man8/init.8
+./usr/share/man/man8/makewhatis.8 type=file src=share/man/man8/makewhatis.8
+./usr/share/man/man8/newsyslog.8 type=file src=share/man/man8/newsyslog.8
+./usr/share/man/man8/pwd_mkdb.8 type=file src=share/man/man8/pwd_mkdb.8
+./usr/share/man/man8/fsconf_mkdb.8 type=file src=share/man/man8/fsconf_mkdb.8
+./usr/share/man/man8/makefs.8 type=file src=share/man/man8/makefs.8
+./usr/share/man/man1/mkimg.1 type=file src=share/man/man1/mkimg.1
+./usr/share/man/man5/mtree.5 type=file src=share/man/man5/mtree.5
+./usr/share/man/man8/rc.8 type=file src=share/man/man8/rc.8
+./usr/share/man/man8/rc.subr.8 type=file src=share/man/man8/rc.subr.8
+./usr/share/man/man8/rcorder.8 type=file src=share/man/man8/rcorder.8
+./usr/share/man/man8/reboot.8 type=file src=share/man/man8/reboot.8
+./usr/share/man/man8/sysctl.8 type=file src=share/man/man8/sysctl.8
+./usr/share/man/man8/syslogd.8 type=file src=share/man/man8/syslogd.8
+./usr/share/man/man8/cron.8 type=file src=share/man/man8/cron.8
+./usr/share/man/man8/mount.8 type=file src=share/man/man8/mount.8
+./usr/share/man/man8/mount_nullfs.8 type=file hardlink=./usr/share/man/man8/mount.8
+./usr/share/man/man8/umount.8 type=file src=share/man/man8/umount.8
+./usr/share/man/man8/sync.8 type=file src=share/man/man8/sync.8
+./usr/share/man/man8/periodic.8 type=file src=share/man/man8/periodic.8
+./usr/share/man/man8/tzsetup.8 type=file src=share/man/man8/tzsetup.8
+./usr/share/man/man8/zdump.8 type=file src=external/public-domain/tz/zdump.8
+./usr/share/man/man8/zic.8 type=file src=external/public-domain/tz/zic.8
+./usr/share/man/man8/halt.8 type=file hardlink=./usr/share/man/man8/reboot.8
+./usr/share/man/man8/poweroff.8 type=file hardlink=./usr/share/man/man8/reboot.8
+./usr/share/man/man8/shutdown.8 type=file src=share/man/man8/shutdown.8
+./usr/share/man/man8/nologin.8 type=file src=share/man/man8/nologin.8
+./usr/share/mk type=dir
+./usr/share/mk type=tree src=gen:BMAKE_MK_FILES
+./usr/include type=tree src=gen:NCURSES_INCLUDE_FILES
+./usr/lib type=tree src=gen:NCURSES_LIB_FILES
+./usr/include/c++ type=dir
+./usr/include/c++/v1 type=dir
+./usr/include/c++/v1 type=tree src=gen:LIBCXX_INCLUDE_FILES
+./usr/include/x86_64-unknown-oxidebsd-musl type=dir
+./usr/include/x86_64-unknown-oxidebsd-musl/c++ type=dir
+./usr/include/x86_64-unknown-oxidebsd-musl/c++/v1 type=dir
+./usr/include/x86_64-unknown-oxidebsd-musl/c++/v1 type=tree src=gen:LIBCXX_TARGET_INCLUDE_FILES
+./usr/lib type=tree src=gen:LIBCXX_LIB_FILES
+./usr/share/terminfo type=dir
+./usr/share/terminfo type=tree src=gen:NCURSES_TERMINFO_FILES
+./usr/share/zoneinfo type=dir
+./usr/share/zoneinfo type=tree src=gen:TZ_ZONEINFO_FILES
+./usr/share/zoneinfo type=tree src=gen:TZ_ZONEINFO_LINKS
+. type=tree src=gen:OPENSSL_FILES
+. type=tree src=gen:OPENSSL_SYMLINKS
+. type=tree src=gen:CERTS_FILES
+. type=tree src=gen:CERTS_SYMLINKS
+. type=tree src=gen:CERTS_DIRS
+./usr/bin/nano type=file src=artifact:OXFS_NANO_ELF_PATH
+./usr/bin/ninja type=file src=artifact:OXFS_NINJA_ELF_PATH
+./usr/src type=dir
+./usr/src/ninja type=dir
+./usr/src/ninja type=tree src=gen:NINJA_SRC_FILES
+./usr/tests/posix type=dir
+./usr/tests/posix/run.sh type=file src=sys/modules/oxfs/src/posix_conformance.sh
+./usr/tests/posix type=tree src=gen:POSIX_TEST_FILES
+./usr/tests/posix type=tree src=gen:POSIX_TEST_EXTRA_FILES
+./lib type=dir
+./lib/libc.so type=file src=artifact:OXFS_LIBC_SO_PATH
+./lib/ld-musl-x86_64.so.1 type=link link=libc.so
+./lib/libgcc_s.so.1 type=file src=artifact:OXFS_LIBGCC_S_PATH
+./usr/lib/libc.so type=link link=/lib/libc.so
+./usr/lib/libgcc_s.so type=link link=/lib/libgcc_s.so.1
+./usr/lib/clang type=dir
+./usr/lib/clang/23 type=dir
+./usr/lib/clang/23 type=tree src=gen:CLANG_RESOURCE_FILES
+./usr/tests/dynlink type=dir
+./usr/tests/dynlink/dynlink-smoke type=file src=artifact:OXFS_DYNLINK_SMOKE_ELF_PATH
+./usr/tests/dynlink/dynlink-pie-smoke type=file src=artifact:OXFS_DYNLINK_PIE_SMOKE_ELF_PATH
+./usr/tests/aslr type=dir
+./usr/tests/aslr/pie-aslr-probe type=file src=artifact:OXFS_PIE_ASLR_PROBE_ELF_PATH
+./usr/tests/pthread type=dir
+./usr/tests/pthread/pthread-smoke type=file src=artifact:OXFS_PTHREAD_SMOKE_ELF_PATH
+./usr/tests/pthread/pthread-cancel-crash type=file src=artifact:OXFS_PTHREAD_CANCEL_CRASH_ELF_PATH
+./usr/tests/pthread/pshared-cond-crash type=file src=artifact:OXFS_PSHARED_COND_CRASH_ELF_PATH
+./usr/tests/at type=dir
+./usr/tests/at/at-smoke type=file src=artifact:OXFS_AT_SMOKE_ELF_PATH
+./usr/tests/net/socket-smoke type=file src=artifact:OXFS_SOCKET_SMOKE_ELF_PATH
+./usr/tests/sysctl type=dir
+./usr/tests/sysctl/sysctl-smoke type=file src=artifact:OXFS_SYSCTL_SMOKE_ELF_PATH
+./usr/tests/pagecache type=dir
+./usr/tests/pagecache/pagecache-smoke type=file src=artifact:OXFS_PAGECACHE_SMOKE_ELF_PATH
+./usr/tests/wx type=dir
+./usr/tests/wx/wx-needed type=file src=artifact:OXFS_WX_NEEDED_ELF_PATH
+./usr/tests/wx/wx-plain type=file src=artifact:OXFS_WX_PLAIN_ELF_PATH
+./usr/tests/poll type=dir
+./usr/tests/poll/ppoll-smoke type=file src=artifact:OXFS_PPOLL_SMOKE_ELF_PATH
+./usr/tests/fd type=dir
+./usr/tests/fd/fd-smoke type=file src=artifact:OXFS_FD_SMOKE_ELF_PATH
+./usr/tests/tty type=dir
+./usr/tests/tty/tty-smoke type=file src=artifact:OXFS_TTY_SMOKE_ELF_PATH
+./usr/tests/ipc type=dir
+./usr/tests/ipc/sem-open-smoke type=file src=artifact:OXFS_SEM_OPEN_SMOKE_ELF_PATH
+./usr/share/examples type=dir
+./usr/share/examples/clang type=dir
+./usr/share/examples/clang/hello.c type=file src=share/examples/clang/hello.c
+./usr/share/examples/clang/hello.cpp type=file src=share/examples/clang/hello.cpp
+./usr/share/examples/ninja type=dir
+./usr/share/examples/ninja/build.ninja type=file src=share/examples/ninja/build.ninja
+./usr/share/examples/ninja/main.c type=file src=share/examples/ninja/main.c
+./usr/share/examples/ninja/greet.c type=file src=share/examples/ninja/greet.c
+./usr/tests/sh type=dir
+./usr/tests/sh/run.sh type=file src=lib/libsh/tests/run-on-target.sh
+./usr/tests/sh/builtins.sh type=file src=lib/libsh/tests/diff/builtins.sh
+./usr/tests/sh/builtins.expected type=file src=lib/libsh/tests/diff/builtins.expected
+./usr/tests/sh/control.sh type=file src=lib/libsh/tests/diff/control.sh
+./usr/tests/sh/control.expected type=file src=lib/libsh/tests/diff/control.expected
+./usr/tests/sh/dot.sh type=file src=lib/libsh/tests/diff/dot.sh
+./usr/tests/sh/dot.expected type=file src=lib/libsh/tests/diff/dot.expected
+./usr/tests/sh/errexit.sh type=file src=lib/libsh/tests/diff/errexit.sh
+./usr/tests/sh/errexit.expected type=file src=lib/libsh/tests/diff/errexit.expected
+./usr/tests/sh/expand.sh type=file src=lib/libsh/tests/diff/expand.sh
+./usr/tests/sh/expand.expected type=file src=lib/libsh/tests/diff/expand.expected
+./usr/tests/sh/glob.sh type=file src=lib/libsh/tests/diff/glob.sh
+./usr/tests/sh/glob.expected type=file src=lib/libsh/tests/diff/glob.expected
+./usr/tests/sh/redirect.sh type=file src=lib/libsh/tests/diff/redirect.sh
+./usr/tests/sh/redirect.expected type=file src=lib/libsh/tests/diff/redirect.expected
+./usr/tests/sh/traps.sh type=file src=lib/libsh/tests/diff/traps.sh
+./usr/tests/sh/traps.expected type=file src=lib/libsh/tests/diff/traps.expected

@@ -144,6 +144,17 @@ impl std::error::Error for ParseError {}
 
 impl Spec {
     pub fn parse(text: &str) -> Result<Spec, ParseError> {
+        Spec::parse_inner(text, false)
+    }
+
+    /// `parse`, accepting `type=` values mtree doesn't know (`Entry::kind` is `None` for them;
+    /// `get("type")` has the word): for formats built on mtree's syntax, such as the build's
+    /// install list.
+    pub fn parse_lenient(text: &str) -> Result<Spec, ParseError> {
+        Spec::parse_inner(text, true)
+    }
+
+    fn parse_inner(text: &str, lenient: bool) -> Result<Spec, ParseError> {
         let mut spec = Spec::default();
         let mut defaults: BTreeMap<String, String> = BTreeMap::new();
         // The current directory in relative form.
@@ -223,7 +234,7 @@ impl Spec {
             for (k, v) in keywords()? {
                 entry.keywords.insert(k, v);
             }
-            if entry.get("type").is_some_and(|t| Type::parse(t).is_none()) {
+            if !lenient && entry.get("type").is_some_and(|t| Type::parse(t).is_none()) {
                 return Err(err(format!("unknown type {}", entry.get("type").unwrap())));
             }
             if !full && decoded != b"." && entry.kind() == Some(Type::Dir) {
@@ -366,6 +377,7 @@ etc type=dir
         assert_eq!(Spec::parse("..\n").unwrap_err().line, 1);
         assert!(Spec::parse("\n./a type=wat\n").unwrap_err().line == 2);
         assert!(Spec::parse("./a mode\n").is_err());
+        assert_eq!(Spec::parse_lenient("./a type=tree\n").unwrap().entries[0].get("type"), Some("tree"));
         assert!(unvis("a\\12").is_none());
         assert_eq!(unvis("a\\012\\s").unwrap(), b"a\n ");
     }

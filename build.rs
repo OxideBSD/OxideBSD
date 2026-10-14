@@ -119,6 +119,9 @@ fn write_toolchain_bin(musl_sysroot: &Path, llvm_host_build: &Path) {
 // cascade, found live).
 include!("build_busybox.rs");
 
+// The install step: dist sets and the system's images (RAM_FLOOR.md §4.3-4.4).
+include!("build_install.rs");
+
 /// The index of the system's manual pages (MAN.md §7 in OxideBSD-doc): liboxdoc's makewhatis,
 /// built for the host, over a copy of `share/man`. oxfs seeds it as `/usr/share/man/oxdoc.db`,
 /// so apropos(1) and man(1)'s lookup by any page name work from the first boot, as the BSDs
@@ -1110,6 +1113,8 @@ fn main() {
         );
     }
     build_module_crate("oxfs", "OXFS", &oxfs_extra_env);
+    // The images, from the same build products: not used to boot yet (RAM_FLOOR.md §4.10, 4).
+    build_sets_and_images(&oxfs_extra_env);
 
     // Real disk persistence (see sys/drivers/ata.rs and sys/modules/oxfs's own "Real disk persistence"
     // section): the two raw disk image *files* QEMU's `-drive` attaches, as opposed to everything
@@ -2065,13 +2070,15 @@ fn write_musl_runtime_manifest(musl_sysroot: &Path) -> PathBuf {
     // (libc.a plus its small stub archives, for `-lm`/`-lpthread` link-line compatibility even
     // though musl merges everything into libc.a). Skipped: the shared libraries `libc.so` (with its
     // `ld-musl-x86_64.so.1` link) and `libgcc_s.so`, which oxfs puts in `/lib` with `/usr/lib`
-    // symlinks to them, and `musl-gcc.specs`, a host build tool file.
+    // symlinks to them, `musl-gcc.specs`, a host build tool file, and `libunwind.a`, LLVM's,
+    // which the libc++ list installs (it sits in this sysroot too, and both lists naming it gave
+    // `/usr/lib` two records of that name).
     let mut lib_files: Vec<(String, PathBuf)> = collect_dir_files(&musl_sysroot.join("lib"))
         .into_iter()
         .filter(|(rel, _)| {
             !matches!(
                 rel.as_str(),
-                "libc.so" | "ld-musl-x86_64.so.1" | "libgcc_s.so" | "musl-gcc.specs"
+                "libc.so" | "ld-musl-x86_64.so.1" | "libgcc_s.so" | "musl-gcc.specs" | "libunwind.a"
             )
         })
         .collect();
