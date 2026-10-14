@@ -43,6 +43,22 @@ case "${KERNEL_ELF##*/}" in
     *) IS_TEST=0 ;;
 esac
 
+# Per-test QEMU settings, by the test's name (the binary's, less its hash).
+TEST_NAME=""
+if [ "$IS_TEST" = 1 ]; then
+    TEST_NAME=$(basename "$KERNEL_ELF" | sed 's/-[0-9a-f]\{16\}$//')
+fi
+case "$TEST_NAME" in
+    ram_floor_boot)
+        # The real system must boot to a login prompt in 128 MB (RAM_FLOOR.md §4.9), and nothing
+        # on the way may run out of memory.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
+        export OXIDEBSD_QEMU_MEM
+        QEMU_PASS_PATTERN="login:"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM"
+        ;;
+esac
+
 # --- Stage a fresh ISO root and build the hybrid image ---
 rm -rf "$ISO_ROOT"
 mkdir -p "$ISO_ROOT/boot/limine" "$ISO_ROOT/EFI/BOOT"

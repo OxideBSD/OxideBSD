@@ -199,6 +199,23 @@ qemu_common_run_test_and_translate_exit() {
             quiet=0
             last_size=$size
         fi
+        # A test that boots the real system (tests/ram_floor_boot.rs) has nothing to report through:
+        # it passes when the serial console shows $QEMU_PASS_PATTERN and fails at
+        # $QEMU_FAIL_PATTERN (extended regular expressions).
+        if [ -n "${QEMU_FAIL_PATTERN:-}" ] && grep -aEq "$QEMU_FAIL_PATTERN" "${QEMU_SERIAL_LOG:-/dev/null}"; then
+            echo "qemu_common.sh: FAILED: the console showed /$QEMU_FAIL_PATTERN/" >&2
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            rm -f "${QEMU_SERIAL_LOG:-}"
+            exit 1
+        fi
+        if [ -n "${QEMU_PASS_PATTERN:-}" ] && grep -aEq "$QEMU_PASS_PATTERN" "${QEMU_SERIAL_LOG:-/dev/null}"; then
+            echo "qemu_common.sh: passed: the console showed /$QEMU_PASS_PATTERN/ after ${elapsed}s"
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            rm -f "${QEMU_SERIAL_LOG:-}"
+            exit 0
+        fi
         if [ "$stall_secs" -gt 0 ] && [ "$quiet" -ge "$stall_secs" ]; then
             echo "qemu_common.sh: HUNG: no serial output for ${stall_secs}s, killing QEMU (pid $qemu_pid; OXIDEBSD_TEST_STALL_SECS)" >&2
             kill "$qemu_pid" 2>/dev/null || true

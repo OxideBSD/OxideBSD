@@ -146,6 +146,10 @@ name = "basic_boot"
 harness = false
 
 [[test]]
+name = "ram_floor_boot"
+harness = false
+
+[[test]]
 name = "acpi_smoke"
 harness = false
 
