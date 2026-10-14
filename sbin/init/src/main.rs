@@ -45,6 +45,10 @@ const HANGUP_GRACE: Duration = Duration::from_secs(2);
 const RESPAWN_LIMIT: usize = 3;
 const RESPAWN_WINDOW: Duration = Duration::from_secs(5);
 const RESPAWN_PAUSE: Duration = Duration::from_secs(30);
+/// How long a single-user child that can't run a shell waits before exiting (FreeBSD's
+/// `STALL_TIMEOUT`), so a root with no `/bin/sh` and no `/etc/rc` doesn't spin init between the
+/// two states. The child waits, not init, which keeps answering shutdown signals meanwhile.
+const STALL: Duration = Duration::from_secs(30);
 
 /// A shutdown request: the signal that asked for it, or 0.
 static REQUEST: AtomicI32 = AtomicI32::new(0);
@@ -537,6 +541,7 @@ fn single_user_child(insecure: bool) -> ! {
     }
     let err = command("/bin/sh").arg0("-sh").env("PS1", PS1).exec();
     complain(&format!("/bin/sh: {err}"));
+    std::thread::sleep(STALL);
     // SAFETY: as above.
     unsafe { libc::_exit(1) };
 }
