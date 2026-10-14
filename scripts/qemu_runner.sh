@@ -73,11 +73,7 @@ fi
 # (`oxidebsd::boot::parse_cmdline`), and so do the arguments after `--` on `cargo run`, which
 # cargo hands this script after the ELF: `cargo run -- -s init_path=/bin/sh`. A test binary's
 # arguments are libtest-style filters, not kernel tokens, so they're ignored.
-#
-# The disks QEMU gets here (a fresh test disk, the dev disk) are disposable, so the kernel may
-# partition one that has no oxfs partition yet (`format-blank`, RAM_FLOOR.md §3.4.5). Never in a
-# real-hardware ISO.
-KERNEL_CMDLINE="format-blank"
+KERNEL_CMDLINE=""
 if [ -n "${OXIDEBSD_REAL_HARDWARE:-}" ]; then
     KERNEL_CMDLINE="no-ata"
 fi
@@ -128,9 +124,12 @@ if [ "$IS_TEST" = 1 ]; then
     QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
     QEMU_DISK_FRESH=1
 else
-    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (created if missing), leaving
-    # the persistent dev disk alone.
+    # OXIDEBSD_DISK_IMAGE boots `cargo run` against another image (copied from the system image
+    # if missing, never replaced), leaving the persistent dev disk alone.
     QEMU_DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/oxfs_disk.img}"
+    if [ -z "${OXIDEBSD_DISK_IMAGE:-}" ]; then
+        QEMU_DISK_MANAGED=1
+    fi
     # Tests keep IDE (tests/ata_smoke.rs drives it directly); `cargo run` gets the fast disk.
     QEMU_DISK_DEFAULT=virtio
 fi

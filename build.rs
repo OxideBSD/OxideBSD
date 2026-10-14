@@ -1112,14 +1112,10 @@ fn main() {
             Path::new(env!("CARGO_MANIFEST_DIR")).join(seeded).display()
         );
     }
-    build_module_crate("oxfs", "OXFS", &oxfs_extra_env);
-    // The images, from the same build products: not used to boot yet (RAM_FLOOR.md §4.10, 4).
+    // oxfs embeds nothing (RAM_FLOOR.md §4.6.1): the system is installed into the images, from
+    // these build products, by distrib/install.mtree.
+    build_module_crate("oxfs", "OXFS", &[]);
     build_sets_and_images(&oxfs_extra_env);
-
-    // Real disk persistence (see sys/drivers/ata.rs and sys/modules/oxfs's own "Real disk persistence"
-    // section): the two raw disk image *files* QEMU's `-drive` attaches, as opposed to everything
-    // above, which gets embedded into the kernel/module binaries themselves via `include_bytes!`.
-    write_data_disk_images();
 
     // Multiboot2 boot path (see CLAUDE.md's Multiboot2 section): a genuinely separate final ELF,
     // linked against its own dedicated linker script and the `multiboot2` feature -- not another
@@ -5210,21 +5206,6 @@ fn build_module_crate(crate_name: &str, env_var: &str, extra_env: &[(&str, &str)
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    // A module embeds files by path (`include_bytes!(env!(...))`), and the nested cargo didn't
-    // reliably rebuild it when one of those files changed but its path didn't: oxfs kept serving
-    // a `std` program linked against the previous musl. A stamp over the embedded files' mtimes,
-    // read by the module with `env!` (which rustc tracks), makes any such change a rebuild.
-    let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
-    for (_, value) in extra_env {
-        if let Ok(modified) = std::fs::metadata(value).and_then(|m| m.modified())
-            && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            for byte in value.bytes().chain(since.as_nanos().to_le_bytes()) {
-                stamp = (stamp ^ byte as u64).wrapping_mul(0x100_0000_01b3); // FNV-1a
-            }
-        }
-    }
-    command.env("OXIDEBSD_EMBED_STAMP", format!("{stamp:016x}"));
     let output = command
         .output()
         .unwrap_or_else(|e| panic!("failed to run cargo rustc for module {crate_name}: {e}"));
@@ -5550,57 +5531,6 @@ fn discover_panic_symbol(llvm_bin: &Path, object: &Path) -> Option<String> {
         .lines()
         .find(|line| line.contains("rust_begin_unwind"))
         .map(|s| s.trim().to_string())
-}
-
-/// Mirrors `sys/modules/oxfs/src/lib.rs`'s own on-disk block-layout constants (see that file's "Real
-/// disk persistence" section) -- duplicated here, not imported, since a `build.rs` can't depend on
-/// a `#![no_std]` module crate. Must be kept in sync by hand if oxfs's own constants ever change --
-/// the same "two things that must agree, flagged rather than shared" duplication this codebase
-/// already accepts elsewhere (e.g. `Cargo.toml`'s `test-success-exit-code` vs. `sys/qemu.rs`'s
-/// `QemuExitCode`).
-const OXFS_BLOCK_SIZE: u64 = 4096;
-// 16384 -> 65536 (64 -> 256 MiB) and 2048 -> 8192 inodes: the POSIX pilot corpus grew from a
-// 488-file curated dedup to the full ~1700-file suite (see `discover_posix_test_files`), each a
-// new inode plus its own data blocks, and ~104 previously-unseeded `pthread_*`/`aio_*`/
-// `lio_listio` directories add real new directory inodes too. Measured the new corpus's own
-// compiled-binary weight directly (~34 KiB average per pilot ELF over a 495-file sample) before
-// picking these -- generous headroom over the ~60 MiB the full corpus's own binaries alone need,
-// not a guess.
-//
-// 65536 -> 262144 (256 MiB -> 1 GiB) alongside the real max-file-size redesign (`Inode::
-// double_indirect` in `sys/modules/oxfs/src/lib.rs`, see that field's own doc comment) -- see that
-// constant's own doc comment for why 1 GiB, not something bigger or smaller.
-const OXFS_NUM_BLOCKS: u64 = 262144;
-/// 1 superblock + `OXFS_BITMAP_BLOCKS` block-used bitmap blocks, computed from the same real inputs
-/// `sys/modules/oxfs/src/lib.rs`'s own `BITMAP_BLOCKS` is, not separately hand-picked numbers.
-/// (Inodes live in an inode file among the data blocks since oxfs `SUPERBLOCK_VERSION` 4.)
-///
-/// **Found live as a real, hand-duplicated staleness bug, twice**: this was once a literal `18`,
-/// left behind when oxfs's then-fixed inode table grew, and once assumed a one-block bitmap after
-/// `OXFS_NUM_BLOCKS` had passed `OXFS_BLOCK_SIZE * 8`. Either sized every new `oxfs_disk.img` too
-/// small for the layout the kernel uses. Keep it derived.
-const OXFS_BITMAP_BLOCKS: u64 = (OXFS_NUM_BLOCKS * 8).div_ceil(OXFS_BLOCK_SIZE * 8);
-const OXFS_METADATA_BLOCKS: u64 = 1 + OXFS_BITMAP_BLOCKS;
-const OXFS_DISK_IMAGE_BYTES: u64 = (OXFS_METADATA_BLOCKS + OXFS_NUM_BLOCKS) * OXFS_BLOCK_SIZE;
-
-/// Records the size the data disk images must have (`target/oxfs_disk.bytes`) for
-/// `scripts/qemu_common.sh`, which creates them: `oxfs_disk.img` (the persistent `cargo run` disk)
-/// if it's missing, grown in place if an older, smaller layout left it too small, and never
-/// rewritten; `oxfs_test_disk.img` fresh (sparse, zeroed) for every test boot.
-///
-/// This script used to write the images itself and watch `oxfs_disk.img` so a deleted one would
-/// be recreated -- but QEMU writes that image on every `cargo run`, so the next build always
-/// reran this script and recompiled the whole kernel crate (~2 min for a no-op build).
-fn write_data_disk_images() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let target_dir = Path::new(manifest_dir).join("target");
-    std::fs::create_dir_all(&target_dir).expect("failed to create target/");
-    let size_path = target_dir.join("oxfs_disk.bytes");
-    let size = format!("{OXFS_DISK_IMAGE_BYTES}\n");
-    if std::fs::read_to_string(&size_path).ok().as_deref() != Some(size.as_str()) {
-        std::fs::write(&size_path, size)
-            .unwrap_or_else(|e| panic!("failed to write {}: {e}", size_path.display()));
-    }
 }
 
 /// Finds the file matching `<prefix>*<suffix>` most recently modified in `dir` -- filenames under

@@ -461,6 +461,23 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
     let cache_text: String = cache.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect();
     write_if_changed(&cache_path, cache_text.as_bytes());
 
+    // What the sets hold, without their times: the QEMU runner replaces the dev disk when this
+    // changes (RAM_FLOOR.md §4.5.3), and a new commit alone changes only the times.
+    let contents: String = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        for set in SETS {
+            let text = std::fs::read_to_string(sets_dir.join(format!("{set}.mtree"))).unwrap();
+            for word in text.split_whitespace().filter(|w| !w.starts_with("time=")) {
+                h.update(word.as_bytes());
+                h.update(b" ");
+            }
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    };
+    std::fs::create_dir_all(root.join("target/images")).unwrap();
+    write_if_changed(&root.join("target/images/sets.sha256"), format!("{contents}\n").as_bytes());
+
     let makefs = build_host_tool(root, "usr.sbin/makefs", "makefs");
     let mkimg = build_host_tool(root, "usr.bin/mkimg", "mkimg");
     let fsck = build_host_tool(root, "sbin/fsck_oxfs", "fsck_oxfs");

@@ -417,11 +417,6 @@ pub fn init(ram: u64) -> bool {
     true
 }
 
-/// The cache's size in buffers, for the boot log.
-pub fn buffers() -> u32 {
-    cache().count
-}
-
 /// Whether more than half the cache is dirty: the writer should flush (back-pressure, §3.2.5).
 pub fn mostly_dirty() -> bool {
     let c = cache();

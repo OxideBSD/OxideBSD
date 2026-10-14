@@ -362,10 +362,12 @@ pub(crate) struct SyscallFrame {
 /// argument that doesn't fit this ABI's normal 4-register `dispatch()` path, see `frame_tls`'s own
 /// doc comment) — a narrow, explicit exception for these three, not a signature change for every
 /// syscall.
-/// Plain `AtomicPtr`, not a lock: this is single-core and `SYSFMASK` clears `RFLAGS::INTERRUPT_FLAG`
-/// on every `SYSCALL` entry, so nothing can preempt a syscall in progress to observe a
-/// half-updated value (same reasoning `sys/console/stdin.rs`'s ring buffer doc comment already
-/// relies on).
+/// Plain `AtomicPtr`, not a lock: single core, interrupts masked for the whole call. It is the
+/// *running* process's: a system call that sleeps (`scheduler::schedule`) lets other processes
+/// make system calls of their own, which repoint it, so `schedule` saves it before switching away
+/// and puts it back when the caller runs again (`set_current_frame`). Without that, an `execve`
+/// that slept reading its program from the disk redirected another process's frame to the new
+/// program's entry point (RAM_FLOOR.md B5: ninja jumping into clang's code).
 static CURRENT_FRAME: AtomicPtr<SyscallFrame> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The currently in-flight syscall's frame — only valid to call from within a syscall handler
@@ -373,6 +375,11 @@ static CURRENT_FRAME: AtomicPtr<SyscallFrame> = AtomicPtr::new(core::ptr::null_m
 /// running.
 pub(crate) fn current_frame() -> *mut SyscallFrame {
     CURRENT_FRAME.load(Ordering::Relaxed)
+}
+
+/// Puts back the frame `current_frame` named before the caller slept (`scheduler::schedule`).
+pub(crate) fn set_current_frame(frame: *mut SyscallFrame) {
+    CURRENT_FRAME.store(frame, Ordering::Relaxed);
 }
 
 /// Copies `*src` into `*dst` (byte-for-byte, all 16 fields), then forces the copy's `rax` to `0`

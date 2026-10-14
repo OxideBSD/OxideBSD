@@ -27,18 +27,32 @@
 : "${QEMU_DISK_IMAGE:?qemu_common.sh: QEMU_DISK_IMAGE must be set before sourcing}"
 : "${QEMU_ISO_PATH:?qemu_common.sh: QEMU_ISO_PATH must be set before sourcing}"
 
-# The data disk image, sized by build.rs (target/oxfs_disk.bytes). $QEMU_DISK_FRESH=1 (tests)
-# starts it zeroed every boot; otherwise it's created if missing and grown in place if a newer
-# oxfs layout needs more room, keeping what's on it. Sparse, so creating one is instant.
-disk_bytes=$(cat target/oxfs_disk.bytes 2>/dev/null) || {
-    echo "qemu_common.sh: target/oxfs_disk.bytes is missing -- run cargo build first" >&2
+# The data disk: a copy of the system image build.rs makes (target/images/disk.img, RAM_FLOOR.md
+# §4.5), sparse, and on a filesystem that can (btrfs, XFS) a reflink, so copying is instant.
+# $QEMU_DISK_FRESH=1 (tests) copies it every boot. Otherwise a missing disk is copied; and with
+# $QEMU_DISK_MANAGED=1 (the dev disk) it's replaced when the sets' contents changed since
+# (target/images/sets.sha256, recorded beside the disk as <disk>.sets) -- losing whatever was
+# changed on it -- unless OXIDEBSD_KEEP_DISK=1.
+disk_source=target/images/disk.img
+sets_hash=$(cat target/images/sets.sha256 2>/dev/null)
+if [ ! -f "$disk_source" ] || [ -z "$sets_hash" ]; then
+    echo "qemu_common.sh: $disk_source is missing -- run cargo build first" >&2
     exit 1
-}
-if [ "${QEMU_DISK_FRESH:-0}" = 1 ]; then
-    rm -f "$QEMU_DISK_IMAGE"
 fi
-if [ ! -e "$QEMU_DISK_IMAGE" ] || [ "$(stat -c %s "$QEMU_DISK_IMAGE")" -lt "$disk_bytes" ]; then
-    truncate -s "$disk_bytes" "$QEMU_DISK_IMAGE"
+copy_disk() {
+    rm -f "$QEMU_DISK_IMAGE"
+    cp --reflink=auto --sparse=always "$disk_source" "$QEMU_DISK_IMAGE"
+    echo "$sets_hash" > "$QEMU_DISK_IMAGE.sets"
+}
+if [ "${QEMU_DISK_FRESH:-0}" = 1 ] || [ ! -e "$QEMU_DISK_IMAGE" ]; then
+    copy_disk
+elif [ "${QEMU_DISK_MANAGED:-0}" = 1 ] && [ "$(cat "$QEMU_DISK_IMAGE.sets" 2>/dev/null)" != "$sets_hash" ]; then
+    if [ -n "${OXIDEBSD_KEEP_DISK:-}" ]; then
+        echo "qemu_common.sh: the system changed, but OXIDEBSD_KEEP_DISK is set: keeping $QEMU_DISK_IMAGE as it is" >&2
+    else
+        echo "qemu_common.sh: the system changed: replacing $QEMU_DISK_IMAGE with the new image -- local changes on it are gone (OXIDEBSD_KEEP_DISK=1 keeps it)" >&2
+        copy_disk
+    fi
 fi
 
 # Guest RAM in MiB: $OXIDEBSD_QEMU_MEM, default 8192. The console-install floor is 128

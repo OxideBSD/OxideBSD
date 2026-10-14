@@ -134,6 +134,7 @@ esac
 # The real, persistent disk (same one `cargo run` uses) -- not the always-fresh test disk, so any
 # files you create at the hush prompt this session are still there next time.
 QEMU_DISK_IMAGE="target/oxfs_disk.img"
+QEMU_DISK_MANAGED=1
 QEMU_ISO_PATH="$ISO_PATH"
 QEMU_HEADLESS_TEST=0
 # shellcheck source=./qemu_common.sh

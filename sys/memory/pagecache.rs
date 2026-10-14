@@ -146,7 +146,7 @@ pub fn frame(id: EntryId, page: u64, fa: &mut impl FrameAllocator<Size4KiB>) -> 
             c.entries.get_mut(&id).unwrap().frames[page as usize] = Some(frame);
             Some(frame)
         }
-        // Filled meanwhile (not possible on one core, but harmless).
+        // Filled meanwhile, by another process while this one slept reading the disk.
         Some(Some(existing)) => {
             c.pending_free.push(frame);
             Some(existing)

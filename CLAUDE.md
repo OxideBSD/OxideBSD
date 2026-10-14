@@ -130,7 +130,7 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   make every build dirty. `cargo build -v` names the dirty path.
 - cargo doesn't track `libc.a` (it's behind `-C linker=musl-gcc`) or musl's installed headers.
   Staleness checks compare against `musl_sysroot/lib/libc.a`; a musl header change needs a
-  BusyBox `O=` dir wipe. `OXIDEBSD_EMBED_STAMP` makes oxfs re-embed changed seed files.
+  BusyBox `O=` dir wipe.
 - `ccache` is used for BusyBox and the POSIX pilot when installed.
 
 ## Boot
@@ -298,16 +298,18 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **A new path that changes a file's contents or frees an inode must call `content_changed`**, or
   the kernel's page cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping
   the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
-- Mount never re-syncs seeded files; only a format does. `target/oxfs_disk.img` may be deleted to
-  force a reformat (fast with virtio/DMA). Tests get a fresh `target/oxfs_test_disk.img`.
+- **The kernel never formats or seeds** (RAM_FLOOR.md §4): the system is `target/images/disk.img`,
+  built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
+  disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`
+  keeps it), and may be deleted to get a fresh one.
 - New mount options go through `oxfs_nmount` and `MountEntry` (`nosuid`, `wxallowed`), checked
   at exec through the `ContentSetId` accessor.
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
   (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
   seeding a node; every device node opens through `oxidebsd_dev_open` by number.
-- A new installed file goes in `distrib/install.mtree` (and a set in `distrib/sets/lists/*`;
-  the build fails on an unlisted path) **and**, until RAM_FLOOR B5 removes seeding, a `seed_file`
-  call in oxfs's `module_init`. Modes: `0755` only for ELFs and `#!` scripts (the default).
+- A new installed file goes in `distrib/install.mtree`, and its set in `distrib/sets/lists/*`
+  (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
+  default).
 - The mount redirect only fires inside `resolve_path_impl`'s component loop.
 - Disk: virtio-blk, else IDE secondary master (DMA, else PIO). The boot ISO is on virtio-scsi.
   `no-ata` protects real hardware from being formatted.

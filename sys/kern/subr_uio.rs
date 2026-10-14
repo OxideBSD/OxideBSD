@@ -174,8 +174,7 @@ pub(crate) extern "C" fn oxidebsd_uiomove(kbuf: *mut u8, len: u64, uio: *mut Uio
     }
 }
 
-/// A transfer over one kernel buffer, for a module doing I/O on its own descriptors (oxfs's
-/// format self-check): `rw` is `0` for a read, `1` for a write. Freed with `oxidebsd_uio_free`.
+/// A transfer over one kernel buffer, for a module doing I/O on its own descriptors: `rw` is `0` for a read, `1` for a write. Freed with `oxidebsd_uio_free`.
 pub(crate) extern "C" fn oxidebsd_uio_kernel_new(buf: *mut u8, len: u64, rw: u64) -> *mut Uio {
     let rw = if rw == 0 { UioRw::Read } else { UioRw::Write };
     let iov = alloc::vec![IoSeg { base: buf as u64, len }];

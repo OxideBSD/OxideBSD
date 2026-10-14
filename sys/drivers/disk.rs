@@ -2,9 +2,9 @@
 //! exports oxfs calls. `init` picks the disk at boot -- a virtio-blk disk if there is one (the
 //! fastest under QEMU), else the legacy IDE disk at secondary master (by bus-master DMA when the
 //! controller can, else PIO) -- and then oxfs's partition on it (`OxideBSD-doc/RAM_FLOOR.md`
-//! §3.4.5): the first GPT or MBR partition of oxfs's type (`part`). A disk without one is only
-//! partitioned when the kernel was booted with `format-blank`; otherwise, as with no disk at all,
-//! oxfs runs on a memory disk (`md`) this boot. oxfs never knows which. Not a general block
+//! §3.4.5): the first GPT or MBR partition of oxfs's type (`part`). The kernel never partitions
+//! or formats a disk (RAM_FLOOR.md §4.2.1): one without an oxfs partition, like no disk at all,
+//! leaves oxfs the memory disk (`md`), empty until the mfsroot fills it. oxfs never knows which. Not a general block
 //! layer: one disk, found once.
 //!
 //! Disks are named by bus (`virt0`, `ide0`; `nvme0`, `sata0`, `sda0`, `mmc0` when those drivers
@@ -98,16 +98,11 @@ fn disk_sectors() -> u64 {
     }
 }
 
-/// Reads the partition table of the physical disk `name`, gives oxfs its partition (writing a
-/// fresh GPT first under `format-blank`, if it has none), and registers the raw devices.
+/// Reads the partition table of the physical disk `name`, gives oxfs its partition, and
+/// registers the raw devices.
 fn attach(name: &str, major: u32, phys_mem_offset: VirtAddr) {
     let sectors = disk_sectors();
-    let mut parts = read_partitions();
-    if !parts.iter().any(|p| p.oxfs && p.blocks().is_some()) && crate::boot::format_blank() {
-        serial_println!("[boot] disk: {} has no oxfs partition -- format-blank: writing a GPT", name);
-        write_fresh_gpt(sectors);
-        parts = read_partitions();
-    }
+    let parts = read_partitions();
     let mut devs = RAW_DEVS.lock();
     devs.push(RawDev { major, minor: 0, first_sector: 0, sectors });
     for p in &parts {
@@ -137,7 +132,7 @@ fn attach(name: &str, major: u32, phys_mem_offset: VirtAddr) {
         }
         None => {
             serial_println!(
-                "[boot] disk: no oxfs partition on {} (boot with format-blank to make one)",
+                "[boot] disk: no oxfs partition on {} (partition and newfs_oxfs it, or install a system image)",
                 name
             );
             init_memory(phys_mem_offset);
@@ -180,37 +175,6 @@ fn read_partitions() -> Vec<super::part::Partition> {
     super::part::read(&head)
 }
 
-/// Writes a fresh GPT with one oxfs partition over the whole physical disk.
-fn write_fresh_gpt(sectors: u64) {
-    let (head, tail) = super::part::fresh_gpt(sectors, random_guid(), random_guid());
-    // Both ends patched a whole block at a time: the tables needn't be block-aligned.
-    patch_sectors(0, &head);
-    patch_sectors(sectors - tail.len() as u64 / 512, &tail);
-}
-
-/// A random (version 4) GUID, in GPT's byte order.
-fn random_guid() -> [u8; 16] {
-    let mut g = [0u8; 16];
-    g[..8].copy_from_slice(&crate::random::kernel_random_u64().to_le_bytes());
-    g[8..].copy_from_slice(&crate::random::kernel_random_u64().to_le_bytes());
-    g[7] = (g[7] & 0x0F) | 0x40;
-    g[8] = (g[8] & 0x3F) | 0x80;
-    g
-}
-
-/// Writes `bytes` at sector `first` of the physical disk, through the blocks covering them.
-fn patch_sectors(first: u64, bytes: &[u8]) {
-    let start_byte = first * 512;
-    let end_byte = start_byte + bytes.len() as u64;
-    let first_block = start_byte / 4096;
-    let blocks = end_byte.div_ceil(4096) - first_block;
-    let mut buf = alloc::vec![0u8; (blocks * 4096) as usize];
-    let _ = read_physical(first_block, &mut buf);
-    let at = (start_byte - first_block * 4096) as usize;
-    buf[at..at + bytes.len()].copy_from_slice(bytes);
-    let _ = write_physical(first_block, &buf);
-}
-
 /// Makes a memory disk of a quarter of RAM the data disk (`md`): with no real disk, or with
 /// `no-ata`, where real disks aren't probed at all.
 pub fn init_memory(phys_mem_offset: VirtAddr) {
@@ -224,8 +188,8 @@ pub fn init_memory(phys_mem_offset: VirtAddr) {
 }
 
 /// Where oxfs's blocks live: `MEMORY`, or the physical disk's backend (at `ROOT_START`). When
-/// nothing chose (no probe ran: a test kernel that loads oxfs without `init`), a memory disk, as
-/// for a boot with no disk.
+/// nothing chose (no probe ran: a kernel that loads oxfs without calling `init` first), an empty
+/// memory disk, as for a boot with no disk -- which then has no root file system.
 fn backend() -> u8 {
     if ON_MEMORY.load(Ordering::Relaxed) {
         return MEMORY;

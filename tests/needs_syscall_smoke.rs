@@ -75,6 +75,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
+    // The data disk first, as kernel_main does: oxfs mounts the system image on it.
+    oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
+
     // Populates SYS_OPEN/SYS_CLOSE/SYS_FSYNC/SYS_SYNC/SYS_FTRUNCATE/SYS_FALLOCATE/SYS_FLOCK/
     // SYS_STATFS/SYS_FSTATFS -- this test's whole filesystem-side scenario.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));

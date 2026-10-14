@@ -58,6 +58,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
 
+    // The data disk first, as kernel_main does: oxfs mounts the system image on it.
+    oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
+
     // Populates SYS_OPEN/SYS_CLOSE/SYS_MKDIR/SYS_STAT/SYS_GETDENTS/SYS_MOUNT_BIND/
     // SYS_MOUNT_TMPFS/SYS_UMOUNT2 -- this test's whole scenario.
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));

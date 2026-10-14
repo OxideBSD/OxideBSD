@@ -44,8 +44,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
-    // Must run before oxfs loads, below -- its module_init decides mount-vs-format based on
-    // whether this probe found a data disk (`drivers::disk`: virtio-blk, or the IDE disk).
+    // Must run before oxfs loads, below: its module_init mounts the system image on the data disk
+    // this probe finds (`drivers::disk`: virtio-blk, or the IDE disk).
     oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
     // Populates SYS_EXIT/SYS_READ/SYS_WRITE/SYS_FORK/SYS_WAIT4/SYS_EXECVE/SYS_GETPID -- must load

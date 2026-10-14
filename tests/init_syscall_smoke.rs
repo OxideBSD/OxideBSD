@@ -93,6 +93,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
+    // The data disk first, as kernel_main does: oxfs mounts the system image on it.
+    oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
+
     const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
     const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

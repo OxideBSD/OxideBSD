@@ -245,6 +245,14 @@ fn reap_pending_threads() {
 static FSLOCK_SLEEP_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn schedule() {
+    // The caller's in-flight system call frame, which other processes' calls repoint while this
+    // one sleeps: put back once it runs again (`syscall::CURRENT_FRAME`).
+    let frame = crate::syscall::current_frame();
+    schedule_inner();
+    crate::syscall::set_current_frame(frame);
+}
+
+fn schedule_inner() {
     without_interrupts(|| {
         reap_pending_threads();
 
