@@ -97,6 +97,7 @@ members = [
   "sys/modules/oxfs",
   "sys/modules/socket",
   "sys/modules/sysctl",
+  "sys/modules/procctl",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
 exclude = ["lib/libcertstore", "lib/liboxfs", "lib/libmtree"]

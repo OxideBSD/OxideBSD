@@ -1,0 +1,78 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 14, 2026
+.Dt PROTECT 1
+.Os OxideBSD
+.Sh NAME
+.Nm protect
+.Nd protect processes from being killed when memory runs out
+.Sh SYNOPSIS
+.Nm
+.Op Fl i
+.Op Fl a Ar adj
+.Ar command
+.Op Ar argument ...
+.Nm
+.Op Fl cdi
+.Op Fl a Ar adj
+.Fl g Ar pgrp | Fl p Ar pid
+.Sh DESCRIPTION
+.Nm
+sets the OOM adjustment of processes
+.Pq Xr procctl 2 ,
+which decides which process the system kills when it runs out of memory.
+By default it sets \-1000: the processes are never chosen.
+In the first form
+.Nm
+sets it for itself and executes
+.Ar command ,
+which keeps it.
+.Pp
+The options are:
+.Bl -tag -width "-a adj"
+.It Fl a Ar adj
+Set
+.Ar adj
+instead, from \-1000 to 1000: a process's pages count
+(1000 +
+.Ar adj )
+/ 1000 times when the victim is chosen, so 1000 makes a process the likeliest
+to be killed.
+.It Fl c
+Clear the protection: set 0.
+.It Fl d
+Also set it for every descendant of the processes.
+.It Fl g Ar pgrp
+Set it for the processes in process group
+.Ar pgrp .
+.It Fl i
+Accepted for compatibility: a new process always takes its parent's
+adjustment.
+.It Fl p Ar pid
+Set it for process
+.Ar pid .
+.El
+.Pp
+Only the superuser may lower an adjustment.
+The current value is in
+.Pa /proc/ Ns Ar pid Ns Pa /oom_adj .
+.Sh EXIT STATUS
+.Ex -std
+When
+.Ar command
+is run, the exit status is its; 127 if it can't be found, and 126 if it can't
+be executed.
+.Sh EXAMPLES
+Never kill the shell this command starts:
+.Dl # protect sh
+.Pp
+Make a large build the first to go:
+.Dl $ protect -a 1000 make -j8
+.Sh SEE ALSO
+.Xr procctl 2
+.Sh HISTORY
+A
+.Nm
+command first appeared in FreeBSD 10.1.
+OxideBSD's takes FreeBSD's options and adds
+.Fl a ;
+it first appeared in OxideBSD 0.3.0.

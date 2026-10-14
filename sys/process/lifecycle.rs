@@ -210,6 +210,7 @@ fn spawn_finish(
             locked_bytes: 0,
             wx_allowed: false,
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
+            oom_adj: 0,
         })),
         fs_base: 0,
         start_ticks: crate::cpu::interrupts::ticks(),
@@ -504,6 +505,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
                 // Real fork() semantics: signal disposition is copied (see ThreadGroupShared::
                 // sigactions's own doc comment for why this field lives here, not on Process).
                 sigactions: parent_shared.sigactions,
+                oom_adj: parent_shared.oom_adj,
             }))
         };
         (

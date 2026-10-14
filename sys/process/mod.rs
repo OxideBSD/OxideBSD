@@ -781,6 +781,10 @@ pub struct ThreadGroupShared {
     /// sibling — only `do_clone`'s own pre-existing `Arc::clone(&caller.shared)` for real
     /// `CLONE_THREAD` sharing needed no change at all to pick this field up automatically.
     pub sigactions: [SigAction; (SIGRTMAX + 1) as usize],
+    /// The OOM killer's adjustment (OxideBSD-doc `COW.md` §6.3), `-1000..=1000`: the process's
+    /// private pages are weighted by `(1000 + oom_adj) / 1000` when choosing a victim, and `-1000`
+    /// is never chosen. Inherited across fork and exec; set by `procctl(2)` (`kern::kern_procctl`).
+    pub oom_adj: i16,
 }
 
 pub struct Process {

@@ -438,6 +438,7 @@ fn main() {
     build_module_crate("clock", "CLOCK", &[]);
     build_module_crate("socket", "SOCKET", &[]);
     build_module_crate("sysctl", "SYSCTL", &[]);
+    build_module_crate("procctl", "PROCCTL", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.
@@ -606,6 +607,9 @@ fn main() {
         build_std_oxidebsd_userland_crate("usr.sbin/newsyslog", "OXFS_NEWSYSLOG_ELF_PATH", &musl_sysroot);
     let logger_elf_path =
         build_std_oxidebsd_userland_crate("usr.bin/logger", "OXFS_LOGGER_ELF_PATH", &musl_sysroot);
+    // protect(1): the OOM killer's per-process adjustment (COW.md §6.3).
+    let protect_elf_path =
+        build_std_oxidebsd_userland_crate("usr.bin/protect", "OXFS_PROTECT_ELF_PATH", &musl_sysroot);
     // /sbin/init: embedded in the kernel, which runs it as pid 1 (INIT.md §9.6); static for
     // the same reason as /bin/sh.
     let init_elf_path = build_std_oxidebsd_userland_crate_with_env(
@@ -930,6 +934,7 @@ fn main() {
         ("OXFS_SYSLOGD_ELF_PATH", syslogd_elf_path.to_str().unwrap()),
         ("OXFS_NEWSYSLOG_ELF_PATH", newsyslog_elf_path.to_str().unwrap()),
         ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),
+        ("OXFS_PROTECT_ELF_PATH", protect_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_INIT_ELF_PATH", init_elf_path.to_str().unwrap()),
         ("OXFS_CRON_ELF_PATH", cron_elf_path.to_str().unwrap()),

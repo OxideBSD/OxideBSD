@@ -2,6 +2,7 @@
 //! sysctl tree (`kern_sysctl`), the load average (`kern_synch`), the message buffer (`subr_msgbuf`).
 
 pub mod fsconf;
+pub mod kern_procctl;
 pub mod kern_synch;
 pub mod kern_sysctl;
 pub mod subr_msgbuf;

@@ -189,6 +189,7 @@ unsafe extern "C" {
     fn oxidebsd_proc_pid_at(index: u64) -> i64;
     fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
+    fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_meminfo(buf_ptr: *mut u8, buf_cap: u64) -> i64;
     fn oxidebsd_proc_initdeaths(buf_ptr: *mut u8, buf_cap: u64) -> i64;
@@ -3421,6 +3422,7 @@ enum ProcLeaf {
     Stat,
     Cmdline,
     Status,
+    OomAdj,
 }
 
 /// All-ASCII-digit, non-empty, fits in `u32` -- a real pid never needs more, and this doubles as
@@ -3568,6 +3570,9 @@ fn open_proc_leaf(pid: u32, leaf: ProcLeaf) -> i64 {
             ProcLeaf::Status => {
                 oxidebsd_proc_status(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
             }
+            ProcLeaf::OomAdj => {
+                oxidebsd_proc_oom_adj(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
+            }
         }
     };
     if n < 0 {
@@ -3612,6 +3617,7 @@ fn proc_open(suffix: &[u8]) -> i64 {
         Some(b"stat") if comps.next().is_none() => open_proc_leaf(pid, ProcLeaf::Stat),
         Some(b"cmdline") if comps.next().is_none() => open_proc_leaf(pid, ProcLeaf::Cmdline),
         Some(b"status") if comps.next().is_none() => open_proc_leaf(pid, ProcLeaf::Status),
+        Some(b"oom_adj") if comps.next().is_none() => open_proc_leaf(pid, ProcLeaf::OomAdj),
         Some(b"fd") if comps.next().is_none() => open_fd_dir(pid),
         // /proc/<pid>/task[/<tid>[/stat|cmdline|status]] -- see ProcDirKind::TaskList's doc
         // comment for why this redirect exists. Only tid == pid is ever valid: this kernel has no
@@ -3664,7 +3670,7 @@ fn proc_kind(suffix: &[u8]) -> Option<bool> {
     }
     match comps.next() {
         None => Some(true), // /proc/<pid>
-        Some(b"stat" | b"cmdline" | b"status") if comps.next().is_none() => Some(false),
+        Some(b"stat" | b"cmdline" | b"status" | b"oom_adj") if comps.next().is_none() => Some(false),
         Some(b"fd") => match (comps.next(), comps.next()) {
             (None, _) => Some(true),
             // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
@@ -7114,7 +7120,7 @@ fn proc_dir_nth_entry(kind: ProcDirKind, n: usize) -> Option<(u64, [u8; NAME_MAX
             Some((PROC_INODE_BASE + pid as u64, name, name_len as u8, DT_DIR))
         }
         ProcDirKind::PidFiles(pid) => {
-            const NAMES: [&[u8]; 3] = [b"stat", b"cmdline", b"status"];
+            const NAMES: [&[u8]; 4] = [b"stat", b"cmdline", b"status", b"oom_adj"];
             let name_bytes = *NAMES.get(n)?;
             let mut name = [0u8; NAME_MAX];
             name[..name_bytes.len()].copy_from_slice(name_bytes);

@@ -153,6 +153,23 @@ pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_c
     copy_into(&proc.cmdline, buf_ptr, buf_cap)
 }
 
+/// `/proc/<pid>/oom_adj`: the thread group's OOM adjustment (OxideBSD-doc `COW.md` §6.3), as
+/// decimal and a newline. `-1` if `pid` no longer exists.
+pub(crate) extern "C" fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else {
+        return -1;
+    };
+    let adj = proc.shared.lock().oom_adj;
+    let mut out = Vec::new();
+    if adj < 0 {
+        out.push(b'-');
+    }
+    push_decimal(&mut out, adj.unsigned_abs() as u64);
+    out.push(b'\n');
+    copy_into(&out, buf_ptr, buf_cap)
+}
+
 /// A handful of `Key:\tvalue\n` lines into `buf_ptr`/`buf_cap`, the fields this tier's target
 /// applets plausibly read (`Name`/`State`/`Tgid`/`Pid`/`PPid`/`Threads`) -- a small subset of real
 /// Linux's own much longer `/proc/[pid]/status`. `-1` if `pid` no longer exists.

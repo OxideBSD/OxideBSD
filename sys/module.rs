@@ -1116,6 +1116,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_fd_check_room" => Some(crate::fs::fd::oxidebsd_fd_check_room as *const () as u64),
         "oxidebsd_klog_open" => Some(crate::kern::subr_msgbuf::oxidebsd_klog_open as *const () as u64),
         "oxidebsd_sys_sysctl" => Some(crate::kern::kern_sysctl::oxidebsd_sys_sysctl as *const () as u64),
+        "oxidebsd_sys_procctl" => Some(crate::kern::kern_procctl::oxidebsd_sys_procctl as *const () as u64),
         "oxidebsd_register_kernel_open" => {
             Some(crate::process::lifecycle::oxidebsd_register_kernel_open as *const () as u64)
         }
@@ -1131,6 +1132,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::process::oxidebsd_proc_stat_line as *const () as u64)
         }
         "oxidebsd_proc_cmdline" => Some(crate::process::oxidebsd_proc_cmdline as *const () as u64),
+        "oxidebsd_proc_oom_adj" => Some(crate::process::oxidebsd_proc_oom_adj as *const () as u64),
         "oxidebsd_proc_status" => Some(crate::process::oxidebsd_proc_status as *const () as u64),
         "oxidebsd_proc_meminfo" => Some(crate::process::oxidebsd_proc_meminfo as *const () as u64),
         "oxidebsd_proc_initdeaths" => Some(crate::process::init::oxidebsd_proc_initdeaths as *const () as u64),

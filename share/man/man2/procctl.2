@@ -1,0 +1,102 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 14, 2026
+.Dt PROCCTL 2
+.Os OxideBSD
+.Sh NAME
+.Nm procctl
+.Nd control processes
+.Sh SYNOPSIS
+.In sys/procctl.h
+.Ft int
+.Fn procctl "idtype_t idtype" "id_t id" "int cmd" "void *data"
+.Sh DESCRIPTION
+.Fn procctl
+applies the command
+.Fa cmd
+to the processes
+.Fa idtype
+and
+.Fa id
+name:
+.Bl -tag -width P_PGID
+.It Dv P_PID
+the process
+.Fa id ,
+or the caller if
+.Fa id
+is 0;
+.It Dv P_PGID
+every process in process group
+.Fa id ,
+or in the caller's if
+.Fa id
+is 0.
+.El
+.Pp
+A command applies to the whole of each process, all of its threads.
+The commands are:
+.Bl -tag -width PROC_OOM_ADJ_STATUS
+.It Dv PROC_OOM_ADJ_CTL
+sets the process's OOM adjustment to the
+.Vt int
+.Fa data
+points to, from
+.Dv OOM_ADJ_MIN
+(\-1000) to
+.Dv OOM_ADJ_MAX
+(1000).
+When the system runs out of memory it kills the process with the most
+private pages, each process's count weighted by
+(1000 + adjustment) / 1000; a process whose adjustment is \-1000 is never
+chosen, and neither is
+.Xr init 8 .
+A new process takes its parent's adjustment, and keeps it across
+.Xr execve 2 .
+Raising a process's adjustment needs the permission
+.Xr kill 2
+needs to signal it; lowering it needs the superuser.
+Over a process group, the call succeeds if it could change any process.
+.It Dv PROC_OOM_ADJ_STATUS
+writes the process's OOM adjustment to the
+.Vt int
+.Fa data
+points to.
+.Dv P_PID
+only.
+.El
+.Pp
+The adjustment is also shown in
+.Pa /proc/ Ns Ar pid Ns Pa /oom_adj .
+.Sh RETURN VALUES
+.Rv -std procctl
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Fa idtype
+or
+.Fa cmd
+is not one of the above, the adjustment is out of range, or
+.Dv PROC_OOM_ADJ_STATUS
+was given a process group.
+.It Bq Er ESRCH
+No process matches
+.Fa idtype
+and
+.Fa id .
+.It Bq Er EPERM
+The caller may not change any of the processes' adjustments.
+.It Bq Er EFAULT
+.Fa data
+points outside the caller's memory.
+.El
+.Sh SEE ALSO
+.Xr protect 1 ,
+.Xr fork 2
+.Sh STANDARDS
+.Fn procctl
+is not in POSIX.
+.Sh HISTORY
+FreeBSD 9.3 introduced
+.Fn procctl .
+OxideBSD's takes FreeBSD's form with its own commands and their own numbers;
+it first appeared in OxideBSD 0.3.0.

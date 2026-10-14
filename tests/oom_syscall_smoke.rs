@@ -132,6 +132,19 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
+    // procctl(2): part 3 sets oom_adj.
+    const PROCCTL_MOD: &[u8] = include_bytes!(env!("PROCCTL_MOD_PATH"));
+    const PROCCTL_PANIC_SYMBOL: &str = env!("PROCCTL_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "procctl",
+        PROCCTL_MOD,
+        PROCCTL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the procctl module: {e:?}"));
+
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 

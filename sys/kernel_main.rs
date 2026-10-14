@@ -215,6 +215,19 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
+    // Registers procctl(2) (COW.md §6.3); the commands are kern::kern_procctl.
+    const PROCCTL_MOD: &[u8] = include_bytes!(env!("PROCCTL_MOD_PATH"));
+    const PROCCTL_PANIC_SYMBOL: &str = env!("PROCCTL_MOD_PANIC_SYMBOL");
+    crate::module::load(
+        "procctl",
+        PROCCTL_MOD,
+        PROCCTL_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the procctl module: {e:?}"));
+
     crate::memory::wx::check_kernel(&mapper, "modules loaded");
 
     // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local

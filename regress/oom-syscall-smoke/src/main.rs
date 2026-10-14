@@ -7,6 +7,9 @@
 //!    finishes and exits 0. The parent's region is untouched.
 //! 2. The faulter dies when it's the biggest: a child writes all of its copy of a region of 60% of
 //!    free memory, which can't fit; it is killed, and pid 1 (never chosen) keeps its region.
+//! 3. `procctl(2)`'s OOM adjustment: out-of-range values are `EINVAL`, a child inherits its
+//!    parent's, `/proc/<pid>/oom_adj` shows it; and it steers the killer: a hog protected with
+//!    `-1000` survives although it's the biggest, while a smaller sibling at `1000` is killed.
 #![no_std]
 #![no_main]
 
@@ -24,6 +27,11 @@ const SYS_WAIT4: u64 = 7;
 const SYS_MMAP: u64 = 100;
 const SYS_MUNMAP: u64 = 101;
 const SYS_PIPE: u64 = 105;
+const SYS_PROCCTL: u64 = 585;
+const P_PID: u64 = 1;
+const PROC_OOM_ADJ_CTL: u64 = 1;
+const PROC_OOM_ADJ_STATUS: u64 = 2;
+const EINVAL: u64 = 22;
 /// Registered by `tests/oom_syscall_smoke.rs` against a test-only handler.
 const SYS_TEST_EXIT: u64 = 9999;
 
@@ -241,11 +249,144 @@ fn part2() {
     write_bytes(b"oom-syscall-smoke: part 2 OK (the faulter, the biggest, was killed; pid 1 never)\n");
 }
 
+fn set_adj(pid: u64, adj: i32) -> Result<u64, u64> {
+    unsafe { syscall4(SYS_PROCCTL, P_PID, pid, PROC_OOM_ADJ_CTL, &adj as *const i32 as u64) }
+}
+
+fn get_adj(pid: u64) -> i32 {
+    let mut adj: i32 = 12345;
+    if unsafe { syscall4(SYS_PROCCTL, P_PID, pid, PROC_OOM_ADJ_STATUS, &mut adj as *mut i32 as u64) }.is_err() {
+        fail(b"procctl PROC_OOM_ADJ_STATUS");
+    }
+    adj
+}
+
+/// `/proc/<pid>/oom_adj`'s contents.
+fn proc_oom_adj(pid: u64, buf: &mut [u8; 16]) -> usize {
+    let mut path = *b"/proc/0000000000/oom_adj";
+    let mut digits = [0u8; 10];
+    let mut n = pid;
+    let mut len = 0;
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let mut at = 6;
+    for i in (0..len).rev() {
+        path[at] = digits[i];
+        at += 1;
+    }
+    let tail = b"/oom_adj";
+    path[at..at + tail.len()].copy_from_slice(tail);
+    let path_len = at + tail.len();
+    let fd = syscall(SYS_OPEN, path.as_ptr() as u64, path_len as u64, 0).unwrap_or_else(|_| fail(b"open /proc/<pid>/oom_adj"));
+    let n = syscall(SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64).unwrap_or_else(|_| fail(b"read /proc/<pid>/oom_adj"));
+    let _ = syscall(SYS_CLOSE, fd, 0, 0);
+    n as usize
+}
+
+fn part3() {
+    if get_adj(0) != 0 {
+        fail(b"pid 1's OOM adjustment isn't 0 at first");
+    }
+    if set_adj(0, 1001) != Err(EINVAL) || set_adj(0, -1001) != Err(EINVAL) {
+        fail(b"an out-of-range OOM adjustment wasn't EINVAL");
+    }
+    // Inherited across fork.
+    if set_adj(0, 5).is_err() {
+        fail(b"procctl PROC_OOM_ADJ_CTL on itself");
+    }
+    match syscall(SYS_FORK, 0, 0, 0) {
+        Ok(0) => exit(if get_adj(0) == 5 { 0 } else { 1 }),
+        Ok(pid) => {
+            if wait_child(pid) != 0 {
+                fail(b"a child didn't inherit its parent's OOM adjustment");
+            }
+        }
+        Err(_) => fail(b"fork"),
+    }
+    if set_adj(0, 0).is_err() {
+        fail(b"procctl back to 0");
+    }
+
+    // 25% shared region, a protected hog of 40%, a sibling at 1000 holding 25%, and a writer
+    // copying the region's 25%: 115%. Killing the sibling makes room.
+    let free = mem_free();
+    let region_len = share(free, 25);
+    let region = mmap_anon(region_len);
+    touch(region, region_len, 0x66);
+    let (ready_rd, ready_wr) = pipe();
+    let (wait_rd, wait_wr) = pipe();
+    let mut children = [0u64; 2];
+    for (i, (len, value)) in [(share(free, 40), 0x77u8), (share(free, 25), 0x88u8)].into_iter().enumerate() {
+        children[i] = match syscall(SYS_FORK, 0, 0, 0) {
+            Ok(0) => {
+                let _ = syscall(SYS_CLOSE, wait_wr, 0, 0);
+                let mine = mmap_anon(len);
+                touch(mine, len, value);
+                let _ = syscall(SYS_WRITE, ready_wr, b"r".as_ptr() as u64, 1);
+                let mut byte = 0u8;
+                let _ = syscall(SYS_READ, wait_rd, &mut byte as *mut u8 as u64, 1);
+                exit(if holds(mine, len, value) { 3 } else { 4 });
+            }
+            Ok(pid) => pid,
+            Err(_) => fail(b"fork a holder"),
+        };
+        let mut byte = 0u8;
+        if syscall(SYS_READ, ready_rd, &mut byte as *mut u8 as u64, 1) != Ok(1) {
+            fail(b"a holder never got its memory");
+        }
+    }
+    let [hog, sibling] = children;
+    if set_adj(hog, -1000).is_err() || set_adj(sibling, 1000).is_err() {
+        fail(b"procctl PROC_OOM_ADJ_CTL on another process");
+    }
+    let mut buf = [0u8; 16];
+    let n = proc_oom_adj(hog, &mut buf);
+    if &buf[..n] != b"-1000\n" {
+        fail(b"/proc/<hog>/oom_adj doesn't read -1000");
+    }
+    let writer = match syscall(SYS_FORK, 0, 0, 0) {
+        Ok(0) => {
+            touch(region, region_len, 0x99);
+            exit(if holds(region, region_len, 0x99) { 0 } else { 1 });
+        }
+        Ok(pid) => pid,
+        Err(_) => fail(b"fork the writer"),
+    };
+    match wait_child(writer) {
+        0 => {}
+        s if s & 0x7f == SIGKILL => fail(b"the writer was killed, not the sibling at 1000"),
+        _ => fail(b"the writer failed"),
+    }
+    let _ = syscall(SYS_CLOSE, wait_wr, 0, 0);
+    match wait_child(hog) {
+        s if s == 3 << 8 => {}
+        s if s & 0x7f == SIGKILL => fail(b"the protected hog was killed"),
+        _ => fail(b"the protected hog's memory changed"),
+    }
+    match wait_child(sibling) {
+        s if s & 0x7f == SIGKILL => {}
+        s if s == 3 << 8 => fail(b"the writer never ran out of memory: the sibling wasn't killed"),
+        _ => fail(b"the sibling failed"),
+    }
+    if !holds(region, region_len, 0x66) {
+        fail(b"the writer's copy reached the parent");
+    }
+    munmap(region, region_len);
+    write_bytes(b"oom-syscall-smoke: part 3 OK (oom_adj: protected hog kept, sibling at 1000 killed)\n");
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write_bytes(b"oom-syscall-smoke: starting\n");
     part1();
     part2();
+    part3();
     write_bytes(b"oom-syscall-smoke: PASS\n");
     test_exit(true);
 }

@@ -14,6 +14,7 @@
 //! `EFAULT`.
 
 use super::{INIT_PID, ProcState, SIGKILL};
+use crate::kern::kern_procctl::OOM_ADJ_MIN;
 use crate::serial_println;
 
 /// What the fault handler does next.
@@ -41,20 +42,27 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
             return Outcome::Fail;
         };
         let phys = crate::memory::phys_mem_offset();
-        let mut best: Option<(super::Pid, u64, bool)> = None;
+        // (pid, score, pages, already sent SIGKILL)
+        let mut best: Option<(super::Pid, u64, u64, bool)> = None;
         // One entry per thread group: its leader holds the address space (threads share it).
         for (&pid, proc) in table.iter() {
             if pid != proc.tgid || pid == INIT_PID || matches!(proc.state, ProcState::Zombie(_)) {
                 continue;
             }
             let Some(space) = proc.address_space.as_ref() else { continue };
+            // The interrupted code may hold this lock: then the process counts as unadjusted.
+            let adj = proc.shared.try_lock().map_or(0, |s| s.oom_adj);
+            if adj <= OOM_ADJ_MIN {
+                continue;
+            }
             let pages = space.private_pages(phys);
-            if best.is_none_or(|(_, most, _)| pages > most) {
+            let score = pages * (1000 + adj as i64) as u64 / 1000;
+            if best.is_none_or(|(_, most, _, _)| score > most) {
                 let dying = proc.pending_signals & (1 << (SIGKILL - 1)) != 0;
-                best = Some((pid, pages, dying));
+                best = Some((pid, score, pages, dying));
             }
         }
-        let victim = best.map(|(pid, pages, dying)| {
+        let victim = best.map(|(pid, _, pages, dying)| {
             if !dying {
                 let name = table.get(&pid).map(|p| p.comm.as_slice()).unwrap_or(b"?");
                 serial_println!(

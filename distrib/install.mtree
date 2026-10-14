@@ -155,6 +155,7 @@
 ./bin/link type=file src=artifact:OXFS_LINK_ELF_PATH
 ./bin/ln type=file src=artifact:OXFS_LN_ELF_PATH
 ./usr/bin/logger type=file src=artifact:OXFS_LOGGER_ELF_PATH
+./usr/bin/protect type=file src=artifact:OXFS_PROTECT_ELF_PATH
 ./usr/bin/login type=file src=artifact:OXFS_LOGIN_ELF_PATH
 ./usr/bin/logname type=file src=artifact:OXFS_LOGNAME_ELF_PATH
 ./bin/ls type=file src=artifact:OXFS_LS_ELF_PATH
@@ -353,6 +354,7 @@
 ./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
 ./usr/share/man/man1/less.1 type=file src=share/man/man1/more.1
 ./usr/share/man/man1/logger.1 type=file src=share/man/man1/logger.1
+./usr/share/man/man1/protect.1 type=file src=share/man/man1/protect.1
 ./usr/share/man/man1/crontab.1 type=file src=share/man/man1/crontab.1
 ./usr/share/man/man1/chmod.1 type=file src=share/man/man1/chmod.1
 ./usr/share/man/man1/kill.1 type=file src=share/man/man1/kill.1
@@ -369,6 +371,7 @@
 ./usr/share/man/man2 type=dir
 ./usr/share/man/man2/accept.2 type=file src=share/man/man2/accept.2
 ./usr/share/man/man2/nmount.2 type=file src=share/man/man2/nmount.2
+./usr/share/man/man2/procctl.2 type=file src=share/man/man2/procctl.2
 ./usr/share/man/man2/accept4.2 type=file hardlink=./usr/share/man/man2/accept.2
 ./usr/share/man/man2/bind.2 type=file src=share/man/man2/bind.2
 ./usr/share/man/man2/connect.2 type=file src=share/man/man2/connect.2
