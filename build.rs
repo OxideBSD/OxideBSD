@@ -682,6 +682,15 @@ fn main() {
     let fsconf_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/fsconf_mkdb", "OXFS_FSCONF_MKDB_ELF_PATH", &musl_sysroot);
     build_boot_fsconf();
+    // makefs(8) and mkimg(1), on the target as well as the host (RAM_FLOOR.md §4.2.4); makefs
+    // reads mtree(5) through lib/libmtree.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmtree/src").display()
+    );
+    let makefs_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/makefs", "OXFS_MAKEFS_ELF_PATH", &musl_sysroot);
+    let mkimg_elf_path = build_std_oxidebsd_userland_crate("usr.bin/mkimg", "OXFS_MKIMG_ELF_PATH", &musl_sysroot);
 
     // The manual system (MAN.md in OxideBSD-doc): oxdoc(1), man(1) and more(1) over liboxdoc,
     // replacing BusyBox's man, more and less.
@@ -942,6 +951,8 @@ fn main() {
         ("OXFS_VISUDO_ELF_PATH", sudo_rs[2].to_str().unwrap()),
         ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
         ("OXFS_FSCONF_MKDB_ELF_PATH", fsconf_mkdb_elf_path.to_str().unwrap()),
+        ("OXFS_MAKEFS_ELF_PATH", makefs_elf_path.to_str().unwrap()),
+        ("OXFS_MKIMG_ELF_PATH", mkimg_elf_path.to_str().unwrap()),
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
         ("OXFS_MAN_ELF_PATH", man_elf_path.to_str().unwrap()),
         ("OXFS_MORE_ELF_PATH", more_elf_path.to_str().unwrap()),

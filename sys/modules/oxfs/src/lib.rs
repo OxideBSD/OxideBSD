@@ -7976,6 +7976,8 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(usr_libexec, b"getty", include_bytes!(env!("OXFS_GETTY_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"pwd_mkdb", include_bytes!(env!("OXFS_PWD_MKDB_ELF_PATH")));
     ok &= seed_file(usr_sbin, b"fsconf_mkdb", include_bytes!(env!("OXFS_FSCONF_MKDB_ELF_PATH")));
+    ok &= seed_file(usr_sbin, b"makefs", include_bytes!(env!("OXFS_MAKEFS_ELF_PATH")));
+    ok &= seed_file(usr_bin, b"mkimg", include_bytes!(env!("OXFS_MKIMG_ELF_PATH")));
     ok &= seed_file(bin, b"grep", include_bytes!(env!("OXFS_GREP_ELF_PATH")));
     ok &= seed_file(usr_bin, b"groups", include_bytes!(env!("OXFS_GROUPS_ELF_PATH")));
     ok &= seed_file(bin, b"gunzip", include_bytes!(env!("OXFS_GUNZIP_ELF_PATH")));
@@ -8476,6 +8478,9 @@ fn format_fresh_filesystem() -> bool {
     ok &= seed_file(man_man8, b"newsyslog.8", include_bytes!("../../../../share/man/man8/newsyslog.8"));
     ok &= seed_file(man_man8, b"pwd_mkdb.8", include_bytes!("../../../../share/man/man8/pwd_mkdb.8"));
     ok &= seed_file(man_man8, b"fsconf_mkdb.8", include_bytes!("../../../../share/man/man8/fsconf_mkdb.8"));
+    ok &= seed_file(man_man8, b"makefs.8", include_bytes!("../../../../share/man/man8/makefs.8"));
+    ok &= seed_file(man_man1, b"mkimg.1", include_bytes!("../../../../share/man/man1/mkimg.1"));
+    ok &= seed_file(man_man5, b"mtree.5", include_bytes!("../../../../share/man/man5/mtree.5"));
     ok &= seed_file(man_man8, b"rc.8", include_bytes!("../../../../share/man/man8/rc.8"));
     ok &= seed_file(man_man8, b"rc.subr.8", include_bytes!("../../../../share/man/man8/rc.subr.8"));
     ok &= seed_file(man_man8, b"rcorder.8", include_bytes!("../../../../share/man/man8/rcorder.8"));

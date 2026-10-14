@@ -1,0 +1,106 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt MTREE 5
+.Os OxideBSD
+.Sh NAME
+.Nm mtree
+.Nd format of a file hierarchy specification
+.Sh DESCRIPTION
+An
+.Nm
+specification describes a file hierarchy, one entry per line: a path, then
+keywords of the form
+.Ar keyword Ns = Ns Ar value .
+A line beginning with
+.Ql #
+is a comment, and a line ending in
+.Ql \e
+continues on the next.
+The system's dist sets are described by specifications in
+.Pa /etc/mtree ,
+and
+.Xr makefs 8
+builds images from them.
+.Pp
+A path containing a
+.Ql /
+is a full path from the root of the hierarchy, beginning
+.Ql ./ ,
+and
+.Ql \&.
+is the root itself.
+A path without one is relative to the current directory: an entry of
+.Cm type Ns = Ns Cm dir
+makes itself the current directory, and the line
+.Ql ..
+returns to its parent.
+.Pp
+In a path, a space, a byte outside printable ASCII, and any of
+.Ql # ,
+.Ql \e ,
+.Ql * ,
+.Ql \&? ,
+.Ql \&[
+and
+.Ql =
+are written as
+.Ql \e
+and three octal digits.
+.Pp
+Two commands set defaults for the entries after them:
+.Bl -tag -width indent
+.It Cm /set Ar keyword Ns = Ns Ar value ...
+Each entry gets these keywords unless it has its own.
+.It Cm /unset Ar keyword ... | Cm all
+Removes defaults.
+.El
+.Pp
+The keywords are:
+.Bl -tag -width sha256digest
+.It Cm contents
+Where a file's contents are, for
+.Xr makefs 8 .
+.It Cm gid , Cm gname
+The group, by number or name.
+.It Cm link
+A symbolic link's target, encoded as a path is.
+.It Cm mode
+The permission bits, in octal.
+.It Cm sha256digest
+The SHA-256 digest of a file's contents
+.Pq also Cm sha256 .
+.It Cm size
+A file's size in bytes.
+.It Cm time
+The modification time, as
+.Sm off
+.Ar seconds . Ar nanoseconds .
+.Sm on
+.It Cm type
+.Cm file ,
+.Cm dir ,
+.Cm link ,
+.Cm char ,
+.Cm block ,
+.Cm fifo
+or
+.Cm socket .
+.It Cm uid , Cm uname
+The owner, by number or name.
+.El
+.Pp
+Other keywords are kept and ignored.
+.Sh FILES
+.Bl -tag -width /etc/mtree -compact
+.It Pa /etc/mtree
+The installed sets' specifications.
+.El
+.Sh SEE ALSO
+.Xr makefs 8
+.Sh HISTORY
+The
+.Nm
+format first appeared with the
+.Nm mtree
+utility in
+.Bx 4.3 Reno .

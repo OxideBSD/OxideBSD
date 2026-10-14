@@ -1,0 +1,11 @@
+[package]
+name = "mtree"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# mtree(5) specifications (RAM_FLOOR.md §4.2.4, §4.3), shared by build.rs, makefs(8) and later
+# oxupdate(8) and mtree(8). No dependencies; its own workspace, testable on the host, like
+# lib/libfstab.
+[workspace]

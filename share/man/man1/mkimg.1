@@ -1,0 +1,89 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 13, 2026
+.Dt MKIMG 1
+.Os OxideBSD
+.Sh NAME
+.Nm mkimg
+.Nd make a partitioned disk image
+.Sh SYNOPSIS
+.Nm
+.Fl s Ar scheme
+.Fl o Ar outfile
+.Op Fl c Ar capacity
+.Fl p Ar partition
+.Op Fl p Ar partition ...
+.Sh DESCRIPTION
+.Nm
+writes a disk image to
+.Ar outfile ,
+partitioned by
+.Ar scheme ,
+with one partition for each
+.Fl p
+in the order given.
+Partitions start at 1 MiB and on 1 MiB boundaries, and are a whole number of
+4 KiB blocks.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl c Ar capacity
+Make the disk at least this large, in bytes or with a
+.Cm k ,
+.Cm m
+or
+.Cm g
+suffix.
+The space after the last partition is left free.
+.It Fl o Ar outfile
+The image to write.
+.It Fl p Ar type Ns Oo / Ns Ar label Oc Ns := Ns Ar file
+A partition of
+.Ar type
+holding the image
+.Ar file .
+Blocks of zeroes are not written, so a sparse
+.Ar file
+gives a sparse disk.
+.It Fl p Ar type Ns Oo / Ns Ar label Oc Ns :: Ns Ar size
+An empty partition of
+.Ar size .
+.It Fl s Ar scheme
+.Cm gpt
+or
+.Cm mbr .
+An MBR disk has at most four partitions and 2 TiB.
+.El
+.Pp
+The partition types are
+.Cm oxfs
+(GPT type
+.Li 06026785-76ab-42c2-afe2-66ea3af562b8 ,
+MBR type
+.Li 0xa2 )
+and
+.Cm efi ,
+an EFI system partition.
+On a GPT disk the
+.Ar label
+is the partition's name, under which
+.Xr devfs 5
+lists it as
+.Pa /dev/gpt/ Ns Ar label .
+The disk's and the partitions' GUIDs are derived from the layout, so the same
+partitions give the same image.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+A disk with one oxfs partition, the root file system:
+.Bd -literal -offset indent
+mkimg -s gpt -o disk.img -p oxfs/rootfs:=root.img
+.Ed
+.Sh SEE ALSO
+.Xr makefs 8 ,
+.Xr newfs_oxfs 8
+.Sh HISTORY
+A
+.Nm
+utility first appeared in
+.Fx 10.1 .
+This one is OxideBSD's own, with the same options for what it does.

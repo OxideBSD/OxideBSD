@@ -145,9 +145,10 @@ impl<D: BlockDevice> Writer<D> {
         Ok(self.dev.write_block(at, b)?)
     }
 
-    /// A free data block, marked used and zeroed (`fill` bytes: `0xFF` for an index block, whose
-    /// slots must read `NO_BLOCK`).
-    fn alloc_block_filled(&mut self, fill: u8) -> Result<u32, Error<D::Error>> {
+    /// A free data block, marked used and filled with `fill` bytes (`0xFF` for an index block,
+    /// whose slots must read `NO_BLOCK`), or left as it is (`None`) for one the caller writes
+    /// whole.
+    fn alloc_block_filled(&mut self, fill: Option<u8>) -> Result<u32, Error<D::Error>> {
         let total = self.sb.data_blocks;
         let mut index = self.next_block / BITS_PER_BITMAP_BLOCK;
         while index < self.sb.bitmap_blocks() {
@@ -160,7 +161,9 @@ impl<D: BlockDevice> Writer<D> {
                 bitmap[bit as usize / 8] |= 1 << (bit % 8);
                 self.dev.write_block((BITMAP_START + index) as u64, &bitmap)?;
                 let n = base + bit;
-                self.write_data(n, &[fill; BLOCK_SIZE])?;
+                if let Some(fill) = fill {
+                    self.write_data(n, &[fill; BLOCK_SIZE])?;
+                }
                 self.next_block = n + 1;
                 return Ok(n);
             }
@@ -170,52 +173,57 @@ impl<D: BlockDevice> Writer<D> {
     }
 
     pub fn alloc_block(&mut self) -> Result<u32, Error<D::Error>> {
-        self.alloc_block_filled(0)
+        self.alloc_block_filled(Some(0))
     }
 
     /// The data block holding `inode`'s block `index`, allocating it (and any index block on the
     /// way) when it has none: direct, single-indirect, then double-indirect, as the module's
     /// `ensure_block`.
     pub fn ensure_block(&mut self, inode: &mut Inode, index: usize) -> Result<u32, Error<D::Error>> {
+        self.ensure_block_filled(inode, index, Some(0))
+    }
+
+    /// `ensure_block`, with a new data block filled as `alloc_block_filled` says.
+    fn ensure_block_filled(&mut self, inode: &mut Inode, index: usize, fill: Option<u8>) -> Result<u32, Error<D::Error>> {
         if index < DIRECT_BLOCKS {
             if inode.direct[index] == NO_BLOCK {
-                inode.direct[index] = self.alloc_block()?;
+                inode.direct[index] = self.alloc_block_filled(fill)?;
             }
             return Ok(inode.direct[index]);
         }
         let index = index - DIRECT_BLOCKS;
         if index < PTRS_PER_INDIRECT {
             if inode.indirect == NO_BLOCK {
-                inode.indirect = self.alloc_block_filled(0xFF)?;
+                inode.indirect = self.alloc_block_filled(Some(0xFF))?;
             }
-            return self.ensure_slot(inode.indirect, index);
+            return self.ensure_slot(inode.indirect, index, fill);
         }
         let index = index - PTRS_PER_INDIRECT;
         if index >= PTRS_PER_DOUBLE_INDIRECT {
             return Err(Error::NoSpace);
         }
         if inode.double_indirect == NO_BLOCK {
-            inode.double_indirect = self.alloc_block_filled(0xFF)?;
+            inode.double_indirect = self.alloc_block_filled(Some(0xFF))?;
         }
         let (outer, inner) = (index / PTRS_PER_INDIRECT, index % PTRS_PER_INDIRECT);
         let mut ob = self.read_data(inode.double_indirect)?;
         let mut inner_block = u32::from_le_bytes(ob[outer * 4..outer * 4 + 4].try_into().unwrap());
         if inner_block == NO_BLOCK {
-            inner_block = self.alloc_block_filled(0xFF)?;
+            inner_block = self.alloc_block_filled(Some(0xFF))?;
             ob[outer * 4..outer * 4 + 4].copy_from_slice(&inner_block.to_le_bytes());
             self.write_data(inode.double_indirect, &ob)?;
         }
-        self.ensure_slot(inner_block, inner)
+        self.ensure_slot(inner_block, inner, fill)
     }
 
     /// Index block `ib`'s pointer at `slot`, allocating a data block for it if it has none.
-    fn ensure_slot(&mut self, ib: u32, slot: usize) -> Result<u32, Error<D::Error>> {
+    fn ensure_slot(&mut self, ib: u32, slot: usize, fill: Option<u8>) -> Result<u32, Error<D::Error>> {
         let mut b = self.read_data(ib)?;
         let existing = u32::from_le_bytes(b[slot * 4..slot * 4 + 4].try_into().unwrap());
         if existing != NO_BLOCK {
             return Ok(existing);
         }
-        let n = self.alloc_block()?;
+        let n = self.alloc_block_filled(fill)?;
         b[slot * 4..slot * 4 + 4].copy_from_slice(&n.to_le_bytes());
         self.write_data(ib, &b)?;
         Ok(n)
@@ -347,5 +355,48 @@ impl<D: BlockDevice> Writer<D> {
         self.dir_insert(n, b"..", parent, now)?;
         self.dir_insert(parent, name, n, now)?;
         Ok(n)
+    }
+
+    /// Makes `name` in `parent` from `inode` (its kind, mode, owner and times; one link), with
+    /// `.` and `..` records for a directory. Its parent's times become `inode`'s mtime.
+    pub fn create(&mut self, parent: u32, name: &[u8], inode: &Inode) -> Result<u32, Error<D::Error>> {
+        let n = self.alloc_inode()?;
+        let mut fresh = *inode;
+        fresh.nlink = 1;
+        self.write_inode(n, &fresh)?;
+        if inode.kind == InodeKind::Dir {
+            self.dir_insert(n, b".", n, inode.mtime)?;
+            self.dir_insert(n, b"..", parent, inode.mtime)?;
+            // dir_insert stamped it; keep the times asked for.
+            let mut back = self.read_inode(n)?;
+            back.mtime = inode.mtime;
+            back.ctime = inode.ctime;
+            self.write_inode(n, &back)?;
+        }
+        self.dir_insert(parent, name, n, inode.mtime)?;
+        Ok(n)
+    }
+
+    /// Writes block `index` of a file whose record the caller holds (`inode`, written back by
+    /// the caller once the whole file is in): a block it writes whole, so a new one isn't zeroed
+    /// first. Its size is the caller's to set.
+    pub fn put_block(&mut self, inode: &mut Inode, index: usize, data: &[u8; BLOCK_SIZE]) -> Result<(), Error<D::Error>> {
+        let n = self.ensure_block_filled(inode, index, None)?;
+        self.write_data(n, data)
+    }
+
+    /// Gives inode `n` another name, `name` in `parent`.
+    pub fn link(&mut self, parent: u32, name: &[u8], n: u32, now: i64) -> Result<(), Error<D::Error>> {
+        self.dir_insert(parent, name, n, now)?;
+        let mut inode = self.read_inode(n)?;
+        inode.nlink += 1;
+        self.write_inode(n, &inode)
+    }
+
+    /// Sets directory `dir`'s times (after its entries went in, which stamped them).
+    pub fn set_times(&mut self, n: u32, mtime: i64, ctime: i64, atime: i64) -> Result<(), Error<D::Error>> {
+        let mut inode = self.read_inode(n)?;
+        (inode.mtime, inode.ctime, inode.atime) = (mtime, ctime, atime);
+        self.write_inode(n, &inode)
     }
 }
