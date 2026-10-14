@@ -699,6 +699,33 @@ pub(crate) fn allocate_frame() -> Option<x86_64::structures::paging::PhysFrame> 
     crate::memory::with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame())
 }
 
+/// Kernel API for modules: a zeroed page, as its address in the physical-memory window, for storage
+/// a module grows and shrinks at run time (oxfs's tmpfs blocks); `0` when memory is exhausted.
+/// Works inside `module_init` (the loader's frame allocator) and after (the global one). Freed
+/// with `oxidebsd_page_free`.
+pub(crate) extern "C" fn oxidebsd_page_alloc() -> u64 {
+    let Some(offset) = phys_mem_offset() else { return 0 };
+    let Some(frame) = allocate_frame() else { return 0 };
+    let va = offset + frame.start_address().as_u64();
+    // SAFETY: a frame just allocated, reached through the physical-memory window.
+    unsafe { core::ptr::write_bytes(va.as_mut_ptr::<u8>(), 0, PAGE_SIZE as usize) };
+    va.as_u64()
+}
+
+/// Gives back a page `oxidebsd_page_alloc` returned.
+pub(crate) extern "C" fn oxidebsd_page_free(va: u64) {
+    use x86_64::structures::paging::FrameDeallocator;
+    let Some(offset) = phys_mem_offset() else { return };
+    let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(va - offset.as_u64()));
+    // SAFETY: as `allocate_frame`; the page came from `oxidebsd_page_alloc` and its module no
+    // longer uses it.
+    if let Some(frame_allocator) = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() } {
+        unsafe { frame_allocator.deallocate_frame(frame) };
+        return;
+    }
+    crate::memory::with_frame_allocator(|frame_allocator| unsafe { frame_allocator.deallocate_frame(frame) });
+}
+
 /// `/proc/modules` -- real Linux's own seven-space-separated-field format per line (`name size
 /// refcount deps state address`), just with fixed placeholders for the three fields this loader
 /// has no equivalent concept for: `refcount` (no module ever tracks how many things reference it),
@@ -936,6 +963,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::syscall::oxidebsd_register_syscall as *const () as u64)
         }
         "oxidebsd_module_alloc_zeroed" => Some(oxidebsd_module_alloc_zeroed as *const () as u64),
+        "oxidebsd_page_alloc" => Some(oxidebsd_page_alloc as *const () as u64),
+        "oxidebsd_page_free" => Some(oxidebsd_page_free as *const () as u64),
         "oxidebsd_copyin" => Some(crate::memory::usercopy::oxidebsd_copyin as *const () as u64),
         "oxidebsd_copyout" => Some(crate::memory::usercopy::oxidebsd_copyout as *const () as u64),
         "oxidebsd_sys_exit" => Some(crate::syscall::oxidebsd_sys_exit as *const () as u64),

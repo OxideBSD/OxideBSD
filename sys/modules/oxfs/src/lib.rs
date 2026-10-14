@@ -244,6 +244,10 @@ unsafe extern "C" {
     fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
     /// Usable RAM in bytes, for sizing pools.
     fn oxidebsd_physmem_bytes() -> u64;
+    /// A zeroed page (its kernel address) for a tmpfs block, `0` when memory is exhausted; given
+    /// back with `oxidebsd_page_free`.
+    fn oxidebsd_page_alloc() -> u64;
+    fn oxidebsd_page_free(page: u64);
     /// The data disk's size in 4 KiB blocks.
     fn oxidebsd_block_device_blocks() -> u64;
     /// Makes every call into this module take the kernel's filesystem lock.
@@ -587,9 +591,10 @@ const TMPFS_INODE_BASE: u32 = MAX_DISK_INODES;
 const TMPFS_INODE_LIMIT: u32 = u32::MAX;
 
 /// A second, purely in-memory pool for tmpfs mounts and devfs, whose `/dev/shm` holds POSIX
-/// shared memory; not persisted. Its size is fixed at boot from RAM (`tmpfs_pool_blocks`):
-/// `RAM / 16`, at least `TMPFS_MIN_BLOCKS` (8 MiB: a 4 MiB `shm_open` object, `mmap/1-2.c`, must
-/// fit) and at most `TMPFS_MAX_BLOCKS` (64 MiB). Block numbers from `TMPFS_BLOCK_BASE` and inode
+/// shared memory; not persisted. Its blocks are pages taken from the kernel as files grow and
+/// given back as they shrink (`TMPFS_PAGES`), up to a limit set at boot from RAM
+/// (`tmpfs_pool_blocks`): `RAM / 16`, at least `TMPFS_MIN_BLOCKS` (8 MiB: a 4 MiB `shm_open`
+/// object, `mmap/1-2.c`, must fit) and at most `TMPFS_MAX_BLOCKS` (64 MiB). Nothing is reserved. Block numbers from `TMPFS_BLOCK_BASE` and inode
 /// numbers from `TMPFS_INODE_BASE` belong to it, far above anything the disk pool hands out, so
 /// every accessor (`read_block`/`write_block`/`read_inode`/`dir_lookup`/...) works over one number
 /// space and only the allocators (`inode_ensure_block_at`, `alloc_inode_in`), `block_ptr` and the
@@ -704,10 +709,12 @@ const OXFS_PATH_MAX: usize = 4096;
 /// allocator and `statfs` never read a full bitmap block to learn it's full. Allocated in
 /// `init_pools` for the largest filesystem the device can hold; counts are set at mount/format.
 static mut FREE_COUNTS: *mut u32 = core::ptr::null_mut();
-/// The tmpfs pool (`TMPFS_BLOCK_BASE`): `TMPFS_BLOCKS` blocks from `init_pools`.
-static mut TMPFS_PTR: *mut [u8; BLOCK_SIZE] = core::ptr::null_mut();
+/// tmpfs's blocks (`TMPFS_BLOCK_BASE`): at most `TMPFS_BLOCKS`, each a page from the kernel taken
+/// when the block is allocated and given back when it's freed (`oxidebsd_page_alloc`), so tmpfs
+/// holds only what its files hold. `TMPFS_PAGES[i]` is block `TMPFS_BLOCK_BASE + i`'s page, `0`
+/// while the block is free.
+static mut TMPFS_PAGES: *mut u64 = core::ptr::null_mut();
 static mut TMPFS_BLOCKS: u32 = 0;
-static mut TMPFS_BLOCK_USED: [bool; TMPFS_MAX_BLOCKS] = [false; TMPFS_MAX_BLOCKS];
 
 /// A fresh inode of `kind`, stamped with the current time.
 fn fresh_inode(kind: InodeKind) -> Inode {
@@ -718,17 +725,28 @@ fn is_tmpfs_block(n: u32) -> bool {
     n >= TMPFS_BLOCK_BASE
 }
 
-/// How many blocks the tmpfs pool gets on a machine with `ram` bytes.
+/// How many blocks tmpfs may hold at once on a machine with `ram` bytes (its limit, not a
+/// reservation).
 fn tmpfs_pool_blocks(ram: u64) -> usize {
     (ram as usize / 16 / BLOCK_SIZE).clamp(TMPFS_MIN_BLOCKS, TMPFS_MAX_BLOCKS)
 }
 
-/// Tmpfs block `n`'s storage (`is_tmpfs_block(n)`). Disk blocks live in the cache (`bcache`).
-fn tmpfs_ptr(n: u32) -> *mut [u8; BLOCK_SIZE] {
-    // SAFETY: the pool is set once by `init_pools` before any syscall can reach here, and callers
-    // only pass tmpfs block numbers this module handed out.
-    unsafe { TMPFS_PTR.add((n - TMPFS_BLOCK_BASE) as usize) }
+/// tmpfs block `n`'s slot in `TMPFS_PAGES`.
+fn tmpfs_page_slot(n: u32) -> *mut u64 {
+    // SAFETY: the table is set once by `init_pools` before any syscall can reach here, and every
+    // tmpfs block number this module hands out is below `TMPFS_BLOCK_BASE + TMPFS_BLOCKS`.
+    unsafe { TMPFS_PAGES.add((n - TMPFS_BLOCK_BASE) as usize) }
 }
+
+/// tmpfs block `n`'s storage, `None` while the block is free. Disk blocks live in the cache.
+fn tmpfs_ptr(n: u32) -> Option<*mut [u8; BLOCK_SIZE]> {
+    // SAFETY: see `tmpfs_page_slot`.
+    let page = unsafe { *tmpfs_page_slot(n) };
+    (page != 0).then_some(page as *mut [u8; BLOCK_SIZE])
+}
+
+/// What a free tmpfs block reads as.
+static ZERO_BLOCK: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
 
 /// Bitmap block `index`'s free count.
 fn free_count(index: u32) -> &'static mut u32 {
@@ -824,7 +842,7 @@ fn register_proc_render(render: usize, len: usize) -> i64 {
     fd
 }
 
-/// Claims real kernel-allocated storage for the cache, `FREE_COUNTS` and `TMPFS_PTR` -- must run
+/// Claims real kernel-allocated storage for the cache, `FREE_COUNTS` and `TMPFS_PAGES` -- must run
 /// first, before
 /// `module_init`'s mount-or-format decision (or anything else) ever calls `read_block`/
 /// `write_block`. Returns `false` on failure (kernel out of memory), which
@@ -845,15 +863,15 @@ fn init_pools() -> bool {
     }
     // SAFETY: inside `module_init`, before any syscall.
     unsafe { FREE_COUNTS = counts as *mut u32 };
+    // tmpfs takes pages as its files grow; only the table of them is reserved.
     let tmpfs_blocks = tmpfs_pool_blocks(ram);
-    let tmpfs_addr = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * BLOCK_SIZE) as u64) };
-    if tmpfs_addr == 0 {
+    let table = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * 8) as u64) };
+    if table == 0 {
         return false;
     }
-    // SAFETY: both addresses are freshly kernel-allocated, zeroed, and mapped read/write for
-    // exactly the sizes requested above -- never written through any other pointer.
+    // SAFETY: freshly kernel-allocated, zeroed, mapped read/write for exactly this size.
     unsafe {
-        TMPFS_PTR = tmpfs_addr as *mut [u8; BLOCK_SIZE];
+        TMPFS_PAGES = table as *mut u64;
         TMPFS_BLOCKS = tmpfs_blocks as u32;
     }
     true
@@ -898,8 +916,8 @@ fn release_flocks_for(real_fd: u64) {
 /// blocks, inode records). `f` must not touch another block: a disk block is lent from the cache.
 fn with_block<R>(n: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
     if is_tmpfs_block(n) {
-        // SAFETY: see `tmpfs_ptr`.
-        f(unsafe { &*tmpfs_ptr(n) })
+        // SAFETY: an allocated block's page, which only `set_block_used` frees.
+        f(tmpfs_ptr(n).map_or(&ZERO_BLOCK, |p| unsafe { &*p }))
     } else {
         bcache::with(data_block_offset() + n, f)
     }
@@ -946,8 +964,10 @@ fn delay_writes_of(n: u32) -> Delayed {
 /// Otherwise it reaches the disk before the system call returns.
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
     if is_tmpfs_block(n) {
-        // SAFETY: see `tmpfs_ptr`.
-        unsafe { *tmpfs_ptr(n) = *data };
+        // SAFETY: as `with_block`. Only allocated blocks are ever written.
+        if let Some(p) = tmpfs_ptr(n) {
+            unsafe { *p = *data };
+        }
     } else if let Some(owner) = delay_owner() {
         bcache::store(data_block_offset() + n, data, bcache::Kind::Data(owner));
     } else {
@@ -959,8 +979,10 @@ fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
 /// reach the disk before the data blocks it points at.
 fn write_index_block(n: u32, data: &[u8; BLOCK_SIZE]) {
     if is_tmpfs_block(n) {
-        // SAFETY: see `tmpfs_ptr`.
-        unsafe { *tmpfs_ptr(n) = *data };
+        // SAFETY: as `with_block`. Only allocated blocks are ever written.
+        if let Some(p) = tmpfs_ptr(n) {
+            unsafe { *p = *data };
+        }
     } else if let Some(owner) = delay_owner() {
         bcache::store(data_block_offset() + n, data, bcache::Kind::Index(owner));
     } else {
@@ -975,8 +997,7 @@ fn bitmap_position(n: u32) -> (u32, usize) {
 
 fn block_used(n: u32) -> bool {
     if is_tmpfs_block(n) {
-        // SAFETY: single-core, syscall-serialized, as every pool here.
-        return unsafe { (*core::ptr::addr_of!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] };
+        return tmpfs_ptr(n).is_some();
     }
     let (index, bit) = bitmap_position(n);
     bcache::with(BITMAP_START + index, |b| b[bit / 8] & (1 << (bit % 8)) != 0)
@@ -986,8 +1007,15 @@ fn block_used(n: u32) -> bool {
 /// that block's free count kept in step.
 fn set_block_used(n: u32, used: bool) {
     if is_tmpfs_block(n) {
-        // SAFETY: as `block_used`.
-        unsafe { (*core::ptr::addr_of_mut!(TMPFS_BLOCK_USED))[(n - TMPFS_BLOCK_BASE) as usize] = used };
+        // A tmpfs block is used while it has a page: `alloc_tmpfs_block` takes it, this gives it
+        // back.
+        if !used && let Some(p) = tmpfs_ptr(n) {
+            // SAFETY: see `tmpfs_page_slot`; the page leaves the table before it's freed.
+            unsafe {
+                *tmpfs_page_slot(n) = 0;
+                oxidebsd_page_free(p as u64);
+            }
+        }
         return;
     }
     let (index, bit) = bitmap_position(n);
@@ -1396,14 +1424,15 @@ fn grow_inode_table(tmpfs: bool) -> Option<()> {
 /// function's own doc comment for why it's the sole call site that needs to know this pool exists.
 fn alloc_tmpfs_block() -> Option<u32> {
     let end = TMPFS_BLOCK_BASE + unsafe { *core::ptr::addr_of!(TMPFS_BLOCKS) };
-    for i in TMPFS_BLOCK_BASE..end {
-        if !block_used(i) {
-            set_block_used(i, true);
-            write_block(i, &[0u8; BLOCK_SIZE]);
-            return Some(i);
-        }
+    let i = (TMPFS_BLOCK_BASE..end).find(|&i| !block_used(i))?;
+    // SAFETY: FFI call to a kernel-exported function; the page is zeroed.
+    let page = unsafe { oxidebsd_page_alloc() };
+    if page == 0 {
+        return None;
     }
-    None
+    // SAFETY: see `tmpfs_page_slot`.
+    unsafe { *tmpfs_page_slot(i) = page };
+    Some(i)
 }
 
 fn alloc_tmpfs_indirect_block() -> Option<u32> {
