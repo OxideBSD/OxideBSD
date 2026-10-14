@@ -138,8 +138,7 @@ fn load_image(
     }
     // A static PIE (ET_DYN) gets a randomized bias, as in do_execve; a fixed-address ET_EXEC none.
     let bias = if elf.is_dynamic() { crate::process::aslr::pick_bias() } else { 0 };
-    let entry = with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, bias))
-        .map_err(SpawnError::Elf)?;
+    let entry = elf::load(&elf, &mut mapper, phys_offset, bias).map_err(SpawnError::Elf)?;
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
     let mapped_pages =
@@ -1432,9 +1431,7 @@ fn exec_image(
             0
         };
         elf.cache = exec_cache_entry(&file, &new_address_space);
-        let entry =
-            with_frame_allocator(|fa| elf::load(&elf, &mut mapper, fa, phys_offset, main_bias))
-                .map_err(|_| ENOEXEC)?;
+        let entry = elf::load(&elf, &mut mapper, phys_offset, main_bias).map_err(|_| ENOEXEC)?;
 
         // A real PT_INTERP dynamic linker, if the binary carries one, gets loaded into the same
         // not-yet-active address space right here, immediately after the main binary's own segments --
@@ -1456,10 +1453,8 @@ fn exec_image(
             let mut interp_elf = Elf::parse_file(&interp_file.head, interp_file.size, interp_file.content)
                 .map_err(|_| ENOEXEC)?;
             interp_elf.cache = exec_cache_entry(&interp_file, &new_address_space);
-            let interp_entry = with_frame_allocator(|fa| {
-                elf::load(&interp_elf, &mut mapper, fa, phys_offset, INTERP_LOAD_BASE)
-            })
-            .map_err(|_| ENOEXEC)?;
+            let interp_entry =
+                elf::load(&interp_elf, &mut mapper, phys_offset, INTERP_LOAD_BASE).map_err(|_| ENOEXEC)?;
             jump_entry = interp_entry;
             interp_base = Some(INTERP_LOAD_BASE);
         }

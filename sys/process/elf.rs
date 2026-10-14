@@ -353,10 +353,13 @@ impl<'a> Elf<'a> {
 /// base, like any ordinary `.so`), let this function shift it to wherever the kernel actually
 /// wants it, and report that same shift as `AT_BASE` — exactly the same math a real kernel's own
 /// ELF loader performs for a `PT_INTERP` interpreter, not a shortcut.
+///
+/// Takes the frame allocator only around each allocation and mapping: the file's contents are
+/// read between them, and a read can sleep on the disk (COW.md §4.4 -- the frame allocator is
+/// never held across a sleep).
 pub fn load(
     elf: &Elf,
     mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     physical_memory_offset: VirtAddr,
     bias: u64,
 ) -> Result<VirtAddr, ElfError> {
@@ -426,18 +429,13 @@ pub fn load(
             // Shared with every other process running this file, read-only. No other segment
             // touches the page, so `mapped_pages` never needs it.
             let cached = elf.cache.zip(elf.cache_page(index, &header, bias, page.start_address().as_u64()));
-            if let Some(frame) =
-                cached.and_then(|(id, file_page)| crate::memory::pagecache::frame(id, file_page, frame_allocator))
-            {
+            if let Some(frame) = cached.and_then(|(id, file_page)| crate::memory::pagecache::frame(id, file_page)) {
                 let flags = flags | crate::memory::address_space::SHARED_LEAF | crate::memory::address_space::CACHED_LEAF;
                 // SAFETY: a page cache frame, freed only once no address space uses its entry
                 // (the caller records this one's use).
-                unsafe {
-                    mapper
-                        .map_to(page, frame, flags, frame_allocator)
-                        .map_err(|_: MapToError<Size4KiB>| ElfError::MappingFailed)?
-                        .ignore();
-                }
+                crate::memory::with_frame_allocator(|fa| unsafe { mapper.map_to(page, frame, flags, fa) })
+                    .map_err(|_: MapToError<Size4KiB>| ElfError::MappingFailed)?
+                    .ignore();
                 continue;
             }
             let frame = match mapped_pages.get_mut(&page) {
@@ -464,15 +462,11 @@ pub fn load(
                     *frame
                 }
                 None => {
-                    let frame = frame_allocator
-                        .allocate_frame()
+                    let frame = crate::memory::with_frame_allocator(|fa| fa.allocate_frame())
                         .ok_or(ElfError::OutOfMemory)?;
-                    unsafe {
-                        mapper
-                            .map_to(page, frame, flags, frame_allocator)
-                            .map_err(|_: MapToError<Size4KiB>| ElfError::MappingFailed)?
-                            .flush();
-                    }
+                    crate::memory::with_frame_allocator(|fa| unsafe { mapper.map_to(page, frame, flags, fa) })
+                        .map_err(|_: MapToError<Size4KiB>| ElfError::MappingFailed)?
+                        .flush();
 
                     // Zero the whole frame (covers BSS and any partial-page padding) before any
                     // segment's bytes get copied in below.

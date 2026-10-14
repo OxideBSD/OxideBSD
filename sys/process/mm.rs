@@ -787,26 +787,26 @@ fn do_mmap_file_backed(
     let mut cached_pages: Vec<bool> = Vec::new();
 
     let frames: Vec<PhysFrame<Size4KiB>> = if let Some(id) = cache_entry {
-        with_frame_allocator(|fa| -> Result<Vec<PhysFrame<Size4KiB>>, u64> {
-            let mut frames = Vec::with_capacity(covered_pages as usize);
-            for i in 0..covered_pages {
-                let page = file_page + i;
-                let (frame, cached) = match memory::pagecache::frame(id, page, fa) {
-                    Some(frame) => (frame, true),
-                    None => {
-                        let frame = fa.allocate_frame().ok_or(ENOMEM)?;
-                        let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-                        unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
-                        let len = real_size.saturating_sub(page * 4096).min(4096);
-                        crate::fs::fd::content_read(content_id, page * 4096, frame_ptr as u64, len);
-                        (frame, false)
-                    }
-                };
-                frames.push(frame);
-                cached_pages.push(cached);
-            }
-            Ok(frames)
-        })?
+        // The frame allocator only around each allocation: the reads can sleep on the disk
+        // (COW.md §4.4).
+        let mut frames = Vec::with_capacity(covered_pages as usize);
+        for i in 0..covered_pages {
+            let page = file_page + i;
+            let (frame, cached) = match memory::pagecache::frame(id, page) {
+                Some(frame) => (frame, true),
+                None => {
+                    let frame = with_frame_allocator(|fa| fa.allocate_frame()).ok_or(ENOMEM)?;
+                    let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+                    unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+                    let len = real_size.saturating_sub(page * 4096).min(4096);
+                    crate::fs::fd::content_read(content_id, page * 4096, frame_ptr as u64, len);
+                    (frame, false)
+                }
+            };
+            frames.push(frame);
+            cached_pages.push(cached);
+        }
+        frames
     } else if private {
         // Real MAP_PRIVATE: a fresh copy, populated once from the object's own real content but
         // never entered into MMAP_FILE_CACHE -- a second, independent MAP_PRIVATE of the same file

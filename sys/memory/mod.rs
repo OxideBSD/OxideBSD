@@ -311,6 +311,12 @@ pub fn with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R)
     f(guard.as_mut().expect("frame allocator not yet installed"))
 }
 
+/// Whether the frame allocator is locked: never while a process sleeps (COW.md §4.4), which
+/// `scheduler::schedule` checks.
+pub fn frame_allocator_locked() -> bool {
+    FRAME_ALLOCATOR.is_locked()
+}
+
 /// `with_frame_allocator` for a page-fault handler: `None` instead of spinning when the lock is
 /// already held -- the fault may have interrupted kernel code holding it, which would otherwise
 /// deadlock on a single core.

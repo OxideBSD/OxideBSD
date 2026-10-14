@@ -119,7 +119,10 @@ pub fn entry_for(content_id: u64) -> Option<EntryId> {
 
 /// The frame holding page `page` of entry `id`, read from the file if it isn't yet. `None` past
 /// the end of the file, out of memory, or if the file reads short: the caller copies the page.
-pub fn frame(id: EntryId, page: u64, fa: &mut impl FrameAllocator<Size4KiB>) -> Option<PhysFrame<Size4KiB>> {
+///
+/// Takes the frame allocator itself, briefly: callers MUST NOT hold it, since the read can sleep
+/// on the disk (COW.md §4.4).
+pub fn frame(id: EntryId, page: u64) -> Option<PhysFrame<Size4KiB>> {
     let (content_id, size) = {
         let mut c = CACHE.lock();
         let e = c.entries.get(&id)?;
@@ -132,7 +135,7 @@ pub fn frame(id: EntryId, page: u64, fa: &mut impl FrameAllocator<Size4KiB>) -> 
         (content_id, size)
     };
     // Filled with the cache unlocked.
-    let frame = fa.allocate_frame()?;
+    let frame = super::with_frame_allocator(|fa| fa.allocate_frame())?;
     let ptr = (super::phys_mem_offset() + frame.start_address().as_u64()).as_mut_ptr::<u8>();
     let off = page * PAGE;
     let len = (size - off).min(PAGE);

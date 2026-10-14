@@ -243,6 +243,8 @@ fn reap_pending_threads() {
 /// that means "a later event woke it back to `Ready` and the scheduler picked it again."
 /// How many sleeps under the filesystem lock `schedule` has reported (it stops at 8).
 static FSLOCK_SLEEP_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The same for sleeps with the frame allocator locked (COW.md §4.4: page faults need it).
+static FRAME_LOCK_SLEEP_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn schedule() {
     // The caller's in-flight system call frame, which other processes' calls repoint while this
@@ -278,6 +280,12 @@ fn schedule_inner() {
                     prev_pid,
                     reason
                 );
+            }
+            if matches!(prev.state, ProcState::Blocked(_))
+                && crate::memory::frame_allocator_locked()
+                && FRAME_LOCK_SLEEP_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
+            {
+                crate::serial_println!("[vm] pid {} sleeping with the frame allocator locked", prev_pid);
             }
             if matches!(prev.state, ProcState::Ready | ProcState::Running) {
                 // Real invariant this codebase's own cross-process `Action::Stop` handling
