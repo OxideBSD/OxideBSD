@@ -34,6 +34,52 @@ use crate::syscall::{EACCES, EAGAIN, EBADF, EBUSY, EINVAL, ENODEV, ENOMEM, ENOTS
 /// from the live `CR3` (no process-table lock -- the active table *is* the faulting process's),
 /// and the frame allocator is only `try_lock`ed. `false` whenever growth doesn't apply or can't
 /// happen right now; the caller then takes its normal fault path.
+/// A copy-on-write fault (OxideBSD-doc `COW.md` §4): a write to a present `COW_LEAF` user page,
+/// from ring 3 or from a copy routine in ring 0. `None` when the fault isn't one; `Some(true)`
+/// when the page is now the writer's own and writable (copied, or just made writable when no
+/// other address space maps the frame); `Some(false)` when there was no frame to copy into.
+pub fn try_resolve_cow(fault_addr: u64) -> Option<bool> {
+    use memory::address_space::COW_LEAF;
+    if fault_addr >= crate::memory::usercopy::VM_MAXUSER || scheduler::current_pid() == 0 {
+        return None;
+    }
+    let phys_offset = memory::phys_mem_offset();
+    let (l4_frame, _) = x86_64::registers::control::Cr3::read();
+    // SAFETY: CR3's level-4 table, live and reachable through the physical-memory window; single
+    // core, interrupts off in the fault handler.
+    let l4 = unsafe { &mut *(phys_offset + l4_frame.start_address().as_u64()).as_mut_ptr::<x86_64::structures::paging::PageTable>() };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(fault_addr));
+    let entry = memory::address_space::leaf_entry(l4, phys_offset, page.start_address())?;
+    let flags = entry.flags();
+    if !flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) || !flags.contains(COW_LEAF) {
+        return None;
+    }
+    let old = entry.frame().ok()?;
+    let writable = (flags - COW_LEAF) | PageTableFlags::WRITABLE;
+    if memory::refs::sole_owner(old) {
+        // The other side copied or went away: the page is just this one's again.
+        entry.set_flags(writable);
+        x86_64::instructions::tlb::flush(page.start_address());
+        return Some(true);
+    }
+    // The frame allocator is never held while user code runs or a copy routine works (COW.md
+    // §4.4), so the lock is free.
+    let Some(Some(new)) = memory::try_with_frame_allocator(|fa| fa.allocate_frame()) else {
+        return Some(false);
+    };
+    let src = (phys_offset + old.start_address().as_u64()).as_ptr::<u8>();
+    let dst = (phys_offset + new.start_address().as_u64()).as_mut_ptr::<u8>();
+    // SAFETY: the shared frame, and one just allocated, through the physical-memory window.
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+    entry.set_addr(new.start_address(), writable);
+    x86_64::instructions::tlb::flush(page.start_address());
+    if memory::refs::release(old) {
+        // The last other mapping went meanwhile (not possible on one core, but it would leak).
+        memory::try_with_frame_allocator(|fa| unsafe { fa.deallocate_frame(old) });
+    }
+    Some(true)
+}
+
 pub fn try_grow_user_stack(fault_addr: u64) -> bool {
     let reserve_bottom = USER_STACK_TOP - USER_STACK_RESERVE;
     if !(reserve_bottom..USER_STACK_TOP).contains(&fault_addr)
@@ -1536,6 +1582,15 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                     ..
                 } => {
                     let mut new_flags = (old_flags & !prot_bits) | (leaf_flags & prot_bits);
+                    // A private page fork still shares (COW.md §5.2): writable means copy on
+                    // write; read-only drops the copy-on-write intent. Unshared, it's plain.
+                    if !old_flags.contains(memory::address_space::SHARED_LEAF) {
+                        new_flags -= memory::address_space::COW_LEAF;
+                        if new_flags.contains(PageTableFlags::WRITABLE) && !matches!(old_frame, x86_64::structures::paging::mapper::MappedFrame::Size4KiB(f) if memory::refs::sole_owner(f))
+                        {
+                            new_flags = (new_flags - PageTableFlags::WRITABLE) | memory::address_space::COW_LEAF;
+                        }
+                    }
                     if writable && old_flags.contains(memory::address_space::CACHED_LEAF) {
                         // A page cache page made writable: this process's own copy from now on,
                         // the cache's page left as it is (PAGECACHE.md §3.2).

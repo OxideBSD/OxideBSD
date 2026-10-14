@@ -40,7 +40,7 @@ OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/R
   a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout: `hier(7)` (`share/man/man7/hier.7`).
 
 **Known deliberate gaps**: no pointer validation in `sys_read`/`sys_write`, no module unload, no
-kernel-mode preemption, no COW fork, no general VFS, no IPv6, static interfaces (no ifconfig/route), no SMP,
+kernel-mode preemption, no general VFS, no IPv6, static interfaces (no ifconfig/route), no SMP,
 no IOAPIC/MSI. Architecture decisions for unbuilt subsystems haven't been made: discuss with the
 user before large structural commitments.
 
@@ -183,12 +183,17 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 - User stacks grow on demand inside an 8 MiB reserve (`mm::try_grow_user_stack`, both rings).
 - `AddressSpace` is `Arc`-refcounted; frames are reclaimed at exit. `SHARED_LEAF` PTEs (SysV shm,
   `MAP_SHARED`) are never freed by teardown.
+- **Fork is copy-on-write** (`OxideBSD-doc/COW.md`): private frames are shared, counted in
+  `memory::refs`. **Drop a private frame only via `refs::release`** (free it when that returns
+  true). **Never write a user page through the HHDM** unless it's freshly allocated or
+  `SHARED_LEAF`: write through the user address (copyout), so the COW fault (`mm::try_resolve_cow`,
+  both rings) copies it first. The frame allocator lock is never held across a sleep.
 - **W^X** (`THREAT_MODEL.md` §3.3): every new mapping is `NO_EXECUTE` (`cpu::nx::no_execute()`)
   unless it holds code; nothing is writable and executable. `memory::wx` audits the kernel at boot
   and after the modules load (`[wx]` lines must say none). User `PROT_WRITE|PROT_EXEC` is
   `ENOTSUP` unless `wxneeded` (`PT_OXIDEBSD_WXNEEDED`, `ld.lld -z wxneeded`) on a `wxallowed` mount.
 - User leaves carry software bits: `SHARED_LEAF`, `CACHED_LEAF`, `PROT_NONE_LEAF` (non-present,
-  keeps its frame), `MAY_WRITE_LEAF`. **A page-table walk must not treat a non-`USER_ACCESSIBLE`
+  keeps its frame), `MAY_WRITE_LEAF`, `COW_LEAF`. **A page-table walk must not treat a non-`USER_ACCESSIBLE`
   user-range entry as kernel-owned**; a non-present leaf may still own a frame.
 
 ## Syscall ABI (`sys/syscall/`)
@@ -267,7 +272,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   sigactions, ...). fd table is keyed by `tgid`; `do_clone` must not call `fork_inherit`.
   Group-killing signals go through `terminate_thread_group` (leader last). `exit` is
   `SYS_EXIT_GROUP`.
-- Private futexes key on `(tgid, addr)`; shared ones on physical address.
+- Private futexes key on `(tgid, addr)`; shared ones on physical address only for `SHARED_LEAF`
+  pages (a private page's frame changes at its COW copy).
 - Orphans reparent to pid 1.
 - Kernel stack floor 128 KiB.
 

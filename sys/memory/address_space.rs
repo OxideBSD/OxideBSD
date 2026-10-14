@@ -66,6 +66,13 @@ pub const PROT_NONE_LEAF: PageTableFlags = PageTableFlags::BIT_11;
 /// file could be made writable and change the frames every other mapping of it shares.
 pub const MAY_WRITE_LEAF: PageTableFlags = PageTableFlags::BIT_52;
 
+/// Marks a private page shared copy-on-write after fork (OxideBSD-doc `COW.md`): mapped without
+/// `WRITABLE`, though the process may write it; the first write faults, and
+/// `process::mm::try_resolve_cow` gives the writer its own copy (or, when no other address space
+/// maps the frame any more, `memory::refs`, just makes it writable). A `PROT_NONE` page keeps it
+/// too.
+pub const COW_LEAF: PageTableFlags = PageTableFlags::BIT_53;
+
 /// Whether `entry` is a `PROT_NONE` user page (`PROT_NONE_LEAF`).
 pub fn is_prot_none(entry: &PageTableEntry) -> bool {
     let flags = entry.flags();
@@ -226,6 +233,9 @@ impl AddressSpace {
         let mut child = Self::build_from_active(physical_memory_offset, frame_allocator, true)?;
         // The child aliases the parent's cached frames (they're `SHARED_LEAF`), so uses them too.
         child.cached = Arc::new(Mutex::new(pagecache::fork_uses(&self.cached)));
+        // The parent's writable private pages just became copy-on-write: drop the TLB entries
+        // that still let it write them.
+        x86_64::instructions::tlb::flush_all();
         Ok(child)
     }
 
@@ -580,6 +590,16 @@ fn free_table_level(
     }
 }
 
+/// A private page's flags once fork shares it: a writable page keeps the right to write as
+/// `COW_LEAF` and loses `WRITABLE`; a read-only one is just shared.
+fn cow_flags(flags: PageTableFlags) -> PageTableFlags {
+    if flags.contains(PageTableFlags::WRITABLE) {
+        (flags - PageTableFlags::WRITABLE) | COW_LEAF
+    } else {
+        flags
+    }
+}
+
 /// Recursively walks `parent`'s `level` (`4` = PML4, `3` = PDPT, `2` = PD, `1` = PT -- the leaf
 /// level, where entries point at actual 4 KiB data frames rather than further tables) alongside
 /// `child` (already zeroed by the caller), populating `child` entry-by-entry:
@@ -607,7 +627,7 @@ fn free_table_level(
 /// exactly that partial subset and nothing else (see its own doc comment) -- so there's no need
 /// for this function, or its own recursive calls, to do any cleanup of their own on this path.
 fn copy_table_level(
-    parent: &PageTable,
+    parent: &mut PageTable,
     child: &mut PageTable,
     level: u8,
     physical_memory_offset: VirtAddr,
@@ -627,13 +647,11 @@ fn copy_table_level(
                 child[i].set_addr(src_frame.start_address(), entry.flags());
                 continue;
             }
-            let new_frame = frame_allocator.allocate_frame().ok_or(())?;
-            let src = (physical_memory_offset + src_frame.start_address().as_u64()).as_ptr::<u8>();
-            let dst = (physical_memory_offset + new_frame.start_address().as_u64()).as_mut_ptr::<u8>();
-            // SAFETY: the parent's own frame and a frame just allocated, both through the
-            // physical-memory window.
-            unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
-            child[i].set_addr(new_frame.start_address(), entry.flags());
+            // Shared copy-on-write, as a present private page below (COW.md §3).
+            super::refs::share(src_frame)?;
+            let flags = cow_flags(entry.flags());
+            parent[i].set_addr(src_frame.start_address(), flags);
+            child[i].set_addr(src_frame.start_address(), flags);
             continue;
         }
         if !entry.flags().contains(PageTableFlags::PRESENT) {
@@ -673,16 +691,12 @@ fn copy_table_level(
                 child[i].set_frame(src_frame, entry.flags());
                 continue;
             }
-            let new_frame = frame_allocator.allocate_frame().ok_or(())?;
-            let src = (physical_memory_offset + src_frame.start_address().as_u64()).as_ptr::<u8>();
-            let dst =
-                (physical_memory_offset + new_frame.start_address().as_u64()).as_mut_ptr::<u8>();
-            // SAFETY: src is a live, present physical frame (just read through the parent's own
-            // page table); dst is a frame allocate_frame just handed out, unused by construction
-            // -- both viewed through the same phys-mem-offset window elf::load already relies on
-            // for the same kind of copy.
-            unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
-            child[i].set_frame(new_frame, entry.flags());
+            // A private page: shared with the child copy-on-write (COW.md §3) -- the same frame in
+            // both, one more reference, neither side writable until a write fault copies it.
+            super::refs::share(src_frame)?;
+            let flags = cow_flags(entry.flags());
+            parent[i].set_frame(src_frame, flags);
+            child[i].set_frame(src_frame, flags);
             continue;
         }
 

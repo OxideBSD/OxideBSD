@@ -38,7 +38,7 @@ fn slot(frame: PhysFrame<Size4KiB>) -> &'static AtomicU16 {
 /// full: the caller fails the fork (`EAGAIN`, COW.md §2.3).
 pub fn share(frame: PhysFrame<Size4KiB>) -> Result<(), ()> {
     slot(frame)
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1).filter(|&n| n < u16::MAX))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1).filter(|&n| n < u16::MAX))
         .map(|_| ())
         .map_err(|_| ())
 }
@@ -47,7 +47,7 @@ pub fn share(frame: PhysFrame<Size4KiB>) -> Result<(), ()> {
 /// `true` when it was the last, and the caller frees the frame.
 pub fn release(frame: PhysFrame<Size4KiB>) -> bool {
     slot(frame)
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
         .is_err()
 }
 

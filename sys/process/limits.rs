@@ -698,8 +698,8 @@ pub fn do_futex_requeue(
 /// virtual address on this no-ASLR kernel (every stack sits at `USER_STACK_TOP`), so scoping by
 /// `tgid` there is still required, see `BlockReason::WaitingForFutex`'s own doc comment.
 ///
-/// A **shared** futex instead resolves `addr` through the caller's own currently-active address
-/// space to the real physical address backing it (`Translate::translate_addr`, which folds in the
+/// A **shared** futex on a shared page (`SHARED_LEAF`: SysV, `MAP_SHARED`) instead resolves `addr`
+/// through the caller's own currently-active address space to the real physical address backing it (`Translate::translate_addr`, which folds in the
 /// real offset within the mapped frame, so this is correct even against a huge page) and returns
 /// `(0, phys_addr)` -- `0` is never a live `tgid` (`Process::tgid` is always a real pid,
 /// `NEXT_PID` starts at `1`), so a shared key can never collide with a private one's own scope.
@@ -727,10 +727,18 @@ fn futex_key(pid: Pid, addr: u64, private: bool) -> Result<(Pid, u64), u64> {
             .expect("futex_key: caller has no address space")
             .mapper(phys_offset)
     };
-    mapper
-        .translate_addr(va)
-        .map(|phys| (0, phys.as_u64()))
-        .ok_or(EFAULT)
+    // Only a shared page (SysV, MAP_SHARED) can be seen by another process, so only its physical
+    // address is a shared key. A private page is keyed like a private futex (as Linux does):
+    // after fork it may be one frame shared copy-on-write, whose address changes at the first
+    // write (COW.md).
+    use x86_64::structures::paging::mapper::TranslateResult;
+    match mapper.translate(va) {
+        TranslateResult::Mapped { frame, offset, flags } if flags.contains(crate::memory::address_space::SHARED_LEAF) => {
+            Ok((0, frame.start_address().as_u64() + offset))
+        }
+        TranslateResult::Mapped { .. } => Ok((proc.tgid, addr)),
+        _ => Err(EFAULT),
+    }
 }
 
 /// The real `FUTEX_WAKE` scan (`do_futex`'s own branch above), factored out so
