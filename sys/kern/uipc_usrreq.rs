@@ -119,7 +119,8 @@ fn sockaddr(name: Option<&Name>) -> SockAddr {
 
 /// A process's credentials as local sockets pass them (`UNIX.md` §9.1): real and effective IDs,
 /// and the groups as FreeBSD's `cr_groups` holds them, the effective group first and then the
-/// supplementary groups, at most `CMGROUP_MAX` (16).
+/// other supplementary groups, at most `CMGROUP_MAX` (16). The effective group isn't repeated:
+/// `initgroups` lists the primary group, and root starts with group 0, both its effective one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cred {
     pid: u32,
@@ -136,7 +137,7 @@ fn current_cred() -> Cred {
     let mut groups = [0u32; 16];
     groups[0] = c.egid;
     let mut ngroups = 1;
-    for &g in c.groups.iter().take(groups.len() - 1) {
+    for &g in c.groups.iter().filter(|&&g| g != c.egid).take(groups.len() - 1) {
         groups[ngroups] = g;
         ngroups += 1;
     }
