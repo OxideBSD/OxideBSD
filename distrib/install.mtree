@@ -246,6 +246,7 @@
 ./bin/hostname type=file src=artifact:OXFS_HOSTNAME_ELF_PATH
 ./usr/bin/id type=file src=artifact:OXFS_ID_ELF_PATH
 ./usr/bin/ipcrm type=file src=artifact:OXFS_IPCRM_ELF_PATH
+./usr/bin/ipcs type=file src=artifact:OXFS_IPCS_ELF_PATH
 ./usr/bin/last type=file src=artifact:OXFS_LAST_ELF_PATH
 ./usr/bin/mesg type=file src=artifact:OXFS_MESG_ELF_PATH
 ./usr/bin/mkfifo type=file src=artifact:OXFS_MKFIFO_ELF_PATH
@@ -355,6 +356,8 @@
 ./usr/share/man/man1/less.1 type=file src=share/man/man1/more.1
 ./usr/share/man/man1/logger.1 type=file src=share/man/man1/logger.1
 ./usr/share/man/man1/protect.1 type=file src=share/man/man1/protect.1
+./usr/share/man/man1/ipcs.1 type=file src=share/man/man1/ipcs.1
+./usr/share/man/man1/ipcrm.1 type=file src=share/man/man1/ipcrm.1
 ./usr/share/man/man1/crontab.1 type=file src=share/man/man1/crontab.1
 ./usr/share/man/man1/chmod.1 type=file src=share/man/man1/chmod.1
 ./usr/share/man/man1/kill.1 type=file src=share/man/man1/kill.1
@@ -517,6 +520,7 @@
 ./usr/tests/pagecache/pagecache-smoke type=file src=artifact:OXFS_PAGECACHE_SMOKE_ELF_PATH
 ./usr/tests/vfork type=dir
 ./usr/tests/vfork/vfork-smoke type=file src=artifact:OXFS_VFORK_SMOKE_ELF_PATH
+./usr/tests/ipc/ipc-tools-smoke type=file src=artifact:OXFS_IPC_TOOLS_SMOKE_ELF_PATH
 ./usr/tests/wx type=dir
 ./usr/tests/wx/wx-needed type=file src=artifact:OXFS_WX_NEEDED_ELF_PATH
 ./usr/tests/wx/wx-plain type=file src=artifact:OXFS_WX_PLAIN_ELF_PATH

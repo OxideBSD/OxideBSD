@@ -48,6 +48,17 @@ const _: () = assert!(core::mem::size_of::<RawIpcPerm>() == 48);
 /// `obj_uid`/`obj_gid` (first match wins) -- same shape `sys/modules/oxfs`'s own `check_access`
 /// already established for inode permissions, generalized here over a plain `(uid, gid, mode)`
 /// triple so both `MsgQueue` and `SemSet` can share it without either owning the other's type.
+/// Appends one record of a `kern.ipc` table (OxideBSD-doc `SYSCTL.md` §5.2): `{int id; int pad;
+/// struct *id_ds}`, the `*id_ds` as `IPC_STAT` fills it.
+pub(crate) fn push_record<T: crate::memory::usercopy::Pod>(out: &mut alloc::vec::Vec<u8>, id: i32, ds: &T) {
+    out.extend_from_slice(&id.to_ne_bytes());
+    out.extend_from_slice(&[0; 4]);
+    // SAFETY: a Pod type is plain integers with no padding, so every byte is initialized.
+    out.extend_from_slice(unsafe {
+        core::slice::from_raw_parts((ds as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    });
+}
+
 pub(crate) fn check_access(
     obj_uid: u32,
     obj_gid: u32,

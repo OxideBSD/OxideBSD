@@ -607,6 +607,56 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     for leaf in vm_leaves {
         add_leaf(t, &vm, leaf);
     }
+    // System V IPC (SYSCTL.md §5.2): the tables ipcs(1) and ipcrm(1) read, a record per object the
+    // caller may see, and the limits.
+    let ipc = add_node(t, &kern, None, "ipc", "IPC");
+    let tables: [(&str, &str, &str, Getter); 3] = [
+        ("msqids", "S,msqid_ds", "Message queue IDs", crate::fs::sysv_msg::sysctl_table),
+        ("shmsegs", "S,shmid_ds", "Shared memory segment IDs", crate::fs::sysv_shm::sysctl_table),
+        ("sema", "S,semid_ds", "Semaphore IDs", crate::fs::sysv_sem::sysctl_table),
+    ];
+    for (name, fmt, descr, get) in tables {
+        add_leaf(t, &ipc, Leaf { number: None, name, kind: CTLTYPE_OPAQUE, fmt, flags: CTLFLAG_RD, descr, get, set: None });
+    }
+    let limits: [(&str, &str, Getter); 10] = [
+        ("msgmax", "Max characters in a message", || ulong(crate::fs::sysv_msg::SYSV_MSGMAX)),
+        ("msgmni", "Number of message queue identifiers", || ulong(crate::fs::sysv_msg::MAX_SYSV_MSG_QUEUES as u64)),
+        ("msgmnb", "Max characters in a message queue", || ulong(crate::fs::sysv_msg::SYSV_MSG_DEFAULT_QBYTES)),
+        ("shmmax", "Maximum shared memory segment size", || ulong(crate::fs::sysv_shm::MAX_SHM_SEGMENT_SIZE as u64)),
+        ("shmmin", "Minimum shared memory segment size", || ulong(1)),
+        ("shmmni", "Number of shared memory identifiers", || ulong(crate::fs::sysv_shm::MAX_SYSV_SHM_SEGMENTS as u64)),
+        ("semmni", "Number of semaphore identifiers", || ulong(crate::fs::sysv_sem::MAX_SYSV_SEM_SETS as u64)),
+        ("semmsl", "Max semaphores per id", || ulong(crate::fs::sysv_sem::MAX_SEMS_PER_SET as u64)),
+        ("semopm", "Max operations per semop call", || ulong(crate::fs::sysv_sem::MAX_SEMOPS_PER_CALL as u64)),
+        ("semvmx", "Semaphore maximum value", || ulong(crate::fs::sysv_sem::SEMVMX as u64)),
+    ];
+    for (name, descr, get) in limits {
+        add_leaf(t, &ipc, Leaf { number: None, name, kind: CTLTYPE_ULONG, fmt: "LU", flags: CTLFLAG_RD, descr, get, set: None });
+    }
+
+    // security.bsd.see_other_uids (FreeBSD's): 0 hides other users' processes and IPC objects from
+    // an unprivileged caller (`process::identity::SEE_OTHER_UIDS`).
+    let security = add_node(t, &[], None, "security", "Security");
+    let bsd = add_node(t, &security, None, "bsd", "BSD security policy");
+    add_leaf(
+        t,
+        &bsd,
+        Leaf {
+            number: None,
+            name: "see_other_uids",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Unprivileged processes may see subjects/objects with different real uid",
+            get: || int(crate::process::identity::SEE_OTHER_UIDS.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v: [u8; 4] = new.get(..4).and_then(|b| b.try_into().ok()).ok_or(EINVAL as i64)?;
+                crate::process::identity::SEE_OTHER_UIDS.store(i32::from_ne_bytes(v) != 0, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+    );
+
     // System call costs (`syscall::stats`): debug.syscall.stats, zeroed by debug.syscall.reset=1.
     let syscall = add_node(t, &debug, None, "syscall", "System call costs");
     add_leaf(

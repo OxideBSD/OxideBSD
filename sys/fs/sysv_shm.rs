@@ -78,8 +78,8 @@ const SHM_RDONLY: u64 = 0o10000;
 /// (12 direct blocks + one single-indirect block), a plausible real-world "big shared buffer" size
 /// without risking exhausting `BootInfoFrameAllocator`'s own never-reclaimed frame pool across
 /// several live segments at once.
-const MAX_SHM_SEGMENT_SIZE: usize = 4 * 1024 * 1024;
-const MAX_SYSV_SHM_SEGMENTS: usize = 32;
+pub(crate) const MAX_SHM_SEGMENT_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_SYSV_SHM_SEGMENTS: usize = 32;
 
 struct ShmSegment {
     key: i32,
@@ -491,6 +491,51 @@ pub(crate) fn inherit_attachments_for_fork(parent: &AddressSpace, child: &Addres
 /// (`EINVAL` for a never-valid id, `EIDRM` for a since-removed one) -- this port doesn't distinguish
 /// the two cases (a plain `BTreeMap` lookup miss either way), so `shmctl` follows `semctl`/
 /// `msgctl`'s own established "`EIDRM` for any lookup miss" convention instead.
+/// A segment's `shmid_ds`, as `IPC_STAT` fills it.
+fn shmid_ds(s: &ShmSegment) -> RawShmidDs {
+    RawShmidDs {
+        shm_perm: RawIpcPerm {
+            key: s.key,
+            uid: s.uid,
+            gid: s.gid,
+            cuid: s.cuid,
+            cgid: s.cgid,
+            mode: s.mode,
+            seq: 0,
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        },
+        shm_segsz: s.size,
+        shm_atime: s.atime,
+        shm_dtime: s.dtime,
+        shm_ctime: s.ctime,
+        shm_cpid: s.cpid as i32,
+        shm_lpid: s.lpid as i32,
+        shm_nattch: s.nattch,
+        pad1: 0,
+        pad2: 0,
+    }
+}
+
+/// `SHM_DEST` in a `kern.ipc.shmsegs` mode: removed while still attached (Linux's value).
+const SHM_DEST: u32 = 0o1000;
+
+/// `kern.ipc.shmsegs` (OxideBSD-doc `SYSCTL.md` §5.2): a record per segment the caller may see
+/// (`Cred::may_see`, its owner and creator), with `SHM_DEST` in the mode of one marked for removal.
+pub(crate) fn sysctl_table() -> Vec<u8> {
+    let cred = process::current_cred();
+    let mut out = Vec::new();
+    for (&id, s) in SEGMENTS.lock().iter().filter(|(_, s)| cred.may_see(&[s.uid, s.cuid])) {
+        let mut ds = shmid_ds(s);
+        if s.marked_for_removal {
+            ds.shm_perm.mode |= SHM_DEST;
+        }
+        crate::fs::sysv_ipc::push_record(&mut out, id, &ds);
+    }
+    out
+}
+
 pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
     let shmid = id as i32;
     let real_cmd = cmd & !IPC_64;
@@ -504,29 +549,7 @@ pub(crate) fn do_shmctl(id: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
             if !check_access(s, uid, gid, false) {
                 return Err(EACCES);
             }
-            let raw = RawShmidDs {
-                shm_perm: RawIpcPerm {
-                    key: s.key,
-                    uid: s.uid,
-                    gid: s.gid,
-                    cuid: s.cuid,
-                    cgid: s.cgid,
-                    mode: s.mode,
-                    seq: 0,
-                    pad0: 0,
-                    pad1: 0,
-                    pad2: 0,
-                },
-                shm_segsz: s.size,
-                shm_atime: s.atime,
-                shm_dtime: s.dtime,
-                shm_ctime: s.ctime,
-                shm_cpid: s.cpid as i32,
-                shm_lpid: s.lpid as i32,
-                shm_nattch: s.nattch,
-                pad1: 0,
-                pad2: 0,
-            };
+            let raw = shmid_ds(s);
             copyout_val(&raw, UserPtr::new(arg))?;
             Ok(0)
         }

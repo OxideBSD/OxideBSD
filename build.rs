@@ -403,6 +403,7 @@ fn main() {
     build_userland_crate("sysctl-syscall-smoke", "SYSCTL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pagecache-syscall-smoke", "PAGECACHE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("vfork-syscall-smoke", "VFORK_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("ipc-tools-syscall-smoke", "IPC_TOOLS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
@@ -616,6 +617,9 @@ fn main() {
     // protect(1): the OOM killer's per-process adjustment (COW.md §6.3).
     let protect_elf_path =
         build_std_oxidebsd_userland_crate("usr.bin/protect", "OXFS_PROTECT_ELF_PATH", &musl_sysroot);
+    // ipcs(1) and ipcrm(1), over the kern.ipc tables (SYSCTL.md §5.2); replaced BusyBox's ipcrm.
+    let ipcs_elf_path = build_std_oxidebsd_userland_crate("usr.bin/ipcs", "OXFS_IPCS_ELF_PATH", &musl_sysroot);
+    let ipcrm_elf_path = build_std_oxidebsd_userland_crate("usr.bin/ipcrm", "OXFS_IPCRM_ELF_PATH", &musl_sysroot);
     // /sbin/init: embedded in the kernel, which runs it as pid 1 (INIT.md §9.6); static for
     // the same reason as /bin/sh.
     let init_elf_path = build_std_oxidebsd_userland_crate_with_env(
@@ -728,6 +732,7 @@ fn main() {
     let sysctl_smoke_elf_path = build_c_pie(&musl_sysroot, "sysctl-smoke");
     let pagecache_smoke_elf_path = build_c_pie(&musl_sysroot, "pagecache-smoke");
     let vfork_smoke_elf_path = build_c_pie(&musl_sysroot, "vfork-smoke");
+    let ipc_tools_smoke_elf_path = build_c_pie(&musl_sysroot, "ipc-tools-smoke");
     let wx_needed_elf_path = build_clang_pie("wx-needed", "wx-needed", &["-Wl,-z,wxneeded"]);
     let wx_plain_elf_path = build_clang_pie("wx-needed", "wx-plain", &[]);
     let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
@@ -942,6 +947,8 @@ fn main() {
         ("OXFS_NEWSYSLOG_ELF_PATH", newsyslog_elf_path.to_str().unwrap()),
         ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),
         ("OXFS_PROTECT_ELF_PATH", protect_elf_path.to_str().unwrap()),
+        ("OXFS_IPCS_ELF_PATH", ipcs_elf_path.to_str().unwrap()),
+        ("OXFS_IPCRM_ELF_PATH", ipcrm_elf_path.to_str().unwrap()),
         ("OXFS_EMERGENCY_ELF_PATH", emergency_elf_path.to_str().unwrap()),
         ("OXFS_INIT_ELF_PATH", init_elf_path.to_str().unwrap()),
         ("OXFS_CRON_ELF_PATH", cron_elf_path.to_str().unwrap()),
@@ -975,6 +982,7 @@ fn main() {
         ("OXFS_SYSCTL_SMOKE_ELF_PATH", sysctl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PAGECACHE_SMOKE_ELF_PATH", pagecache_smoke_elf_path.to_str().unwrap()),
         ("OXFS_VFORK_SMOKE_ELF_PATH", vfork_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_IPC_TOOLS_SMOKE_ELF_PATH", ipc_tools_smoke_elf_path.to_str().unwrap()),
         ("OXFS_WX_NEEDED_ELF_PATH", wx_needed_elf_path.to_str().unwrap()),
         ("OXFS_WX_PLAIN_ELF_PATH", wx_plain_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),

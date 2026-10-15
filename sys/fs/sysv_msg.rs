@@ -74,15 +74,15 @@ const MSG_EXCEPT: u64 = 0o20000;
 
 /// Real Linux's own `MSGMNB` default (max total bytes queued at once) -- what a fresh `msgget`
 /// with no privileged override starts at; adjustable per-queue via `msgctl(IPC_SET)`.
-const SYSV_MSG_DEFAULT_QBYTES: u64 = 16384;
+pub(crate) const SYSV_MSG_DEFAULT_QBYTES: u64 = 16384;
 /// Real Linux's own `MSGMAX` (a single message's hard content-length ceiling, independent of a
 /// specific queue's own `qbytes`).
-const SYSV_MSGMAX: u64 = 8192;
+pub(crate) const SYSV_MSGMAX: u64 = 8192;
 /// A small, sane cap on live queues system-wide -- no privileged-override/`rlimit`-driven ceiling
 /// exists here the way real Linux's `MSGMNI` is (root-tunable via `/proc/sys/kernel/msgmni`); no
 /// live caller to size this against, same "small, plausible number" reasoning
 /// `MAX_POSIX_TIMERS`/`crate::fs::mqueue`'s own caps already use.
-const MAX_SYSV_MSG_QUEUES: usize = 32;
+pub(crate) const MAX_SYSV_MSG_QUEUES: usize = 32;
 
 struct SysvMessage {
     mtype: i64,
@@ -119,6 +119,66 @@ impl MsgQueue {
     fn cbytes(&self) -> u64 {
         self.messages.iter().map(|m| m.data.len() as u64).sum()
     }
+}
+
+/// A queue's `msqid_ds`, as `IPC_STAT` fills it.
+fn msqid_ds(q: &MsgQueue) -> RawMsqidDs {
+    RawMsqidDs {
+        msg_perm: RawIpcPerm {
+            key: q.key,
+            uid: q.uid,
+            gid: q.gid,
+            cuid: q.cuid,
+            cgid: q.cgid,
+            mode: q.mode,
+            seq: 0,
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        },
+        msg_stime: q.stime,
+        msg_rtime: q.rtime,
+        msg_ctime: q.ctime,
+        msg_cbytes: q.cbytes(),
+        msg_qnum: q.messages.len() as u64,
+        msg_qbytes: q.qbytes,
+        msg_lspid: q.lspid as i32,
+        msg_lrpid: q.lrpid as i32,
+        unused: [0; 2],
+    }
+}
+
+/// `MSG_RWAIT` and `MSG_WAIT` in a `kern.ipc.msqids` mode: a process waits to receive from or to
+/// send to the queue (`ipcs`'s `R` and `S`).
+const MSG_RWAIT: u32 = 0o2000;
+const MSG_WAIT: u32 = 0o4000;
+
+/// `kern.ipc.msqids` (OxideBSD-doc `SYSCTL.md` §5.2): a record per queue the caller may see
+/// (`Cred::may_see`, its owner and creator), with `MSG_RWAIT`/`MSG_WAIT` set while a receiver or a
+/// sender waits on it.
+pub(crate) fn sysctl_table() -> Vec<u8> {
+    let cred = crate::process::current_cred();
+    // Who waits where, read before the queues are locked (the order `do_msgsnd` keeps).
+    let (mut receiving, mut sending) = (Vec::new(), Vec::new());
+    for p in crate::process::table().lock().values() {
+        match p.state {
+            ProcState::Blocked(BlockReason::WaitingForSysvMsgRecv(id)) => receiving.push(id as i32),
+            ProcState::Blocked(BlockReason::WaitingForSysvMsgSend(id)) => sending.push(id as i32),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for (&id, q) in QUEUES.lock().iter().filter(|(_, q)| cred.may_see(&[q.uid, q.cuid])) {
+        let mut ds = msqid_ds(q);
+        if receiving.contains(&id) {
+            ds.msg_perm.mode |= MSG_RWAIT;
+        }
+        if sending.contains(&id) {
+            ds.msg_perm.mode |= MSG_WAIT;
+        }
+        crate::fs::sysv_ipc::push_record(&mut out, id, &ds);
+    }
+    out
 }
 
 static NEXT_MSQID: Mutex<i32> = Mutex::new(1);
@@ -400,29 +460,7 @@ pub(crate) fn do_msgctl(q: u64, cmd: u64, buf_ptr: u64) -> Result<u64, u64> {
             if !check_access(qref, uid, gid, false) {
                 return Err(EACCES);
             }
-            let raw = RawMsqidDs {
-                msg_perm: RawIpcPerm {
-                    key: qref.key,
-                    uid: qref.uid,
-                    gid: qref.gid,
-                    cuid: qref.cuid,
-                    cgid: qref.cgid,
-                    mode: qref.mode,
-                    seq: 0,
-                    pad0: 0,
-                    pad1: 0,
-                    pad2: 0,
-                },
-                msg_stime: qref.stime,
-                msg_rtime: qref.rtime,
-                msg_ctime: qref.ctime,
-                msg_cbytes: qref.cbytes(),
-                msg_qnum: qref.messages.len() as u64,
-                msg_qbytes: qref.qbytes,
-                msg_lspid: qref.lspid as i32,
-                msg_lrpid: qref.lrpid as i32,
-                unused: [0; 2],
-            };
+            let raw = msqid_ds(qref);
             copyout_val(&raw, UserPtr::new(buf_ptr))?;
             Ok(0)
         }

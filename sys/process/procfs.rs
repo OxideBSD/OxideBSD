@@ -54,10 +54,19 @@ fn state_char(state: ProcState) -> u8 {
     }
 }
 
+/// Whether a caller with `cred` sees process `p` in `/proc` (so in `ps`): FreeBSD's
+/// `security.bsd.see_other_uids` rule on its real user ID (`Cred::may_see`). A hidden process is
+/// as if it didn't exist. `cred` is read before the process table is locked (`current_cred`
+/// takes it).
+fn sees(cred: &identity::Cred, p: &Process) -> bool {
+    cred.may_see(&[p.shared.lock().cred.ruid])
+}
+
 /// Exposed to `sys/modules/oxfs` for its `/proc` directory listing -- `1`/`0` rather than `bool` to
 /// stay a plain FFI scalar, same convention `oxidebsd_register_syscall`'s own return already uses.
 pub(crate) extern "C" fn oxidebsd_proc_exists(pid: u64) -> i32 {
-    if PROCESS_TABLE.lock().contains_key(&pid) {
+    let cred = identity::current_cred();
+    if PROCESS_TABLE.lock().get(&pid).is_some_and(|p| sees(&cred, p)) {
         1
     } else {
         0
@@ -68,11 +77,13 @@ pub(crate) extern "C" fn oxidebsd_proc_exists(pid: u64) -> i32 {
 /// `index` is past the end -- lets `sys/modules/oxfs` enumerate `/proc`'s own directory listing without
 /// a "how many pids" call of its own (just loop until `-1`).
 pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
+    let cred = identity::current_cred();
     PROCESS_TABLE
         .lock()
-        .keys()
+        .iter()
+        .filter(|(_, p)| sees(&cred, p))
         .nth(index as usize)
-        .map(|&pid| pid as i64)
+        .map(|(&pid, _)| pid as i64)
         .unwrap_or(-1)
 }
 
@@ -84,8 +95,9 @@ pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
 /// Returns bytes written, or `-1` if `pid` no longer exists (a race between the caller's own
 /// existence check and this call -- the process table isn't locked across both).
 pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
         return -1;
     };
     let ppid = proc.parent.unwrap_or(0);
@@ -150,8 +162,9 @@ pub(crate) extern "C" fn oxidebsd_current_tgid() -> u64 {
 /// Raw copy of `Process::cmdline` (already real `/proc/[pid]/cmdline` wire format) into
 /// `buf_ptr`/`buf_cap`. `-1` if `pid` no longer exists.
 pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
         return -1;
     };
     copy_into(&proc.cmdline, buf_ptr, buf_cap)
@@ -160,8 +173,9 @@ pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_c
 /// `/proc/<pid>/oom_adj`: the thread group's OOM adjustment (OxideBSD-doc `COW.md` §6.3), as
 /// decimal and a newline. `-1` if `pid` no longer exists.
 pub(crate) extern "C" fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
         return -1;
     };
     let adj = proc.shared.lock().oom_adj;
@@ -178,8 +192,9 @@ pub(crate) extern "C" fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_c
 /// applets plausibly read (`Name`/`State`/`Tgid`/`Pid`/`PPid`/`Threads`) -- a small subset of real
 /// Linux's own much longer `/proc/[pid]/status`. `-1` if `pid` no longer exists.
 pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
         return -1;
     };
     let ppid = proc.parent.unwrap_or(0);

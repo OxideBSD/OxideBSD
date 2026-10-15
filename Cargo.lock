@@ -238,6 +238,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipc-tools-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "itimer-syscall-smoke"
 version = "0.1.0"
 

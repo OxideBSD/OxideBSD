@@ -87,17 +87,17 @@ const IPC_NOWAIT: i16 = 0o4000;
 
 /// Real Linux's own `SEMVMX` (`include/uapi/linux/sem.h`) -- the maximum value a single
 /// semaphore may ever hold. `semctl(SETVAL)`/`SEM_UNDO` accumulation both enforce this.
-const SEMVMX: i32 = 32767;
+pub(crate) const SEMVMX: i32 = 32767;
 /// A small, sane cap on semaphores per set and live sets system-wide -- no privileged-override/
 /// `rlimit`-driven ceiling exists here the way real Linux's `SEMMSL`/`SEMMNI` are, and no live
 /// caller to size either against, same "small, plausible number" reasoning
 /// `MAX_POSIX_TIMERS`/`crate::fs::sysv_msg::MAX_SYSV_MSG_QUEUES` already use.
-const MAX_SEMS_PER_SET: usize = 4096;
-const MAX_SYSV_SEM_SETS: usize = 32;
+pub(crate) const MAX_SEMS_PER_SET: usize = 4096;
+pub(crate) const MAX_SYSV_SEM_SETS: usize = 32;
 /// A sane bound on a single `semop`/`semtimedop` call's own `nsops` -- real Linux's own `SEMOPM`
 /// default is `32`, matched here for authenticity even though nothing enforces it being a
 /// meaningful limit on this port.
-const MAX_SEMOPS_PER_CALL: usize = 32;
+pub(crate) const MAX_SEMOPS_PER_CALL: usize = 32;
 
 struct Semaphore {
     val: i32,
@@ -122,6 +122,43 @@ struct SemSet {
     otime: i64,
     ctime: i64,
     semas: Vec<Semaphore>,
+}
+
+/// A set's `semid_ds`, as `IPC_STAT` fills it.
+fn semid_ds(s: &SemSet) -> RawSemidDs {
+    RawSemidDs {
+        sem_perm: RawIpcPerm {
+            key: s.key,
+            uid: s.uid,
+            gid: s.gid,
+            cuid: s.cuid,
+            cgid: s.cgid,
+            mode: s.mode,
+            seq: 0,
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        },
+        sem_otime: s.otime,
+        unused1: 0,
+        sem_ctime: s.ctime,
+        unused2: 0,
+        sem_nsems: s.semas.len() as u16,
+        pad: [0; 6],
+        unused3: 0,
+        unused4: 0,
+    }
+}
+
+/// `kern.ipc.sema` (OxideBSD-doc `SYSCTL.md` §5.2): a record per semaphore set the caller may see
+/// (`Cred::may_see`, its owner and creator).
+pub(crate) fn sysctl_table() -> Vec<u8> {
+    let cred = crate::process::current_cred();
+    let mut out = Vec::new();
+    for (&id, s) in SETS.lock().iter().filter(|(_, s)| cred.may_see(&[s.uid, s.cuid])) {
+        crate::fs::sysv_ipc::push_record(&mut out, id, &semid_ds(s));
+    }
+    out
 }
 
 fn check_access(s: &SemSet, uid: u32, gid: u32, want_write: bool) -> bool {
@@ -530,28 +567,7 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
             if !check_access(s, uid, gid, false) {
                 return Err(EACCES);
             }
-            let raw = RawSemidDs {
-                sem_perm: RawIpcPerm {
-                    key: s.key,
-                    uid: s.uid,
-                    gid: s.gid,
-                    cuid: s.cuid,
-                    cgid: s.cgid,
-                    mode: s.mode,
-                    seq: 0,
-                    pad0: 0,
-                    pad1: 0,
-                    pad2: 0,
-                },
-                sem_otime: s.otime,
-                unused1: 0,
-                sem_ctime: s.ctime,
-                unused2: 0,
-                sem_nsems: s.semas.len() as u16,
-                pad: [0; 6],
-                unused3: 0,
-                unused4: 0,
-            };
+            let raw = semid_ds(s);
             copyout_val(&raw, UserPtr::new(arg))?;
             Ok(0)
         }

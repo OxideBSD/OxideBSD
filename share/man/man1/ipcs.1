@@ -1,0 +1,105 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 15, 2026
+.Dt IPCS 1
+.Os OxideBSD
+.Sh NAME
+.Nm ipcs
+.Nd report System V interprocess communication facilities
+.Sh SYNOPSIS
+.Nm
+.Op Fl abcMmopQqSsTt
+.Op Fl u Ar user
+.Sh DESCRIPTION
+.Nm
+reports the System V message queues, shared memory segments and semaphore
+sets in the system.
+With no options it reports all three kinds, one line per object with its
+kind, identifier, key, mode, owner and group.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Show everything:
+.Fl b , c , o , p
+and
+.Fl t .
+.It Fl b
+Show the maximum sizes: the bytes a message queue may hold, a segment's
+size, the number of semaphores in a set.
+.It Fl c
+Show the user and group of the object's creator.
+.It Fl M
+Show the shared memory limits.
+.It Fl m
+Report shared memory segments.
+.It Fl o
+Show outstanding usage: the bytes and messages on a queue, the number of
+processes attached to a segment.
+.It Fl p
+Show process IDs: the last to send and to receive on a queue, a segment's
+creator and the last to attach or detach it.
+.It Fl Q
+Show the message queue limits.
+.It Fl q
+Report message queues.
+.It Fl S
+Show the semaphore limits.
+.It Fl s
+Report semaphore sets.
+.It Fl T
+Show all the limits.
+.It Fl t
+Show times: of the last send, receive and change of a queue; the last
+attach, detach and change of a segment; the last operation on and change of
+a semaphore set.
+.It Fl u Ar user
+Report only the objects
+.Ar user ,
+a name or a number, owns.
+.El
+.Pp
+The mode column has two letters of state before the permissions: a
+.Ql D
+for a segment removed while still attached, which goes once the last
+process detaches; an
+.Ql R
+or
+.Ql S
+for a queue a process is waiting to receive from or to send to.
+The permissions read like those of
+.Xr ls 1 ,
+with
+.Ql a
+for alter.
+.Pp
+.Nm
+reads the kernel's tables,
+.Va kern.ipc.msqids ,
+.Va kern.ipc.shmsegs
+and
+.Va kern.ipc.sema .
+When
+.Va security.bsd.see_other_uids
+is 0, a user other than the superuser sees only objects whose owner or
+creator is that user's real user ID.
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr ipcrm 1 ,
+.Xr msgget 2 ,
+.Xr semget 2 ,
+.Xr shmget 2 ,
+.Xr sysctl 8
+.Sh STANDARDS
+.Nm
+is in the X/Open System Interfaces option of
+.St -p1003.1-2008 .
+.Fl M , Q , S , T
+and
+.Fl u
+are extensions, from
+.Fx .
+.Sh HISTORY
+.Nm
+appeared in AT&T System V.
+OxideBSD's first appeared in 0.3.0, replacing BusyBox's.

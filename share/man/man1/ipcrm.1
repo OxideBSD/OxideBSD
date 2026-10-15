@@ -1,0 +1,69 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 15, 2026
+.Dt IPCRM 1
+.Os OxideBSD
+.Sh NAME
+.Nm ipcrm
+.Nd remove System V message queues, semaphore sets and shared memory segments
+.Sh SYNOPSIS
+.Nm
+.Op Fl vW
+.Op Fl q Ar msqid
+.Op Fl m Ar shmid
+.Op Fl s Ar semid
+.Op Fl Q Ar msgkey
+.Op Fl M Ar shmkey
+.Op Fl S Ar semkey
+.Ar ...
+.Sh DESCRIPTION
+.Nm
+removes the objects it is given, by identifier or by key:
+.Bl -tag -width "-Q msgkey"
+.It Fl q Ar msqid
+the message queue
+.Ar msqid ;
+.It Fl m Ar shmid
+the shared memory segment
+.Ar shmid ;
+.It Fl s Ar semid
+the semaphore set
+.Ar semid ;
+.It Fl Q Ar msgkey
+the message queue with key
+.Ar msgkey ;
+.It Fl M Ar shmkey
+the shared memory segment with key
+.Ar shmkey ;
+.It Fl S Ar semkey
+the semaphore set with key
+.Ar semkey .
+.El
+.Pp
+An identifier of \-1 stands for every object of its kind,
+.Fl W
+for every object of every kind.
+Numbers may be decimal, or hexadecimal or octal with C's prefixes.
+.Fl v
+reports each object removed.
+.Pp
+Removing an object needs its owner, its creator or the superuser.
+A shared memory segment still attached is removed once the last process
+detaches it; its key is free at once.
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr ipcs 1 ,
+.Xr msgctl 2 ,
+.Xr semctl 2 ,
+.Xr shmctl 2
+.Sh STANDARDS
+.Nm
+is in the X/Open System Interfaces option of
+.St -p1003.1-2008 .
+.Fl v , W
+and an identifier of \-1 are extensions, from
+.Fx .
+.Sh HISTORY
+.Nm
+appeared in AT&T System V.
+OxideBSD's first appeared in 0.3.0, replacing BusyBox's.

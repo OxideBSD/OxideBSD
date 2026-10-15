@@ -114,6 +114,11 @@ pub struct Cred {
     pub groups: Vec<u32>,
 }
 
+/// `security.bsd.see_other_uids` (FreeBSD's): when false, an unprivileged caller sees only the
+/// processes (`/proc`, so `ps`) and System V IPC objects (`kern.ipc.*`, so `ipcs`) of its own
+/// real user ID (`Cred::may_see`). True by default.
+pub static SEE_OTHER_UIDS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// `<limits.h>`'s `NGROUPS_MAX` in OxideBSD's musl, and `kern.ngroups`.
 pub const NGROUPS_MAX: usize = 32;
 
@@ -143,6 +148,16 @@ impl Cred {
     pub fn may_signal(&self, target: &Cred) -> bool {
         self.privileged()
             || [self.ruid, self.euid].iter().any(|&id| id == target.ruid || id == target.suid)
+    }
+
+    /// Whether this caller may see something belonging to the users `uids` (a process's real user
+    /// ID; an IPC object's owner and creator): FreeBSD's `cr_canseeotheruids`. Always, unless
+    /// `security.bsd.see_other_uids` is 0; then the superuser, or a caller whose real user ID is
+    /// among them.
+    pub fn may_see(&self, uids: &[u32]) -> bool {
+        SEE_OTHER_UIDS.load(core::sync::atomic::Ordering::Relaxed)
+            || self.privileged()
+            || uids.contains(&self.ruid)
     }
 
     /// `setpriority(2)` and the `sched_*` calls (FreeBSD's `p_cansched`): the superuser, or a caller

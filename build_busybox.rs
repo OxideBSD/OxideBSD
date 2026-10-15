@@ -155,11 +155,10 @@
         // only its `-d`/`-f`/`-i` flags (real DNS resolution) stay NEEDS_NETWORK.
         ("HOSTNAME", "hostname", 0xe200000),
         // The 2026-10-14 batch (OxideBSD-doc `BUSYBOX_APPLETS.md` §3): BSD base tools nothing else
-        // provided (`ipcs` waits for a native one over `kern.ipc` sysctls). `who`/`w`/`users`/
-        // `wall`/`last` read the utmpx and wtmpx files musl's utmpx(3) and login(1) keep (see
-        // `configure_busybox_single_applet`); `ps` replaces `minips`.
+        // provided (`ipcrm` since went native, with `ipcs`, over the `kern.ipc` sysctls).
+        // `who`/`w`/`users`/`wall`/`last` read the utmpx and wtmpx files musl's utmpx(3) and
+        // login(1) keep (see `configure_busybox_single_applet`); `ps` replaces `minips`.
         ("ID", "id", 0xe240000),
-        ("IPCRM", "ipcrm", 0xe280000),
         ("LAST", "last", 0xe300000),
         ("MESG", "mesg", 0xe340000),
         ("MKFIFO", "mkfifo", 0xe380000),
