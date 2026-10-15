@@ -1,7 +1,8 @@
-//! The 128 MB floor (OxideBSD-doc `RAM_FLOOR.md` §4.9): the real system -- kernel, modules, the
-//! system image's `/sbin/init`, `/etc/rc` and getty -- must reach a login prompt in 128 MB of RAM.
-//! This kernel is the real one; the QEMU runner gives it 128 MB, passes when `login:` reaches the
-//! serial console, and fails on a panic or anything running out of memory
+//! The 64 MB floor (OxideBSD-doc `RAM_FLOOR.md` §4.9): the real system -- kernel, modules, the
+//! system image's `/sbin/init`, `/etc/rc` and getty -- must reach a login prompt in 64 MB of RAM.
+//! This kernel is the real one; the QEMU runner gives it 64 MB, passes when `login:` reaches the
+//! serial console, and fails on a panic, anything running out of memory, a `[fault]` or a failed
+//! rc service
 //! (`scripts/qemu_runner.sh`, `TEST_NAME` `ram_floor_boot`).
 #![no_std]
 #![no_main]
