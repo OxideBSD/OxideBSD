@@ -276,11 +276,13 @@ fn build_limine_deploy_tool() {
 
     // Everything scripts/qemu_runner.sh needs to stage a bootable hybrid BIOS+UEFI ISO: the
     // deploy tool itself (for `limine bios-install`), both CD boot images, `limine-bios.sys`
-    // (BIOS boot from a raw/hybrid image), and the two EFI executables the ISO's `EFI/BOOT/`
+    // (BIOS boot from a raw/hybrid image), the hard-disk boot code `mkimg -b` installs
+    // (scripts/mkbootimg.sh), and the two EFI executables the ISO's `EFI/BOOT/`
     // directory needs for UEFI (x86_64 32- and 64-bit).
     const STAGE_FILES: &[&str] = &[
         "limine",
         "limine-bios.sys",
+        "limine-bios-hdd.bin",
         "limine-bios-cd.bin",
         "limine-uefi-cd.bin",
         "BOOTX64.EFI",
@@ -576,6 +578,11 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/liboxfs/src").display()
+    );
+    // makefs's `-t msdos` writer: FAT's on-disk format, lib/libmsdosfs.
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmsdosfs/src").display()
     );
     let fsck_oxfs_elf_path =
         build_static_std_crate("sbin/fsck_oxfs", "OXFS_FSCK_OXFS_ELF_PATH", &musl_sysroot);

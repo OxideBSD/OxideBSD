@@ -33,7 +33,8 @@
 # $QEMU_DISK_MANAGED=1 (the dev disk) it's replaced when the sets' contents changed since
 # (target/images/sets.sha256, recorded beside the disk as <disk>.sets) -- losing whatever was
 # changed on it -- unless OXIDEBSD_KEEP_DISK=1.
-disk_source=target/images/disk.img
+# QEMU_DISK_SOURCE: the image a fresh disk is copied from (the bootable one, for a disk-boot test).
+disk_source=${QEMU_DISK_SOURCE:-target/images/disk.img}
 sets_hash=$(cat target/images/sets.sha256 2>/dev/null)
 if [ ! -f "$disk_source" ] || [ -z "$sets_hash" ]; then
     echo "qemu_common.sh: $disk_source is missing -- run cargo build first" >&2
@@ -128,9 +129,11 @@ esac
 # shellcheck disable=SC2086 # $boot_cd is deliberately several words
 set -- "$@" \
     -drive "if=none,id=oxfsdisk,format=raw,file=$QEMU_DISK_IMAGE" \
-    -device "$data_disk" \
-    -drive "if=none,id=isocd,media=cdrom,file=$QEMU_ISO_PATH" \
-    $boot_cd
+    -device "$data_disk"
+# QEMU_NO_ISO=1: no CD, the firmware boots the disk.
+if [ "${QEMU_NO_ISO:-0}" != 1 ]; then
+    set -- "$@" -drive "if=none,id=isocd,media=cdrom,file=$QEMU_ISO_PATH" $boot_cd
+fi
 
 qemu_common_find_ovmf() {
     if [ -n "${OXIDEBSD_OVMF_PATH:-}" ]; then
@@ -156,7 +159,9 @@ qemu_common_find_ovmf() {
 # UEFI-first), BIOS via OXIDEBSD_FIRMWARE=bios. OVMF itself is a host QEMU prerequisite, like
 # qemu-system-x86_64 already is -- not vendored.
 FIRMWARE="${OXIDEBSD_FIRMWARE:-uefi}"
-if [ "$FIRMWARE" = "bios" ]; then
+if [ "$FIRMWARE" = "bios" ] && [ "${QEMU_NO_ISO:-0}" = 1 ]; then
+    set -- "$@" -boot order=c
+elif [ "$FIRMWARE" = "bios" ]; then
     set -- "$@" -boot order=d
 elif [ "$FIRMWARE" = "uefi" ]; then
     OVMF_PATH="$(qemu_common_find_ovmf)" || {

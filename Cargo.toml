@@ -157,6 +157,14 @@ name = "ram_floor_boot"
 harness = false
 
 [[test]]
+name = "disk_boot"
+harness = false
+
+[[test]]
+name = "disk_boot_bios"
+harness = false
+
+[[test]]
 name = "acpi_smoke"
 harness = false
 

@@ -65,6 +65,17 @@ case "$TEST_NAME" in
         # A service rc couldn't start, or any user process faulting, is a failure too.
         QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]"
         ;;
+    disk_boot|disk_boot_bios)
+        # The bootable disk image alone, no ISO (RAM_FLOOR.md §4.4.4): built below by
+        # scripts/mkbootimg.sh from what the ISO gets, and booted through to a login prompt.
+        DISK_BOOT=1
+        if [ "$TEST_NAME" = disk_boot_bios ]; then
+            OXIDEBSD_FIRMWARE=bios
+            export OXIDEBSD_FIRMWARE
+        fi
+        QEMU_PASS_PATTERN="login:"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|rc: failed services|\[fault\]"
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
@@ -152,6 +163,13 @@ xorriso -as mkisofs -R -r -J \
     "$ISO_ROOT" -o "$ISO_PATH" > /dev/null
 
 "$STAGE_DIR/limine" bios-install "$ISO_PATH" > /dev/null
+
+if [ "${DISK_BOOT:-0}" = 1 ]; then
+    QEMU_DISK_SOURCE="target/images/boot-test.img"
+    rm -f "$QEMU_DISK_SOURCE"
+    scripts/mkbootimg.sh "$ISO_ROOT/boot" "$QEMU_DISK_SOURCE"
+    QEMU_NO_ISO=1
+fi
 
 if [ "$IS_TEST" = 1 ]; then
     QEMU_DISK_IMAGE="target/oxfs_test_disk.img"

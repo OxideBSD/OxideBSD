@@ -7,8 +7,9 @@
 //!        image-file directory|manifest ...
 //! ```
 //!
-//! - `-t oxfs` (the default and, for now, the only type).
-//! - `-o label=name`: the volume label (`newfs_oxfs -L`).
+//! - `-t oxfs` (the default) or `-t msdos` (FAT32, `msdos.rs`).
+//! - `-o options`: comma-separated, per type. oxfs: `label=name`, the volume label
+//!   (`newfs_oxfs -L`). msdos: see `msdos.rs`.
 //! - `-s size`: the image's size, in bytes or with a `k`, `m` or `g` suffix; without it, just
 //!   large enough for the files, with a little room to spare.
 //! - `-F specfile`: an mtree(5) specification for the first directory: each entry's type, mode,
@@ -24,6 +25,8 @@
 //!
 //! Supported: regular files, directories, symbolic links and FIFOs. Device nodes are refused:
 //! devfs makes `/dev`.
+
+mod msdos;
 
 use mtree::{Entry, Spec, Type};
 use oxfs_format::{BLOCK_SIZE, BlockDevice, FormatOptions, Inode, InodeKind, ROOT_INODE, SB_LABEL_LEN, Writer};
@@ -466,6 +469,7 @@ fn parse_size(s: &str) -> Option<u64> {
 fn main() -> ExitCode {
     let (mut fstype, mut size, mut specfile, mut timestamp) = (String::from("oxfs"), None, None, None);
     let mut label = String::new();
+    let mut options = Vec::new();
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -489,20 +493,27 @@ fn main() -> ExitCode {
                 Ok(t) => timestamp = Some(t),
                 Err(_) => return usage(),
             },
-            _ => {
-                for o in value.split(',') {
-                    match o.split_once('=') {
-                        Some(("label", l)) => label = l.to_string(),
-                        _ => {
-                            eprintln!("makefs: unknown oxfs option {o}");
-                            return ExitCode::from(1);
-                        }
-                    }
-                }
-            }
+            _ => options.extend(value.split(',').map(str::to_string)),
         }
     }
-    if fstype != "oxfs" {
+    // Options are read once the type is known, wherever -t came.
+    let mut msdos_opts = msdos::Options::default();
+    for o in &options {
+        let ok = match (fstype.as_str(), o.split_once('=')) {
+            ("oxfs", Some(("label", l))) => {
+                label = l.to_string();
+                Ok(())
+            }
+            ("msdos", Some((k, v))) => msdos_opts.set(k, v),
+            ("oxfs" | "msdos", _) => Err(format!("unknown {fstype} option {o}")),
+            _ => Ok(()),
+        };
+        if let Err(e) = ok {
+            eprintln!("makefs: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if fstype != "oxfs" && fstype != "msdos" {
         eprintln!("makefs: unsupported file system type {fstype}");
         return ExitCode::from(1);
     }
@@ -514,7 +525,8 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     let image = PathBuf::from(&positional[0]);
-    match run(&image, &positional[1..], specfile.as_deref(), size, label.as_bytes(), timestamp) {
+    let fs = if fstype == "msdos" { Fs::Msdos(msdos_opts) } else { Fs::Oxfs(label.as_bytes()) };
+    match run(&image, &positional[1..], specfile.as_deref(), size, &fs, timestamp) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("makefs: {e}");
@@ -523,7 +535,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(image: &Path, sources: &[String], specfile: Option<&str>, size: Option<u64>, label: &[u8], timestamp: Option<i64>) -> Result<(), String> {
+enum Fs<'a> {
+    Oxfs(&'a [u8]),
+    Msdos(msdos::Options),
+}
+
+fn run(image: &Path, sources: &[String], specfile: Option<&str>, size: Option<u64>, fs: &Fs, timestamp: Option<i64>) -> Result<(), String> {
     let mut tree = Tree::new();
     let mut first_dir = true;
     for source in sources {
@@ -551,6 +568,12 @@ fn run(image: &Path, sources: &[String], specfile: Option<&str>, size: Option<u6
         }
     }
     check_parents(&tree)?;
+    if let Fs::Msdos(opts) = fs {
+        let (size, entries) = msdos::build(image, &tree, size, opts, timestamp)?;
+        println!("{}: {size} bytes, {entries} entries, FAT32", image.display());
+        return Ok(());
+    }
+    let Fs::Oxfs(label) = fs else { unreachable!() };
     let size = size.unwrap_or_else(|| auto_size(&tree)) / BLOCK_SIZE as u64 * BLOCK_SIZE as u64;
     let inodes = build(image, &tree, size, label, timestamp)?;
     println!("{}: {size} bytes, {} entries, {inodes} inodes", image.display(), tree.len());

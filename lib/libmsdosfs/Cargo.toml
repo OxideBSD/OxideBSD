@@ -1,0 +1,10 @@
+[package]
+name = "msdosfs_format"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# The FAT file system's on-disk format: makefs(8)'s `-t msdos` writer uses it, and the kernel's
+# msdosfs will. No dependencies; its own workspace, testable on the host, like lib/liboxfs.
+[workspace]

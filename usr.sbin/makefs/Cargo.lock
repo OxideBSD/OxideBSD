@@ -6,9 +6,14 @@ version = 4
 name = "makefs"
 version = "0.1.0"
 dependencies = [
+ "msdosfs_format",
  "mtree",
  "oxfs_format",
 ]
+
+[[package]]
+name = "msdosfs_format"
+version = "0.1.0"
 
 [[package]]
 name = "mtree"

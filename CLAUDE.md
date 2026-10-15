@@ -156,6 +156,9 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `regress/multiboot2-kernel/` boots the real system via `scripts/run_multiboot2_kernel.sh`. The
   smoke crate depends on the `oxidebsd` lib, so its build is guarded by
   `OXIDEBSD_BUILDING_MULTIBOOT2_SMOKE`.
+- `scripts/mkbootimg.sh <bootdir> <out.img>`: a self-booting GPT disk (BIOS boot partition via
+  `mkimg -b`, FAT32 ESP via `makefs -t msdos`, the root image), from `target/iso_root/boot`;
+  tests `disk_boot`/`disk_boot_bios` boot it with no ISO.
 - `global_asm!` that switches sections must `.pushsection`/`.popsection`.
 
 ## Memory

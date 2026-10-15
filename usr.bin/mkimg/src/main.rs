@@ -3,7 +3,7 @@
 //! on the host; it is installed on the target too.
 //!
 //! ```text
-//! mkimg -s scheme -o outfile [-c capacity] -p partition ...
+//! mkimg -s scheme -o outfile [-c capacity] [-b bootcode] -p partition ...
 //! ```
 //!
 //! - `-s gpt` or `-s mbr`: the partitioning scheme.
@@ -11,7 +11,15 @@
 //! - `-c capacity`: the disk's size at least, in bytes or with a `k`, `m` or `g` suffix; the last
 //!   partition does not grow into it.
 //! - `-p type[/label]:=file`: a partition holding `file`; `-p type[/label]::size`: an empty one
-//!   of `size`. Types: `oxfs`, `efi`. A label is GPT's partition name (`/dev/gpt/<label>`).
+//!   of `size`. Types: `oxfs`, `efi`, `bios` (a GPT BIOS boot partition, for `-b`). A label is
+//!   GPT's partition name (`/dev/gpt/<label>`).
+//! - `-b bootcode`: BIOS boot code, Limine's hard-disk image (`limine-bios-hdd.bin`), installed
+//!   as `limine bios-install` does (`RAM_FLOOR.md` §4.4.4): its first sector becomes the boot
+//!   sector, keeping the disk's timestamp and partition table, and the rest, stage 2, goes into
+//!   the GPT's `bios` partition, or on an MBR disk into the gap before the first partition; the
+//!   boot sector is told where (a little-endian byte offset at `0x1a4`). An MBR disk's first
+//!   partition is marked active if none is, as some BIOSes need. Stage 2 finds
+//!   `limine-bios.sys` and `limine.conf` on a FAT partition of the disk.
 //!
 //! Partitions start at 1 MiB and on 1 MiB boundaries, and are whole 4 KiB blocks. A GPT disk's
 //! and partitions' GUIDs are derived from the layout, so the same partitions give the same disk:
@@ -33,9 +41,15 @@ const GPT_ENTRY_SECTORS: u64 = GPT_ENTRIES * GPT_ENTRY_SIZE / SECTOR;
 /// The EFI system partition's type, `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`.
 const EFI_TYPE_GUID: [u8; 16] = guid_bytes(0xC12A_7328, 0xF81F, 0x11D2, [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B]);
 const EFI_MBR_TYPE: u8 = 0xEF;
+/// A BIOS boot partition's type, `21686148-6449-6E6F-744E-656564454649` ("Hah!IdontNeedEFI").
+const BIOS_TYPE_GUID: [u8; 16] = *b"Hah!IdontNeedEFI";
+/// Where Limine's boot sector keeps stage 2's byte offset.
+const STAGE2_LOC_OFFSET: usize = 0x1a4;
+/// Stage 2's place on an MBR disk: after the boot sector, and a multiple of every sector size.
+const MBR_STAGE2_LOC: u64 = 4096;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: mkimg -s gpt|mbr -o outfile [-c capacity] -p type[/label]:=file|::size ...");
+    eprintln!("usage: mkimg -s gpt|mbr -o outfile [-c capacity] [-b bootcode] -p type[/label]:=file|::size ...");
     ExitCode::from(1)
 }
 
@@ -46,9 +60,11 @@ enum Scheme {
 }
 
 #[derive(Clone, Copy)]
+#[derive(PartialEq)]
 enum PartType {
     Oxfs,
     Efi,
+    Bios,
 }
 
 impl PartType {
@@ -56,6 +72,7 @@ impl PartType {
         match self {
             PartType::Oxfs => OXFS_TYPE_GUID,
             PartType::Efi => EFI_TYPE_GUID,
+            PartType::Bios => BIOS_TYPE_GUID,
         }
     }
 
@@ -63,6 +80,7 @@ impl PartType {
         match self {
             PartType::Oxfs => OXFS_MBR_TYPE,
             PartType::Efi => EFI_MBR_TYPE,
+            PartType::Bios => unreachable!("refused on MBR"),
         }
     }
 }
@@ -94,7 +112,8 @@ fn parse_part(s: &str) -> Result<Part, String> {
     let kind = match kind {
         "oxfs" => PartType::Oxfs,
         "efi" => PartType::Efi,
-        _ => return Err(format!("{kind}: unknown partition type (oxfs, efi)")),
+        "bios" => PartType::Bios,
+        _ => return Err(format!("{kind}: unknown partition type (oxfs, efi, bios)")),
     };
     if label.encode_utf16().count() > 36 || label.contains('/') {
         return Err(format!("{label}: a label is at most 36 characters, without `/`"));
@@ -205,9 +224,47 @@ fn mbr_entry(sector0: &mut [u8], i: usize, kind: u8, first: u64, sectors: u64) {
     sector0[511] = 0xAA;
 }
 
-fn run(scheme: Scheme, out: &str, capacity: u64, mut parts: Vec<Part>) -> Result<(), String> {
+/// `-b`: Limine's boot sector over sector 0 (its timestamp, bytes 218-223, and the partition
+/// table, 440-509, kept), stage 2 at `stage2_loc`, and that offset in the boot sector.
+fn install_bootcode(disk: &File, scheme: Scheme, parts: &[Part], code: &[u8]) -> Result<(), String> {
+    if code.len() <= SECTOR as usize {
+        return Err("boot code: no stage 2 after its first sector".into());
+    }
+    let stage2 = &code[SECTOR as usize..];
+    let (loc, room) = match scheme {
+        Scheme::Gpt => {
+            let bios = parts
+                .iter()
+                .find(|p| p.kind == PartType::Bios)
+                .ok_or("-b on a GPT disk needs a bios partition (-p bios::64k)")?;
+            (bios.first * SECTOR, bios.sectors * SECTOR)
+        }
+        // Partitions start at 1 MiB; Limine itself allows up to sector 63.
+        Scheme::Mbr => (MBR_STAGE2_LOC, 63 * SECTOR - MBR_STAGE2_LOC),
+    };
+    if stage2.len() as u64 > room {
+        return Err(format!("boot code: stage 2 is {} bytes, only {room} fit", stage2.len()));
+    }
+    let mut sector0 = vec![0u8; SECTOR as usize];
+    disk.read_exact_at(&mut sector0, 0).map_err(|e| e.to_string())?;
+    sector0[..218].copy_from_slice(&code[..218]);
+    sector0[224..440].copy_from_slice(&code[224..440]);
+    sector0[510..512].copy_from_slice(&code[510..512]);
+    sector0[STAGE2_LOC_OFFSET..STAGE2_LOC_OFFSET + 8].copy_from_slice(&loc.to_le_bytes());
+    // Some BIOSes boot only a disk with an active partition: the first, as Limine marks it.
+    if scheme == Scheme::Mbr && !(0..4).any(|i| sector0[446 + i * 16] == 0x80) {
+        sector0[446] = 0x80;
+    }
+    disk.write_all_at(&sector0, 0).map_err(|e| e.to_string())?;
+    disk.write_all_at(stage2, loc).map_err(|e| e.to_string())
+}
+
+fn run(scheme: Scheme, out: &str, capacity: u64, bootcode: Option<&[u8]>, mut parts: Vec<Part>) -> Result<(), String> {
     if scheme == Scheme::Mbr && parts.len() > 4 {
         return Err("MBR holds at most four partitions".into());
+    }
+    if scheme == Scheme::Mbr && parts.iter().any(|p| p.kind == PartType::Bios) {
+        return Err("a bios partition is GPT's; on MBR, -b uses the gap before the first partition".into());
     }
     let mut next = ALIGN;
     for p in &mut parts {
@@ -222,6 +279,7 @@ fn run(scheme: Scheme, out: &str, capacity: u64, mut parts: Vec<Part>) -> Result
         return Err("too large for MBR (2 TiB)".into());
     }
     let disk = OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
         .truncate(true)
@@ -242,6 +300,9 @@ fn run(scheme: Scheme, out: &str, capacity: u64, mut parts: Vec<Part>) -> Result
             }
             disk.write_all_at(&sector0, 0).map_err(io)?;
         }
+    }
+    if let Some(code) = bootcode {
+        install_bootcode(&disk, scheme, &parts, code).map_err(|e| format!("{out}: {e}"))?;
     }
     let mut buf = vec![0u8; 1 << 20];
     for p in &mut parts {
@@ -276,7 +337,7 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 fn main() -> ExitCode {
-    let (mut scheme, mut out, mut capacity, mut parts) = (None, None, 0, Vec::new());
+    let (mut scheme, mut out, mut capacity, mut parts, mut bootcode) = (None, None, 0, Vec::new(), None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let Some(value) = args.next() else { return usage() };
@@ -289,6 +350,13 @@ fn main() -> ExitCode {
                 }
             }
             "-o" => out = Some(value),
+            "-b" => match std::fs::read(&value) {
+                Ok(code) => bootcode = Some(code),
+                Err(e) => {
+                    eprintln!("mkimg: {value}: {e}");
+                    return ExitCode::from(1);
+                }
+            },
             "-c" => match parse_size(&value) {
                 Some(n) => capacity = n,
                 None => return usage(),
@@ -307,7 +375,7 @@ fn main() -> ExitCode {
     if parts.is_empty() {
         return usage();
     }
-    match run(scheme, &out, capacity, parts) {
+    match run(scheme, &out, capacity, bootcode.as_deref(), parts) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mkimg: {e}");
