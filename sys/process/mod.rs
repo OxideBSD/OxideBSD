@@ -712,19 +712,13 @@ pub(crate) struct SignalStackFrame {
     pub(crate) ucontext_addr: u64,
 }
 
-/// State genuinely shared by every thread in a real POSIX thread group (`CLONE_THREAD`), once
-/// `process::lifecycle::do_clone` exists — moved out of `Process` itself specifically so that a
-/// write from one thread (e.g. `chdir`, `brk`, a new `mmap`) is immediately visible to every
-/// sibling sharing the same `Arc<Mutex<..>>`, not just a copy sitting in that one thread's own
-/// `Process`. `mmap_file_regions` in particular *must* live here, not just conventionally should:
-/// once `AddressSpace::share` (`sys/memory/address_space.rs`) makes the underlying page-table
-/// mappings genuinely shared across threads, letting each thread keep its own divergent
-/// `mmap_file_regions` bookkeeping would cause double-writeback/stale-`munmap` bugs against the
-/// one real shared mapping.
+/// State shared by every thread in a POSIX thread group (`CLONE_THREAD`): a write from one
+/// thread (`chdir`, `setuid`, `sigaction`) is visible to every sibling sharing the same
+/// `Arc<Mutex<..>>`. `spawn`/`fork` build a fresh one; `do_clone` shares the caller's.
 ///
-/// Every process today is still its own thread group of one — `spawn`/`fork` both build a fresh
-/// `Arc::new(Mutex::new(..))` here, so nothing changes behavior until `do_clone` (which instead
-/// does `Arc::clone(&parent.shared)`) lands.
+/// The memory bookkeeping (`brk`, the `mmap` region lists, memory locks, `wx_allowed`, SysV shm
+/// attachments) is not here: it belongs to the address space (`mm::VmState`), so a vfork child,
+/// which borrows its parent's page tables but is a process of its own, shares it too.
 ///
 /// **Lock-ordering rule**: always lock `PROCESS_TABLE` first if both locks are needed, this
 /// `Mutex` second — and never hold this lock across `scheduler::schedule()`. Same discipline
@@ -735,34 +729,6 @@ pub struct ThreadGroupShared {
     pub umask: u32,
     /// Real, effective and saved IDs and supplementary groups (`identity::Cred`).
     pub cred: identity::Cred,
-    pub brk: VirtAddr,
-    pub mmap_file_regions: Vec<mm::MmapFileRegion>,
-    /// Real, still-live `/dev/fb0` (or any future MMIO-backed) mappings -- see `mm::MmapPhysRegion`'s
-    /// own doc comment. Same fork/execve treatment as `mmap_file_regions` (not inherited by `fork`,
-    /// cleaned up by `mm::cleanup_mmap_phys_regions_for_exit` on both self-exit and `execve`).
-    pub mmap_phys_regions: Vec<mm::MmapPhysRegion>,
-    /// Real `mlockall(MCL_FUTURE)` state (`process::mm::do_mlockall`/`do_mmap`) — `true` once this
-    /// address space has called `mlockall(MCL_FUTURE)`, making every later `mmap()` implicitly
-    /// locked (subject to `RLIMIT_MEMLOCK`, see `process::mm::do_mmap`'s own `auto_lock` handling).
-    /// Lives here, not on `Process`, because real memory locks are a property of the address
-    /// space, not the individual thread — a `CLONE_THREAD` sibling shares this state automatically
-    /// via the same `Arc` `mmap_file_regions` already does. **Not inherited by `fork`** (a forked
-    /// child gets its own fresh `ThreadGroupShared`, real POSIX: `mlockall()`'s `MCL_FUTURE`
-    /// setting is not inherited across `fork(2)`); **cleared by `execve`** (`do_execve` resets it
-    /// explicitly, real POSIX: memory locks are automatically removed on `execve(2)`).
-    pub mlockall_future: bool,
-    /// Real running total of bytes this address space has locked via the `mlockall_future`
-    /// auto-lock path above — what `RLIMIT_MEMLOCK` is actually checked against. **Deliberately
-    /// scoped to just that one trigger**: an explicit `mlock`/`munlock` call doesn't add to or
-    /// subtract from this counter (`process::mm::do_mlock`'s own doc comment already documents
-    /// that real per-page locked-state tracking doesn't exist here) — no real caller in this
-    /// kernel's own call graph needs `RLIMIT_MEMLOCK` enforced against an explicit `mlock()`, only
-    /// against `mlockall(MCL_FUTURE)`'s own implicit one. Same fork/execve treatment as
-    /// `mlockall_future` above.
-    pub locked_bytes: u64,
-    /// Whether this program may map pages writable and executable at once (`mm::check_wx`): a
-    /// `wxneeded` program run from a `wxallowed` mount. Set by `execve`, kept across `fork`.
-    pub wx_allowed: bool,
     /// Indexed `1..=64` (index `0` unused) -- see `SigAction`'s own doc comment. **Lives here, not
     /// on `Process`, because real POSIX signal disposition is a property of the whole process,
     /// shared by every thread** -- `sigaction()` called on any one `CLONE_THREAD` sibling must be
@@ -847,8 +813,8 @@ pub struct Process {
     /// bare top of the mapped stack region (`process::USER_STACK_TOP`). Handed straight to
     /// `usermode::jump_to_usermode`/`syscall::redirect_frame` as the stack pointer.
     pub user_stack_top: VirtAddr,
-    /// Real `CLONE_THREAD`-shared state: `cwd`, `root_inode`, `umask`, `cred`, `brk`, and
-    /// `mmap_file_regions` — see `ThreadGroupShared`'s own doc comment for why these seven moved
+    /// Real `CLONE_THREAD`-shared state: `cwd`, `root_inode`, `umask`, `cred`, `sigactions` —
+    /// see `ThreadGroupShared`'s own doc comment for why these moved
     /// out of `Process` itself and into one `Arc<Mutex<..>>` every thread in a real thread group
     /// shares. Every process today is still its own thread group of one (`spawn`/`fork` both build
     /// a fresh, independent `Arc` here), so this is purely a storage-location change until
@@ -1048,20 +1014,6 @@ pub struct Process {
     /// mutates the live `Process` in place and never assigns this field, the same "leave it alone"
     /// treatment `cwd`/`pgid`/`rlimits` already get).
     pub sysv_sem_undo: Vec<(i32, u16, i32)>,
-    /// Real SysV shared-memory attachment bookkeeping (`crate::fs::sysv_shm`) -- one `(addr,
-    /// shmid)` pair per successful `shmat`, in call order, so `shmdt(addr)` can find (and remove)
-    /// the matching entry and `crate::fs::sysv_shm::detach_all_for_exit` can decrement every
-    /// still-attached segment's own `nattch` on real process termination. **Real inheritance across
-    /// `fork`** -- `crate::fs::sysv_shm::inherit_attachments_for_fork` gives a forked child its own
-    /// independent copy of this list (and bumps each referenced segment's `nattch` to match), called
-    /// right after `AddressSpace::fork` has already aliased the real backing frames into the
-    /// child's own table (see `memory::address_space::SHARED_LEAF`'s own doc comment). **Real
-    /// implicit detach on `execve`** — `do_execve` calls the exact same
-    /// `crate::fs::sysv_shm::detach_all_for_exit` a real process exit does (after committing the
-    /// new `AddressSpace`, which is what actually makes every prior `shmat`'s own mapping
-    /// unreachable): matches real Linux, where `execve(2)` destroying the old address space is
-    /// itself a real implicit detach of everything that was attached to it.
-    pub sysv_shm_attach: Vec<(u64, i32)>,
     /// Real per-standard-signal-number sender identity/payload, indexed `1..=34` same as
     /// `sigactions` (index `0` unused) -- see `QueuedSigInfo`'s own doc comment. Not copied by
     /// `fork` (a forked child starts with `pending_signals == 0` too, so there's nothing
@@ -1200,6 +1152,17 @@ pub struct Process {
     /// Set when the timer wakes this process from a terminal read at its `VTIME` deadline,
     /// rather than input arriving (`crate::tty::read`).
     pub tty_timed_out: bool,
+}
+
+impl Process {
+    /// The memory bookkeeping of the address space this process runs in (`mm::VmState`). Panics
+    /// for a reaped zombie, which has none: only call it for a live process.
+    pub fn vm(&self) -> spin::MutexGuard<'_, mm::VmState> {
+        self.address_space
+            .as_ref()
+            .expect("vm: process has no address space")
+            .vm()
+    }
 }
 
 /// See `Process::cascade_budget`'s own doc comment for what this gates and why it exists.

@@ -182,6 +182,7 @@ fn spawn_finish(
     let cmdline = build_cmdline(argv);
     let kernel_stack_top = kernel_stack.top();
     let rsp = crate::process::context_switch::seed_spawn_frame(kernel_stack_top);
+    address_space.vm().brk = brk;
 
     let process = Process {
         pid,
@@ -203,12 +204,6 @@ fn spawn_finish(
             root_inode: 0,
             umask: 0o022,
             cred: Cred::root(),
-            brk,
-            mmap_file_regions: Vec::new(),
-            mmap_phys_regions: Vec::new(),
-            mlockall_future: false,
-            locked_bytes: 0,
-            wx_allowed: false,
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
             oom_adj: 0,
         })),
@@ -241,7 +236,6 @@ fn spawn_finish(
         cont_notify_pending: false,
         sigsuspend_restore_mask: None,
         sysv_sem_undo: Vec::new(),
-        sysv_shm_attach: Vec::new(),
         pending_siginfo: [QueuedSigInfo::default(); 35],
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: crate::cpu::fpu::clean_state(),
@@ -441,6 +435,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
     let child_pid = alloc_pid();
     let (
         child_address_space,
+        parent_space,
         child_shared,
         parent_fs_base,
         parent_pgid,
@@ -478,14 +473,10 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         let Ok(child_address_space) = child_address_space else {
             return Err(ENOMEM);
         };
-        // Real fork() semantics for the now-`ThreadGroupShared` fields: cwd/root_inode/umask/
-        // uid/gid/brk are all copied (a forked child is a real POSIX *process*, gets its own
-        // independent ThreadGroupShared, never Arc::clone's the parent's -- that's do_clone's own
-        // CLONE_THREAD-only behavior). `mmap_file_regions` starts empty here regardless -- real
-        // inheritance for any `MAP_SHARED` entry is filled in right after this Process is inserted
-        // into the table, by the `mm::inherit_mmap_file_regions_for_fork` call below, same
-        // "needs a real child_pid table entry to write into" reasoning as the matching
-        // `fs::sysv_shm::inherit_attachments_for_fork` call just after it.
+        // fork() semantics for the `ThreadGroupShared` fields: cwd/root_inode/umask/cred are
+        // copied (a forked child is a process of its own, with its own ThreadGroupShared, never
+        // the parent's -- sharing it is do_clone's CLONE_THREAD behaviour). The memory bookkeeping
+        // goes with the address space instead (`mm::VmState`, filled by `inherit_vm_for_fork`).
         let child_shared = {
             let parent_shared = parent.shared.lock();
             Arc::new(Mutex::new(ThreadGroupShared {
@@ -493,15 +484,6 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
                 root_inode: parent_shared.root_inode,
                 umask: parent_shared.umask,
                 cred: parent_shared.cred.clone(),
-                brk: parent_shared.brk,
-                mmap_file_regions: Vec::new(),
-                mmap_phys_regions: Vec::new(),
-                // Not inherited -- see ThreadGroupShared::mlockall_future's own doc comment (real
-                // POSIX mlockall()/fork() semantics).
-                mlockall_future: false,
-                locked_bytes: 0,
-                // The same program in the same address space.
-                wx_allowed: parent_shared.wx_allowed,
                 // Real fork() semantics: signal disposition is copied (see ThreadGroupShared::
                 // sigactions's own doc comment for why this field lives here, not on Process).
                 sigactions: parent_shared.sigactions,
@@ -510,6 +492,9 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         };
         (
             child_address_space,
+            // A second handle on the parent's table, only to read its `VmState` once the table
+            // lock is dropped (`inherit_vm_for_fork` takes the shm and mmap locks).
+            parent.address_space.as_ref().expect("fork: caller has no address space").share(),
             child_shared,
             parent.fs_base,
             parent.pgid,
@@ -556,6 +541,8 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         return Err(ENOMEM);
     };
     let kernel_stack_top = kernel_stack.top();
+    mm::inherit_vm_for_fork(&parent_space, &child_address_space);
+    drop(parent_space);
     // SAFETY: parent_frame is the caller's own live SyscallFrame, valid for the duration of this
     // call (we're still inside sys_fork's/sys_clone's own handling of it).
     let rsp = unsafe {
@@ -624,10 +611,6 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         sigsuspend_restore_mask: None,
         // Not inherited -- see this field's own doc comment (real SysV semadj/fork semantics).
         sysv_sem_undo: Vec::new(),
-        // Starts empty here -- real inheritance is filled in right after this Process is inserted
-        // into the table, by the `fs::sysv_shm::inherit_attachments_for_fork` call below (needs a
-        // real child_pid table entry to write into, which doesn't exist yet at this point).
-        sysv_shm_attach: Vec::new(),
         // Not inherited -- see this field's own doc comment (pending_signals itself starts at 0
         // for a forked child too, so there's nothing meaningful to carry over).
         pending_siginfo: [QueuedSigInfo::default(); 35],
@@ -656,15 +639,6 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         table.get_mut(&caller_pid).unwrap().children.push(child_pid);
         table.insert(child_pid, Box::new(child));
     }
-    // Real fork() semantics: a child that inherited an attached SysV shm segment (its own page
-    // table already aliases the real frames -- see AddressSpace::fork's own SHARED_LEAF handling)
-    // needs the matching nattch/attach-list bookkeeping too. See that function's own doc comment.
-    crate::fs::sysv_shm::inherit_attachments_for_fork(caller_pid, child_pid);
-    // Real fork() semantics: a child that inherited a fd-backed MAP_SHARED mapping (same
-    // SHARED_LEAF frame-aliasing story as the SysV-shm call just above) needs the matching
-    // MMAP_FILE_REFCOUNT/mmap_file_regions bookkeeping too, or none of its own writes through the
-    // mapping ever get written back to the file. See that function's own doc comment.
-    mm::inherit_mmap_file_regions_for_fork(caller_pid, child_pid);
     // Real fork() semantics: the child gets its own independently-closable copy of every fd the
     // parent's own thread group currently has open, not a shared view of those table entries --
     // see crate::fs::fd::fork_inherit's own doc comment for why this specifically matters for
@@ -889,7 +863,6 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         cont_notify_pending: false,
         sigsuspend_restore_mask: None,
         sysv_sem_undo: Vec::new(),
-        sysv_shm_attach: Vec::new(),
         pending_siginfo: [QueuedSigInfo::default(); 35],
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: parent_fpu_state,
@@ -1560,17 +1533,15 @@ fn exec_image(
         // running and jumps immediately via redirect_frame below), kept in sync anyway since it's
         // the honest answer to "where does this process's AddressSpace currently expect to run".
         me.entry_point = jump_entry;
+        me.shared.lock().cred = new_cred;
         {
-            let mut shared = me.shared.lock();
-            shared.brk = VirtAddr::new(main_bias + elf.highest_loaded_address());
-            shared.cred = new_cred;
-            // Real POSIX: memory locks (including a prior mlockall(MCL_FUTURE)) are automatically
-            // removed on execve(2) -- see ThreadGroupShared::mlockall_future's own doc comment.
-            shared.mlockall_future = false;
-            shared.locked_bytes = 0;
+            // A fresh `VmState` came with the new table: no mappings, no memory locks (POSIX:
+            // `execve` removes them).
+            let mut vm = me.vm();
+            vm.brk = VirtAddr::new(main_bias + elf.highest_loaded_address());
             // W^X's escape hatch (THREAT_MODEL.md §3.3, OpenBSD's): a program marked `wxneeded`,
             // run from a `wxallowed` mount.
-            shared.wx_allowed = wx_allowed;
+            vm.wx_allowed = wx_allowed;
         }
         // effective_path is whichever path actually got loaded as the real ELF above -- the
         // caller's own original path_bytes when there was no `#!` to follow, or the final
@@ -1606,32 +1577,19 @@ fn exec_image(
         me.posix_timers = [None; MAX_POSIX_TIMERS];
         old_address_space
     };
-    // Real reclaim: the old address space is truly unreachable now (CR3 already moved, and
-    // `me.address_space` already holds the new one) -- see AddressSpace::teardown's own doc
-    // comment for why this exact call site is safe. Real fd-backed mmap/SysV shm content the old
-    // image had live is protected from this by SHARED_LEAF (see that constant's own doc comment)
-    // regardless of whether the cleanup calls below have run yet. `phys_offset` here is the same
-    // one this function established above, still valid (it never changes at runtime).
-    // `.expect()`: a live, currently-executing process (which execve always is) always had
-    // Some -- only a Zombie ever has None.
+    // The old image's mappings are gone from this process: their bookkeeping is cleaned up
+    // (SysV shm detached, `MAP_SHARED` file pages written back, `/dev/fb0` released) by whoever
+    // uses the old table last -- this process, unless it was a vfork child borrowing its
+    // parent's, or a thread whose siblings keep running in it. Then the table itself is torn
+    // down: CR3 already moved, and `teardown` only frees it once no handle remains.
+    // `.expect()`: a live, executing process always had Some -- only a Zombie has None.
     marks[6] = crate::cpu::tsc::now();
-    with_frame_allocator(|fa| unsafe {
-        old_address_space
-            .expect("execve: old address space already gone")
-            .teardown(phys_offset, fa)
-    });
-    // Real SysV shm semantics: the old address space (just torn down above) is what every prior
-    // shmat's own mapping actually lived in -- the new image can't see any of it, so this is a
-    // real implicit detach of everything, exactly like a real process exit's own
-    // detach_all_for_exit call (see that function's own doc comment) except the process survives.
-    // Must run after the PROCESS_TABLE-locked block above ends, not inside it -- this function
-    // takes that same lock itself, briefly, to drain the attachment list.
+    let old_address_space = old_address_space.expect("execve: old address space already gone");
+    if last_live_user(&PROCESS_TABLE.lock(), caller_pid, &old_address_space) {
+        cleanup_vm(&old_address_space);
+    }
+    with_frame_allocator(|fa| unsafe { old_address_space.teardown(phys_offset, fa) });
     marks[7] = crate::cpu::tsc::now();
-    crate::fs::sysv_shm::detach_all_for_exit(caller_pid);
-    // Same story for any real fd-backed mmap the old image had live -- see `mm::
-    // cleanup_mmap_file_regions_for_exit`'s own doc comment.
-    mm::cleanup_mmap_file_regions_for_exit(caller_pid);
-    mm::cleanup_mmap_phys_regions_for_exit(caller_pid);
     // Real close-on-exec: any fd this process marked FD_CLOEXEC (fcntl(F_SETFD)/open(O_CLOEXEC),
     // see `crate::fs::fd::CLOEXEC`'s own doc comment) doesn't survive into the new program image.
     // Keyed by tgid, not caller_pid directly -- see `crate::fs::fd`'s own module doc comment on
@@ -1966,6 +1924,33 @@ pub(crate) const INIT_PID: Pid = 1;
 /// Real POSIX behavior (a real orphan's own `getppid()` genuinely reads back `1`), not just
 /// internal bookkeeping. No-op if `pid` is `INIT_PID` itself (nothing left to reparent *to* if
 /// init exits) or has no live children.
+/// Whether no live process but `pid` uses `space`: a thread group's threads share one table, and
+/// a vfork child borrows its parent's. The last live user cleans up its `VmState` at exit or
+/// exec (`cleanup_vm`); a zombie still holding a handle doesn't count.
+pub(crate) fn last_live_user(
+    table: &BTreeMap<Pid, Box<Process>>,
+    pid: Pid,
+    space: &AddressSpace,
+) -> bool {
+    let id = space.id();
+    !table.iter().any(|(&other, p)| {
+        other != pid
+            && !matches!(p.state, ProcState::Zombie(_))
+            && p.address_space.as_ref().is_some_and(|a| a.id() == id)
+    })
+}
+
+/// Ends every mapping's bookkeeping in `space` (`mm::VmState`), for its last live user at exit or
+/// exec: each attached SysV segment's `nattch` drops, `MAP_SHARED` file pages are written back
+/// and their references released, `/dev/fb0` goes back to the console. The page tables stay
+/// (`AddressSpace::teardown` frees them). Takes the process table and other locks: call it with
+/// none held.
+fn cleanup_vm(space: &AddressSpace) {
+    crate::fs::sysv_shm::detach_all_for_exit(space);
+    mm::cleanup_mmap_file_regions_for_exit(space);
+    mm::cleanup_mmap_phys_regions_for_exit(space);
+}
+
 fn reparent_orphans(pid: Pid) {
     if pid == INIT_PID {
         return;
@@ -2082,20 +2067,22 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
     // separate `process::table()` lock -- both would deadlock against `spin::Mutex`'s non-reentrant
     // guarantee if nested inside the lock this function is about to take.
     crate::fs::sysv_sem::apply_undo_for_exit(pid);
-    // Real SysV shm semantics: every segment this process still had attached gets a real implicit
-    // detach (nattch decrement, possible IPC_RMID finalization) -- see
-    // `crate::fs::sysv_shm::detach_all_for_exit`'s own doc comment for why this must run before
-    // `PROCESS_TABLE` is locked below, same reasoning as the `apply_undo_for_exit` call above.
-    crate::fs::sysv_shm::detach_all_for_exit(pid);
-    // Real fd-backed mmap semantics: every mapping this process still had live gets its content
-    // written back and its extra reference released -- see `mm::
-    // cleanup_mmap_file_regions_for_exit`'s own doc comment. Must run after the `close_all` call
-    // above (which releases each mapped fd's *own* reference first, leaving only the mmap-held one
-    // for this call to release -- matching real POSIX's "mmap() keeps the file open past close()")
-    // and, for the same reentrant-`Mutex` reason as the two calls above, before `PROCESS_TABLE` is
-    // locked below.
-    mm::cleanup_mmap_file_regions_for_exit(pid);
-    mm::cleanup_mmap_phys_regions_for_exit(pid);
+    // The address space's bookkeeping (SysV shm detach, `MAP_SHARED` writeback, `/dev/fb0`), if
+    // this is the last live process using it: not while a vfork child still borrows it, nor for
+    // a vfork child exiting while its parent runs on. After `close_all` above (which drops each
+    // mapped fd's own reference, leaving the mapping's), before `PROCESS_TABLE` is locked below
+    // (the cleanups take it and other locks). The extra handle only lives for the cleanup.
+    let space = {
+        let table = PROCESS_TABLE.lock();
+        table
+            .get(&pid)
+            .and_then(|me| me.address_space.as_ref())
+            .filter(|space| last_live_user(&table, pid, space))
+            .map(AddressSpace::share)
+    };
+    if let Some(space) = space {
+        cleanup_vm(&space);
+    }
     let mut table = PROCESS_TABLE.lock();
     match table.get_mut(&pid) {
         Some(me) if matches!(me.state, ProcState::Zombie(_)) => return, // already dead

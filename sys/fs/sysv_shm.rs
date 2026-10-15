@@ -21,9 +21,9 @@
 //! `copy_table_level` now special-cases any leaf marked `memory::address_space::SHARED_LEAF`
 //! (every leaf this module's own `do_shmat` maps carries it) and aliases the segment's *real* frame
 //! into the child's table instead of copying its content into a fresh private one. That closes the
-//! actual sharing gap; `inherit_attachments_for_fork` below (called from `process::lifecycle::
-//! do_fork_from_current` right after the child's `Process` entry exists) closes the matching
-//! bookkeeping half -- the child gets its own real `sysv_shm_attach` copy and each referenced
+//! actual sharing gap; `inherit_attachments_for_fork` below (called from `process::mm::
+//! inherit_vm_for_fork` once the child's table exists) closes the matching bookkeeping half --
+//! the child's `VmState` gets its own `shm_attach` copy and each referenced
 //! segment's `nattch` is bumped to match, exactly as if the child had called `shmat` itself. Matches
 //! `Process::sysv_sem_undo`'s own *opposite* "starts fresh across fork" precedent deliberately: real
 //! SysV semaphore adjustments are documented `fork`-local by POSIX itself, while a `shmat` mapping
@@ -54,6 +54,7 @@ use x86_64::structures::paging::{
 
 use crate::fs::sysv_ipc::{IPC_64, IPC_RMID, IPC_SET, IPC_STAT, RawIpcPerm};
 use crate::memory::{self, with_frame_allocator};
+use crate::memory::address_space::AddressSpace;
 use crate::process::{self, Pid};
 use crate::syscall::{EACCES, EAGAIN, EEXIST, EIDRM, EINVAL, ENOENT, ENOMEM};
 
@@ -347,7 +348,7 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
         Ok(())
     })?;
 
-    me.sysv_shm_attach.push((base, shmid));
+    me.vm().shm_attach.push((base, shmid));
     Ok(base)
 }
 
@@ -362,12 +363,15 @@ pub(crate) fn do_shmdt(shmaddr: u64) -> Result<u64, u64> {
     let me = table
         .get_mut(&caller)
         .expect("shmdt: current process missing from table");
-    let idx = me
-        .sysv_shm_attach
-        .iter()
-        .rposition(|&(addr, _)| addr == shmaddr)
-        .ok_or(EINVAL)?;
-    let (_, shmid) = me.sysv_shm_attach.remove(idx);
+    let shmid = {
+        let mut vm = me.vm();
+        let idx = vm
+            .shm_attach
+            .iter()
+            .rposition(|&(addr, _)| addr == shmaddr)
+            .ok_or(EINVAL)?;
+        vm.shm_attach.remove(idx).1
+    };
 
     // The segment can't have vanished while we still held one of its nattch counts -- IPC_RMID
     // only actually removes SEGMENTS once nattch reaches zero (see this module's own doc comment).
@@ -416,22 +420,12 @@ pub(crate) fn do_shmdt(shmaddr: u64) -> Result<u64, u64> {
     Ok(0)
 }
 
-/// Called from `process::lifecycle::terminate_process` on every real process termination, the same
-/// "before `PROCESS_TABLE` is locked there" placement `crate::fs::sysv_sem::apply_undo_for_exit`
-/// already establishes (and for the identical reason: this function takes that same lock itself,
-/// briefly, to drain the attachment list). Applies the real `nattch`-decrement/possible-removal
-/// tail every `shmdt` call already performs -- **does not** unmap any page-table entries (unlike
-/// `do_shmdt`): a terminating process's own address space is never freed anywhere in this kernel,
-/// so there's nothing that needs unmapping before it becomes a `Zombie`, and once reaped there's no
-/// address space left to unmap from at all.
-pub(crate) fn detach_all_for_exit(pid: Pid) {
-    let attach_list = {
-        let mut table = process::table().lock();
-        let Some(me) = table.get_mut(&pid) else {
-            return;
-        };
-        core::mem::take(&mut me.sysv_shm_attach)
-    };
+/// The implicit detach of everything attached in `space` when its last live user exits or execs
+/// (`process::lifecycle::last_live_user`): the `nattch` decrement and possible removal every
+/// `shmdt` performs, without unmapping (the table is going away). Takes no process table lock;
+/// call it with none held.
+pub(crate) fn detach_all_for_exit(space: &AddressSpace) {
+    let attach_list = core::mem::take(&mut space.vm().shm_attach);
     if attach_list.is_empty() {
         return;
     }
@@ -464,26 +458,12 @@ pub(crate) fn detach_all_for_exit(pid: Pid) {
     }
 }
 
-/// Called from `process::lifecycle::do_fork_from_current`, right after the child's own `Process`
-/// entry is inserted into the table and its `AddressSpace::fork` has already aliased (not copied)
-/// every `SHARED_LEAF` leaf — see that flag's own doc comment. Real POSIX fork() semantics: a child
-/// that inherits an attached segment's own live mapping counts as a genuinely separate attachment,
-/// exactly like an unrelated process's own independent `shmat` would — so `IPC_RMID` on a segment
-/// still attached only in a forked descendant must not complete early, and each of the parent's and
-/// child's own later `shmdt`/exit must decrement `nattch` exactly once, not zero times (if the
-/// child's copy were silently ignored) or twice (if both ended up sharing one bookkeeping entry).
-/// Fixed by giving the child a real, independent copy of the parent's own `sysv_shm_attach` list
-/// (the `(addr, shmid)` pairs carry over unchanged — `AddressSpace::fork` preserves every VA
-/// exactly, so the child's mapping sits at the identical address) and bumping each referenced
-/// segment's own `nattch` to match, the same increment `do_shmat` itself performs for a real attach.
-pub(crate) fn inherit_attachments_for_fork(parent_pid: Pid, child_pid: Pid) {
-    let attach_list = {
-        let table = process::table().lock();
-        table
-            .get(&parent_pid)
-            .map(|p| p.sysv_shm_attach.clone())
-            .unwrap_or_default()
-    };
+/// A forked child's copy of its parent's attachments (`mm::inherit_vm_for_fork`): `AddressSpace::
+/// fork` aliased every `SHARED_LEAF` page at the same address, and the child's mapping counts as
+/// an attachment of its own, so each segment's `nattch` goes up by one. `IPC_RMID` then can't
+/// complete while only the child is attached, and each side's `shmdt` or exit drops it once.
+pub(crate) fn inherit_attachments_for_fork(parent: &AddressSpace, child: &AddressSpace) {
+    let attach_list = parent.vm().shm_attach.clone();
     if attach_list.is_empty() {
         return;
     }
@@ -495,9 +475,7 @@ pub(crate) fn inherit_attachments_for_fork(parent_pid: Pid, child_pid: Pid) {
             }
         }
     }
-    if let Some(child) = process::table().lock().get_mut(&child_pid) {
-        child.sysv_shm_attach = attach_list;
-    }
+    child.vm().shm_attach = attach_list;
 }
 
 /// `SYS_SHMCTL` (`544`, item 19) -- matches real `shmctl(2)`'s exact `(id, cmd, buf)` wire format,

@@ -242,7 +242,7 @@ pub(crate) static WXABORT: core::sync::atomic::AtomicBool = core::sync::atomic::
 
 /// W^X (THREAT_MODEL.md §3.3, OpenBSD's policy): no mapping may be writable and executable at
 /// once. `mmap`/`mprotect` asking for both fail with `ENOTSUP` and are logged, unless the process
-/// is a marked `wxneeded` program run from a `wxallowed` mount (`ThreadGroupShared::wx_allowed`).
+/// is a marked `wxneeded` program run from a `wxallowed` mount (`VmState::wx_allowed`).
 fn check_wx(caller_pid: Pid, prot: u64, call: &str) -> Result<(), u64> {
     if prot & (PROT_WRITE | PROT_EXEC) != PROT_WRITE | PROT_EXEC {
         return Ok(());
@@ -251,7 +251,7 @@ fn check_wx(caller_pid: Pid, prot: u64, call: &str) -> Result<(), u64> {
     let Some(me) = table.get(&caller_pid) else {
         return Err(ENOTSUP);
     };
-    if me.shared.lock().wx_allowed {
+    if me.vm().wx_allowed {
         return Ok(());
     }
     crate::serial_println!(
@@ -338,57 +338,87 @@ pub(crate) fn content_mapped(content_id: u64) -> Option<bool> {
     Some(MMAP_FILE_REFCOUNT.try_lock()?.contains_key(&content_id))
 }
 
-/// Real `fork()` semantics for a fd-backed `MAP_SHARED` mapping the child inherits by virtue of
-/// the whole address space being duplicated. `AddressSpace::fork`'s own `SHARED_LEAF` handling
-/// already makes the child's page table alias the exact same real frames the parent's does for
-/// every `shared` `MmapFileRegion` -- what was missing was the accounting: `do_munmap`/`do_msync`/
-/// `cleanup_mmap_file_regions_for_exit` all key writeback exclusively off the *calling* process's
-/// own `mmap_file_regions` list, so with the child's list left empty (the original, unconditional
-/// behavior), nothing the child did with its share of the mapping ever wrote those bytes back to
-/// the file -- see `MmapFileRegion`'s own doc comment for the concrete failure case this fixes.
-/// Called from `do_fork_from_current` right after the child's table entry exists, same convention
-/// `fs::sysv_shm::inherit_attachments_for_fork` already established for the identical underlying
-/// gap. `MAP_PRIVATE` regions are deliberately skipped -- see `MmapFileRegion::shared`'s own doc
-/// comment for why fork already gives those a genuinely private, independent frame with nothing
-/// left for this list to track.
-pub(crate) fn inherit_mmap_file_regions_for_fork(parent_pid: Pid, child_pid: Pid) {
-    let regions: Vec<MmapFileRegion> = {
-        let table = PROCESS_TABLE.lock();
-        let Some(parent) = table.get(&parent_pid) else {
-            return;
-        };
-        parent
-            .shared
-            .lock()
-            .mmap_file_regions
-            .iter()
-            .filter(|r| r.shared)
-            .copied()
-            .collect()
-    };
-    if regions.is_empty() {
-        return;
+/// The memory bookkeeping of one address space, FreeBSD's `vmspace`: it lives in the
+/// `AddressSpace` (`AddressSpace::vm`), so everything sharing the page tables shares it -- the
+/// threads of a group, and a vfork child borrowing its parent's (COW.md §7). Kept with the table
+/// rather than with a process because a mapping's bookkeeping has to match the mapping: a vfork
+/// child with its own copy could detach a SysV segment at exec, freeing frames the parent still
+/// maps. `execve` and `spawn` start an empty one with their new table; `fork` copies what a child
+/// inherits (`inherit_vm_for_fork`). The last live process using it cleans it up at exit or exec
+/// (`lifecycle::last_live_user`).
+pub struct VmState {
+    /// The program break (`do_brk`).
+    pub brk: VirtAddr,
+    /// The fd-backed mappings, for writeback and the page cache's reference counts.
+    pub mmap_file_regions: Vec<MmapFileRegion>,
+    /// Still-live `/dev/fb0` (or any future MMIO-backed) mappings -- see `MmapPhysRegion`'s own
+    /// doc comment. Not inherited by `fork`.
+    pub mmap_phys_regions: Vec<MmapPhysRegion>,
+    /// `mlockall(MCL_FUTURE)`: every later `mmap()` is locked too, subject to `RLIMIT_MEMLOCK`
+    /// (`do_mmap`'s `auto_lock`). Neither inherited by `fork` nor kept across `execve` (POSIX).
+    pub mlockall_future: bool,
+    /// Bytes locked through `mlockall_future`, what `RLIMIT_MEMLOCK` is checked against. An
+    /// explicit `mlock`/`munlock` doesn't count (`do_mlock`: no per-page locked state exists).
+    pub locked_bytes: u64,
+    /// Whether this program may map pages writable and executable at once (`check_wx`): a
+    /// `wxneeded` program run from a `wxallowed` mount. Set by `execve`, kept across `fork`.
+    pub wx_allowed: bool,
+    /// One `(addr, shmid)` per SysV `shmat`, in call order (`crate::fs::sysv_shm`): `shmdt` finds
+    /// its entry here, and cleanup at exit or exec drops every segment's `nattch` once. A forked
+    /// child gets its own copy, each segment's `nattch` raised to match.
+    pub shm_attach: Vec<(u64, i32)>,
+}
+
+impl Default for VmState {
+    fn default() -> Self {
+        Self {
+            brk: VirtAddr::zero(),
+            mmap_file_regions: Vec::new(),
+            mmap_phys_regions: Vec::new(),
+            mlockall_future: false,
+            locked_bytes: 0,
+            wx_allowed: false,
+            shm_attach: Vec::new(),
+        }
     }
-    {
+}
+
+/// Fills a forked child's `VmState` from its parent's, once `AddressSpace::fork` has built the
+/// child's table: the break and W^X permission carry over; so does every `MAP_SHARED` file
+/// region (the child's table aliases the same frames, so its writes must be written back too,
+/// and each region holds a reference on the file's mapping) and every SysV shm attachment
+/// (`sysv_shm::inherit_attachments_for_fork`). Private regions are left out: fork gave the child
+/// its own copy-on-write pages, with nothing left to write back. Memory locks are not inherited.
+pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
+    let (brk, wx_allowed, regions) = {
+        let vm = parent.vm();
+        let regions: Vec<MmapFileRegion> =
+            vm.mmap_file_regions.iter().filter(|r| r.shared).copied().collect();
+        (vm.brk, vm.wx_allowed, regions)
+    };
+    if !regions.is_empty() {
         let mut refs = MMAP_FILE_REFCOUNT.lock();
         for r in &regions {
             *refs.entry(r.content_id).or_insert(0) += 1;
         }
     }
-    let table = PROCESS_TABLE.lock();
-    if let Some(child) = table.get(&child_pid) {
-        child.shared.lock().mmap_file_regions.extend(regions);
+    {
+        let mut vm = child.vm();
+        vm.brk = brk;
+        vm.wx_allowed = wx_allowed;
+        vm.mmap_file_regions = regions;
     }
+    crate::fs::sysv_shm::inherit_attachments_for_fork(parent, child);
 }
 
 /// One real fd-backed `MAP_SHARED` mapping still live in a process's own address space — enough
 /// state for `do_munmap` (or exit/`execve` cleanup) to write real content back to the underlying
 /// file (via `crate::fs::fd::content_write`, keyed by `content_id` alone — no fd/`real_fd`
 /// involved at all, see that function's own doc comment for why). A `shared` (`MAP_SHARED`) entry
-/// *is* now inherited across `fork` -- see `inherit_mmap_file_regions_for_fork`'s own doc comment
-/// for why: `AddressSpace::fork`'s `SHARED_LEAF` handling already makes the child's page table
-/// alias the exact same real frames the parent's does, so leaving the child's own list empty (the
-/// original behavior, matching `Process::sysv_shm_attach`'s now-fixed precedent) meant nothing the
+/// *is* now inherited across `fork` -- see `inherit_vm_for_fork`'s own doc comment for why:
+/// `AddressSpace::fork`'s `SHARED_LEAF` handling already makes the child's page table alias the
+/// exact same real frames the parent's does, so leaving the child's own list empty (the original
+/// behavior, matching the SysV shm attachment list's now-fixed precedent) meant nothing the
 /// child did with its share -- write through it, `munmap` it, exit -- ever wrote those bytes back
 /// to the file, a real, silent data-loss bug. A `MAP_PRIVATE` entry stays uninherited: `do_mmap_
 /// file_backed` never marks a private mapping's frames `SHARED_LEAF`, so `AddressSpace::fork`
@@ -517,16 +547,14 @@ pub fn do_mmap(
     // before actually establishing the mapping -- a process that called `mlockall(MCL_FUTURE)`
     // implicitly locks every future mapping, and if that would push its own total locked bytes
     // past `RLIMIT_MEMLOCK`, real POSIX has the whole `mmap()` fail `EAGAIN` rather than partially
-    // mapping. `mlockall_future`/`locked_bytes` live on `ThreadGroupShared`, not `Process`, since
-    // real memory locks are a property of the address space, not the individual thread -- see
-    // that struct's own doc comment; a `CLONE_THREAD` sibling shares this state automatically via
-    // the same `Arc` `mmap_file_regions` already does.
+    // mapping. `mlockall_future`/`locked_bytes` live in the address space's `VmState`: memory
+    // locks are a property of the address space, shared by everything running in it.
     let auto_lock = {
         let table = PROCESS_TABLE.lock();
         let me = table
             .get(&caller_pid)
             .expect("mmap: current process missing from table");
-        let shared = me.shared.lock();
+        let shared = me.vm();
         if shared.mlockall_future {
             let (rlim_cur, _) = me.rlimits[RLIMIT_MEMLOCK as usize];
             if shared.locked_bytes.saturating_add(region_len) > rlim_cur {
@@ -565,7 +593,7 @@ pub fn do_mmap(
     if auto_lock && result.is_ok() {
         let table = PROCESS_TABLE.lock();
         if let Some(me) = table.get(&caller_pid) {
-            me.shared.lock().locked_bytes += region_len;
+            me.vm().locked_bytes += region_len;
         }
     }
 
@@ -756,7 +784,7 @@ fn do_mmap_fb(
             }
         });
     }
-    me.shared.lock().mmap_phys_regions.push(MmapPhysRegion {
+    me.vm().mmap_phys_regions.push(MmapPhysRegion {
         va_start: base,
         npages: page_count,
     });
@@ -837,8 +865,7 @@ fn do_mmap_file_backed(
         .lock()
         .get(&caller_pid)
         .expect("mmap: current process missing from table")
-        .shared
-        .lock()
+        .vm()
         .mmap_file_regions
         .len()
         >= MAX_MMAP_FILE_REGIONS
@@ -1154,7 +1181,7 @@ fn do_mmap_file_backed(
     if !private {
         *MMAP_FILE_REFCOUNT.lock().entry(content_id).or_insert(0) += 1;
     }
-    me.shared.lock().mmap_file_regions.push(MmapFileRegion {
+    me.vm().mmap_file_regions.push(MmapFileRegion {
         va_start: base,
         npages: page_count,
         mapped_pages: covered_pages,
@@ -1180,7 +1207,7 @@ pub fn signal_for_user_fault(caller_pid: Pid, addr: u64) -> u64 {
     let Some(me) = table.get(&caller_pid) else {
         return crate::process::SIGSEGV;
     };
-    let in_reserved_tail = me.shared.lock().mmap_file_regions.iter().any(|r| {
+    let in_reserved_tail = me.vm().mmap_file_regions.iter().any(|r| {
         let backed_end = r.va_start + r.mapped_pages * 4096;
         let reserved_end = r.va_start + r.npages * 4096;
         addr >= backed_end && addr < reserved_end
@@ -1296,14 +1323,12 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         .expect("munmap: current process missing from table");
 
     let file_region_idx = me
-        .shared
-        .lock()
+        .vm()
         .mmap_file_regions
         .iter()
         .position(|r| r.va_start == addr);
     let phys_region_idx = me
-        .shared
-        .lock()
+        .vm()
         .mmap_phys_regions
         .iter()
         .position(|r| r.va_start == addr);
@@ -1402,7 +1427,7 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
     }
 
     if let Some(idx) = file_region_idx {
-        let region = me.shared.lock().mmap_file_regions.remove(idx);
+        let region = me.vm().mmap_file_regions.remove(idx);
         drop(table);
         if any_dirty {
             writeback_region(&region, phys_offset);
@@ -1420,7 +1445,7 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         // this process's own bookkeeping entry and, once no such mapping remains anywhere, lets
         // `console::framebuffer::redraw()` resume (see `set_owned_by_userspace`'s own doc
         // comment).
-        let mut shared = me.shared.lock();
+        let mut shared = me.vm();
         shared.mmap_phys_regions.remove(idx);
         let none_left = shared.mmap_phys_regions.is_empty();
         drop(shared);
@@ -1470,7 +1495,7 @@ pub fn do_msync(caller_pid: Pid, addr: u64, len: u64, flags: u64) -> Result<u64,
     let me = table
         .get(&caller_pid)
         .expect("msync: current process missing from table");
-    let shared = me.shared.lock();
+    let shared = me.vm();
     let region = shared
         .mmap_file_regions
         .iter()
@@ -1490,19 +1515,11 @@ pub fn do_msync(caller_pid: Pid, addr: u64, len: u64, flags: u64) -> Result<u64,
 
 /// Real cleanup for every fd-backed mapping a process still had live at exit/`execve` — writes
 /// back and releases each one's `MMAP_FILE_CACHE` reference, the same way an explicit `munmap`
-/// would, since neither event ever calls `do_munmap` itself. Called from
-/// `process::lifecycle::terminate_process` (before `PROCESS_TABLE` is locked, same placement
-/// `crate::fs::sysv_shm::detach_all_for_exit`'s own call site already establishes) and from
-/// `do_execve` (after the new `AddressSpace` is committed -- the old one, and every page mapped
-/// into it, just became unreachable, matching real Linux's own implicit-unmap-on-execve).
-pub fn cleanup_mmap_file_regions_for_exit(pid: Pid) {
-    let regions = {
-        let table = PROCESS_TABLE.lock();
-        let Some(me) = table.get(&pid) else {
-            return;
-        };
-        core::mem::take(&mut me.shared.lock().mmap_file_regions)
-    };
+/// would, since neither event ever calls `do_munmap` itself. Called with no lock held by the
+/// last live process using `space` (`lifecycle::last_live_user`), from `terminate_process` and
+/// from `do_execve` once the new `AddressSpace` is committed.
+pub fn cleanup_mmap_file_regions_for_exit(space: &AddressSpace) {
+    let regions = core::mem::take(&mut space.vm().mmap_file_regions);
     if regions.is_empty() {
         return;
     }
@@ -1523,15 +1540,11 @@ pub fn cleanup_mmap_file_regions_for_exit(pid: Pid) {
 /// page-table teardown for a self-exit or execve happens generically elsewhere (`AddressSpace::
 /// teardown`'s own `SHARED_LEAF`-skipping walk) -- this just drops the bookkeeping and, once no
 /// such mapping remains anywhere, lets `console::framebuffer::redraw()` resume.
-pub fn cleanup_mmap_phys_regions_for_exit(pid: Pid) {
+pub fn cleanup_mmap_phys_regions_for_exit(space: &AddressSpace) {
     let had_any = {
-        let table = PROCESS_TABLE.lock();
-        let Some(me) = table.get(&pid) else {
-            return;
-        };
-        let mut shared = me.shared.lock();
-        let had_any = !shared.mmap_phys_regions.is_empty();
-        shared.mmap_phys_regions.clear();
+        let mut vm = space.vm();
+        let had_any = !vm.mmap_phys_regions.is_empty();
+        vm.mmap_phys_regions.clear();
         had_any
     };
     if had_any {
@@ -1554,7 +1567,7 @@ pub fn has_live_phys_mapping(pid: Pid) -> bool {
     PROCESS_TABLE
         .lock()
         .get(&pid)
-        .is_some_and(|p| !p.shared.lock().mmap_phys_regions.is_empty())
+        .is_some_and(|p| !p.vm().mmap_phys_regions.is_empty())
 }
 
 /// `SYS_MPROTECT`'s real logic. `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` set `USER_ACCESSIBLE`/
@@ -1649,7 +1662,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     }
     if shared_written {
         // A `MAP_SHARED` file mapping made writable is written back like one mapped writable.
-        let mut shared = me.shared.lock();
+        let mut shared = me.vm();
         for r in shared.mmap_file_regions.iter_mut().filter(|r| r.shared) {
             if r.va_start <= end_inclusive && addr < r.va_start + r.npages * 4096 {
                 r.writable = true;
@@ -1832,7 +1845,7 @@ pub fn do_munlock(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
 /// validates `flags` is a real, nonzero combination of `MCL_CURRENT`/`MCL_FUTURE`/`MCL_ONFAULT`
 /// (real Linux `EINVAL` otherwise — at least one of `MCL_CURRENT`/`MCL_FUTURE` is required).
 /// `MCL_ONFAULT` stays the same unenforced no-op tier `do_mlock` above documents (no fault-time
-/// locking exists to make real). `MCL_FUTURE` flips `ThreadGroupShared::mlockall_future`, which
+/// locking exists to make real). `MCL_FUTURE` flips `VmState::mlockall_future`, which
 /// `do_mmap` consults on every later mapping — see that field's own doc comment. `MCL_CURRENT`
 /// snapshots every one of the caller's own currently-live `mmap_file_regions` as `locked` (real
 /// POSIX: locks pages *currently* mapped, not a standing policy for future ones the way
@@ -1852,7 +1865,7 @@ pub fn do_mlockall(caller_pid: Pid, flags: u64) -> Result<u64, u64> {
     let me = table
         .get(&caller_pid)
         .expect("mlockall: current process missing from table");
-    let mut shared = me.shared.lock();
+    let mut shared = me.vm();
     if flags & MCL_FUTURE != 0 {
         shared.mlockall_future = true;
     }
@@ -1869,7 +1882,7 @@ pub fn do_munlockall(caller_pid: Pid) -> Result<u64, u64> {
     let me = table
         .get(&caller_pid)
         .expect("munlockall: current process missing from table");
-    let mut shared = me.shared.lock();
+    let mut shared = me.vm();
     shared.mlockall_future = false;
     shared.locked_bytes = 0;
     for region in shared.mmap_file_regions.iter_mut() {
@@ -1896,7 +1909,7 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
     let me = table
         .get(&caller_pid)
         .expect("brk: current process missing from table");
-    let mut shared = me.shared.lock();
+    let mut shared = me.vm();
 
     if addr == 0 {
         return Ok(shared.brk.as_u64());

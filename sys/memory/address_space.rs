@@ -13,6 +13,7 @@ use x86_64::structures::paging::{
 
 use crate::memory::frame_to_page_table;
 use crate::memory::pagecache::{self, EntryId};
+use crate::process::mm::VmState;
 
 /// Marks a leaf page-table entry as **not** exclusively owned by the address space it's mapped
 /// into — real SysV `shmat` (`fs::sysv_shm::do_shmat`) and real fd-backed `MAP_SHARED` mmap
@@ -187,6 +188,10 @@ pub struct AddressSpace {
     /// The page cache entries this address space maps frames of (`memory::pagecache`), shared
     /// by its threads like the table itself.
     cached: Arc<Mutex<BTreeSet<EntryId>>>,
+    /// The memory bookkeeping (`brk`, `mmap` regions, SysV shm attachments, ...) for the mappings
+    /// in this table, shared by everything that shares the table: threads and a vfork child
+    /// alike (FreeBSD's `vmspace`). `fork` starts an empty one, filled by `mm::inherit_vm_for_fork`.
+    vm: Arc<Mutex<VmState>>,
 }
 
 impl AddressSpace {
@@ -236,6 +241,7 @@ impl AddressSpace {
             level_4_frame: Arc::new(new_frame),
             user_level_4_frame,
             cached: Arc::default(),
+            vm: Arc::default(),
         })
     }
 
@@ -421,6 +427,7 @@ impl AddressSpace {
             level_4_frame: Arc::new(new_frame),
             user_level_4_frame,
             cached: Arc::default(),
+            vm: Arc::default(),
         })
     }
 
@@ -434,6 +441,7 @@ impl AddressSpace {
             level_4_frame: Arc::clone(&self.level_4_frame),
             user_level_4_frame: self.user_level_4_frame.as_ref().map(Arc::clone),
             cached: Arc::clone(&self.cached),
+            vm: Arc::clone(&self.vm),
         }
     }
 
@@ -579,6 +587,11 @@ impl AddressSpace {
     /// Records that this address space maps frames of page cache entry `id`.
     pub fn use_cached(&self, id: EntryId) {
         pagecache::add_use(&self.cached, id);
+    }
+
+    /// This address space's memory bookkeeping (`VmState`). Lock after the process table, if both.
+    pub fn vm(&self) -> spin::MutexGuard<'_, VmState> {
+        self.vm.lock()
     }
 
     /// Identifies the address space (its PML4's physical address): threads share one.

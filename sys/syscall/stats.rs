@@ -56,7 +56,7 @@ pub fn record(nr: u64, s: Start) {
 
 /// The phases of `execve` (`lifecycle::exec_image`), timed separately: where an exec's time goes.
 pub const EXEC_PHASES: [&str; 8] =
-    ["read file", "parse, new space", "load ELF", "load interpreter", "stack", "switch over", "free old space", "close, cleanup"];
+    ["read file", "parse, new space", "load ELF", "load interpreter", "stack", "switch over", "clean up, free old space", "close on exec"];
 static PHASE: [AtomicU64; 8] = [ZERO; 8];
 static EXECS: AtomicU64 = AtomicU64::new(0);
 
