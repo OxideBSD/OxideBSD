@@ -42,3 +42,7 @@
 [submodule "external/mit/sudo-rs"]
 	path = external/mit/sudo-rs
 	url = https://github.com/OxideBSD/sudo-rs-oxidebsd.git
+[submodule "external/bsd/zstd"]
+	path = external/bsd/zstd
+	url = https://github.com/OxideBSD/zstd-oxidebsd.git
+	branch = oxidebsd

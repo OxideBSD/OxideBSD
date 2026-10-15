@@ -6,7 +6,8 @@
 // by an mtree(5) specification, `target/sets/<set>.mtree`, which the image carries as
 // `/etc/mtree/<set>.mtree`. Host builds of makefs(8), fsck_oxfs(8) and mkimg(1) then make
 // `target/images/root.img` (the root file system, every set) and `target/images/disk.img` (a GPT
-// disk holding it as `rootfs`), checked by fsck_oxfs.
+// disk holding it as `rootfs`), checked by fsck_oxfs. Each set is also archived as
+// `target/sets/<set>.tar.zst`, the distribution format.
 
 /// The dist sets, in the order an image is made from them.
 const SETS: [&str; 3] = ["base", "clang", "tests"];
@@ -403,6 +404,7 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
         .filter_map(|l| l.rsplit_once('\t').map(|(k, v)| (k.to_string(), v.to_string())))
         .collect();
     let mut makefs_inputs = Vec::new();
+    let zstd = build_zstd(Path::new("cc"), &[], &root.join("target/host-tools/zstd"), None);
     for set in SETS {
         // A set carries its own paths and every directory above them, so it can be unpacked
         // or imaged on its own.
@@ -416,9 +418,10 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
             }
             paths.insert("");
         }
+        let paths: Vec<&str> = paths.into_iter().collect();
         let mut spec = mtree::Spec::default();
         let mut makefs = mtree::Spec::default();
-        for path in paths {
+        for &path in &paths {
             let item = &tree[path];
             let mut e = mtree::Entry::new(path.as_bytes());
             e.set("mode", format!("{:04o}", item.mode));
@@ -457,6 +460,7 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
         let input = sets_dir.join(format!("{set}.makefs"));
         write_if_changed(&input, makefs.write().as_bytes());
         makefs_inputs.push(input);
+        write_set_archive(set, &paths, &tree, &destdir, &sets_dir, epoch, &zstd);
     }
     let cache_text: String = cache.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect();
     write_if_changed(&cache_path, cache_text.as_bytes());
@@ -515,6 +519,125 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
     run_host_tool(&fsck, &["-fn".as_ref(), root_img.as_os_str()]);
     let part = format!("oxfs/rootfs:={}", root_img.display());
     run_host_tool(&mkimg, &["-s".as_ref(), "gpt".as_ref(), "-o".as_ref(), disk_img.as_os_str(), "-p".as_ref(), part.as_ref()]);
+    std::fs::write(&stamp_path, stamp).unwrap();
+}
+
+/// One ustar(5) header block. `path` is split into `prefix` and `name` at a `/` when it's longer
+/// than 100 bytes; numbers are zero-padded octal. Owners 0 are named `root` and `wheel`.
+fn ustar_header(path: &str, item: &Installed, typeflag: u8, size: u64, linkname: &str, mtime: i64) -> [u8; 512] {
+    let mut h = [0u8; 512];
+    fn put(h: &mut [u8], at: usize, len: usize, bytes: &[u8]) {
+        assert!(bytes.len() <= len, "ustar field too long: {:?}", String::from_utf8_lossy(bytes));
+        h[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    fn octal(h: &mut [u8], at: usize, len: usize, value: u64) {
+        let text = format!("{value:0width$o}", width = len - 1);
+        put(h, at, len - 1, text.as_bytes());
+    }
+    let (prefix, name) = if path.len() <= 100 {
+        ("", path)
+    } else {
+        let split = path
+            .match_indices('/')
+            .map(|(i, _)| i)
+            .find(|&i| i <= 155 && path.len() - i - 1 <= 100 && i + 1 < path.len())
+            .unwrap_or_else(|| panic!("{path}: too long for a ustar name"));
+        (&path[..split], &path[split + 1..])
+    };
+    put(&mut h, 0, 100, name.as_bytes());
+    octal(&mut h, 100, 8, u64::from(item.mode & 0o7777));
+    octal(&mut h, 108, 8, u64::from(item.uid));
+    octal(&mut h, 116, 8, u64::from(item.gid));
+    octal(&mut h, 124, 12, size);
+    octal(&mut h, 136, 12, mtime.max(0) as u64);
+    h[156] = typeflag;
+    put(&mut h, 157, 100, linkname.as_bytes());
+    put(&mut h, 257, 6, b"ustar\0");
+    put(&mut h, 263, 2, b"00");
+    if item.uid == 0 {
+        put(&mut h, 265, 32, b"root");
+    }
+    if item.gid == 0 {
+        put(&mut h, 297, 32, b"wheel");
+    }
+    put(&mut h, 345, 155, prefix.as_bytes());
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    put(&mut h, 148, 8, format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+/// Writes `target/sets/<set>.tar.zst` (RAM_FLOOR.md §4.3.4): a ustar archive of the set's
+/// `paths` in order, every entry dated `epoch`, compressed by the host build of the vendored
+/// zstd. Byte-identical for the same set and zstd: rewritten only when the set's specification
+/// or zstd changed. Of a file's hard-linked names, the first in the archive holds the data and
+/// the others link to it.
+fn write_set_archive(set: &str, paths: &[&str], tree: &InstallTree, destdir: &Path, sets_dir: &Path, epoch: i64, zstd: &Path) {
+    use std::io::Write;
+    let out = sets_dir.join(format!("{set}.tar.zst"));
+    let stamp_path = sets_dir.join(format!(".{set}.tar.zst.stamp"));
+    let stamp = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(std::fs::read(sets_dir.join(format!("{set}.mtree"))).unwrap());
+        h.update(format!("{:?}", std::fs::metadata(zstd).unwrap().modified().unwrap()));
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    if out.exists() && std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+    let tmp = sets_dir.join(format!("{set}.tar.zst.tmp"));
+    // Multithreaded zstd gives the same bytes whatever the thread count; level 19 keeps zstd's
+    // 8 MiB window, so a 64 MB machine can unpack it (no --long).
+    let mut child = Command::new(zstd)
+        .args(["-q", "-19", "-T0", "-c"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&tmp).unwrap())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", zstd.display()));
+    {
+        let mut w = std::io::BufWriter::new(child.stdin.take().unwrap());
+        // A linked file's install-list name -> its first name in this archive.
+        let mut first_name: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+        for &path in paths {
+            let item = &tree[path];
+            let name = if path.is_empty() { "./".to_string() } else { format!("./{path}") };
+            let file = |src: &Path, w: &mut std::io::BufWriter<_>| {
+                let bytes = std::fs::read(src).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
+                w.write_all(&ustar_header(&name, item, b'0', bytes.len() as u64, "", epoch)).unwrap();
+                w.write_all(&bytes).unwrap();
+                w.write_all(&vec![0u8; (512 - bytes.len() % 512) % 512]).unwrap();
+            };
+            match &item.body {
+                InstallBody::Dir => {
+                    let dir = if path.is_empty() { name.clone() } else { format!("{name}/") };
+                    w.write_all(&ustar_header(&dir, item, b'5', 0, "", epoch)).unwrap();
+                }
+                InstallBody::Link(target) => {
+                    w.write_all(&ustar_header(&name, item, b'2', 0, target, epoch)).unwrap();
+                }
+                InstallBody::File(_) | InstallBody::Hardlink(_) => {
+                    let inode = match &item.body {
+                        InstallBody::Hardlink(other) => other.as_str(),
+                        _ => path,
+                    };
+                    match first_name.get(inode) {
+                        Some(first) => w.write_all(&ustar_header(&name, item, b'1', 0, &format!("./{first}"), epoch)).unwrap(),
+                        None => {
+                            file(&destdir.join(path), &mut w);
+                            first_name.insert(inode, path);
+                        }
+                    }
+                }
+                InstallBody::SetSpec(s) => file(&sets_dir.join(format!("{s}.mtree")), &mut w),
+            }
+        }
+        w.write_all(&[0u8; 1024]).unwrap();
+        w.flush().unwrap();
+    }
+    let status = child.wait().unwrap();
+    assert!(status.success(), "zstd for {set}.tar.zst failed: {status}");
+    std::fs::rename(&tmp, &out).unwrap();
     std::fs::write(&stamp_path, stamp).unwrap();
 }
 

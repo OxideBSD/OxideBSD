@@ -772,6 +772,14 @@ fn main() {
     let libcxx_runtime_manifest_path = write_libcxx_runtime_manifest(&llvm_host_build);
     let bmake_elf_path = build_bmake(&musl_sysroot);
     let bmake_mk_manifest_path = write_bmake_mk_manifest();
+    // `/sbin/zstd`, static, so a set archive can be unpacked before `/usr` exists
+    // (RAM_FLOOR.md §4.3.4).
+    let zstd_elf_path = build_zstd(
+        &musl_sysroot.join("bin/musl-gcc"),
+        &["-static-pie"],
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("target/zstd/zstd"),
+        Some(&musl_sysroot.join("lib/libc.a")),
+    );
 
     // Real ncurses (vendored at `lib/ncurses`, matching FreeBSD's own base layout -- see
     // CLAUDE.md's ncurses/nano/nvi section), the curses/terminfo library `nano`/`nvi` both link
@@ -1005,6 +1013,7 @@ fn main() {
         ("OXFS_CLANG_ELF_PATH", clang_elf_path.to_str().unwrap()),
         ("OXFS_LLD_ELF_PATH", lld_elf_path.to_str().unwrap()),
         ("OXFS_BMAKE_ELF_PATH", bmake_elf_path.to_str().unwrap()),
+        ("OXFS_ZSTD_ELF_PATH", zstd_elf_path.to_str().unwrap()),
         (
             "BMAKE_MK_MANIFEST_PATH",
             bmake_mk_manifest_path.to_str().unwrap(),
@@ -2787,6 +2796,53 @@ fn build_bmake(musl_sysroot: &Path) -> PathBuf {
     assert!(status.success(), "bmake make-bootstrap.sh failed: {status}");
     assert!(bin.exists(), "bmake build produced no binary");
     bin
+}
+
+/// Builds the `zstd(1)` program from `external/bsd/zstd` (upstream, unpatched) into `out` with
+/// the C compiler `cc` and `link_args`, in one compiler run over the library and the program
+/// sources: no build directory inside the submodule, and none of the Makefile's probes of the
+/// build host. Multithreaded compression (`-T`), no legacy formats, no zlib/lzma/lz4. Rebuilt
+/// when a source or `extra_input` (musl's `libc.a`, for the target build) is newer than `out`.
+fn build_zstd(cc: &Path, link_args: &[&str], out: &Path, extra_input: Option<&Path>) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("external/bsd/zstd");
+    println!("cargo:rerun-if-changed={}", src.join("lib").display());
+    println!("cargo:rerun-if-changed={}", src.join("programs").display());
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for dir in ["lib/common", "lib/compress", "lib/decompress", "lib/dictBuilder", "programs"] {
+        for entry in std::fs::read_dir(src.join(dir)).unwrap_or_else(|e| panic!("{dir}: {e}")) {
+            let path = entry.unwrap().path();
+            if matches!(path.extension().and_then(|e| e.to_str()), Some("c") | Some("S")) {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    let newest = sources
+        .iter()
+        .map(|p| p.as_path())
+        .chain(extra_input)
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap();
+    if std::fs::metadata(out).and_then(|m| m.modified()).is_ok_and(|m| m >= newest) {
+        return out.to_path_buf();
+    }
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let status = Command::new(cc)
+        .args(["-O2", "-pthread", "-DZSTD_MULTITHREAD", "-DZSTD_LEGACY_SUPPORT=0", "-DBACKTRACE_ENABLE=0"])
+        .arg("-I")
+        .arg(src.join("lib"))
+        .arg("-I")
+        .arg(src.join("lib/common"))
+        .args(link_args)
+        .arg("-o")
+        .arg(out)
+        .args(&sources)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run {} for zstd: {e}", cc.display()));
+    assert!(status.success(), "building zstd with {} failed: {status}", cc.display());
+    out.to_path_buf()
 }
 
 /// Generates `BMAKE_MK_FILES` (every `*.mk` under `usr.bin/make/mk`, including `sys/*.mk`),

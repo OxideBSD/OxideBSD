@@ -129,6 +129,9 @@
 ./sbin/fsck type=file src=artifact:OXFS_FSCK_ELF_PATH
 ./sbin/fsck_oxfs type=file src=artifact:OXFS_FSCK_OXFS_ELF_PATH
 ./sbin/newfs_oxfs type=file src=artifact:OXFS_NEWFS_OXFS_ELF_PATH
+./sbin/zstd type=file src=artifact:OXFS_ZSTD_ELF_PATH
+./sbin/unzstd type=file hardlink=./sbin/zstd
+./sbin/zstdcat type=file hardlink=./sbin/zstd
 ./usr/bin/du type=file src=artifact:OXFS_DU_ELF_PATH
 ./bin/ed type=file src=artifact:OXFS_ED_ELF_PATH
 ./bin/egrep type=file src=artifact:OXFS_EGREP_ELF_PATH
@@ -353,6 +356,9 @@
 ./usr/share/man/man1/apropos.1 type=file src=share/man/man1/apropos.1
 ./usr/share/man/man1/whatis.1 type=file hardlink=./usr/share/man/man1/apropos.1
 ./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
+./usr/share/man/man1/zstd.1 type=file src=external/bsd/zstd/programs/zstd.1
+./usr/share/man/man1/unzstd.1 type=file hardlink=./usr/share/man/man1/zstd.1
+./usr/share/man/man1/zstdcat.1 type=file hardlink=./usr/share/man/man1/zstd.1
 ./usr/share/man/man1/less.1 type=file src=share/man/man1/more.1
 ./usr/share/man/man1/logger.1 type=file src=share/man/man1/logger.1
 ./usr/share/man/man1/protect.1 type=file src=share/man/man1/protect.1
