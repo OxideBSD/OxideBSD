@@ -145,8 +145,41 @@ impl Drop for Guard {
 /// `for_call` guards in force: while any is, a disk transfer polls instead of sleeping.
 static NO_SLEEP: AtomicU64 = AtomicU64::new(0);
 
+/// `exit` for a hold that can't have made anyone wait: a page cache fill from a copy routine
+/// (`memory::pagecache`, OxideBSD-doc `DEMANDPAGE.md` §5.2.1), which took the lock free (or
+/// already its own), kept interrupts masked and never slept, so no process blocked on it and no
+/// interrupt deferred a termination meanwhile. It wakes no one and runs nothing deferred: both
+/// take the process table's lock, which the interrupted code may hold (found: `do_mmap` copying in
+/// under it). A waiter still counted in `WAITERS` was already woken by the holder before.
+pub fn exit_quiet() {
+    if scheduler::current_pid() == 0 {
+        return;
+    }
+    if DEPTH.fetch_sub(1, Ordering::AcqRel) == 1 {
+        OWNER.store(0, Ordering::Release);
+    }
+}
+
+/// Forbids sleeping for the disk while it lives, as a `Guard::for_call` does: for a page cache
+/// fill from a copy routine, which can't know what spin locks the interrupted code holds
+/// (OxideBSD-doc `DEMANDPAGE.md` §4.2).
+pub struct NoSleep;
+
+impl NoSleep {
+    pub fn new() -> Self {
+        NO_SLEEP.fetch_add(1, Ordering::AcqRel);
+        NoSleep
+    }
+}
+
+impl Drop for NoSleep {
+    fn drop(&mut self) {
+        NO_SLEEP.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Whether a disk transfer may sleep now: the current process holds the lock, and nothing on
-/// the way here forbade it (`Guard`).
+/// the way here forbade it (`Guard`, `NoSleep`).
 pub fn may_sleep() -> bool {
     held_by_current() && NO_SLEEP.load(Ordering::Acquire) == 0
 }

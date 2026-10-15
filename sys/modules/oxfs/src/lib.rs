@@ -149,6 +149,8 @@ unsafe extern "C" {
     /// Drops the kernel's page cache entry for an inode whose contents change or which is freed
     /// (`PAGECACHE.md` §2.4): see `content_changed`.
     fn oxidebsd_content_changed(inode: u64);
+    /// Registers `oxfs_content_block_map` (`DEMANDPAGE.md` §5.1).
+    fn oxidebsd_register_content_block_map(map: extern "C" fn(u64, *mut [u64; 3], u64) -> i64);
     /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
     fn oxidebsd_make_dev(
         name_ptr: u64,
@@ -3335,6 +3337,51 @@ extern "C" fn oxfs_inode_content_write(inode: u64, ptr: u64, len: u64) -> i64 {
     } else {
         -EIO
     }
+}
+
+/// The kernel page cache's block map of `inode` (`DEMANDPAGE.md` §5.1): its delayed writes go to
+/// the disk first, then its data blocks are written into `out` (room for `cap`) as runs `[file
+/// page, disk block, length]`, the blocks numbered as `oxidebsd_block_read` takes them, holes left
+/// out. The number of runs, or minus the number needed when `cap` is short; `i64::MIN` for a tmpfs
+/// file, which isn't on the disk.
+extern "C" fn oxfs_content_block_map(inode: u64, out: *mut [u64; 3], cap: u64) -> i64 {
+    let n = inode as u32;
+    if is_tmpfs_inode(n) {
+        return i64::MIN;
+    }
+    sync_file(n);
+    let record = read_inode(n);
+    let pages = (record.size as usize).div_ceil(BLOCK_SIZE);
+    let offset = data_block_offset() as u64;
+    let mut runs = 0u64;
+    let mut last: Option<[u64; 3]> = None;
+    let mut emit = |run: [u64; 3], runs: &mut u64| {
+        if *runs < cap {
+            // SAFETY: the caller (the kernel's `fd::content_block_map`) passes room for `cap`.
+            unsafe { *out.add(*runs as usize) = run };
+        }
+        *runs += 1;
+    };
+    for page in 0..pages {
+        let Some(block) = inode_block_at(&record, page) else { continue };
+        if is_tmpfs_block(block) {
+            return i64::MIN;
+        }
+        let block = offset + block as u64;
+        match last.as_mut() {
+            Some(run) if run[0] + run[2] == page as u64 && run[1] + run[2] == block => run[2] += 1,
+            _ => {
+                if let Some(run) = last.take() {
+                    emit(run, &mut runs);
+                }
+                last = Some([page as u64, block, 1]);
+            }
+        }
+    }
+    if let Some(run) = last {
+        emit(run, &mut runs);
+    }
+    if runs <= cap { runs as i64 } else { -(runs as i64) }
 }
 
 /// `size` accessor for `oxidebsd_register_content_accessors` -- `inode`'s real current content
@@ -7583,6 +7630,7 @@ pub extern "C" fn module_init() -> i32 {
             oxfs_inode_is_shm,
             oxfs_exec_setid,
         );
+        oxidebsd_register_content_block_map(oxfs_content_block_map);
         oxidebsd_register_socket_nodes(oxfs_create_socket_node, oxfs_lookup_socket_node);
         oxidebsd_register_kernel_open(oxfs_kern_open);
     }

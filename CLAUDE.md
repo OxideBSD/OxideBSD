@@ -193,7 +193,13 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   and after the modules load (`[wx]` lines must say none). User `PROT_WRITE|PROT_EXEC` is
   `ENOTSUP` unless `wxneeded` (`PT_OXIDEBSD_WXNEEDED`, `ld.lld -z wxneeded`) on a `wxallowed` mount.
 - User leaves carry software bits: `SHARED_LEAF`, `CACHED_LEAF`, `PROT_NONE_LEAF` (non-present,
-  keeps its frame), `MAY_WRITE_LEAF`, `COW_LEAF`. **A page-table walk must not treat a non-`USER_ACCESSIBLE`
+  keeps its frame), `MAY_WRITE_LEAF`, `COW_LEAF`, `FILE_LEAF` (non-present, **no** frame: a page
+  cache page not filled yet, entry id + file page in its address bits).
+- **File mappings are demand-paged** (`OxideBSD-doc/DEMANDPAGE.md`): exec and `mmap` write
+  `FILE_LEAF` entries; the fault fills them from the disk through the entry's block map, never
+  through oxfs. A new page table walk must handle `FILE_LEAF` (fork copies it, munmap forgets it,
+  mprotect/mlock fill it first). **A fault in a copy routine must never sleep or wait**: the
+  interrupted code may hold any spin lock (syscalls do copy in under the process table's lock). **A page-table walk must not treat a non-`USER_ACCESSIBLE`
   user-range entry as kernel-owned**; a non-present leaf may still own a frame.
 
 ## Syscall ABI (`sys/syscall/`)
@@ -304,6 +310,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **A new path that changes a file's contents or frees an inode must call `content_changed`**, or
   the kernel's page cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping
   the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
+- **RAM rule: never require more than 64 MB**, boot and console install, forever (user, 2026-10-14);
+  UEFI is exempt only if OVMF itself needs more. `ram_floor_boot` fails on any `[fault]` or
+  failed rc service, not just panics.
 - **The kernel never formats or seeds** (RAM_FLOOR.md §4): the system is `target/images/disk.img`,
   built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
   disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`

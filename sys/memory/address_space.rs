@@ -73,6 +73,71 @@ pub const MAY_WRITE_LEAF: PageTableFlags = PageTableFlags::BIT_52;
 /// too.
 pub const COW_LEAF: PageTableFlags = PageTableFlags::BIT_53;
 
+/// Marks a not-present user page of a page cache mapping not filled yet (OxideBSD-doc
+/// `DEMANDPAGE.md` §3): its address bits hold the cache entry (20 bits) and the file page (20
+/// bits), its `USER_ACCESSIBLE` and `NO_EXECUTE` the permissions the page gets when the first touch
+/// fills it (`process::mm::try_fill_file_page`). Owns no frame. Never with `PROT_NONE_LEAF`.
+pub const FILE_LEAF: PageTableFlags = PageTableFlags::BIT_54;
+
+/// Whether `entry` is a `FILE_LEAF` page: `Some((cache entry, file page, executable))`.
+pub fn file_entry(entry: &PageTableEntry) -> Option<(u64, u64, bool)> {
+    let flags = entry.flags();
+    if flags.contains(PageTableFlags::PRESENT) || !flags.contains(FILE_LEAF) {
+        return None;
+    }
+    let payload = entry.addr().as_u64() >> 12;
+    Some((payload & 0xf_ffff, payload >> 20, !flags.contains(PageTableFlags::NO_EXECUTE)))
+}
+
+/// Makes `entry` a `FILE_LEAF` page for page `file_page` of cache entry `id`. `None` if they don't
+/// fit its 20-bit fields (the caller fills the page now instead).
+pub fn set_file_entry(entry: &mut PageTableEntry, id: u64, file_page: u64, executable: bool) -> Option<()> {
+    if id > 0xf_ffff || file_page > 0xf_ffff {
+        return None;
+    }
+    let mut flags = FILE_LEAF | PageTableFlags::USER_ACCESSIBLE;
+    if !executable {
+        flags |= crate::cpu::nx::no_execute();
+    }
+    entry.set_addr(PhysAddr::new((file_page << 20 | id) << 12), flags);
+    Some(())
+}
+
+/// The level-1 entry for `va` under `l4`, making the tables that lead to it if they're missing
+/// (user tables, as `map_to_with_table_flags` makes them). `None` out of memory, or past a huge
+/// page.
+pub fn leaf_entry_or_create(
+    l4: &mut PageTable,
+    physical_memory_offset: VirtAddr,
+    va: VirtAddr,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Option<&'static mut PageTableEntry> {
+    let indexes = [va.p4_index(), va.p3_index(), va.p2_index()];
+    let mut table: &mut PageTable = l4;
+    for index in indexes {
+        let entry = &mut table[index];
+        if entry.is_unused() {
+            let frame = frame_allocator.allocate_frame()?;
+            // SAFETY: a fresh frame, zeroed before it's linked in.
+            unsafe { frame_to_page_table(frame, physical_memory_offset) }.zero();
+            entry.set_frame(
+                frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+            );
+        }
+        let flags = entry.flags();
+        if !flags.contains(PageTableFlags::PRESENT) || flags.contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        let frame = entry.frame().ok()?;
+        // SAFETY: a present, non-huge entry points at a live page table, reachable through the
+        // physical-memory window; the caller's `&mut` to `l4` stands for the whole tree.
+        table = unsafe { frame_to_page_table(frame, physical_memory_offset) };
+    }
+    // SAFETY: as above; `frame_to_page_table`'s tables live as long as the address space.
+    Some(unsafe { &mut *(&mut table[va.p1_index()] as *mut PageTableEntry) })
+}
+
 /// Whether `entry` is a `PROT_NONE` user page (`PROT_NONE_LEAF`).
 pub fn is_prot_none(entry: &PageTableEntry) -> bool {
     let flags = entry.flags();
@@ -733,6 +798,14 @@ fn copy_table_level(
             let flags = cow_flags(entry.flags());
             parent[i].set_addr(src_frame.start_address(), flags);
             child[i].set_addr(src_frame.start_address(), flags);
+            continue;
+        }
+        if level == 1 && file_entry(entry).is_some() {
+            // A page cache page not filled yet: the child fills it from the same entry, which
+            // `fork_uses` counts as the child's too.
+            if copy_user_leaves {
+                child[i] = entry.clone();
+            }
             continue;
         }
         if !entry.flags().contains(PageTableFlags::PRESENT) {

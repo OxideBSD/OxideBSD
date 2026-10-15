@@ -284,8 +284,9 @@ fn page_fault_handler(frame: &mut TrapFrame) {
         return;
     }
     // A write to a copy-on-write page, from ring 3 or from a copy routine in ring 0 (COW.md §4.2),
-    // gets the writer its own copy and retries; a not-present fault in the stack reserve, from
-    // either ring, gets its page (`mm::try_grow_user_stack`). With no frame for either, the OOM
+    // gets the writer its own copy and retries; a not-present fault on a page cache page not
+    // filled yet gets it filled (DEMANDPAGE.md §4), and one in the stack reserve gets its page
+    // (`mm::try_grow_user_stack`), from either ring. With no frame for any of these, the OOM
     // killer frees one (COW.md §6) or the fault goes the usual way below.
     if let Ok(fault_addr) = Cr2::read() {
         let addr = fault_addr.as_u64();
@@ -296,7 +297,13 @@ fn page_fault_handler(frame: &mut TrapFrame) {
                 None
             }
         } else {
-            crate::process::mm::try_grow_user_stack(addr)
+            // A page cache page's first touch (DEMANDPAGE.md §4), else stack growth.
+            match crate::process::mm::try_fill_file_page(addr, frame.from_user()) {
+                Some(crate::process::mm::FileFill::Done) => Some(true),
+                Some(crate::process::mm::FileFill::NoMemory) => Some(false),
+                Some(crate::process::mm::FileFill::Failed) => None,
+                None => crate::process::mm::try_grow_user_stack(addr),
+            }
         };
         match resolved {
             Some(true) => return,

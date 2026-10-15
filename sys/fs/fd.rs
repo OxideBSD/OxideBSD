@@ -851,6 +851,36 @@ pub(crate) extern "C" fn oxidebsd_register_content_accessors(
     *CONTENT_ACCESSORS.lock() = Some((read, write, size, is_shm, setid));
 }
 
+/// `(content_id, out, cap) -> runs`: a file's disk blocks for the page cache's demand paging
+/// (OxideBSD-doc `DEMANDPAGE.md` §5.1), as `[file page, disk block, length]` runs into `out`
+/// (room for `cap`), its delayed writes put on the disk first. The number of runs, or minus the
+/// number needed if `cap` is too small; `i64::MIN` for a file not on the disk (tmpfs).
+pub(crate) type ContentBlockMap = extern "C" fn(u64, *mut [u64; 3], u64) -> i64;
+
+static CONTENT_BLOCK_MAP: Mutex<Option<ContentBlockMap>> = Mutex::new(None);
+
+pub(crate) extern "C" fn oxidebsd_register_content_block_map(map: ContentBlockMap) {
+    *CONTENT_BLOCK_MAP.lock() = Some(map);
+}
+
+/// File `content_id`'s block map (`ContentBlockMap`), `None` if it has none.
+pub(crate) fn content_block_map(content_id: u64) -> Option<alloc::vec::Vec<[u64; 3]>> {
+    let map = (*CONTENT_BLOCK_MAP.lock())?;
+    let _lock = crate::fs::fslock::Guard::for_call(map as usize as u64);
+    let mut runs: alloc::vec::Vec<[u64; 3]> = alloc::vec![[0; 3]; 16];
+    loop {
+        let n = map(content_id, runs.as_mut_ptr(), runs.len() as u64);
+        if n == i64::MIN {
+            return None;
+        }
+        if n >= 0 {
+            runs.truncate(n as usize);
+            return Some(runs);
+        }
+        runs.resize(n.unsigned_abs() as usize, [0; 3]);
+    }
+}
+
 /// The mode bits, owner and group of the program open on `fd`, for `execve`
 /// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
 pub(crate) fn exec_setid(fd: u64) -> Option<((u32, u32, u32), bool)> {

@@ -80,6 +80,56 @@ pub fn try_resolve_cow(fault_addr: u64) -> Option<bool> {
     Some(true)
 }
 
+/// What a `FILE_LEAF` fault came to (`try_fill_file_page`).
+pub enum FileFill {
+    /// Mapped: the instruction retries.
+    Done,
+    /// No frame for it: the OOM killer's case.
+    NoMemory,
+    /// The page can't be had (stale, past the file, or the filesystem busy for a copy routine):
+    /// the fault goes the usual way.
+    Failed,
+}
+
+/// The first touch of a page cache mapping's page (OxideBSD-doc `DEMANDPAGE.md` §4): a
+/// not-present fault on a `FILE_LEAF` entry, from ring 3 or a copy routine in ring 0, gets the
+/// page from the cache (reading it from the disk if it must) and maps it read-only, shared and
+/// cached, as a mapping made whole would have. `None` when the fault isn't one.
+pub fn try_fill_file_page(fault_addr: u64, from_user: bool) -> Option<FileFill> {
+    use memory::address_space::{CACHED_LEAF, SHARED_LEAF, file_entry, leaf_entry};
+    if fault_addr >= crate::memory::usercopy::VM_MAXUSER || scheduler::current_pid() == 0 {
+        return None;
+    }
+    let phys_offset = memory::phys_mem_offset();
+    let page_va = VirtAddr::new(fault_addr & !0xfff);
+    let l4 = || {
+        let (l4_frame, _) = x86_64::registers::control::Cr3::read();
+        // SAFETY: CR3's level-4 table, live and reachable through the physical-memory window.
+        unsafe { &mut *(phys_offset + l4_frame.start_address().as_u64()).as_mut_ptr::<x86_64::structures::paging::PageTable>() }
+    };
+    let pending = leaf_entry(l4(), phys_offset, page_va)?;
+    let (id, file_page, executable) = file_entry(pending)?;
+    let raw = pending.addr().as_u64() | pending.flags().bits();
+    let from = if from_user { memory::pagecache::Fill::UserFault } else { memory::pagecache::Fill::KernelFault };
+    let frame = match memory::pagecache::fill(id, file_page, from) {
+        Ok(frame) => frame,
+        Err(memory::pagecache::FillError::NoMemory) => return Some(FileFill::NoMemory),
+        Err(memory::pagecache::FillError::Unavailable) => return Some(FileFill::Failed),
+    };
+    // The fill may have slept on the disk: another thread may have filled the page, or unmapped
+    // it, meanwhile. Only the entry as it was is replaced.
+    let Some(entry) = leaf_entry(l4(), phys_offset, page_va) else { return Some(FileFill::Done) };
+    if entry.addr().as_u64() | entry.flags().bits() == raw {
+        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | SHARED_LEAF | CACHED_LEAF;
+        if !executable {
+            flags |= crate::cpu::nx::no_execute();
+        }
+        entry.set_addr(frame.start_address(), flags);
+        x86_64::instructions::tlb::flush(page_va);
+    }
+    Some(FileFill::Done)
+}
+
 /// A not-present fault inside the stack reserve: maps the page. `None` when the fault isn't stack
 /// growth; `Some(false)` when there was no frame for it (the OOM killer's case).
 pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
@@ -848,13 +898,19 @@ fn do_mmap_file_backed(
             space.use_cached(id);
         }
     }
-    let frames: Vec<PhysFrame<Size4KiB>> = if let Some(id) = cache_entry {
+    // Filled on first touch (DEMANDPAGE.md): the pages get `FILE_LEAF` entries below, not frames.
+    let demand = cache_entry.filter(|&id| {
+        memory::pagecache::demand(id) && file_page + covered_pages <= 0xf_ffff
+    });
+    let frames: Vec<PhysFrame<Size4KiB>> = if demand.is_some() {
+        Vec::new()
+    } else if let Some(id) = cache_entry {
         // The frame allocator only around each allocation: the reads can sleep on the disk
         // (COW.md §4.4).
         let mut frames = Vec::with_capacity(covered_pages as usize);
         for i in 0..covered_pages {
             let page = file_page + i;
-            let (frame, cached) = match memory::pagecache::frame(id, page) {
+            let (frame, cached) = match memory::pagecache::frame(id, page, memory::pagecache::Fill::Syscall) {
                 Some(frame) => (frame, true),
                 None => {
                     let frame = with_frame_allocator(|fa| fa.allocate_frame()).ok_or(ENOMEM)?;
@@ -1054,6 +1110,23 @@ fn do_mmap_file_backed(
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
         let end_page =
             Page::<Size4KiB>::containing_address(VirtAddr::new(base + covered_pages * 4096 - 1));
+        if let Some(id) = demand {
+            let executable = !flags.contains(PageTableFlags::NO_EXECUTE);
+            with_frame_allocator(|fa| -> Result<(), u64> {
+                for (i, page) in Page::range_inclusive(start_page, end_page).enumerate() {
+                    let entry = memory::address_space::leaf_entry_or_create(
+                        mapper.level_4_table_mut(),
+                        phys_offset,
+                        page.start_address(),
+                        fa,
+                    )
+                    .ok_or(ENOMEM)?;
+                    memory::address_space::set_file_entry(entry, id, file_page + i as u64, executable)
+                        .ok_or(ENOMEM)?;
+                }
+                Ok(())
+            })?;
+        }
         with_frame_allocator(|fa| -> Result<(), u64> {
             for (i, (page, frame)) in Page::range_inclusive(start_page, end_page).zip(frames.iter()).enumerate() {
                 let flags = if cached_pages.get(i) == Some(&true) {
@@ -1285,6 +1358,14 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
         // same as `AddressSpace::teardown`'s own walk -- that content is owned by
         // `MMAP_FILE_CACHE`, released via `release_mmap_file_ref` below instead, never by this
         // per-page free.
+        // A page cache page not filled yet owns no frame: just forgotten (DEMANDPAGE.md).
+        if let Some(entry) =
+            memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
+            && memory::address_space::file_entry(entry).is_some()
+        {
+            entry.set_unused();
+            continue;
+        }
         // A PROT_NONE page isn't present, so `translate` doesn't see it: remove it here.
         if let Some(entry) =
             memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
@@ -1518,6 +1599,15 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     let parent_table_flags =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
+    // Page cache pages not filled yet are filled first, as a touch would, so the new permissions
+    // apply to a real page (DEMANDPAGE.md): left as they were, a page made PROT_NONE would fill and
+    // become readable at its first touch. Before any lock: a fill may sleep on the disk.
+    for va in (addr..=end_inclusive).step_by(4096) {
+        if let Some(FileFill::NoMemory) = try_fill_file_page(va, true) {
+            return Err(ENOMEM);
+        }
+    }
+
     let phys_offset = memory::phys_mem_offset();
     let table = PROCESS_TABLE.lock();
     let me = table
@@ -1714,6 +1804,14 @@ fn range_fully_mapped(caller_pid: Pid, addr: u64, len: u64) -> bool {
 pub fn do_mlock(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
     if len == 0 {
         return Ok(0);
+    }
+    // Locked pages are resident: page cache pages not filled yet are filled now (DEMANDPAGE.md).
+    if let Some(end) = addr.checked_add(len) {
+        for va in (addr & !0xfff..end).step_by(4096) {
+            if let Some(FileFill::NoMemory) = try_fill_file_page(va, true) {
+                return Err(crate::syscall::EAGAIN);
+            }
+        }
     }
     if range_fully_mapped(caller_pid, addr, len) {
         Ok(0)

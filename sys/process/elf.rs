@@ -359,7 +359,7 @@ impl<'a> Elf<'a> {
 /// never held across a sleep).
 pub fn load(
     elf: &Elf,
-    mapper: &mut impl Mapper<Size4KiB>,
+    mapper: &mut x86_64::structures::paging::OffsetPageTable<'_>,
     physical_memory_offset: VirtAddr,
     bias: u64,
 ) -> Result<VirtAddr, ElfError> {
@@ -429,7 +429,27 @@ pub fn load(
             // Shared with every other process running this file, read-only. No other segment
             // touches the page, so `mapped_pages` never needs it.
             let cached = elf.cache.zip(elf.cache_page(index, &header, bias, page.start_address().as_u64()));
-            if let Some(frame) = cached.and_then(|(id, file_page)| crate::memory::pagecache::frame(id, file_page)) {
+            // Filled on first touch (DEMANDPAGE.md): a `FILE_LEAF` entry, no frame yet.
+            if let Some((id, file_page)) = cached
+                && crate::memory::pagecache::demand(id)
+            {
+                let executable = !flags.contains(PageTableFlags::NO_EXECUTE);
+                let set = crate::memory::with_frame_allocator(|fa| {
+                    let entry = crate::memory::address_space::leaf_entry_or_create(
+                        mapper.level_4_table_mut(),
+                        physical_memory_offset,
+                        page.start_address(),
+                        fa,
+                    )?;
+                    crate::memory::address_space::set_file_entry(entry, id, file_page, executable)
+                });
+                if set.is_some() {
+                    continue;
+                }
+            }
+            if let Some(frame) = cached.and_then(|(id, file_page)| {
+                crate::memory::pagecache::frame(id, file_page, crate::memory::pagecache::Fill::Syscall)
+            }) {
                 let flags = flags | crate::memory::address_space::SHARED_LEAF | crate::memory::address_space::CACHED_LEAF;
                 // SAFETY: a page cache frame, freed only once no address space uses its entry
                 // (the caller records this one's use).
