@@ -57,7 +57,15 @@ fi
 
 # Guest RAM in MiB: $OXIDEBSD_QEMU_MEM, default 8192. The console-install floor is 128
 # (OxideBSD-doc ROADMAP.md, v0.3.0 item 6).
-set -- -accel kvm -accel tcg -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
+# Accelerator: KVM when the host has it, else TCG. $OXIDEBSD_QEMU_ACCEL=tcg forces emulation:
+# under KVM a CPU model (-cpu) only changes what CPUID reports, and the host still runs any newer
+# instruction; TCG traps it, as the real CPU would -- the way to check the first-generation ISA
+# baseline (CLAUDE.md: OXIDEBSD_QEMU_CPU=Opteron_G1 OXIDEBSD_QEMU_ACCEL=tcg).
+if [ "${OXIDEBSD_QEMU_ACCEL:-}" = tcg ]; then
+    set -- -accel tcg -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
+else
+    set -- -accel kvm -accel tcg -m "${OXIDEBSD_QEMU_MEM:-8192}" -nic user,model=rtl8139
+fi
 # Serial on stdio. A test also logs it to a file, which the stall guard below watches.
 if [ "${QEMU_HEADLESS_TEST:-0}" = 1 ]; then
     QEMU_SERIAL_LOG=$(mktemp target/qemu_test_serial.XXXXXX)

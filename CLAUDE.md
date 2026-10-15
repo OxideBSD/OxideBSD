@@ -91,6 +91,8 @@ user before large structural commitments.
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
   `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the floor is 64),
   `OXIDEBSD_QEMU_CPU=max` (QEMU's default CPU has no SMEP/SMAP; set this to exercise them),
+  `OXIDEBSD_QEMU_ACCEL=tcg` (pure emulation: with `OXIDEBSD_QEMU_CPU=Opteron_G1` it checks the
+  x86-64-v1 baseline, since under KVM `-cpu` only masks CPUID and newer instructions still run),
   `OXIDEBSD_REAL_HARDWARE=1` (adds `no-ata`).
 
 ## Test architecture
