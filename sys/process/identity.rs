@@ -129,9 +129,11 @@ fn unchanged(v: u64) -> bool {
 }
 
 impl Cred {
-    /// The superuser, as the kernel's first process starts.
+    /// The superuser, as the kernel's first process starts: every ID 0, and group 0 (`wheel`) as
+    /// its one supplementary group, as the BSDs' process 0 has it. A program that gives up root
+    /// sets its groups first (`initgroups`, `setusercontext`), or it keeps `wheel`.
     pub fn root() -> Cred {
-        Cred::default()
+        Cred { groups: alloc::vec![0], ..Cred::default() }
     }
 
     pub fn privileged(&self) -> bool {

@@ -11,10 +11,9 @@
 //!
 //! Three parts, all through `tests/uid_syscall_smoke.rs` spawning this binary as pid 1:
 //! 1. As root, as the kernel starts its first process (`identity::Cred::root`): confirm
-//!    `getuid`/`geteuid`/`getgid`/`getegid` all report `0`, and `getgroups` reports no
-//!    supplementary groups, through both the count-query (`size == 0`) and real-write
-//!    (`size >= 1`) shapes. (It reported a fixed `[gid]` before credentials grew a real group
-//!    list, `282249f`; this check expected that until it was updated.)
+//!    `getuid`/`geteuid`/`getgid`/`getegid` all report `0`, and `getgroups` reports the one
+//!    supplementary group `[0]` (`wheel`, as on the BSDs), through both the count-query
+//!    (`size == 0`) and real-write (`size >= 1`) shapes.
 //! 2. Still as root: create `/uidtest`, `chmod` it to `0o600`, `chown` it to uid `99` (leaving
 //!    gid unchanged via the real `(gid_t)-1` sentinel), then `stat` it back and confirm both stuck.
 //! 2b. Create `/uidtest_mode` via `open(O_CREAT, 0o600)` directly (no follow-up `chmod()`) and
@@ -154,14 +153,14 @@ fn check_root_identity() -> bool {
     }
 
     let count = unsafe { syscall(SYS_GETGROUPS, 0, 0, 0) };
-    if count != Ok(0) {
-        write_bytes(b"uid-syscall-smoke: getgroups(0, NULL) didn't report 0\n");
+    if count != Ok(1) {
+        write_bytes(b"uid-syscall-smoke: getgroups(0, NULL) didn't report 1\n");
         return false;
     }
     let mut list: [u32; 1] = [0xffff_ffff];
     let n = unsafe { syscall(SYS_GETGROUPS, 1, list.as_mut_ptr() as u64, 0) };
-    if n != Ok(0) || list[0] != 0xffff_ffff {
-        write_bytes(b"uid-syscall-smoke: getgroups(1, &list) wrote groups a fresh root has none of\n");
+    if n != Ok(1) || list[0] != 0 {
+        write_bytes(b"uid-syscall-smoke: getgroups(1, &list) didn't report [0]\n");
         return false;
     }
 
