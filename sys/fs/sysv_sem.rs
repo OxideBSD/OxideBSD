@@ -154,26 +154,29 @@ unsafe impl crate::memory::usercopy::Pod for RawSembuf {}
 
 const _: () = assert!(core::mem::size_of::<RawSembuf>() == 6);
 
-/// musl's own `struct semid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/sem.h`) -- same
-/// probe-confirmed rigor as `RawSembuf` above (88 bytes total: 48-byte `ipc_perm` + two 8-byte
-/// `time_t`s + a 2-byte `sem_nsems` padded out to 8 + two reserved 8-byte longs).
+/// musl's `struct semid_ds` on x86_64 (`external/mit/musl/arch/x86_64/bits/sem.h`, which overrides
+/// `arch/generic`'s): 104 bytes, a reserved long after each `time_t`. It used to follow the
+/// generic one (88 bytes): `IPC_STAT` wrote `sem_ctime` into `__unused1` and the count into
+/// `sem_ctime`, and a program read `sem_nsems` as 0.
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct RawSemidDs {
     sem_perm: RawIpcPerm,
     sem_otime: i64,
+    unused1: i64,
     sem_ctime: i64,
+    unused2: i64,
     sem_nsems: u16,
     pad: [u8; 6],
     unused3: i64,
     unused4: i64,
 }
 
-const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 88);
+const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 104);
 // SAFETY: integers only, no padding (the size assert pins the layout).
 unsafe impl crate::memory::usercopy::Pod for RawSemidDs {}
 
-const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 88);
+const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 104);
 
 /// Wakes every process blocked in `do_semop`/`do_semtimedop` on `semid` **whose own `semnum` is
 /// one of `touched`** -- called after any successful `semop`/`semctl(SETVAL/SETALL)`/
@@ -541,7 +544,9 @@ pub(crate) fn do_semctl(id: u64, semnum: u64, cmd: u64, arg: u64) -> Result<u64,
                     pad2: 0,
                 },
                 sem_otime: s.otime,
+                unused1: 0,
                 sem_ctime: s.ctime,
+                unused2: 0,
                 sem_nsems: s.semas.len() as u16,
                 pad: [0; 6],
                 unused3: 0,

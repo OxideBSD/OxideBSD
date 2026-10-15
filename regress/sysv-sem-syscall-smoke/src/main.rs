@@ -183,17 +183,22 @@ struct RawIpcPerm {
     pad2: i64,
 }
 
-/// Matches the kernel's own `RawSemidDs` (`sys/fs/sysv_sem.rs`) exactly.
+/// Matches the kernel's own `RawSemidDs` (`sys/fs/sysv_sem.rs`) exactly: musl's x86_64 layout, 104
+/// bytes.
 #[repr(C)]
 struct RawSemidDs {
     sem_perm: RawIpcPerm,
     sem_otime: i64,
+    unused1: i64,
     sem_ctime: i64,
+    unused2: i64,
     sem_nsems: u16,
     pad: [u8; 6],
     unused3: i64,
     unused4: i64,
 }
+
+const _: () = assert!(core::mem::size_of::<RawSemidDs>() == 104);
 
 /// Matches the kernel's own `RawTimespec` shape (a plain `{i64, i64}` pair, same as every other
 /// timespec-taking syscall in this codebase).
@@ -257,7 +262,9 @@ fn semctl_stat(id: u64) -> Result<RawSemidDs, u64> {
             pad2: 0,
         },
         sem_otime: 0,
+        unused1: 0,
         sem_ctime: 0,
+        unused2: 0,
         sem_nsems: 0,
         pad: [0; 6],
         unused3: 0,
@@ -499,7 +506,9 @@ pub extern "C" fn _start() -> ! {
             pad2: 0,
         },
         sem_otime: 0,
+        unused1: 0,
         sem_ctime: 0,
+        unused2: 0,
         sem_nsems: 0,
         pad: [0; 6],
         unused3: 0,
