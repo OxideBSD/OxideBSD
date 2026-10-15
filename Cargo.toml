@@ -64,6 +64,7 @@ members = [
   "regress/socket-syscall-smoke",
   "regress/sysctl-syscall-smoke",
   "regress/pagecache-syscall-smoke",
+  "regress/vfork-syscall-smoke",
   "regress/ppoll-syscall-smoke",
   "regress/fd-syscall-smoke",
   "regress/tty-syscall-smoke",
@@ -98,6 +99,7 @@ members = [
   "sys/modules/socket",
   "sys/modules/sysctl",
   "sys/modules/procctl",
+  "sys/modules/vfork",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
 exclude = ["lib/libcertstore", "lib/liboxfs", "lib/libmtree"]
@@ -366,6 +368,10 @@ harness = false
 
 [[test]]
 name = "pagecache_syscall_smoke"
+harness = false
+
+[[test]]
+name = "vfork_syscall_smoke"
 harness = false
 
 [[test]]

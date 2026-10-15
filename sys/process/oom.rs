@@ -13,7 +13,11 @@
 //! locks: the victim is only sent `SIGKILL` (acted on when it next runs) and the copy fails with
 //! `EFAULT`.
 
-use super::{INIT_PID, ProcState, SIGKILL};
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+
+use super::{INIT_PID, Pid, Process, ProcState, SIGKILL};
 use crate::kern::kern_procctl::OOM_ADJ_MIN;
 use crate::serial_println;
 
@@ -34,7 +38,7 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
     let me = super::scheduler::current_pid();
     // Who to kill, chosen under the process table -- unless the interrupted code holds it, when
     // nothing can be chosen safely.
-    let (my_tgid, victim) = {
+    let (my_tgid, victim, partners) = {
         let Some(table) = super::table().try_lock() else {
             return Outcome::Fail;
         };
@@ -74,8 +78,18 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
             }
             (pid, dying)
         });
-        (my_tgid, victim)
+        let partners = victim.map(|(pid, _)| vfork_partners(&table, pid)).unwrap_or_default();
+        (my_tgid, victim, partners)
     };
+    // A vfork child and its parent are one address space: the memory goes only if both do.
+    for &other in partners.iter().filter(|&&other| other != my_tgid) {
+        if from_user {
+            super::terminate_thread_group(other, 128 + SIGKILL as i32);
+        } else {
+            super::signals::post_signal(other, SIGKILL);
+        }
+    }
+    let victim = if partners.contains(&my_tgid) { Some((my_tgid, false)) } else { victim };
     let Some((pid, dying)) = victim.filter(|&(pid, _)| pid != my_tgid) else {
         // The faulter is the biggest, or the only candidate left. Pid 1 is never killed for it.
         if my_tgid == INIT_PID {
@@ -102,4 +116,27 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
         super::scheduler::schedule();
     }
     Outcome::Retry
+}
+
+/// The thread groups a vfork borrow ties to `tgid`: a vfork child running in its address space,
+/// or the parent whose space it runs in (`Process::vfork_parent`). Never pid 1, nor a zombie.
+fn vfork_partners(table: &BTreeMap<Pid, Box<Process>>, tgid: Pid) -> Vec<Pid> {
+    let mut partners = Vec::new();
+    for child in table.values() {
+        let Some(parent_tgid) = child.vfork_parent.and_then(|p| table.get(&p)).map(|p| p.tgid) else {
+            continue;
+        };
+        let other = if child.tgid == tgid {
+            parent_tgid
+        } else if parent_tgid == tgid {
+            child.tgid
+        } else {
+            continue;
+        };
+        let alive = table.get(&other).is_some_and(|p| !matches!(p.state, ProcState::Zombie(_)));
+        if other != INIT_PID && alive && !partners.contains(&other) {
+            partners.push(other);
+        }
+    }
+    partners
 }

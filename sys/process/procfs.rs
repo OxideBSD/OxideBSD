@@ -43,7 +43,11 @@ pub(crate) fn copy_into(content: &[u8], buf_ptr: *mut u8, buf_cap: u64) -> i64 {
 fn state_char(state: ProcState) -> u8 {
     match state {
         ProcState::Ready | ProcState::Running => b'R',
-        ProcState::Blocked(BlockReason::WaitingForDisk | BlockReason::WaitingForFsLock) => b'D',
+        ProcState::Blocked(
+            BlockReason::WaitingForDisk
+            | BlockReason::WaitingForFsLock
+            | BlockReason::WaitingForVforkChild(_),
+        ) => b'D',
         ProcState::Blocked(_) => b'S',
         ProcState::Zombie(_) => b'Z',
         ProcState::Stopped(_) => b'T',
@@ -190,6 +194,8 @@ pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_ca
         ProcState::Blocked(BlockReason::WaitingForDisk | BlockReason::WaitingForFsLock) => {
             b"D (disk sleep)".as_slice()
         }
+        // FreeBSD's wait channel for it.
+        ProcState::Blocked(BlockReason::WaitingForVforkChild(_)) => b"D (ppwait)".as_slice(),
         ProcState::Blocked(_) => b"S (sleeping)".as_slice(),
         ProcState::Zombie(_) => b"Z (zombie)".as_slice(),
         ProcState::Stopped(_) => b"T (stopped)".as_slice(),
@@ -224,6 +230,8 @@ pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_ca
     }
     out.push(b'\n');
     out.extend_from_slice(b"Threads:\t1\n");
+    // FreeBSD's `P_PPWAIT` (`ps`'s `V`): a vfork child still borrowing its parent's memory.
+    out.extend_from_slice(if proc.vfork_parent.is_some() { b"PPWait:\t1\n" } else { b"PPWait:\t0\n" });
     drop(table);
     copy_into(&out, buf_ptr, buf_cap)
 }

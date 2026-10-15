@@ -402,6 +402,7 @@ fn main() {
     build_userland_crate("socket-syscall-smoke", "SOCKET_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sysctl-syscall-smoke", "SYSCTL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pagecache-syscall-smoke", "PAGECACHE_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("vfork-syscall-smoke", "VFORK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
@@ -443,6 +444,7 @@ fn main() {
     build_module_crate("socket", "SOCKET", &[]);
     build_module_crate("sysctl", "SYSCTL", &[]);
     build_module_crate("procctl", "PROCCTL", &[]);
+    build_module_crate("vfork", "VFORK", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.
@@ -725,6 +727,7 @@ fn main() {
     let socket_smoke_elf_path = build_c_pie(&musl_sysroot, "socket-smoke");
     let sysctl_smoke_elf_path = build_c_pie(&musl_sysroot, "sysctl-smoke");
     let pagecache_smoke_elf_path = build_c_pie(&musl_sysroot, "pagecache-smoke");
+    let vfork_smoke_elf_path = build_c_pie(&musl_sysroot, "vfork-smoke");
     let wx_needed_elf_path = build_clang_pie("wx-needed", "wx-needed", &["-Wl,-z,wxneeded"]);
     let wx_plain_elf_path = build_clang_pie("wx-needed", "wx-plain", &[]);
     let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
@@ -971,6 +974,7 @@ fn main() {
         ("OXFS_SOCKET_SMOKE_ELF_PATH", socket_smoke_elf_path.to_str().unwrap()),
         ("OXFS_SYSCTL_SMOKE_ELF_PATH", sysctl_smoke_elf_path.to_str().unwrap()),
         ("OXFS_PAGECACHE_SMOKE_ELF_PATH", pagecache_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_VFORK_SMOKE_ELF_PATH", vfork_smoke_elf_path.to_str().unwrap()),
         ("OXFS_WX_NEEDED_ELF_PATH", wx_needed_elf_path.to_str().unwrap()),
         ("OXFS_WX_PLAIN_ELF_PATH", wx_plain_elf_path.to_str().unwrap()),
         ("OXFS_PPOLL_SMOKE_ELF_PATH", ppoll_smoke_elf_path.to_str().unwrap()),

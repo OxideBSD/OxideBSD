@@ -228,6 +228,19 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the procctl module: {e:?}"));
 
+    // Registers vfork(2) (COW.md §7); the work is process::do_vfork.
+    const VFORK_MOD: &[u8] = include_bytes!(env!("VFORK_MOD_PATH"));
+    const VFORK_PANIC_SYMBOL: &str = env!("VFORK_MOD_PANIC_SYMBOL");
+    crate::module::load(
+        "vfork",
+        VFORK_MOD,
+        VFORK_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
+
     crate::memory::wx::check_kernel(&mapper, "modules loaded");
 
     // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local

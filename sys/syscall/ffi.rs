@@ -2218,6 +2218,11 @@ pub(crate) extern "C" fn oxidebsd_sys_fork() -> i64 {
     result_to_ffi(crate::process::do_fork_from_current())
 }
 
+/// The `vfork` module's handler (`SYS_VFORK`, 586): `process::do_vfork`.
+pub(crate) extern "C" fn oxidebsd_sys_vfork(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    result_to_ffi(crate::process::do_vfork())
+}
+
 /// `SYS_CLONE = 555`'s FFI adapter over `do_clone` -- `ctid` (the real `clone(2)` 4th argument,
 /// carried in `r10`) really is used: real `CLONE_CHILD_CLEARTID` support, see `Process::
 /// clear_child_tid`'s own doc comment for what it's actually for (not `pthread_join`, which needs

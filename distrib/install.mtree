@@ -372,6 +372,7 @@
 ./usr/share/man/man2/accept.2 type=file src=share/man/man2/accept.2
 ./usr/share/man/man2/nmount.2 type=file src=share/man/man2/nmount.2
 ./usr/share/man/man2/procctl.2 type=file src=share/man/man2/procctl.2
+./usr/share/man/man2/vfork.2 type=file src=share/man/man2/vfork.2
 ./usr/share/man/man2/accept4.2 type=file hardlink=./usr/share/man/man2/accept.2
 ./usr/share/man/man2/bind.2 type=file src=share/man/man2/bind.2
 ./usr/share/man/man2/connect.2 type=file src=share/man/man2/connect.2
@@ -514,6 +515,8 @@
 ./usr/tests/sysctl/sysctl-smoke type=file src=artifact:OXFS_SYSCTL_SMOKE_ELF_PATH
 ./usr/tests/pagecache type=dir
 ./usr/tests/pagecache/pagecache-smoke type=file src=artifact:OXFS_PAGECACHE_SMOKE_ELF_PATH
+./usr/tests/vfork type=dir
+./usr/tests/vfork/vfork-smoke type=file src=artifact:OXFS_VFORK_SMOKE_ELF_PATH
 ./usr/tests/wx type=dir
 ./usr/tests/wx/wx-needed type=file src=artifact:OXFS_WX_NEEDED_ELF_PATH
 ./usr/tests/wx/wx-plain type=file src=artifact:OXFS_WX_PLAIN_ELF_PATH

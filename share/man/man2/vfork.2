@@ -1,0 +1,97 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 15, 2026
+.Dt VFORK 2
+.Os OxideBSD
+.Sh NAME
+.Nm vfork
+.Nd create a new process without copying the address space
+.Sh SYNOPSIS
+.In unistd.h
+.Ft pid_t
+.Fn vfork void
+.Sh DESCRIPTION
+.Fn vfork
+creates a new process, as
+.Xr fork 2
+does, except that the child does not get a copy of the caller's address
+space: it runs in the caller's own memory, on the caller's stack, until it
+calls
+.Xr execve 2
+or
+.Xr _exit 2 .
+Until then the calling thread is suspended.
+The child is otherwise a process of its own: it has its own copy of the
+file descriptor table, its own credentials and signal dispositions, and
+other threads of the parent keep running.
+.Pp
+Every change the child makes to memory is the parent's: its stores, the
+program break it moves with
+.Xr malloc 3 ,
+the mappings and System V shared memory it attaches.
+The child must not return from the function that called
+.Fn vfork ,
+since the parent's stack frame is still in use, and should call
+.Xr _exit 2
+rather than
+.Xr exit 3
+if its
+.Xr execve 2
+fails, so as not to flush the parent's
+.Xr stdio 3
+buffers.
+.Pp
+A caught signal sent to the suspended parent stays pending until the
+child has exec'd or exited; a signal that terminates the parent, such as
+.Dv SIGKILL ,
+does so at once, and the child keeps the memory.
+While it waits, the parent's state is
+.Ql D
+with the wait channel
+.Ql ppwait ,
+and the child's
+.Pa /proc/ Ns Ar pid Ns Pa /status
+shows
+.Ql PPWait: 1 .
+If the system runs out of memory, the parent and the child are one
+address space to the OOM killer, and are killed together.
+.Pp
+.Xr posix_spawn 3
+creates its child the same way, through
+.Fn clone
+with
+.Dv CLONE_VM | CLONE_VFORK .
+.Sh RETURN VALUES
+In the child,
+.Fn vfork
+returns 0; in the parent, once the child has exec'd or exited, the child's
+process ID.
+On failure it returns \-1 in the parent, creates no child, and sets
+.Va errno .
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EAGAIN
+The system's process limit,
+.Va kern.maxproc ,
+has been reached.
+.It Bq Er ENOMEM
+There was no memory for the new process's kernel stack.
+.El
+.Sh SEE ALSO
+.Xr _exit 2 ,
+.Xr execve 2 ,
+.Xr fork 2 ,
+.Xr wait4 2 ,
+.Xr posix_spawn 3
+.Sh STANDARDS
+.Fn vfork
+was in
+.St -p1003.1-2001
+and was removed from later editions.
+.Sh HISTORY
+.Fn vfork
+first appeared in
+.Bx 3.0 .
+In OxideBSD it was the same as
+.Xr fork 2
+until 0.3.0, which gave it its own system call and the shared address
+space.

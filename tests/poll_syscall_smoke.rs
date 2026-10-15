@@ -125,6 +125,19 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
 
+    // vfork(2) (COW.md §7), as at boot: BusyBox's spawn() and musl's vfork() call it.
+    const VFORK_MOD: &[u8] = include_bytes!(env!("VFORK_MOD_PATH"));
+    const VFORK_PANIC_SYMBOL: &str = env!("VFORK_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load(
+        "vfork",
+        VFORK_MOD,
+        VFORK_PANIC_SYMBOL,
+        false,
+        &mut mapper,
+        &mut frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
+
     const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
     const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
     oxidebsd::module::load(

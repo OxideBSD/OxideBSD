@@ -258,6 +258,11 @@ pub enum BlockReason {
     /// `while (sem_trywait(sem))`, see `process::do_futex`'s own doc comment) -- re-checking here
     /// too would just be redundant, not more correct.
     WaitingForFutex(Pid, u64, u64),
+    /// A vfork parent (`lifecycle::fork_impl`), asleep until child `.0` stops borrowing its
+    /// address space by exec or exit (`lifecycle::vfork_release`): FreeBSD's `ppwait`. Shown as
+    /// `D`, as on the BSDs. No signal wakes it; a fatal one kills it where it sleeps
+    /// (`terminate_process` needs no wake), and the child keeps the address space alive.
+    WaitingForVforkChild(Pid),
 }
 /// Real signal numbers (Linux/BSD-shared low range) -- the classic, standard `1..=31` range;
 /// real-time signals (`SIGRTMIN..=SIGRTMAX`, `35..=64`) are handled separately, see `SIGRTMIN`'s
@@ -1152,6 +1157,10 @@ pub struct Process {
     /// Set when the timer wakes this process from a terminal read at its `VTIME` deadline,
     /// rather than input arriving (`crate::tty::read`).
     pub tty_timed_out: bool,
+    /// Set on a vfork child while it borrows its parent's address space: the parent thread that
+    /// called vfork, asleep in `WaitingForVforkChild` until this is taken by exec or exit
+    /// (`lifecycle::vfork_release`). FreeBSD's `P_PPWAIT`, which `ps` shows as `V`.
+    pub vfork_parent: Option<Pid>,
 }
 
 impl Process {

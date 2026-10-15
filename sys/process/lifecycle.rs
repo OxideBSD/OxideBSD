@@ -250,6 +250,7 @@ fn spawn_finish(
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
         tty_timed_out: false,
+        vfork_parent: None,
     };
 
     {
@@ -386,31 +387,62 @@ fn user_stack_eager_pages(arg_bytes: u64) -> u64 {
 /// bias is decided exactly once, by whichever `execve()` last loaded its current image — `fork()`
 /// only ever duplicates whatever is already there.
 pub fn do_fork_from_current() -> Result<u64, u64> {
-    fork_impl(None)
+    fork_impl(ForkKind::Fork)
 }
 
-/// Real vfork-via-`clone(2)`: `musl`'s own `posix_spawn()` (`external/mit/musl/src/process/
-/// posix_spawn.c`) issues `clone(child_fn, stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)` to launch
-/// its helper, not a plain `fork()`+`execve()` -- found live via the real on-target Clang/LLVM
-/// port, whose driver uses `posix_spawn()` to launch every subprocess tool (`ld.lld`, `clang -cc1`
-/// when not run integrated). `do_clone` used to flatly reject this combination (`EINVAL`, see its
-/// own doc comment's "vfork-shaped calls... out of scope" note) -- real, but too narrow once a real
-/// consumer needed exactly this shape.
-///
-/// Degrades to a real `fork()` (a genuine, independent, deep-copied address space and
-/// `ThreadGroupShared`, not an actual `CLONE_VM` share), exactly like this codebase's own
-/// `vfork.s` patch already does for the plain `vfork()` libc entry point (see `CLAUDE.md`'s musl
-/// port section) -- real POSIX explicitly permits a `vfork()`-family call to behave as a plain
-/// `fork()`, so this is legal, not a shortcut that could observably misbehave. The one genuine
-/// difference from `do_fork_from_current`: `clone(2)`'s own contract is "the child starts running
-/// `fn(arg)` on `stack`," not "the child resumes at the same call site as the parent" -- so the
-/// child's frame is seeded via `context_switch::seed_clone_frame` (jumps to the given entry point
-/// on `new_user_rsp`) instead of `seed_fork_frame` (resumes at the parent's own return address).
-/// `ptid`/`ctid` aren't threaded through here: this exact flag combination carries neither
-/// `CLONE_PARENT_SETTID` nor `CLONE_CHILD_CLEARTID`, and `do_clone`'s caller already routes any
-/// combination requesting them to the real `CLONE_THREAD` path instead.
+/// `vfork(2)` (`SYS_VFORK`, the `vfork` module; OxideBSD-doc `COW.md` §7): the child borrows the
+/// caller's address space instead of copying it, and resumes at the call site with `0`, on the
+/// caller's own stack; the caller sleeps until the child execs or exits, then returns the
+/// child's pid. Everything else is fork's: the child is a process of its own, with its own copy
+/// of the fd table, credentials and signal dispositions. POSIX leaves anything but `exec` or
+/// `_exit` in the child undefined; here it is whatever the shared memory makes of it, and the
+/// kernel's bookkeeping stays right either way (`mm::VmState` goes with the table).
+pub fn do_vfork() -> Result<u64, u64> {
+    fork_impl(ForkKind::Vfork)
+}
+
+/// `clone(fn, stack, CLONE_VM|CLONE_VFORK|SIGCHLD, arg)`, the shape musl's `posix_spawn()`
+/// issues (`external/mit/musl/src/process/posix_spawn.c`; found through the on-target Clang
+/// driver, which spawns every tool that way): vfork, except that the child starts at `fn` on
+/// `stack` (`context_switch::seed_clone_frame`) rather than at the call site. The child borrows
+/// the address space and the caller sleeps until it execs or exits, as for `do_vfork`.
 pub fn do_vfork_clone(new_user_rsp: u64) -> Result<u64, u64> {
-    fork_impl(Some(new_user_rsp))
+    fork_impl(ForkKind::VforkClone(new_user_rsp))
+}
+
+/// What `fork_impl` makes.
+#[derive(Clone, Copy)]
+enum ForkKind {
+    /// `fork(2)`: a copy-on-write copy of the address space; the child resumes at the call site.
+    Fork,
+    /// `vfork(2)`: the child borrows the address space and resumes at the call site.
+    Vfork,
+    /// `clone(CLONE_VM|CLONE_VFORK)`: the child borrows the address space and starts on this stack.
+    VforkClone(u64),
+}
+
+impl ForkKind {
+    /// Whether the child borrows the caller's address space, the caller sleeping until it's done.
+    fn borrows(self) -> bool {
+        !matches!(self, ForkKind::Fork)
+    }
+}
+
+/// A vfork child is done with its parent's address space: it exec'd (`exec_image`, after the
+/// switch to its new table) or is exiting (`terminate_process`). Wakes the parent thread asleep
+/// in `fork_impl`, if it still is: it may have been killed, or stopped and not yet continued (it
+/// sees the borrow is over once it runs). Nothing for a process that isn't borrowing.
+pub(crate) fn vfork_release(child_pid: Pid) {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(parent_pid) = table.get_mut(&child_pid).and_then(|c| c.vfork_parent.take()) else {
+        return;
+    };
+    if let Some(parent) = table.get_mut(&parent_pid)
+        && parent.state == ProcState::Blocked(BlockReason::WaitingForVforkChild(child_pid))
+    {
+        parent.state = ProcState::Ready;
+        scheduler::enqueue_ready(parent_pid);
+    }
 }
 
 /// `kern.maxproc` (SYSCTL.md §§5-6), as FreeBSD's `fork1` applies it: processes (thread groups,
@@ -426,7 +458,7 @@ fn check_maxproc() -> Result<(), u64> {
     Ok(())
 }
 
-fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
+fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
     let caller_pid = scheduler::current_pid();
     let parent_frame = syscall::current_frame() as *const SyscallFrame;
     let phys_offset = memory::phys_mem_offset();
@@ -455,17 +487,18 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         let parent = table
             .get_mut(&caller_pid)
             .expect("fork: current process missing from table");
+        // `.expect()`: the live, currently-running caller of a syscall always has Some -- only a
+        // Zombie ever has None, and a Zombie can't be mid-syscall.
+        let parent_space = parent.address_space.as_ref().expect("fork: caller has no address space");
+        // A vfork child borrows the table (and its `VmState`), as a thread does.
         // SAFETY: AddressSpace::fork requires self to be the currently active address space --
         // true here, since sys_fork runs synchronously on the calling process's own kernel stack
-        // with its own CR3 still live. `.expect()`: the live, currently-running caller of a
-        // syscall always has Some -- only a Zombie ever has None, and a Zombie can't be mid-syscall.
-        let child_address_space = with_frame_allocator(|fa| {
-            parent
-                .address_space
-                .as_ref()
-                .expect("fork: caller has no address space")
-                .fork(phys_offset, fa)
-        });
+        // with its own CR3 still live.
+        let child_address_space = if kind.borrows() {
+            Ok(parent_space.share())
+        } else {
+            with_frame_allocator(|fa| parent_space.fork(phys_offset, fa))
+        };
         // Real ENOMEM, not a kernel panic, on real frame exhaustion mid-copy -- see
         // AddressSpace::build_from_active's own doc comment. Nothing to tear down on this
         // particular path (unlike the matching KernelStack::new failure below): a failed `fork()`
@@ -494,7 +527,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
             child_address_space,
             // A second handle on the parent's table, only to read its `VmState` once the table
             // lock is dropped (`inherit_vm_for_fork` takes the shm and mmap locks).
-            parent.address_space.as_ref().expect("fork: caller has no address space").share(),
+            parent_space.share(),
             child_shared,
             parent.fs_base,
             parent.pgid,
@@ -541,18 +574,22 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         return Err(ENOMEM);
     };
     let kernel_stack_top = kernel_stack.top();
-    mm::inherit_vm_for_fork(&parent_space, &child_address_space);
+    if !kind.borrows() {
+        mm::inherit_vm_for_fork(&parent_space, &child_address_space);
+    }
     drop(parent_space);
     // SAFETY: parent_frame is the caller's own live SyscallFrame, valid for the duration of this
     // call (we're still inside sys_fork's/sys_clone's own handling of it).
     let rsp = unsafe {
-        match new_user_rsp {
-            Some(new_rsp) => crate::process::context_switch::seed_clone_frame(
+        match kind {
+            ForkKind::VforkClone(new_rsp) => crate::process::context_switch::seed_clone_frame(
                 kernel_stack_top,
                 parent_frame,
                 new_rsp,
             ),
-            None => crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame),
+            ForkKind::Fork | ForkKind::Vfork => {
+                crate::process::context_switch::seed_fork_frame(kernel_stack_top, parent_frame)
+            }
         }
     };
 
@@ -632,6 +669,7 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
         tty_timed_out: false,
+        vfork_parent: kind.borrows().then_some(caller_pid),
     };
 
     {
@@ -649,6 +687,23 @@ fn fork_impl(new_user_rsp: Option<u64>) -> Result<u64, u64> {
     // the parent's tgid.
     crate::fs::fd::fork_inherit(scheduler::current_tgid(), child_pid);
     scheduler::enqueue_ready(child_pid);
+    if kind.borrows() {
+        // The child runs in this address space now: sleep until it execs or exits
+        // (`vfork_release`). Re-checked after every wake: a stop and continue makes this Ready
+        // early. A fatal signal ends the process here, in its sleep.
+        loop {
+            {
+                let mut table = PROCESS_TABLE.lock();
+                if !table.get(&child_pid).is_some_and(|c| c.vfork_parent == Some(caller_pid)) {
+                    break;
+                }
+                if let Some(me) = table.get_mut(&caller_pid) {
+                    me.state = ProcState::Blocked(BlockReason::WaitingForVforkChild(child_pid));
+                }
+            }
+            scheduler::schedule();
+        }
+    }
     Ok(child_pid)
 }
 
@@ -679,8 +734,7 @@ const PTHREAD_CLONE_FLAGS: u64 = CLONE_VM
 
 /// The second (and, for now, only other) accepted flag combination -- real `vfork()`-via-`clone()`,
 /// exactly what `musl`'s own `posix_spawn()` issues (`external/mit/musl/src/process/posix_spawn.c`).
-/// See `do_vfork_clone`'s own doc comment for the real consumer this was found through and why
-/// degrading it to a plain `fork()` is POSIX-legal, not a shortcut.
+/// See `do_vfork_clone`'s own doc comment for the real consumer this was found through.
 const CLONE_VFORK: u64 = 0x0000_4000;
 const SIGCHLD: u64 = 17;
 const VFORK_CLONE_FLAGS: u64 = CLONE_VM | CLONE_VFORK | SIGCHLD;
@@ -880,6 +934,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         // cascade_budget`'s own doc comment.
         cascade_budget: None,
         tty_timed_out: false,
+        vfork_parent: None,
     };
 
     {
@@ -1596,6 +1651,8 @@ fn exec_image(
     // why the fd/CLOEXEC tables are tgid-scoped -- though the two are identical until a real
     // `clone(2)`-created thread can execve.
     crate::fs::fd::close_cloexec(scheduler::current_tgid());
+    // A vfork child has its own address space now: its parent may run again.
+    vfork_release(caller_pid);
     marks[8] = crate::cpu::tsc::now();
     syscall::stats::exec_phases(&marks);
 
@@ -1977,6 +2034,8 @@ fn reparent_orphans(pid: Pid) {
 }
 
 pub(crate) fn terminate_process(pid: Pid, code: i32) {
+    // A vfork child's exit ends its borrow: its parent may run again.
+    vfork_release(pid);
     // Real orphan reparenting -- see `reparent_orphans`'s own doc comment. Runs unconditionally,
     // before any of the branches below, since even a non-leader `CLONE_THREAD` sibling (the
     // `other_thread_alive` branch just below) can have forked real children of its own under its

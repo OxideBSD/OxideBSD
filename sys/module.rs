@@ -974,6 +974,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_read" => Some(crate::syscall::oxidebsd_sys_read as *const () as u64),
         "oxidebsd_sys_write" => Some(crate::syscall::oxidebsd_sys_write as *const () as u64),
         "oxidebsd_sys_fork" => Some(crate::syscall::oxidebsd_sys_fork as *const () as u64),
+        "oxidebsd_sys_vfork" => Some(crate::syscall::oxidebsd_sys_vfork as *const () as u64),
         "oxidebsd_sys_clone" => Some(crate::syscall::oxidebsd_sys_clone as *const () as u64),
         "oxidebsd_sys_wait4" => Some(crate::syscall::oxidebsd_sys_wait4 as *const () as u64),
         "oxidebsd_sys_execve" => Some(crate::syscall::oxidebsd_sys_execve as *const () as u64),
