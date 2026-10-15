@@ -66,6 +66,7 @@ members = [
   "regress/pagecache-syscall-smoke",
   "regress/vfork-syscall-smoke",
   "regress/ipc-tools-syscall-smoke",
+  "regress/serial-input-syscall-smoke",
   "regress/ppoll-syscall-smoke",
   "regress/fd-syscall-smoke",
   "regress/tty-syscall-smoke",
@@ -377,6 +378,10 @@ harness = false
 
 [[test]]
 name = "ipc_tools_syscall_smoke"
+harness = false
+
+[[test]]
+name = "serial_input_smoke"
 harness = false
 
 [[test]]

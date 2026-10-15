@@ -979,10 +979,16 @@ fn keyboard_interrupt_handler(frame: &mut TrapFrame) {
     }
 }
 
-/// A USB keystroke's signal stopped or killed the current process: the timer interrupt, which
-/// polls the USB keyboard, reschedules if it interrupted user code (see
-/// `keyboard_interrupt_handler` for why only then).
+/// A USB keystroke's signal (or a serial console's, `request_reschedule`) stopped or killed the
+/// current process: the timer interrupt, which polls the USB keyboard, reschedules if it
+/// interrupted user code (see `keyboard_interrupt_handler` for why only then).
 static KEY_RESCHEDULE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Console input from an interrupt with no frame to hand (`register_irq_handler`'s handlers, the
+/// serial console's) stopped or killed the current process: the next timer tick reschedules.
+pub(crate) fn request_reschedule() {
+    KEY_RESCHEDULE.store(true, Ordering::Relaxed);
+}
 
 /// Feeds one synthesized PS/2 Scan Code Set 1 byte through the exact same decode pipeline a real
 /// PS/2 IRQ uses (`KEYBOARD`'s `add_byte`/`process_keyevent`, then `handle_decoded_key`) -- the

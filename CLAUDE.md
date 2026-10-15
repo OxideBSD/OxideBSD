@@ -107,8 +107,9 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   (`tests/*_syscall_smoke.rs` + `regress/*-syscall-smoke/`), never by calling handlers as Rust
   functions (interrupts stay on and `ticks()` advances, hiding real bugs). Test-only syscalls:
   `9999` exit, `9998` inject UDP frame, `9997` TCP step.
-- **Interactive input can be scripted headlessly**: QEMU monitor `sendkey`/`screendump` over
-  `OXIDEBSD_QEMU_MONITOR`, or `scripts/qemu_sendkeys.py`. Only credential prompts and
+- **Interactive input can be scripted headlessly**: a test's `tests/<name>.serial` is typed on
+  COM1 (`ttyv0`'s input under `-D`) once the guest prints `serial input: ready`; or QEMU monitor
+  `sendkey`/`screendump` over `OXIDEBSD_QEMU_MONITOR`, or `scripts/qemu_sendkeys.py`. Only credential prompts and
   restart/reboot/poweroff persistence stay manual; hand those to the user.
 - **POSIX pilot** (`tests/posix_conformance_smoke.rs`, full Open POSIX Test Suite) is the main
   regression and bug-finding check; its pass rate is not a conformance measure. Run with `scripts/run_posix_pilot_supervised.sh [--reset]`.

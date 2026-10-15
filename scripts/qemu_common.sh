@@ -180,8 +180,21 @@ qemu_common_run_test_and_translate_exit() {
     timeout_secs="$1"
     shift
 
-    qemu-system-x86_64 "$@" &
+    # Serial console input for the test (qemu_runner.sh's QEMU_SERIAL_INPUT): QEMU reads its stdio
+    # from a FIFO this script holds open, and the file goes in once the log shows
+    # $QEMU_SERIAL_INPUT_AFTER. Otherwise a background QEMU's stdin is /dev/null: no input.
+    serial_fifo=""
+    if [ -n "${QEMU_SERIAL_INPUT:-}" ]; then
+        serial_fifo=$(mktemp -u target/qemu_serial_in.XXXXXX)
+        mkfifo "$serial_fifo"
+        trap 'rm -f "$serial_fifo"' EXIT
+        qemu-system-x86_64 "$@" <"$serial_fifo" &
+        exec 3>"$serial_fifo"
+    else
+        qemu-system-x86_64 "$@" &
+    fi
     qemu_pid=$!
+    serial_sent=0
     # Lets a host-side script (or a human) find and kill this exact QEMU instance without
     # pattern-matching its argv.
     echo "$qemu_pid" > target/qemu_runner.pid
@@ -223,6 +236,11 @@ qemu_common_run_test_and_translate_exit() {
             wait "$qemu_pid" 2>/dev/null || true
             rm -f "${QEMU_SERIAL_LOG:-}"
             exit 0
+        fi
+        if [ -n "$serial_fifo" ] && [ "$serial_sent" = 0 ] &&
+            grep -aqF "$QEMU_SERIAL_INPUT_AFTER" "${QEMU_SERIAL_LOG:-/dev/null}"; then
+            cat "$QEMU_SERIAL_INPUT" >&3
+            serial_sent=1
         fi
         if [ "$stall_secs" -gt 0 ] && [ "$quiet" -ge "$stall_secs" ]; then
             echo "qemu_common.sh: HUNG: no serial output for ${stall_secs}s, killing QEMU (pid $qemu_pid; OXIDEBSD_TEST_STALL_SECS)" >&2

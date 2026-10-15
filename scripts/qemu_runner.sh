@@ -48,6 +48,13 @@ TEST_NAME=""
 if [ "$IS_TEST" = 1 ]; then
     TEST_NAME=$(basename "$KERNEL_ELF" | sed 's/-[0-9a-f]\{16\}$//')
 fi
+# A test with a tests/<name>.serial file gets its bytes typed on the serial console, once the
+# guest prints "serial input: ready" (any earlier and the firmware or the boot loader could read
+# them): headless input without the QEMU monitor's sendkey.
+if [ -n "$TEST_NAME" ] && [ -f "$REPO_ROOT/tests/$TEST_NAME.serial" ]; then
+    QEMU_SERIAL_INPUT="$REPO_ROOT/tests/$TEST_NAME.serial"
+    QEMU_SERIAL_INPUT_AFTER="serial input: ready"
+fi
 case "$TEST_NAME" in
     ram_floor_boot)
         # The real system must boot to a login prompt in 64 MB, under UEFI as under BIOS -- never

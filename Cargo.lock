@@ -534,6 +534,10 @@ name = "sem-open-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "serial-input-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "session-syscall-smoke"
 version = "0.1.0"
 

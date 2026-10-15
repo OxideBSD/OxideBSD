@@ -1,6 +1,7 @@
 //! `ttyv0`, the framebuffer console (TTY.md §2.2, §7): keyboard input, and output through the
-//! ANSI engine (`console::vga`) and framebuffer. Its output is also copied to COM1, before output
-//! processing, so the serial log reads as the program wrote it (§2.5).
+//! ANSI engine (`console::vga`) and framebuffer. With a serial console (`-h`, `-D`) its output is
+//! also copied to COM1, before output processing, so the serial log reads as the program wrote
+//! it, and what COM1 receives is input too (§2.5).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,8 +12,8 @@ struct Console;
 /// Where the console's output goes (§2.5), set from the boot flags: the screen by default, the
 /// screen and COM1 with `-D` (dual console), COM1 alone with `-h` (serial console), as in
 /// FreeBSD. Each byte to COM1 is a port write, an exit to the hypervisor under a VM, so copying
-/// is opt-in. Kernel messages go to COM1 regardless. Input is always the keyboard for now; the
-/// kernel doesn't read the serial port yet.
+/// is opt-in. Kernel messages go to COM1 regardless. Input is the keyboard's, and with COM1 in
+/// use COM1's too (`serial_interrupt`), as in FreeBSD: one terminal, two keyboards.
 static TO_SCREEN: AtomicBool = AtomicBool::new(true);
 static TO_SERIAL: AtomicBool = AtomicBool::new(false);
 
@@ -58,6 +59,35 @@ pub fn init() {
     let _ = crate::fs::devfs::make_dev("tty", ctty.0, ctty.1, 0, 0, 0o666, super::dev_open);
     let _ = crate::fs::devfs::make_dev("console", console.0, console.1, 0, 0, 0o600, super::dev_open);
     super::pty::init();
+    // The serial console's input, now that ttyv0 can take it (§2.5).
+    if TO_SERIAL.load(Ordering::Relaxed) {
+        crate::cpu::interrupts::register_irq_handler(COM1_IRQ, serial_interrupt);
+        // SAFETY: IRQ 4 has its handler, registered just above.
+        unsafe { crate::cpu::pic::unmask_irq(COM1_IRQ) };
+    }
+}
+
+/// COM1's interrupt line on a PC.
+const COM1_IRQ: u8 = 4;
+
+/// IRQ 4: COM1 received bytes, the serial console's typing (§2.5). They go where the keyboard's
+/// go (`keyboard`); a signal character that stops or kills the current process reschedules at
+/// the next tick (`request_reschedule`), since this handler has no frame to tell whether it
+/// interrupted user code.
+fn serial_interrupt() {
+    let mut buf = [0u8; 16];
+    loop {
+        let n = crate::console::serial::receive(&mut buf);
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            crate::random::mix_entropy(b as u64);
+        }
+        if keyboard(&buf[..n]) {
+            crate::cpu::interrupts::request_reschedule();
+        }
+    }
 }
 
 /// Set while a process that mapped `/dev/fb0` owns the keyboard (§7.2): keys then go only to
@@ -72,8 +102,9 @@ pub(crate) fn raw_keyboard_owned() -> bool {
     RAW_KEYBOARD_OWNED.load(Ordering::Relaxed)
 }
 
-/// Keyboard bytes. Returns whether a signal character stopped or killed the current process,
-/// so that the interrupt handler, if it interrupted that process in user mode, reschedules.
+/// Bytes typed at the console: the keyboard's, or the serial console's (`serial_interrupt`).
+/// Returns whether a signal character stopped or killed the current process, so that the
+/// interrupt handler, if it interrupted that process in user mode, reschedules.
 pub fn keyboard(bytes: &[u8]) -> bool {
     let cur = crate::process::scheduler::current_pid();
     let signaled = if raw_keyboard_owned() {

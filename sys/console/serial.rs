@@ -8,9 +8,12 @@ use x86_64::instructions::port::Port;
 /// Line status register bit: set when the transmit holding register is empty and ready to
 /// accept another byte.
 const LSR_TRANSMIT_EMPTY: u8 = 1 << 5;
+/// Line status register bit: a received byte waits in the data register.
+const LSR_DATA_READY: u8 = 1;
 
-/// A minimal driver for a 16550-compatible UART accessed via port I/O, write-only (this kernel
-/// never reads from the serial port). See <https://wiki.osdev.org/Serial_Ports>.
+/// A minimal driver for a 16550-compatible UART accessed via port I/O. It writes the console's
+/// output and kernel messages, and reads the serial console's input (`receive`, from
+/// `tty::console`'s IRQ 4 handler). See <https://wiki.osdev.org/Serial_Ports>.
 struct SerialPort {
     data: Port<u8>,
     interrupt_enable: Port<u8>,
@@ -48,10 +51,17 @@ impl SerialPort {
             self.data.write(0x03); // divisor low byte: 38400 baud
             self.interrupt_enable.write(0x00); // divisor high byte
             self.line_control.write(0x03); // disable DLAB; 8 data bits, no parity, 1 stop bit
-            self.fifo_control.write(0xc7); // enable FIFO, clear queues, 14-byte threshold
+            // Enable the FIFOs and clear them; a receive interrupt for every byte (the 1-byte
+            // trigger level), since a console's input is typed one key at a time.
+            self.fifo_control.write(0x07);
             self.modem_control.write(0x0b); // DTR + RTS + enable the UART's IRQ output line
-            self.interrupt_enable.write(0x01); // re-enable interrupts
+            self.interrupt_enable.write(0x01); // interrupt on received data (IRQ 4, unmasked by tty::console)
         }
+    }
+
+    fn receive(&mut self) -> Option<u8> {
+        // SAFETY: the line status and data registers of this UART; reading data takes the byte.
+        unsafe { (self.line_status.read() & LSR_DATA_READY != 0).then(|| self.data.read()) }
     }
 
     fn send(&mut self, byte: u8) {
@@ -95,6 +105,22 @@ static SERIAL1: Lazy<Mutex<SerialPort>> = Lazy::new(|| {
     serial_port.init();
     Mutex::new(serial_port)
 });
+
+/// Reads what COM1 has received, up to `buf.len()` bytes, and returns how many: the serial
+/// console's input, from its interrupt.
+pub fn receive(buf: &mut [u8]) -> usize {
+    interrupts::without_interrupts(|| {
+        let mut port = SERIAL1.lock();
+        let mut n = 0;
+        while n < buf.len()
+            && let Some(byte) = port.receive()
+        {
+            buf[n] = byte;
+            n += 1;
+        }
+        n
+    })
+}
 
 /// Writes bytes to COM1 alone, which need not be UTF-8 (a copy of `ttyv0`'s output).
 pub fn write_bytes(bytes: &[u8]) {

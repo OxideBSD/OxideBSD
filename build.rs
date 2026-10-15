@@ -404,6 +404,7 @@ fn main() {
     build_userland_crate("pagecache-syscall-smoke", "PAGECACHE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("vfork-syscall-smoke", "VFORK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ipc-tools-syscall-smoke", "IPC_TOOLS_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("serial-input-syscall-smoke", "SERIAL_INPUT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ppoll-syscall-smoke", "PPOLL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("fd-syscall-smoke", "FD_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tty-syscall-smoke", "TTY_SYSCALL_SMOKE_ELF_PATH");
