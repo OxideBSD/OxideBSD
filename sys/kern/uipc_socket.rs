@@ -496,6 +496,10 @@ fn recv(h: &Handle, buf: &mut [u8], flags: i64, ctl_room: usize) -> Result<(usiz
                 if r.n == 0 || !waitall || got == buf.len() {
                     return Ok((got, r.from, ctl_flags, control));
                 }
+                // More may be queued already: ask again before waiting. `wait` blocks until
+                // something changes, whatever is queued -- waiting here hung a `MSG_WAITALL`
+                // receive with its next bytes already queued, until unrelated activity woke it.
+                continue;
             }
             Err(e) if e == EAGAIN as i64 => {}
             Err(e) => return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(e) },
