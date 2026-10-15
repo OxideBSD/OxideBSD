@@ -21,6 +21,11 @@ without this?" If not, leave it out.
 
 OxideBSD: a Rust BSD-like OS, x86_64 only, single core. Roadmap: `OxideBSD-doc/ROADMAP.md`.
 
+**Minimum requirements, permanent (never increase):** a 64-bit, little-endian x64, ARM64, PPC64,
+MIPS64 or RISCV64 machine with 64 MB of RAM. The ISA baseline is the first generation (x86-64-v1:
+SSE2 and NX, nothing newer): a newer CPU feature may be used when present (PCID, SMEP, SMAP), never
+required -- probe it and keep a fallback.
+
 - Boots via Limine (hybrid BIOS+UEFI ISO, `sys/boot/mod.rs`), or via Multiboot2 (`multiboot2`
   feature, `sys/boot/multiboot2.rs`). Higher-half kernel.
 - Per-process address spaces, ELF64 loading (static `ET_EXEC`, PIE with ASLR, `PT_INTERP` dynamic
