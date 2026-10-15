@@ -239,9 +239,12 @@ fn build_limine_deploy_tool() {
         "--enable-uefi-ia32",
         "--enable-uefi-cd",
     ];
+    // What Limine leaves the UEFI firmware before it claims memory (our fork's knob; upstream
+    // keeps 64 MiB): OxideBSD must boot in 64 MB of RAM (CLAUDE.md, oxfs and disks).
+    const CPPFLAGS_FOR_TARGET: &str = "-DLIMINE_FIRMWARE_RESERVE_MIB=8";
     let version = std::fs::read_to_string(limine_dir.join("version"))
         .unwrap_or_else(|e| panic!("{}/version: {e} (submodule not checked out?)", limine_dir.display()));
-    let stamp_contents = format!("{}\n{}", version.trim(), CONFIGURE_ARGS.join(" "));
+    let stamp_contents = format!("{}\n{}\n{}", version.trim(), CONFIGURE_ARGS.join(" "), CPPFLAGS_FOR_TARGET);
     let stamp = build_dir.join("oxidebsd-configure.stamp");
     if std::fs::read_to_string(&stamp).ok().as_deref() != Some(stamp_contents.as_str()) {
         let _ = std::fs::remove_dir_all(&build_dir);
@@ -249,6 +252,7 @@ fn build_limine_deploy_tool() {
             .unwrap_or_else(|e| panic!("failed to create {}: {e}", build_dir.display()));
         let status = Command::new(limine_dir.join("configure"))
             .current_dir(&build_dir)
+            .env("CPPFLAGS_FOR_TARGET", CPPFLAGS_FOR_TARGET)
             .args(CONFIGURE_ARGS)
             .status()
             .unwrap_or_else(|e| panic!("failed to run limine's configure: {e}"));

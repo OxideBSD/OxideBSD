@@ -84,7 +84,7 @@ user before large structural commitments.
   BusyBox rebuild.** Never `touch build.rs` to force rebuilds.
 - Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio`, `OXIDEBSD_DISK_IMAGE`,
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
-  `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the console-install floor is 128),
+  `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the floor is 64),
   `OXIDEBSD_QEMU_CPU=max` (QEMU's default CPU has no SMEP/SMAP; set this to exercise them),
   `OXIDEBSD_REAL_HARDWARE=1` (adds `no-ata`).
 
@@ -311,8 +311,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   the kernel's page cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping
   the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
 - **RAM rule: never require more than 64 MB**, boot and console install, forever (user, 2026-10-14);
-  UEFI is exempt only if OVMF itself needs more. `ram_floor_boot` fails on any `[fault]` or
-  failed rc service, not just panics.
+  UEFI is exempt only if OVMF itself needs more. `ram_floor_boot` boots at 64 MB and fails on any
+  `[fault]` or failed rc service, not just panics. Under UEFI that takes our Limine fork's
+  `LIMINE_FIRMWARE_RESERVE_MIB` (set in `build.rs`) and `memory::reclaim_bootloader_memory`; boot
+  responses read after boot are cached first (`boot::snapshot`).
 - **The kernel never formats or seeds** (RAM_FLOOR.md §4): the system is `target/images/disk.img`,
   built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
   disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`

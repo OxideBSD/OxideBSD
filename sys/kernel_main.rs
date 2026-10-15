@@ -242,6 +242,12 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     crate::fs::fd::init();
 
+    // The loader's memory (UEFI boot services, Limine's own data): 40 MB of a 64 MB UEFI
+    // machine. Every boot response the kernel keeps is copied first; Limine's page tables, which
+    // the kernel runs on, and this stack stay.
+    crate::boot::snapshot();
+    crate::memory::reclaim_bootloader_memory();
+
     // pid 1 is `/sbin/init` (INIT.md), read from the root file system as FreeBSD's start_init
     // does -- nothing userland is embedded in the kernel (RAM_FLOOR.md §4.6.3) -- started with the
     // boot flags (§4.1) and an empty environment (§4.2), and without a controlling terminal: its

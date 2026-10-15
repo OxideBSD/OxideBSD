@@ -143,6 +143,14 @@ pub struct FbInfo {
 /// comment) and this framebuffer is what actually makes its content visible.
 #[cfg(not(feature = "multiboot2"))]
 pub fn primary_framebuffer() -> Option<FbInfo> {
+    // Read once, at boot: the response lives in bootloader-reclaimable memory, which the kernel
+    // takes back before starting pid 1 (`memory::reclaim_bootloader_memory`).
+    static FB: spin::Once<Option<FbInfo>> = spin::Once::new();
+    *FB.call_once(read_primary_framebuffer)
+}
+
+#[cfg(not(feature = "multiboot2"))]
+fn read_primary_framebuffer() -> Option<FbInfo> {
     let fb = FRAMEBUFFER_REQUEST
         .response()
         .and_then(|r| r.framebuffers().first().copied())?;
@@ -190,12 +198,31 @@ pub fn primary_framebuffer() -> Option<FbInfo> {
 /// The contents of the boot module whose path ends in `name` (e.g. `/boot/fsconf`), if the boot
 /// loader loaded one. None under Multiboot2, which loads no modules here.
 pub fn boot_module(name: &str) -> Option<&'static [u8]> {
-    let response = MODULES_REQUEST.response()?;
-    response.modules().iter().find(|m| m.path().ends_with(name)).map(|m| m.data())
+    // The module list and its paths live in bootloader-reclaimable memory (the data itself
+    // doesn't): the list is copied once, at boot (`snapshot`).
+    MODULES.call_once(read_modules).iter().find(|(path, _)| path.ends_with(name)).map(|&(_, data)| data)
+}
+
+static MODULES: spin::Once<alloc::vec::Vec<(alloc::string::String, &'static [u8])>> = spin::Once::new();
+
+fn read_modules() -> alloc::vec::Vec<(alloc::string::String, &'static [u8])> {
+    let Some(response) = MODULES_REQUEST.response() else { return alloc::vec::Vec::new() };
+    response.modules().iter().map(|m| (alloc::string::String::from(m.path()), m.data())).collect()
 }
 
 pub fn rsdp_address() -> Option<u64> {
-    RSDP_REQUEST.response().map(|r| r.address as u64)
+    // As `boot_module`: read once, before the response's memory is reclaimed.
+    static RSDP: spin::Once<Option<u64>> = spin::Once::new();
+    *RSDP.call_once(|| RSDP_REQUEST.response().map(|r| r.address as u64))
+}
+
+/// Reads every bootloader response the kernel uses after boot, so nothing reads them once the
+/// memory they live in is reclaimed (`memory::reclaim_bootloader_memory`). The heap must exist.
+pub fn snapshot() {
+    #[cfg(not(feature = "multiboot2"))]
+    let _ = primary_framebuffer();
+    let _ = boot_module("");
+    let _ = rsdp_address();
 }
 
 /// Whether the kernel was booted with `no-ata` on its Limine command line (`limine.conf`'s

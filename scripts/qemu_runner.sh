@@ -50,9 +50,9 @@ if [ "$IS_TEST" = 1 ]; then
 fi
 case "$TEST_NAME" in
     ram_floor_boot)
-        # The real system must boot to a login prompt in 128 MB (RAM_FLOOR.md §4.9), and nothing
-        # on the way may run out of memory.
-        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
+        # The real system must boot to a login prompt in 64 MB, under UEFI as under BIOS -- never
+        # more, forever (CLAUDE.md) -- and nothing on the way may run out of memory.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
         export OXIDEBSD_QEMU_MEM
         QEMU_PASS_PATTERN="login:"
         # A service rc couldn't start, or any user process faulting, is a failure too.

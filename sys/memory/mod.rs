@@ -140,9 +140,11 @@ impl BootInfoFrameAllocator {
         // call returns, and `process::kernel_stack_size`/`user_stack_pages` read it lazily, the
         // first time a process is ever created (always after this point).
         USABLE_RAM_BYTES.store(usable_bytes, Ordering::Relaxed);
+        // Bootloader-reclaimable memory joins the allocator later (`reclaim_bootloader_memory`),
+        // so the reference counts cover it too.
         let frame_limit = memory_map
             .iter()
-            .filter(|region| region.type_ == MEMMAP_USABLE)
+            .filter(|region| region.type_ == MEMMAP_USABLE || region.type_ == limine::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE)
             .map(|region| (region.base + region.length) / 4096)
             .max()
             .unwrap_or(0);
@@ -151,6 +153,19 @@ impl BootInfoFrameAllocator {
             "[boot] frame allocator ready: {} usable region(s), {} KiB total",
             usable_regions,
             usable_bytes / 1024
+        );
+        // Where the rest of the machine's memory is, by the loader's types: what a low-memory
+        // boot is short of shows here first.
+        let kib = |ty: u64| memory_map.iter().filter(|r| r.type_ == ty).map(|r| r.length).sum::<u64>() / 1024;
+        serial_println!(
+            "[boot] memory map (KiB): usable {}, bootloader-reclaimable {}, kernel+modules {}, acpi-reclaimable {}, acpi-nvs {}, framebuffer {}, reserved {}",
+            kib(limine::memmap::MEMMAP_USABLE),
+            kib(limine::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE),
+            kib(limine::memmap::MEMMAP_EXECUTABLE_AND_MODULES),
+            kib(limine::memmap::MEMMAP_ACPI_RECLAIMABLE),
+            kib(limine::memmap::MEMMAP_ACPI_NVS),
+            kib(limine::memmap::MEMMAP_FRAMEBUFFER),
+            kib(limine::memmap::MEMMAP_RESERVED)
         );
 
         BootInfoFrameAllocator {
@@ -263,6 +278,109 @@ impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
         self.free_list = Some(frame);
         FRAMES_IN_USE.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+impl BootInfoFrameAllocator {
+    /// Gives the allocator a frame that was never its own (`reclaim_bootloader_memory`): onto the
+    /// free list, without counting it as given back.
+    ///
+    /// # Safety
+    /// Nothing may use `frame`.
+    unsafe fn add_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        let next_ptr = (phys_mem_offset() + frame.start_address().as_u64()).as_mut_ptr::<u64>();
+        let prev_head = self.free_list.map(|f| f.start_address().as_u64()).unwrap_or(u64::MAX);
+        // SAFETY: the caller's.
+        unsafe { next_ptr.write(prev_head) };
+        self.free_list = Some(frame);
+    }
+}
+
+/// Takes back the memory the boot loader leaves the kernel once it's done
+/// (`MEMMAP_BOOTLOADER_RECLAIMABLE`: UEFI boot services' memory, Limine's own data, its stack and
+/// page tables): 42 MB of a 64 MB UEFI machine, against 4 MB under BIOS. Once, after the boot
+/// responses the kernel keeps are copied (`boot::snapshot`) and before pid 1 starts.
+///
+/// Kept: the page tables the kernel runs on (Limine built them, and every address space shares
+/// their kernel half), found by walking the active ones, and the boot stack this runs on (the
+/// frames around it). The frame allocator's copy of the memory map moves to the heap first: it
+/// walked Limine's.
+pub fn reclaim_bootloader_memory() {
+    use alloc::collections::BTreeSet;
+    use alloc::vec::Vec;
+    use limine::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE;
+    use x86_64::structures::paging::{PageTable, PageTableFlags};
+    let offset = phys_mem_offset();
+
+    // Every page table frame reachable from the active level 4 table (huge pages end a walk).
+    fn tables(frame: u64, level: u8, offset: VirtAddr, out: &mut BTreeSet<u64>) {
+        out.insert(frame);
+        if level == 1 {
+            return;
+        }
+        // SAFETY: a live page table, through the physical-memory window, only read.
+        let table = unsafe { &*(offset + frame).as_ptr::<PageTable>() };
+        for entry in table.iter() {
+            let flags = entry.flags();
+            if flags.contains(PageTableFlags::PRESENT) && !flags.contains(PageTableFlags::HUGE_PAGE) {
+                tables(entry.addr().as_u64(), level - 1, offset, out);
+            }
+        }
+    }
+    let mut keep = BTreeSet::new();
+    let (l4, _) = x86_64::registers::control::Cr3::read();
+    tables(l4.start_address().as_u64(), 4, offset, &mut keep);
+    // The stack this runs on: the frames around it.
+    let rsp: u64;
+    // SAFETY: reads RSP.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    if let Some(phys) = translate_kernel(rsp) {
+        let here = phys & !0xfff;
+        for i in 0..=64u64 {
+            keep.insert(here.saturating_sub(i * 4096));
+            keep.insert(here + i * 4096);
+        }
+    }
+
+    with_frame_allocator(|fa| {
+        // The memory map, moved to the heap: the allocator walks it lazily.
+        let entries: &'static [Entry] = Vec::leak(
+            fa.memory_map.iter().map(|e| Entry { base: e.base, length: e.length, type_: e.type_ }).collect(),
+        );
+        let reclaim: Vec<(u64, u64)> = entries
+            .iter()
+            .filter(|e| e.type_ == MEMMAP_BOOTLOADER_RECLAIMABLE)
+            .map(|e| (e.base, e.length))
+            .collect();
+        fa.memory_map = Vec::leak(entries.iter().collect());
+        let mut reclaimed = 0u64;
+        for (base, length) in reclaim {
+            let first = base.div_ceil(4096);
+            let end = (base + length) / 4096;
+            for n in first..end {
+                if keep.contains(&(n * 4096)) {
+                    continue;
+                }
+                // SAFETY: bootloader memory the kernel no longer uses: not a page table it runs
+                // on, not its stack, and every boot response it reads was copied.
+                unsafe { fa.add_frame(PhysFrame::containing_address(x86_64::PhysAddr::new(n * 4096))) };
+                reclaimed += 4096;
+            }
+        }
+        USABLE_RAM_BYTES.fetch_add(reclaimed, Ordering::Relaxed);
+        serial_println!("[boot] reclaimed {} KiB of boot loader memory ({} page tables and the boot stack kept)", reclaimed / 1024, keep.len());
+    });
+}
+
+/// The physical address of kernel virtual address `va` under the active page tables.
+fn translate_kernel(va: u64) -> Option<u64> {
+    use x86_64::structures::paging::{OffsetPageTable, Translate};
+    let (l4, _) = x86_64::registers::control::Cr3::read();
+    let offset = phys_mem_offset();
+    // SAFETY: the active level 4 table, through the physical-memory window, only read.
+    let table = unsafe { &mut *(offset + l4.start_address().as_u64()).as_mut_ptr() };
+    // SAFETY: as above.
+    let mapper = unsafe { OffsetPageTable::new(table, offset) };
+    mapper.translate_addr(VirtAddr::new(va)).map(|p| p.as_u64())
 }
 
 /// Frames handed out by the frame allocator and not given back: everything the kernel and every
