@@ -17,8 +17,9 @@
 //! an inode on disk points only at blocks holding its own data (an older size at worst), never at
 //! another file's freed contents.
 //!
-//! Modules have no `alloc`: the buffers, their headers and the hash table come from
-//! `oxidebsd_module_alloc_zeroed` in `init`, which must run inside `module_init`. Everything is
+//! The buffers, their headers and the hash table come from `oxidebsd_module_alloc_zeroed` in
+//! `init`, which must run inside `module_init` (written before modules had `alloc`; the shared
+//! buffer cache replaces this file, VFS.md §7.4). Everything is
 //! single-core and syscall-serialized, like the rest of oxfs, and nothing may call back into the
 //! cache from inside a `with` closure (that's what makes lending the buffer safe).
 

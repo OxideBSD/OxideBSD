@@ -584,6 +584,29 @@ static void modules(void)
 		"native_abi holds nothing from the kernel heap");
 	errno = 0;
 	CHECK_ERR(sysctlbyname("kern.module.nosuchmodule.alloc", 0, 0, 0, 0), ENOENT, "an unknown module is ENOENT");
+
+	/* oxfs renders an open /proc file into one heap allocation, freed at close. */
+	unsigned long before = ulval("kern.module.oxfs.allocs");
+	int fd = open("/proc/meminfo", O_RDONLY);
+	unsigned long during = ulval("kern.module.oxfs.allocs");
+	close(fd);
+	unsigned long after = ulval("kern.module.oxfs.allocs");
+	printf("     oxfs allocations %lu, %lu with /proc/meminfo open, %lu after\n", before, during, after);
+	CHECK(fd >= 0 && during > before && after == during - 1, "an open /proc file is charged to oxfs until close");
+	CHECK(ulval("kern.module.oxfs.alloc") > 0, "oxfs holds heap bytes (its open-file table)");
+
+	/* A /proc file is no longer cut at 1 KiB: a child with a 3000-byte argument reads its own
+	 * cmdline back whole (long_cmdline). */
+	pid_t pid = fork();
+	if (pid == 0) {
+		static char arg[3001];
+		memset(arg, 'x', 3000);
+		execl("/usr/tests/sysctl/sysctl-smoke", "sysctl-smoke", "--long-cmdline", arg, (char *)0);
+		_exit(127);
+	}
+	int status = -1;
+	waitpid(pid, &status, 0);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "/proc/self/cmdline longer than 1 KiB reads back whole");
 }
 
 /* Open files: kern.maxfiles from RAM, kern.maxfilesperproc 9/10 of it, RLIMIT_NOFILE 1024 soft
@@ -625,9 +648,28 @@ static void open_files(void)
 		"RLIMIT_NOFILE: EMFILE past it, EBADF/EINVAL for dup2/F_DUPFD to it, clamped to maxfilesperproc");
 }
 
-int main(void)
+/* The child half of modules(): its cmdline is "sysctl-smoke\0--long-cmdline\0" and 3000 x's. */
+static int long_cmdline(void)
+{
+	static char b[8192];
+	int fd = open("/proc/self/cmdline", O_RDONLY);
+	if (fd < 0) return 1;
+	size_t n = 0;
+	ssize_t r;
+	while ((r = read(fd, b + n, sizeof b - n)) > 0) n += r;
+	close(fd);
+	size_t want = sizeof "sysctl-smoke" + sizeof "--long-cmdline" + 3001;
+	if (n != want) {
+		printf("     /proc/self/cmdline: %zu bytes, want %zu\n", n, want);
+		return 1;
+	}
+	return 0;
+}
+
+int main(int argc, char **argv)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
+	if (argc > 1 && strcmp(argv[1], "--long-cmdline") == 0) return long_cmdline();
 	if (num("kern.msgbufsize") == 131072) {
 		tunables();
 		printf("sysctl-smoke: %d failure(s)\n", failures);

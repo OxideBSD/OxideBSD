@@ -19,8 +19,8 @@
 //! (`Process::cwd` in `sys/process.rs`, via `oxidebsd_get_cwd`/`oxidebsd_set_cwd`); no
 //! `unlink`/`rmdir`/`rename` at all -> all three now exist.
 //!
-//! **Storage**, all fixed-size `static mut` arrays (modules can't use `alloc`/`Vec`/`BTreeMap` --
-//! see CLAUDE.md's module-loading section): a flat pool of `NUM_BLOCKS` `BLOCK_SIZE`-byte blocks
+//! **Storage**, mostly fixed-size `static mut` arrays from before modules had a heap (the open-file
+//! table and `/proc` renders now grow from it, `lib/libkern-mod`): a flat pool of `NUM_BLOCKS` `BLOCK_SIZE`-byte blocks
 //! (`BLOCKS`/`BLOCK_USED`), and inodes packed into an inode file in that pool, which grows as
 //! needed (`InodeTable`; the disk pool and the tmpfs pool each have one). An inode addresses
 //! its data via `DIRECT_BLOCKS` direct block numbers, one single-indirect block, and one
@@ -59,6 +59,12 @@
 //! format and what's synthesized vs. real. Plus `SYS_GETDENTS = 129` -- real `readdir()`'s own
 //! syscall, see `oxfs_getdents`'s own doc comment for the wire format.
 #![no_std]
+
+extern crate alloc;
+use kern_mod as _;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 mod bcache;
 
@@ -476,8 +482,7 @@ const EBUSY: i64 = 16;
 const EEXIST: i64 = 17;
 const ENOTDIR: i64 = 20;
 const EISDIR: i64 = 21;
-const ENFILE: i64 = 23;
-const EMFILE: i64 = 24;
+const ENOMEM: i64 = 12;
 const ENOSPC: i64 = 28;
 const EIO: i64 = 5;
 const EINVAL: i64 = 22;
@@ -629,12 +634,11 @@ fn block_device_present() -> bool {
 }
 
 
-/// Synthetic `/proc/<pid>/{stat,cmdline,status}` content buffer -- comfortably covers any of the
-/// three for this kernel's simple, single-threaded processes; longer content silently truncates
-/// (accepted simplification for this tier, not indefinite-length-safe).
+/// The first size a `/proc` file is rendered into (`render_proc`); a render that fills it is
+/// retried in a buffer twice the size, up to `PROC_RENDER_MAX`.
 const PROC_BUFFER: usize = 1024;
-/// How many `/proc` files can be open at once (`PROC_RENDERS`): 256 KiB in all.
-const MAX_PROC_RENDERS: usize = 256;
+/// The largest `/proc` file: a render still filling this many bytes is cut there.
+const PROC_RENDER_MAX: usize = 1 << 20;
 /// Base for synthetic `d_ino` values `/proc`'s own `getdents` records report -- nothing
 /// dereferences these as real inodes (there's no real inode backing any `/proc` entry), they only
 /// need to be distinct and non-zero. Above every real inode number (those are `u32`).
@@ -678,7 +682,10 @@ const CWD_PROC_PID_MASK: u64 = 0xFFFF_FFFF;
 /// variant has a content buffer at all (writes go straight to the inode, directory fds have no
 /// formatted listing, `/proc` renders live in `PROC_RENDERS`): the largest variants are the ones
 /// carrying a name, a few hundred bytes.
-const MAX_OPEN_FILES: usize = 2048;
+///
+/// **No fixed size since the module allocator (VFS.md §3.1)**: `OPEN_FILES` grows a chunk of this
+/// many slots at a time from the kernel heap, as files are opened; `kern.maxfiles` is the limit.
+const OPEN_FILE_CHUNK: usize = 32;
 
 const MAX_CWD_PATH: usize = 256;
 const MAX_CWD_DEPTH: usize = 32;
@@ -808,39 +815,90 @@ fn all_inode_numbers() -> impl Iterator<Item = u32> {
     let tmpfs = inode_table(true).count;
     (0..disk).chain(TMPFS_INODE_BASE..TMPFS_INODE_BASE + tmpfs)
 }
-static mut OPEN_FILES: [Option<(u64, OpenFile)>; MAX_OPEN_FILES] = [None; MAX_OPEN_FILES];
+/// Every oxfs descriptor's state, keyed by `real_fd`: chunks of `OPEN_FILE_CHUNK` slots. A chunk
+/// never moves once allocated, so `find_open_file`'s `&'static mut` stays valid while another file
+/// is opened and the table grows (a flat `Vec` would reallocate under it).
+static mut OPEN_FILES: Vec<Box<[Option<(u64, OpenFile)>]>> = Vec::new();
 
-/// Rendered `/proc` files (`OpenFile::ProcRead::render`), pooled so an `OPEN_FILES` slot doesn't
-/// carry `PROC_BUFFER` bytes it rarely needs. A file is rendered once at `open`, so a reader sees
-/// one consistent snapshot however it splits its reads.
-static mut PROC_RENDERS: [[u8; PROC_BUFFER]; MAX_PROC_RENDERS] = [[0; PROC_BUFFER]; MAX_PROC_RENDERS];
-static mut PROC_RENDER_USED: [bool; MAX_PROC_RENDERS] = [false; MAX_PROC_RENDERS];
+/// Every slot of `OPEN_FILES`, used or free.
+fn open_file_slots() -> impl Iterator<Item = &'static mut Option<(u64, OpenFile)>> {
+    // SAFETY: single-core, syscall-serialized (`oxidebsd_module_serialize`), as every pool here.
+    unsafe { (*core::ptr::addr_of_mut!(OPEN_FILES)).iter_mut().flat_map(|chunk| chunk.iter_mut()) }
+}
 
-/// Claims a `PROC_RENDERS` slot, `None` when every one is in use.
-fn alloc_proc_render() -> Option<usize> {
+/// A free `OPEN_FILES` slot, growing the table by a chunk when every slot is in use; `None` when
+/// the heap can't spare one.
+fn free_open_file_slot() -> Option<&'static mut Option<(u64, OpenFile)>> {
+    // SAFETY: as `open_file_slots`; the borrow ends before the table is touched again.
+    let chunks = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
+    if !chunks.iter().any(|chunk| chunk.iter().any(Option::is_none)) {
+        let mut chunk = Vec::new();
+        chunks.try_reserve(1).ok()?;
+        chunk.try_reserve_exact(OPEN_FILE_CHUNK).ok()?;
+        chunk.resize(OPEN_FILE_CHUNK, None);
+        chunks.push(chunk.into_boxed_slice());
+    }
+    open_file_slots().find(|slot| slot.is_none())
+}
+
+/// Rendered `/proc` files (`OpenFile::ProcRead::render`), indexed by `render`, each exactly as long
+/// as its content. A file is rendered once at `open`, so a reader sees one consistent snapshot
+/// however it splits its reads. A slot is `None` while free; the table only grows.
+static mut PROC_RENDERS: Vec<Option<Box<[u8]>>> = Vec::new();
+
+/// Renders a `/proc` file with `fill(buf, cap)`, which writes at most `cap` bytes and returns how
+/// many (or a negative errno); a render that fills the buffer may have been cut, so it is retried
+/// in one twice the size, up to `PROC_RENDER_MAX`. Returns the content's slot in `PROC_RENDERS`.
+fn render_proc(mut fill: impl FnMut(*mut u8, usize) -> i64) -> Result<u32, i64> {
+    let mut cap = PROC_BUFFER;
+    let content = loop {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.try_reserve_exact(cap).map_err(|_| -ENOMEM)?;
+        buf.resize(cap, 0);
+        let n = fill(buf.as_mut_ptr(), cap);
+        if n < 0 {
+            return Err(n);
+        }
+        let n = (n as usize).min(cap);
+        if n < cap || cap >= PROC_RENDER_MAX {
+            buf.truncate(n);
+            break buf;
+        }
+        cap *= 2;
+    };
     // SAFETY: single-core, syscall-serialized, as every pool here.
-    let used = unsafe { &mut *core::ptr::addr_of_mut!(PROC_RENDER_USED) };
-    let idx = used.iter().position(|&u| !u)?;
-    used[idx] = true;
-    Some(idx)
+    let renders = unsafe { &mut *core::ptr::addr_of_mut!(PROC_RENDERS) };
+    let slot = match renders.iter().position(Option::is_none) {
+        Some(slot) => slot,
+        None => {
+            renders.try_reserve(1).map_err(|_| -ENOMEM)?;
+            renders.push(None);
+            renders.len() - 1
+        }
+    };
+    // `into_boxed_slice` shrinks to the content: a buffer doubled past it gives the rest back.
+    renders[slot] = Some(content.into_boxed_slice());
+    Ok(slot as u32)
 }
 
 fn free_proc_render(idx: usize) {
-    // SAFETY: as `alloc_proc_render`.
-    unsafe { (*core::ptr::addr_of_mut!(PROC_RENDER_USED))[idx] = false };
+    // SAFETY: as `render_proc`.
+    unsafe { (&mut *core::ptr::addr_of_mut!(PROC_RENDERS))[idx] = None };
 }
 
-fn proc_render(idx: usize) -> &'static mut [u8; PROC_BUFFER] {
-    // SAFETY: as `alloc_proc_render`; callers never hold two borrows of one slot.
-    unsafe { &mut (*core::ptr::addr_of_mut!(PROC_RENDERS))[idx] }
+/// A rendered `/proc` file's content.
+fn proc_render(idx: usize) -> &'static [u8] {
+    // SAFETY: as `render_proc`; the boxed content doesn't move when the table grows.
+    unsafe { (&*core::ptr::addr_of!(PROC_RENDERS))[idx].as_deref().unwrap_or(&[]) }
 }
 
-/// Registers a `ProcRead` for the `len` bytes rendered into slot `render`, releasing the slot if
-/// no descriptor can be made.
-fn register_proc_render(render: usize, len: usize) -> i64 {
-    let fd = register_open_file(OpenFile::ProcRead { render: render as u16, len, position: 0 });
+/// Registers a `ProcRead` for the content rendered into slot `render`, releasing the slot if no
+/// descriptor can be made.
+fn register_proc_render(render: u32) -> i64 {
+    let len = proc_render(render as usize).len();
+    let fd = register_open_file(OpenFile::ProcRead { render, len, position: 0 });
     if fd < 0 {
-        free_proc_render(render);
+        free_proc_render(render as usize);
     }
     fd
 }
@@ -1201,8 +1259,7 @@ fn free_inode_blocks(inode: &Inode) {
 
 /// Whether an oxfs descriptor has inode `n` open.
 fn inode_is_open(n: u32) -> bool {
-    let slots = unsafe { &*core::ptr::addr_of!(OPEN_FILES) };
-    slots.iter().flatten().any(|(_, file)| match file {
+    open_file_slots().flatten().any(|(_, file)| match file {
         OpenFile::FileRead { inode, .. } | OpenFile::DirListing { inode, .. } => *inode == n,
         OpenFile::Write { inode, .. } => *inode == n,
         _ => false,
@@ -3065,10 +3122,9 @@ fn build_cwd_path(inode_num: u32, out: &mut [u8; MAX_CWD_PATH]) -> usize {
     len
 }
 
-/// An open file's own state, keyed by fd in `OPEN_FILES`. Modules can't use `alloc`/`Box`, so
-/// every slot is sized for the largest variant: no variant embeds a content buffer (the write
-/// buffers and `/proc` renders are pooled and referenced by index), so a slot stays small (see
-/// `MAX_OPEN_FILES`).
+/// An open file's own state, keyed by fd in `OPEN_FILES`. Every slot is sized for the largest
+/// variant: no variant embeds a content buffer (`/proc` renders live in `PROC_RENDERS`, referenced
+/// by index), so a slot stays small (see `OPEN_FILE_CHUNK`).
 #[derive(Clone, Copy)]
 #[allow(clippy::large_enum_variant)]
 enum OpenFile {
@@ -3125,7 +3181,7 @@ enum OpenFile {
     /// `sys/process.rs`'s kernel-exported accessors (see `open_proc_leaf`) into a `PROC_RENDERS`
     /// slot; no real inode backs this.
     ProcRead {
-        render: u16,
+        render: u32,
         len: usize,
         position: usize,
     },
@@ -3187,9 +3243,8 @@ fn register_open_file(open_file: OpenFile) -> i64 {
     if room < 0 {
         return room;
     }
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
-    let Some(slot) = slots.iter_mut().find(|s| s.is_none()) else {
-        return -EMFILE;
+    let Some(slot) = free_open_file_slot() else {
+        return -ENOMEM;
     };
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let real_fd = unsafe { oxidebsd_alloc_fd() };
@@ -3449,8 +3504,7 @@ fn is_shm_dir(dir: u32) -> bool {
 }
 
 fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
-    for (slot_fd, file) in slots.iter_mut().flatten() {
+    for (slot_fd, file) in open_file_slots().flatten() {
         if *slot_fd == fd {
             return Some(file);
         }
@@ -3531,7 +3585,7 @@ enum ProcSysFile {
 /// first (the one real, always-mounted filesystem), followed by one line per active `MountEntry`.
 /// Read by BusyBox's own `mount.c` (with no arguments) and `mountpoint`/`umount`'s own mtab
 /// lookups -- the same "prefer /proc/mounts when present" convention real Linux userland follows.
-fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
+fn format_mounts(buf: &mut [u8]) -> usize {
     let mut n = 0;
     let mut push = |bytes: &[u8]| {
         let room = buf.len() - n;
@@ -3565,70 +3619,48 @@ fn format_mounts(buf: &mut [u8; PROC_BUFFER]) -> usize {
 /// kernel accessors (or, for `Mounts`, this module's own state) instead of a per-pid one. Unlike
 /// `open_proc_leaf`, there's no pid to vanish out from under this call -- none of these ever fail.
 fn open_proc_sysfile(kind: ProcSysFile) -> i64 {
-    let Some(render) = alloc_proc_render() else {
-        return -ENFILE;
-    };
-    let content = proc_render(render);
-    let n = match kind {
-        ProcSysFile::Mounts => format_mounts(content) as i64,
+    let render = render_proc(|buf, cap| match kind {
+        // SAFETY: `render_proc` hands a buffer of `cap` bytes it owns.
+        ProcSysFile::Mounts => format_mounts(unsafe { core::slice::from_raw_parts_mut(buf, cap) }) as i64,
         // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures;
-        // each writes at most PROC_BUFFER bytes into content, sized to match.
+        // each writes at most `cap` bytes into `buf`.
         _ => unsafe {
             match kind {
-                ProcSysFile::Meminfo => {
-                    oxidebsd_proc_meminfo(content.as_mut_ptr(), PROC_BUFFER as u64)
-                }
-                ProcSysFile::Uptime => {
-                    oxidebsd_proc_uptime(content.as_mut_ptr(), PROC_BUFFER as u64)
-                }
-                ProcSysFile::Stat => {
-                    oxidebsd_proc_stat_global(content.as_mut_ptr(), PROC_BUFFER as u64)
-                }
-                ProcSysFile::Modules => {
-                    oxidebsd_proc_modules(content.as_mut_ptr(), PROC_BUFFER as u64)
-                }
-                ProcSysFile::InitDeaths => {
-                    oxidebsd_proc_initdeaths(content.as_mut_ptr(), PROC_BUFFER as u64)
-                }
+                ProcSysFile::Meminfo => oxidebsd_proc_meminfo(buf, cap as u64),
+                ProcSysFile::Uptime => oxidebsd_proc_uptime(buf, cap as u64),
+                ProcSysFile::Stat => oxidebsd_proc_stat_global(buf, cap as u64),
+                ProcSysFile::Modules => oxidebsd_proc_modules(buf, cap as u64),
+                ProcSysFile::InitDeaths => oxidebsd_proc_initdeaths(buf, cap as u64),
                 ProcSysFile::Mounts => unreachable!(),
             }
         },
-    };
-    register_proc_render(render, n as usize)
+    });
+    match render {
+        Ok(render) => register_proc_render(render),
+        Err(e) => e,
+    }
 }
 
-/// `/proc/<pid>/{stat,cmdline,status}`: calls the matching kernel accessor once, at `open` time,
-/// into a fresh fixed buffer -- same "format once, stream on read" shape `open_dir_listing` uses.
+/// `/proc/<pid>/{stat,cmdline,status,oom_adj}`: calls the matching kernel accessor once, at
+/// `open` time -- same "format once, stream on read" shape `open_dir_listing` uses.
 fn open_proc_leaf(pid: u32, leaf: ProcLeaf) -> i64 {
-    let Some(render) = alloc_proc_render() else {
-        return -ENFILE;
-    };
-    let content = proc_render(render);
     // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures; each
-    // writes at most PROC_BUFFER bytes into content, sized to match.
-    let n = unsafe {
-        match leaf {
-            ProcLeaf::Stat => {
-                oxidebsd_proc_stat_line(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
-            }
-            ProcLeaf::Cmdline => {
-                oxidebsd_proc_cmdline(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
-            }
-            ProcLeaf::Status => {
-                oxidebsd_proc_status(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
-            }
-            ProcLeaf::OomAdj => {
-                oxidebsd_proc_oom_adj(pid as u64, content.as_mut_ptr(), PROC_BUFFER as u64)
-            }
-        }
-    };
-    if n < 0 {
-        // The pid existed at proc_open's own check but is gone now (exited between that check and
-        // this call) -- ESRCH is the honest answer, not EBADF/ENOENT.
-        free_proc_render(render);
-        return -ESRCH;
+    // writes at most `cap` bytes into `buf`.
+    let render = render_proc(|buf, cap| unsafe {
+        let n = match leaf {
+            ProcLeaf::Stat => oxidebsd_proc_stat_line(pid as u64, buf, cap as u64),
+            ProcLeaf::Cmdline => oxidebsd_proc_cmdline(pid as u64, buf, cap as u64),
+            ProcLeaf::Status => oxidebsd_proc_status(pid as u64, buf, cap as u64),
+            ProcLeaf::OomAdj => oxidebsd_proc_oom_adj(pid as u64, buf, cap as u64),
+        };
+        // The pid existed at proc_open's own check but is gone now (exited between that check
+        // and this call) -- ESRCH is the honest answer, not EBADF/ENOENT.
+        if n < 0 { -ESRCH } else { n }
+    });
+    match render {
+        Ok(render) => register_proc_render(render),
+        Err(e) => e,
     }
-    register_proc_render(render, n as usize)
 }
 
 /// Dispatches every `/proc/...` path `oxfs_open` hands off to it (`suffix` is the path *after*
@@ -4455,10 +4487,7 @@ extern "C" fn oxfs_write(fd: u64, uio: u64, flags: u64) -> i64 {
 /// was the last thing keeping an unlinked file alive (`maybe_release`).
 extern "C" fn oxfs_close(fd: u64) -> i64 {
     release_flocks_for(fd);
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
-    let Some(slot) = slots
-        .iter_mut()
-        .find(|s| matches!(s, Some((slot_fd, _)) if *slot_fd == fd))
+    let Some(slot) = open_file_slots().find(|s| matches!(s, Some((slot_fd, _)) if *slot_fd == fd))
     else {
         return -EBADF;
     };
@@ -5427,8 +5456,7 @@ fn rename_impl(old_cwd: u32, old_path: &[u8], new_cwd: u32, new_path: &[u8], nor
 /// Files open through `old_parent`/`old_leaf` now go by the new name, for their
 /// `/proc/<pid>/fd` links (`open_file_path`).
 fn rename_open_files(old_parent: u32, old_leaf: &[u8], new_parent: u32, new_leaf: &[u8]) {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
-    for (_, file) in slots.iter_mut().flatten() {
+    for (_, file) in open_file_slots().flatten() {
         let (parent, name, name_len) = match file {
             OpenFile::FileRead { parent, name, name_len, .. } => (parent, name, name_len),
             OpenFile::Write { parent_inode, name, name_len, .. } => (parent_inode, name, name_len),
@@ -6683,9 +6711,7 @@ fn remount_root(rdonly: bool) -> i64 {
         return 0;
     }
     if rdonly {
-        let slots = unsafe { &*core::ptr::addr_of!(OPEN_FILES) };
-        let writing = slots
-            .iter()
+        let writing = open_file_slots()
             .flatten()
             .any(|(_, f)| matches!(f, OpenFile::Write { inode, .. } if !is_tmpfs_inode(*inode)));
         if writing {
