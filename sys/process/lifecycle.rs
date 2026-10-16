@@ -21,13 +21,6 @@ use crate::syscall::{
     self, E2BIG, EACCES, EBADF, ECHILD, EINVAL, EIO, ELOOP, ENOENT, ENOEXEC, ENOMEM, SyscallFrame,
 };
 
-// Real FreeBSD syscall numbers, duplicated here rather than imported — same "no shared crate
-// across this internal ABI boundary" convention `modules/fat32`/`sys/modules/native_abi` already use
-// for their own copies of these same constants. `do_execve` uses these to drive its own internal
-// open/read-loop/close against the exact same fd/fat32 machinery `stsh`'s `cat` already exercises
-// via `syscall::dispatch` directly (`dispatch` is `pub(crate)`, callable from arbitrary kernel
-// code, not just from the `SYSCALL` entry stub).
-const SYS_CLOSE: u64 = 6;
 /// `execveat`'s open -- see `do_execveat`. OxideBSD's own number (`sys/modules/oxfs`'s
 /// `SYS_OPENAT`); its `RawAtPath` is the caller's own, a user pointer.
 const SYS_OPENAT: u64 = 560;
@@ -1067,7 +1060,8 @@ fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
 
 /// Opens a program for `exec_image` and reads its head (`ExecFile`), given the kernel's own copy of
 /// its path (a top-level `execve` target, or a `#!`/`PT_INTERP` interpreter parsed out of a file).
-/// oxfs's open for a path in kernel memory, `(path_ptr, path_len, flags) -> fd | -errno` (BSD's
+/// oxfs's open for a path in kernel memory, `(path_ptr, path_len, flags) -> fd | -errno`, called
+/// inside `fd::kernel_open` so the result is a held file's handle, not an fd (BSD's
 /// `namei` with `UIO_SYSSPACE`): `SYS_OPEN` takes a user pointer, and exec's paths are the kernel's
 /// own copies (USERMEM.md). Registered by oxfs's `module_init`.
 type KernOpenFn = extern "C" fn(u64, u64, u64) -> i64;
@@ -1078,33 +1072,28 @@ pub(crate) extern "C" fn oxidebsd_register_kernel_open(f: KernOpenFn) {
     *KERN_OPEN.lock() = Some(f);
 }
 
-fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
+/// Opens `path` as a file the kernel holds (`fd::kernel_open`): no descriptor of the caller's.
+/// Its handle.
+fn kernel_open_path(path: &[u8]) -> Result<u64, u64> {
     let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
-    let fd = {
+    let handle = crate::fs::fd::kernel_open(|| {
         let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
         open(path.as_ptr() as u64, path.len() as u64, 0)
-    };
-    if fd < 0 {
-        return Err(-fd as u64);
-    }
-    read_exec_head_and_close(fd as u64)
+    });
+    if handle < 0 { Err(-handle as u64) } else { Ok(handle as u64) }
+}
+
+fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
+    read_exec_head_and_release(kernel_open_path(path)?)
 }
 
 /// A whole program, read from the root file system by path, for the kernel to start as pid 1
 /// (`init::start`; FreeBSD execs it inside process 1, `start_init`). The buffer is the caller's,
 /// dropped once the image is mapped. `ENOEXEC` for anything but a non-empty oxfs file.
 pub(crate) fn read_program(path: &[u8]) -> Result<Vec<u8>, u64> {
-    let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
-    let fd = {
-        let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
-        open(path.as_ptr() as u64, path.len() as u64, 0)
-    };
-    if fd < 0 {
-        return Err(-fd as u64);
-    }
-    let fd = fd as u64;
+    let handle = kernel_open_path(path)?;
     let read = || -> Result<Vec<u8>, u64> {
-        let content = crate::fs::fd::content_id_of(fd).ok_or(ENOEXEC)?;
+        let content = crate::fs::fd::content_id_of_handle(handle).ok_or(ENOEXEC)?;
         let size = u64::try_from(crate::fs::fd::content_size(content)).map_err(|_| ENOEXEC)?;
         if size == 0 {
             return Err(ENOEXEC);
@@ -1116,17 +1105,23 @@ pub(crate) fn read_program(path: &[u8]) -> Result<Vec<u8>, u64> {
         Ok(image)
     };
     let result = read();
-    let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
+    crate::fs::fd::release(handle);
     result
 }
 
 /// `open_exec_file`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
-/// `execveat`'s dirfd-relative (and `AT_SYMLINK_NOFOLLOW`) target.
+/// `execveat`'s dirfd-relative (and `AT_SYMLINK_NOFOLLOW`) target -- as a file the kernel holds.
 fn open_exec_file_at(at_ptr: u64, nofollow: bool) -> Result<ExecFile, u64> {
     const O_NOFOLLOW: u64 = 0o400000;
     let flags = if nofollow { O_NOFOLLOW } else { 0 };
-    let fd = syscall::dispatch(SYS_OPENAT, at_ptr, flags, 0, 0)?;
-    read_exec_head_and_close(fd)
+    let handle = crate::fs::fd::kernel_open(|| match syscall::dispatch(SYS_OPENAT, at_ptr, flags, 0, 0) {
+        Ok(h) => h as i64,
+        Err(e) => -(e as i64),
+    });
+    if handle < 0 {
+        return Err(-handle as u64);
+    }
+    read_exec_head_and_release(handle as u64)
 }
 
 /// How much one `read` asks for while loading an executable. Large, because the per-call cost
@@ -1135,9 +1130,9 @@ fn open_exec_file_at(at_ptr: u64, nofollow: bool) -> Result<ExecFile, u64> {
 /// itself, on the heap, never the kernel stack.
 const EXEC_READ_CHUNK: usize = 1 << 20;
 
-/// Reads `fd` to its end into one buffer, with `read` (`pread == false`, from the current offset)
+/// Reads file `handle` to its end into one buffer, with `read` (`pread == false`, from its offset)
 /// or `pread` from offset 0, which leaves the caller's own offset alone.
-fn read_fd_to_end(fd: u64, pread: bool) -> Result<Vec<u8>, u64> {
+fn read_fd_to_end(handle: u64, pread: bool) -> Result<Vec<u8>, u64> {
     let mut bytes: Vec<u8> = Vec::new();
     loop {
         // Straight into the spare capacity: no zero-filling first, which in the unoptimized
@@ -1150,7 +1145,7 @@ fn read_fd_to_end(fd: u64, pread: bool) -> Result<Vec<u8>, u64> {
         let seg = alloc::vec![IoSeg { base: buf, len: EXEC_READ_CHUNK as u64 }];
         let mut uio = Uio::new(seg, UioRw::Read, UioSeg::Kernel, len as u64)?;
         let flags = if pread { FOF_OFFSET } else { 0 };
-        let raw = crate::fs::fd::read(fd, &mut uio, flags).ok_or(EBADF)?;
+        let raw = crate::fs::fd::read_handle(handle, &mut uio, flags).ok_or(EBADF)?;
         if raw < 0 {
             return Err(-raw as u64);
         }
@@ -1189,19 +1184,19 @@ impl ExecFile {
 /// our toolchains link fit in the first page, and the `#!` line too.
 const EXEC_HEAD: u64 = 4096;
 
-fn read_exec_head_and_close(fd: u64) -> Result<ExecFile, u64> {
-    let result = read_exec_head(fd, false);
-    let _ = syscall::dispatch(SYS_CLOSE, fd, 0, 0, 0);
+fn read_exec_head_and_release(handle: u64) -> Result<ExecFile, u64> {
+    let result = read_exec_head(handle, false);
+    crate::fs::fd::release(handle);
     result
 }
 
-/// Reads the head of `fd`'s file for `exec_image`, never moving its offset unless it isn't on
+/// Reads the head of file `handle` for `exec_image`, never moving its offset unless it isn't on
 /// oxfs and `pread` is false.
-fn read_exec_head(fd: u64, pread: bool) -> Result<ExecFile, u64> {
-    let content = crate::fs::fd::content_id_of(fd);
+fn read_exec_head(handle: u64, pread: bool) -> Result<ExecFile, u64> {
+    let content = crate::fs::fd::content_id_of_handle(handle);
     let size = content.map_or(-1, crate::fs::fd::content_size);
     let (Some(content), Ok(size)) = (content, u64::try_from(size)) else {
-        return read_fd_to_end(fd, pread).map(ExecFile::whole);
+        return read_fd_to_end(handle, pread).map(ExecFile::whole);
     };
     let read = |len: u64| -> Result<Vec<u8>, u64> {
         let mut head = alloc::vec![0u8; len as usize];
@@ -1222,7 +1217,7 @@ fn read_exec_head(fd: u64, pread: bool) -> Result<ExecFile, u64> {
             head = read(end)?;
         }
     }
-    let (setid, wxallowed) = match crate::fs::fd::exec_setid(fd) {
+    let (setid, wxallowed) = match crate::fs::fd::exec_setid_handle(handle) {
         Some((setid, wxallowed)) => (Some(setid), wxallowed),
         None => (None, false),
     };
@@ -1349,7 +1344,8 @@ pub fn do_execveat(
         if dirfd < 0 {
             return Err(EBADF);
         }
-        let image = read_exec_head(dirfd as u64, true)?;
+        let handle = crate::fs::fd::real_fd_of(dirfd as u64).ok_or(EBADF)?;
+        let image = read_exec_head(handle, true)?;
         return exec_image(caller_pid, path_bytes, Some(image), false, argv_ptr, envp_ptr);
     }
 

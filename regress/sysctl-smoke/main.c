@@ -639,13 +639,20 @@ static void open_files(void)
 		if (setrlimit(RLIMIT_NOFILE, &huge) < 0) _exit(7);
 		getrlimit(RLIMIT_NOFILE, &huge);
 		if (huge.rlim_max != (rlim_t)num("kern.maxfilesperproc")) _exit(8);
-		_exit(0);
+		/* At its limit a process can still exec: the kernel reads the program without taking
+		 * one of its descriptors. */
+		struct rlimit tight = { 16, 16 };
+		setrlimit(RLIMIT_NOFILE, &tight);
+		while (open("/dev/null", O_RDONLY) >= 0)
+			;
+		execl("/bin/true", "true", (char *)0);
+		_exit(9);
 	}
 	int status = -1;
 	waitpid(pid, &status, 0);
 	printf("     limit child exited %d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-		"RLIMIT_NOFILE: EMFILE past it, EBADF/EINVAL for dup2/F_DUPFD to it, clamped to maxfilesperproc");
+		"RLIMIT_NOFILE: EMFILE past it, EBADF/EINVAL for dup2/F_DUPFD to it, clamped, exec at it");
 }
 
 /* The child half of modules(): its cmdline is "sysctl-smoke\0--long-cmdline\0" and 3000 x's. */

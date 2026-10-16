@@ -427,14 +427,23 @@ pub(crate) extern "C" fn oxidebsd_file_set_offset(handle: u64, offset: u64) {
 /// flags `flag` (`FREAD`/`FWRITE`/`FAPPEND`/`FNONBLOCK`) and kind `kind`, and gives the calling
 /// process the lowest free fd for it. Returns the fd, or `-ENFILE` past `kern.maxfiles` (callers
 /// have made room first, `check_room`).
+///
+/// Inside `kernel_open` the file is the kernel's instead: it gets no fd, one reference the
+/// kernel drops with `release`, and the return value is its handle.
 pub(crate) fn finstall(real_fd: u64, ops: &'static FileOps, data: u64, flag: u32, kind: FdKind) -> i64 {
     let pid = scheduler::current_tgid();
+    let held = kernel_opening();
     {
         let mut descriptions = DESCRIPTIONS.lock();
         if descriptions.len() >= crate::kern::kern_sysctl::maxfiles() {
             return -ENFILE;
         }
-        descriptions.insert(real_fd, Description { ops, data, flag, offset: 0, kind, refs: 0 });
+        let refs = held as u32;
+        descriptions.insert(real_fd, Description { ops, data, flag, offset: 0, kind, refs });
+    }
+    if held {
+        *KERNEL_OPEN.lock() = None;
+        return real_fd as i64;
     }
     let mut table = TABLE.lock();
     let fd = lowest_free(&table, pid, 0);
@@ -545,6 +554,25 @@ fn free_below(table: &BTreeMap<(u64, u64), u64>, pid: u64, limit: u64) -> u64 {
     limit.saturating_sub(table.range((pid, 0)..(pid, limit)).count() as u64)
 }
 
+/// The process (by pid: an open can wait on the disk, and others run meanwhile) whose current open
+/// is the kernel's own (`kernel_open`).
+static KERNEL_OPEN: Mutex<Option<u64>> = Mutex::new(None);
+
+fn kernel_opening() -> bool {
+    *KERNEL_OPEN.lock() == Some(scheduler::current_pid())
+}
+
+/// Runs `open`, a file system's open call made by the kernel for itself (exec's open of a program,
+/// FreeBSD's `vn_open` with no fd), so that the file it makes is held by the kernel: no fd, not
+/// counted against `RLIMIT_NOFILE`, its handle returned where the fd would be. The caller drops
+/// it with `release(handle)`. An open that fails, or makes no file, leaves nothing held.
+pub(crate) fn kernel_open(open: impl FnOnce() -> i64) -> i64 {
+    *KERNEL_OPEN.lock() = Some(scheduler::current_pid());
+    let r = open();
+    *KERNEL_OPEN.lock() = None;
+    r
+}
+
 /// Whether `n` more open-file descriptions fit under `kern.maxfiles` (SYSCTL.md §§5-6), which
 /// counts descriptions, as FreeBSD's counts `struct file`s: `dup` and `fork` share one and don't
 /// count; and whether the calling process has `n` fd numbers free under its `RLIMIT_NOFILE`
@@ -556,7 +584,7 @@ pub(crate) fn check_room(n: usize) -> Result<(), i64> {
         return Err(ENFILE);
     }
     let limit = crate::process::limits::current_nofile();
-    if free_below(&TABLE.lock(), scheduler::current_tgid(), limit) < n as u64 {
+    if !kernel_opening() && free_below(&TABLE.lock(), scheduler::current_tgid(), limit) < n as u64 {
         return Err(EMFILE);
     }
     Ok(())
@@ -717,7 +745,12 @@ pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, u64> {
 /// `write(1, NULL, 0)`). An error after some bytes moved returns the count if it is `EINTR`,
 /// `ERESTART` or `EAGAIN`, the error otherwise (USERMEM.md §4.4).
 pub(crate) fn read(fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
-    let (real_fd, ops) = lookup(fd)?;
+    read_handle(real_fd_of(fd)?, uio, flags)
+}
+
+/// `read` on a file by its handle, one the kernel holds itself (`kernel_open`).
+pub(crate) fn read_handle(real_fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
+    let (ops, ..) = file_of(real_fd)?;
     Some(transfer(ops.read.unwrap_or(fo_denied), ops, FREAD, real_fd, uio, flags))
 }
 
@@ -788,7 +821,12 @@ pub(crate) fn real_fd_of(fd: u64) -> Option<u64> {
 /// decide whether a real fd-backed `MAP_SHARED` mapping is even possible, and to key its own
 /// cross-open shared-frame cache. `None` covers both "no such fd" and "not identifiable right now."
 pub(crate) fn content_id_of(fd: u64) -> Option<u64> {
-    let (real_fd, ops) = lookup(fd)?;
+    content_id_of_handle(real_fd_of(fd)?)
+}
+
+/// `content_id_of` by handle.
+pub(crate) fn content_id_of_handle(real_fd: u64) -> Option<u64> {
+    let (ops, ..) = file_of(real_fd)?;
     let content_id = ops.content_id?;
     let _lock = crate::fs::fslock::Guard::for_call(content_id as usize as u64);
     let id = content_id(real_fd);
@@ -905,8 +943,8 @@ pub(crate) fn content_block_map(content_id: u64) -> Option<alloc::vec::Vec<[u64;
 
 /// The mode bits, owner and group of the program open on `fd`, for `execve`
 /// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
-pub(crate) fn exec_setid(fd: u64) -> Option<((u32, u32, u32), bool)> {
-    let real_fd = real_fd_of(fd)?;
+/// `exec_setid` by handle.
+pub(crate) fn exec_setid_handle(real_fd: u64) -> Option<((u32, u32, u32), bool)> {
     let setid = (*CONTENT_ACCESSORS.lock())?.4;
     let _lock = crate::fs::fslock::Guard::for_call(setid as usize as u64);
     let mut out = [0u32; 4];
