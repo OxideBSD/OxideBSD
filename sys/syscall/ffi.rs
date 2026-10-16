@@ -240,14 +240,14 @@ pub(crate) fn sys_pipe2(fds_ptr: u64, flags: u64) -> Result<u64, u64> {
 /// function's own doc comment, and `sys/fs/fd.rs`'s module doc comment, for the refcount-aware
 /// fd-aliasing this needs to actually work (not just copy function pointers around).
 pub(crate) fn sys_dup2(oldfd: u64, newfd: u64) -> Result<u64, u64> {
-    crate::fs::fd::dup2(oldfd, newfd).map_err(|_| EBADF)
+    crate::fs::fd::dup2(oldfd, newfd)
 }
 
 /// `SYS_DUP` (`125`) — matches real `dup(2)`'s exact single-argument `(oldfd)` signature.
 /// Delegates to `crate::fs::fd::dup` — see that function's own doc comment for why this exists at
 /// all (BusyBox's `hush`, with `CONFIG_HUSH_JOB` on, needs it to set up `G_interactive_fd`).
 pub(crate) fn sys_dup(oldfd: u64) -> Result<u64, u64> {
-    crate::fs::fd::dup(oldfd).map_err(|_| EBADF)
+    crate::fs::fd::dup(oldfd)
 }
 
 /// `SYS_SET_TID_ADDRESS` (`150`) — real `set_tid_address(2)`'s exact single-pointer wire format.
@@ -285,8 +285,7 @@ pub(crate) fn sys_set_tid_address(_tidptr: u64) -> Result<u64, u64> {
 /// per-`(pid, fd)` `FD_CLOEXEC` bit, enforced by `process::do_execve` via `close_cloexec` (found
 /// live: `shm_open/11-1.c`, the Open POSIX Test Suite pilot, checks it directly via `F_GETFD` --
 /// real `shm_open()` always passes `O_CLOEXEC` to `open()`). `F_DUPFD`/`F_DUPFD_CLOEXEC` delegate
-/// to `crate::fs::fd::dup` (ignoring the real "minimum fd number" hint in `arg` -- this kernel's
-/// bump allocator has no notion of it); `F_DUPFD_CLOEXEC` additionally marks the *new* fd
+/// to `crate::fs::fd::dup_min` (the lowest free fd >= `arg`, under `RLIMIT_NOFILE`); `F_DUPFD_CLOEXEC` additionally marks the *new* fd
 /// close-on-exec (real POSIX: unlike a plain `dup`/`F_DUPFD`, this variant's whole point is
 /// atomically setting the flag on the fresh fd) -- added mainly so musl's own `F_DUPFD_CLOEXEC`
 /// fallback in `fcntl.c` (which always tries that command first, then falls back through
@@ -343,9 +342,9 @@ pub(crate) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
             crate::fs::fd::set_cloexec(pid, fd, arg & FD_CLOEXEC != 0);
             Ok(0)
         }
-        F_DUPFD => crate::fs::fd::dup_min(fd, arg).map_err(|_| EBADF),
+        F_DUPFD => crate::fs::fd::dup_min(fd, arg),
         F_DUPFD_CLOEXEC => {
-            let newfd = crate::fs::fd::dup_min(fd, arg).map_err(|_| EBADF)?;
+            let newfd = crate::fs::fd::dup_min(fd, arg)?;
             crate::fs::fd::set_cloexec(pid, newfd, true);
             Ok(newfd)
         }

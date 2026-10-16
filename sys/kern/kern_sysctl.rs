@@ -188,6 +188,7 @@ const KERN_OSRELEASE: i32 = 2;
 const KERN_VERSION: i32 = 4;
 const KERN_MAXPROC: i32 = 6;
 const KERN_MAXFILES: i32 = 7;
+const KERN_MAXFILESPERPROC: i32 = 29;
 const KERN_ARGMAX: i32 = 8;
 const KERN_HOSTNAME: i32 = 10;
 const KERN_CLOCKRATE: i32 = 12;
@@ -212,9 +213,32 @@ pub(crate) const MACHINE_ARCH: &str = "amd64";
 
 /// `kern.maxproc` and `kern.maxfiles`: boot tunables (`SYSCTL.md` §6). `fork` refuses past the
 /// first (`process::lifecycle::check_maxproc`), creating an open file past the second
-/// (`fs::fd::check_room`).
+/// (`fs::fd::check_room`). `MAXFILES` is 0 unless set: then `maxfiles` sizes it from RAM.
 pub(crate) static MAXPROC: Mutex<i32> = Mutex::new(4096);
-pub(crate) static MAXFILES: Mutex<i32> = Mutex::new(8192);
+pub(crate) static MAXFILES: Mutex<i32> = Mutex::new(0);
+/// `kern.maxfilesperproc`, 0 unless set: then 9/10 of `kern.maxfiles`, as FreeBSD's default.
+/// What `RLIMIT_NOFILE` can't exceed (`process::limits::current_nofile`).
+pub(crate) static MAXFILESPERPROC: Mutex<i32> = Mutex::new(0);
+
+/// RAM per open file `kern.maxfiles` allows by default: an open file costs the kernel heap (an
+/// eighth of RAM) a few hundred bytes between its description and its file system's state, so
+/// every file open at once still leaves most of the heap: 2048 files at 64 MB, 262144 at 8 GB.
+const RAM_PER_FILE: u64 = 32 * 1024;
+
+/// `kern.maxfiles`: the boot tunable, else one per `RAM_PER_FILE` of RAM, at least 512.
+pub(crate) fn maxfiles() -> usize {
+    let set = *MAXFILES.lock();
+    if set > 0 {
+        return set as usize;
+    }
+    (crate::memory::usable_ram_bytes() / RAM_PER_FILE).clamp(512, 1_000_000) as usize
+}
+
+/// `kern.maxfilesperproc`: as set, else 9/10 of `kern.maxfiles`.
+pub(crate) fn maxfilesperproc() -> usize {
+    let set = *MAXFILESPERPROC.lock();
+    if set > 0 { set as usize } else { maxfiles() / 10 * 9 }
+}
 
 /// Sets boot tunable `name` from the kernel command line's `name=value` (`SYSCTL.md` §6): before
 /// the heap exists, so no allocation. An unknown name or a value out of range is logged and
@@ -227,6 +251,9 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
             .map(|v| crate::kern::subr_msgbuf::SIZE.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
         "kern.maxproc" => parsed.filter(|v| (32..=1_000_000).contains(v)).map(|v| *MAXPROC.lock() = v as i32),
         "kern.maxfiles" => parsed.filter(|v| (64..=1_000_000).contains(v)).map(|v| *MAXFILES.lock() = v as i32),
+        "kern.maxfilesperproc" => {
+            parsed.filter(|v| (16..=1_000_000).contains(v)).map(|v| *MAXFILESPERPROC.lock() = v as i32)
+        }
         "kern.tty.pty_max" => parsed
             .filter(|v| (1..=4096).contains(v))
             .map(|v| crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed)),
@@ -349,8 +376,25 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             fmt: "I",
             flags: CTLFLAG_RDTUN,
             descr: "Maximum number of files",
-            get: || int(*MAXFILES.lock()),
+            get: || int(maxfiles() as i32),
             set: None,
+        },
+        Leaf {
+            number: Some(KERN_MAXFILESPERPROC),
+            name: "maxfilesperproc",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Maximum files allowed open per process",
+            get: || int(maxfilesperproc() as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                if !(16..=1_000_000).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                *MAXFILESPERPROC.lock() = v;
+                Ok(())
+            }),
         },
         Leaf {
             number: Some(KERN_ARGMAX),

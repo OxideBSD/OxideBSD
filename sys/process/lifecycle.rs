@@ -228,7 +228,11 @@ fn spawn_finish(
         // No login mechanism exists -- pid 1 (and every process descending from it) starts as
         // root, same reasoning as ThreadGroupShared::uid's own doc comment (via Process::shared
         // above).
-        rlimits: [(u64::MAX, u64::MAX); 16],
+        rlimits: {
+            let mut rlimits = [(u64::MAX, u64::MAX); 16];
+            rlimits[super::limits::RLIMIT_NOFILE] = super::limits::initial_nofile();
+            rlimits
+        },
         nice: 0,
         sched_policy: SCHED_DEFAULT,
         sched_priority: 0,

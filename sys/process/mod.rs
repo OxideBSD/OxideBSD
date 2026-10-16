@@ -967,9 +967,9 @@ pub struct Process {
     /// `SYS_PRLIMIT64`'s backing store -- one `(rlim_cur, rlim_max)` pair per real `RLIMIT_*`
     /// resource (`RLIM_NLIMITS = 16` on real Linux), `u64::MAX` (`RLIM_INFINITY`) in every slot by
     /// default. Copied by `fork` (real POSIX rlimit/fork semantics, same as `uid`/`gid`/`pgid`);
-    /// preserved by `execve` (untouched, same as `cwd`/`pgid`). **Stored, never enforced** — an
-    /// honest, documented gap, the same tier as several other accepted-but-unenforced fields
-    /// already in this codebase (e.g. `O_NONBLOCK` on a TCP socket, see `sys/netinet/tcp.rs`).
+    /// preserved by `execve` (untouched, same as `cwd`/`pgid`). Enforced: `RLIMIT_MEMLOCK`
+    /// (`mlockall(MCL_FUTURE)`) and `RLIMIT_NOFILE` (`limits::current_nofile`, which starts at
+    /// `kern.maxfilesperproc`); the rest are stored only.
     pub rlimits: [(u64, u64); 16],
     /// `SYS_SETPRIORITY`/`SYS_GETPRIORITY`'s backing store — real `nice` range is `-20..=19`, `0`
     /// by default. Stored and echoed back honestly; this kernel's cooperative round-robin

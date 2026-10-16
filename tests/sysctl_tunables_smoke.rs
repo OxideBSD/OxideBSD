@@ -24,7 +24,8 @@ const SYS_TEST_EXIT: u64 = 9999;
 /// What `regress/sysctl-smoke/main.c`'s `tunables` expects: the last `kern.maxfiles` is out of
 /// range, so the first stays. `-D` keeps the console on COM1 as `qemu_runner.sh` asked, since this
 /// replaces the flags the real command line set.
-const TUNABLES: &str = "-D kern.msgbufsize=131072 kern.maxproc=40 kern.maxfiles=100 kern.bogus=1 kern.maxfiles=5";
+const TUNABLES: &str =
+    "-D kern.msgbufsize=131072 kern.maxproc=40 kern.maxfiles=100 kern.maxfilesperproc=200 kern.bogus=1 kern.maxfiles=5";
 
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
     serial_println!(

@@ -801,8 +801,8 @@ pub(crate) extern "C" fn oxidebsd_kfree(ptr: *mut u8, size: u64, align: u64, id:
     if let Some(stats) = MODULE_ALLOC_STATS.get(id as usize) {
         // A module's own stamp never changes, so these can't go below zero unless a module frees
         // what it didn't allocate; saturate rather than wrap so the sysctl stays readable.
-        let _ = stats.bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| Some(b.saturating_sub(size)));
-        let _ = stats.count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
+        let _ = stats.bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| Some(b.saturating_sub(size)));
+        let _ = stats.count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
     }
 }
 

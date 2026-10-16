@@ -186,7 +186,7 @@ pub extern "C" fn oxidebsd_sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64) ->
     }
     // More entries than open files can exist is EINVAL (as FreeBSD bounds it), so a huge `nfds`
     // never becomes a huge allocation.
-    if nfds > *crate::kern::kern_sysctl::MAXFILES.lock() as u64 {
+    if nfds > crate::kern::kern_sysctl::maxfiles() as u64 {
         return -(EINVAL as i64);
     }
     // The array is copied in whole and back out on success, as on the BSDs.

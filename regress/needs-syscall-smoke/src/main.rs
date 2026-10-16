@@ -457,7 +457,8 @@ pub extern "C" fn _start() -> ! {
     check!(root_usage() == (free0, used0), b"the grown inode table didn't shrink back");
     write_bytes(b"needs-syscall-smoke: reclamation OK\n");
 
-    // --- prlimit64: real read-old/write-new round trip, RLIM_INFINITY default. ---
+    // --- prlimit64: real read-old/write-new round trip. RLIMIT_NOFILE starts finite: 1024 soft
+    // (at most), kern.maxfilesperproc hard. ---
     let mut old = RawRlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -476,8 +477,8 @@ pub extern "C" fn _start() -> ! {
         b"prlimit64 initial read failed"
     );
     check!(
-        old.rlim_cur == u64::MAX && old.rlim_max == u64::MAX,
-        b"prlimit64 default wasn't RLIM_INFINITY"
+        old.rlim_cur >= 16 && old.rlim_cur <= 1024 && old.rlim_max != u64::MAX && old.rlim_cur <= old.rlim_max,
+        b"prlimit64: RLIMIT_NOFILE didn't start at 1024 soft, finite hard"
     );
     let new = RawRlimit {
         rlim_cur: 100,

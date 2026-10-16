@@ -441,21 +441,33 @@ pub(crate) extern "C" fn oxidebsd_alloc_fd() -> u64 {
 
 /// `ENFILE` (musl's value): the system-wide open-file limit, `kern.maxfiles`, is reached.
 const ENFILE: i64 = 23;
+/// `EMFILE`: the process's own limit, `RLIMIT_NOFILE` (`process::limits::current_nofile`), is
+/// reached.
+const EMFILE: i64 = 24;
+
+/// How many fd numbers below `limit` `pid` has free.
+fn free_below(table: &BTreeMap<(u64, u64), u64>, pid: u64, limit: u64) -> u64 {
+    limit.saturating_sub(table.range((pid, 0)..(pid, limit)).count() as u64)
+}
 
 /// Whether `n` more open-file descriptions fit under `kern.maxfiles` (SYSCTL.md §§5-6), which
 /// counts descriptions, as FreeBSD's counts `struct file`s: `dup` and `fork` share one and don't
-/// count. Every creator of descriptions checks before building its own state, so a refusal leaves
-/// nothing to undo; `register` refuses too, as a backstop.
+/// count; and whether the calling process has `n` fd numbers free under its `RLIMIT_NOFILE`
+/// (`EMFILE`). Every creator of descriptions checks before building its own state, so a refusal
+/// leaves nothing to undo; `register` refuses too, as a backstop.
 pub(crate) fn check_room(n: usize) -> Result<(), i64> {
-    let max = *crate::kern::kern_sysctl::MAXFILES.lock() as usize;
+    let max = crate::kern::kern_sysctl::maxfiles();
     if DESCRIPTIONS.lock().len() + n > max {
-        Err(ENFILE)
-    } else {
-        Ok(())
+        return Err(ENFILE);
     }
+    let limit = crate::process::limits::current_nofile();
+    if free_below(&TABLE.lock(), scheduler::current_tgid(), limit) < n as u64 {
+        return Err(EMFILE);
+    }
+    Ok(())
 }
 
-/// `check_room` for modules: `0`, or `-ENFILE`.
+/// `check_room` for modules: `0`, `-ENFILE` or `-EMFILE`.
 pub(crate) extern "C" fn oxidebsd_fd_check_room(n: u64) -> i64 {
     match check_room(n as usize) {
         Ok(()) => 0,
@@ -529,8 +541,7 @@ fn register(
         match descriptions.get_mut(&real_fd) {
             Some(d) => d.ops = ops,
             None => {
-                let max = *crate::kern::kern_sysctl::MAXFILES.lock() as usize;
-                if descriptions.len() >= max {
+                if descriptions.len() >= crate::kern::kern_sysctl::maxfiles() {
                     return -ENFILE;
                 }
                 descriptions.insert(real_fd, Description { ops, refs: 0 });
@@ -668,9 +679,15 @@ pub(crate) fn fork_inherit(parent: u64, child: u64) {
 /// refcount-aware path `oxidebsd_close_fd` uses, so an in-use underlying resource survives if
 /// another alias — in this process or any other — still references it), then `newfd` becomes a
 /// fresh alias of `oldfd`'s own `real_fd`.
-pub(crate) fn dup2(oldfd: u64, newfd: u64) -> Result<u64, ()> {
+///
+/// `EBADF` for an `oldfd` that isn't open or a `newfd` at or past the process's `RLIMIT_NOFILE`.
+pub(crate) fn dup2(oldfd: u64, newfd: u64) -> Result<u64, u64> {
     let pid = scheduler::current_tgid();
-    let real_fd = *TABLE.lock().get(&(pid, oldfd)).ok_or(())?;
+    let limit = crate::process::limits::current_nofile();
+    let real_fd = *TABLE.lock().get(&(pid, oldfd)).ok_or(crate::syscall::EBADF)?;
+    if newfd >= limit {
+        return Err(crate::syscall::EBADF);
+    }
     if oldfd == newfd {
         return Ok(newfd);
     }
@@ -688,16 +705,25 @@ pub(crate) fn dup2(oldfd: u64, newfd: u64) -> Result<u64, ()> {
 /// `G_interactive_fd` setup gives up entirely and silently treats itself as non-interactive, the
 /// exact thing turning on real interactive mode was for. See CLAUDE.md's "Interactive shell"
 /// section for the full trace of why `fcntl` itself doesn't need implementing for this to work.
-pub(crate) fn dup(oldfd: u64) -> Result<u64, ()> {
+pub(crate) fn dup(oldfd: u64) -> Result<u64, u64> {
     dup_min(oldfd, 0)
 }
 
-/// `fcntl(F_DUPFD, min)`: like `dup`, but the new fd is the lowest free one >= `min`.
-pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, ()> {
+/// `fcntl(F_DUPFD, min)`: like `dup`, but the new fd is the lowest free one >= `min`. `EBADF` for
+/// an `oldfd` that isn't open, `EINVAL` for a `min` at or past the process's `RLIMIT_NOFILE`,
+/// `EMFILE` when no number below it is free.
+pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, u64> {
     let pid = scheduler::current_tgid();
+    let limit = crate::process::limits::current_nofile();
     let mut table = TABLE.lock();
-    let real_fd = *table.get(&(pid, oldfd)).ok_or(())?;
+    let real_fd = *table.get(&(pid, oldfd)).ok_or(crate::syscall::EBADF)?;
+    if min >= limit {
+        return Err(crate::syscall::EINVAL);
+    }
     let newfd = lowest_free(&table, pid, min);
+    if newfd >= limit {
+        return Err(EMFILE as u64);
+    }
     install(&mut table, pid, newfd, real_fd);
     Ok(newfd)
 }

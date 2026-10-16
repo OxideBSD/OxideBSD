@@ -13,6 +13,7 @@
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/sysctl.h>
+#include <sys/resource.h>
 #ifndef CTLFLAG_SKIP
 #define CTLFLAG_SKIP 0x01000000 /* FreeBSD's; not in OxideBSD's <sys/sysctl.h> yet */
 #endif
@@ -491,14 +492,16 @@ static void load_average(void)
 }
 
 /* Booted by tests/sysctl_tunables_smoke.rs with kern.msgbufsize=131072 kern.maxproc=40
- * kern.maxfiles=100 kern.bogus=1 kern.maxfiles=5 (SYSCTL.md §6, §11.3). */
+ * kern.maxfiles=100 kern.maxfilesperproc=200 kern.bogus=1 kern.maxfiles=5 (SYSCTL.md §6, §11.3):
+ * the per-process limit above the system's, so opening files reaches kern.maxfiles first. */
 static void tunables(void)
 {
 	char *m = msgbuf();
 	CHECK(strstr(m, "unknown tunable kern.bogus") != 0, "an unknown tunable is logged");
 	CHECK(strstr(m, "kern.maxfiles=5 out of range") != 0, "an out-of-range tunable is logged");
 	free(m);
-	CHECK(num("kern.maxproc") == 40 && num("kern.maxfiles") == 100, "kern.maxproc and kern.maxfiles are set");
+	CHECK(num("kern.maxproc") == 40 && num("kern.maxfiles") == 100 && num("kern.maxfilesperproc") == 200,
+		"kern.maxproc, kern.maxfiles and kern.maxfilesperproc are set");
 
 	/* The buffer really is 128 KiB: fill it well past 64 KiB (the kernel logs each unknown number
 	 * once, so these must differ). */
@@ -583,6 +586,45 @@ static void modules(void)
 	CHECK_ERR(sysctlbyname("kern.module.nosuchmodule.alloc", 0, 0, 0, 0), ENOENT, "an unknown module is ENOENT");
 }
 
+/* Open files: kern.maxfiles from RAM, kern.maxfilesperproc 9/10 of it, RLIMIT_NOFILE 1024 soft
+ * and that hard, enforced: EMFILE past it (shm_open/38-1), EBADF for dup2 to it, EINVAL for F_DUPFD from it. */
+static void open_files(void)
+{
+	int maxfiles = num("kern.maxfiles"), perproc = num("kern.maxfilesperproc");
+	struct rlimit rl;
+	getrlimit(RLIMIT_NOFILE, &rl);
+	printf("     maxfiles %d perproc %d nofile %lu/%lu\n", maxfiles, perproc,
+		(unsigned long)rl.rlim_cur, (unsigned long)rl.rlim_max);
+	CHECK(maxfiles >= 512 && perproc == maxfiles / 10 * 9, "kern.maxfilesperproc is 9/10 of kern.maxfiles");
+	CHECK(rl.rlim_cur == (rlim_t)(perproc < 1024 ? perproc : 1024) && rl.rlim_max == (rlim_t)perproc,
+		"RLIMIT_NOFILE starts at 1024 soft, kern.maxfilesperproc hard");
+	CHECK(sysconf(_SC_OPEN_MAX) == (long)rl.rlim_cur, "sysconf(_SC_OPEN_MAX) is the soft limit");
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		struct rlimit small = { 16, 16 };
+		if (setrlimit(RLIMIT_NOFILE, &small) < 0) _exit(1);
+		int last = -1, fd;
+		while ((fd = open("/dev/null", O_RDONLY)) >= 0) last = fd;
+		if (errno != EMFILE || last != 15) _exit(2);
+		if (dup(0) >= 0 || errno != EMFILE) _exit(3);
+		if (dup2(0, 16) >= 0 || errno != EBADF) _exit(4);
+		if (fcntl(0, F_DUPFD, 16) >= 0 || errno != EINVAL) _exit(5);
+		close(15);
+		if (dup(0) != 15) _exit(6);
+		struct rlimit huge = { RLIM_INFINITY, RLIM_INFINITY };
+		if (setrlimit(RLIMIT_NOFILE, &huge) < 0) _exit(7);
+		getrlimit(RLIMIT_NOFILE, &huge);
+		if (huge.rlim_max != (rlim_t)num("kern.maxfilesperproc")) _exit(8);
+		_exit(0);
+	}
+	int status = -1;
+	waitpid(pid, &status, 0);
+	printf("     limit child exited %d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		"RLIMIT_NOFILE: EMFILE past it, EBADF/EINVAL for dup2/F_DUPFD to it, clamped to maxfilesperproc");
+}
+
 int main(void)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
@@ -599,6 +641,7 @@ int main(void)
 	memory();
 	load_average();
 	modules();
+	open_files();
 	printf("sysctl-smoke: %d failure(s)\n", failures);
 	return failures;
 }

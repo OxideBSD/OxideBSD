@@ -37,6 +37,35 @@ unsafe impl Pod for RawTimespec {}
 /// Real Linux's own `RLIM_NLIMITS` -- the number of `Process::rlimits` slots that exist.
 const RLIM_NLIMITS: u64 = 16;
 
+/// `RLIMIT_NOFILE` (musl's x86_64 number): the most descriptors a process may have open.
+pub(crate) const RLIMIT_NOFILE: usize = 7;
+
+/// The soft `RLIMIT_NOFILE` a process starts with. The BSDs differ (FreeBSD starts at
+/// `kern.maxfilesperproc`, OpenBSD at 512, NetBSD at 1024); the majority, a small soft limit under a
+/// large hard one, keeps a runaway loop of opens cheap while letting a program that needs more
+/// raise it.
+const INITIAL_NOFILE_SOFT: u64 = 1024;
+
+/// What a process starts with for `RLIMIT_NOFILE`: soft `INITIAL_NOFILE_SOFT`, hard
+/// `kern.maxfilesperproc`, the soft never above the hard.
+pub(crate) fn initial_nofile() -> (u64, u64) {
+    let hard = crate::kern::kern_sysctl::maxfilesperproc() as u64;
+    (INITIAL_NOFILE_SOFT.min(hard), hard)
+}
+
+/// The calling process's descriptor limit: its `RLIMIT_NOFILE` soft limit, never more than
+/// `kern.maxfilesperproc` (FreeBSD's `getmaxfd`). An fd number at or past it is refused
+/// (`fs::fd`: `EMFILE`, or `EBADF`/`EINVAL` for an explicit number).
+pub(crate) fn current_nofile() -> u64 {
+    let per_proc = crate::kern::kern_sysctl::maxfilesperproc() as u64;
+    let pid = scheduler::current_pid();
+    if pid == 0 {
+        return per_proc;
+    }
+    let cur = PROCESS_TABLE.lock().get(&pid).map_or(u64::MAX, |p| p.rlimits[RLIMIT_NOFILE].0);
+    cur.min(per_proc)
+}
+
 /// `SYS_PRLIMIT64`'s real logic -- real `prlimit64(pid, resource, new_limit, old_limit)`: writes
 /// the resource's *old* value to `old_ptr` first (if non-null), matching real Linux's own
 /// "read-then-write, atomically" contract, then applies `new_ptr`'s value (if non-null). Either
@@ -62,7 +91,13 @@ pub fn do_prlimit64(
         copyout_val(&RawRlimit { rlim_cur: cur, rlim_max: max }, UserPtr::new(old_ptr))?;
     }
     if new_ptr != 0 {
-        let new: RawRlimit = copyin_val(UserPtr::new(new_ptr))?;
+        let mut new: RawRlimit = copyin_val(UserPtr::new(new_ptr))?;
+        if resource as usize == RLIMIT_NOFILE {
+            // FreeBSD clamps both to kern.maxfilesperproc rather than refusing.
+            let per_proc = crate::kern::kern_sysctl::maxfilesperproc() as u64;
+            new.rlim_cur = new.rlim_cur.min(per_proc);
+            new.rlim_max = new.rlim_max.min(per_proc);
+        }
         proc.rlimits[resource as usize] = (new.rlim_cur, new.rlim_max);
     }
     Ok(0)
