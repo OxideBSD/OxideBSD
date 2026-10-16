@@ -196,15 +196,11 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 impl BootInfoFrameAllocator {
     /// `allocate_frame` without reclaiming from the page cache.
     fn allocate_unreclaimed(&mut self) -> Option<PhysFrame> {
-        // Real reuse first: `free_list` only ever becomes `Some` via `deallocate_frame` below,
-        // which never runs before `install_global_memory_state` has already populated
-        // `PHYS_MEM_OFFSET` (real process teardown, the only caller, happens well after boot) --
-        // so `phys_mem_offset()` below is always safe to call once this branch is actually taken,
-        // even though this exact function is also called during early boot (heap/module mapping)
-        // while that global is still unset; those early calls never see a populated free list and
-        // fall straight through to the bump path, never touching `phys_mem_offset()` at all.
+        // Reuse first. `free_list` fills through `deallocate_frame`, which runs during boot too
+        // (the buffer cache frees pages it evicts inside oxfs's `module_init`), before the global
+        // `PHYS_MEM_OFFSET` exists: the window is whichever is live, the loader's then.
         if let Some(frame) = self.free_list.take() {
-            let offset = phys_mem_offset();
+            let offset = crate::module::phys_mem_offset().expect("no physical-memory window to reuse a frame through");
             let next_ptr = (offset + frame.start_address().as_u64()).as_ptr::<u64>();
             // SAFETY: frame was previously handed to deallocate_frame, which wrote a real next-
             // pointer (or the NONE sentinel) into its first 8 bytes through this same window.
@@ -265,7 +261,9 @@ impl BootInfoFrameAllocator {
 /// frame address is 4 KiB-aligned, so its low 12 bits are always zero, `u64::MAX`'s never are).
 impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
-        let offset = phys_mem_offset();
+        // Whichever physical-memory window is live: the module loader's while a `module_init`
+        // runs (the buffer cache evicts and frees pages there), the global one after.
+        let offset = crate::module::phys_mem_offset().expect("no physical-memory window to free a frame through");
         let next_ptr = (offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
         let prev_head = self
             .free_list

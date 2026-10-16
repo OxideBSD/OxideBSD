@@ -66,7 +66,7 @@ use kern_mod as _;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-mod bcache;
+mod buf;
 
 // The on-disk format: layout constants, `Inode`, `pack_inode`/`unpack_inode`, directory records
 // and the superblock (`lib/liboxfs`, shared with fsck_oxfs and the host tools).
@@ -199,25 +199,6 @@ unsafe extern "C" {
     /// on `oxidebsd_unix_time`. Backs real `st_mtime`/`st_ctime` (`write_inode_data`/
     /// `resize_inode_data`).
     fn oxidebsd_unix_time() -> i64;
-    /// `1`/`0` -- whether `src/ata.rs`'s fixed data-disk channel/drive responded to `IDENTIFY` at
-    /// boot. `false` (`0`) means every mutation stays purely in-memory this boot, same as before
-    /// this pass existed at all -- see `module_init`'s own doc comment.
-    fn oxidebsd_block_device_present() -> i64;
-    /// Reads/writes one `BLOCK_SIZE`-byte oxfs block (`block_no`, this module's own block-number
-    /// space -- NOT a raw disk LBA) from/to `buf_ptr`, an already-allocated `BLOCK_SIZE`-byte
-    /// buffer in this module's own memory. `0` on success, `-1` on any failure (no device,
-    /// timeout, device error). See `src/ata.rs`'s own doc comment for the real sector-level I/O
-    /// this translates into.
-    fn oxidebsd_block_read(block_no: u64, buf_ptr: u64) -> i64;
-    fn oxidebsd_block_write(block_no: u64, buf_ptr: u64) -> i64;
-    /// Real, multi-block counterparts to `oxidebsd_block_read`/`_write` -- see their own doc
-    /// comments (kernel tree, `sys/drivers/ata.rs`) for why the buffer cache's flushes and reads
-    /// use these instead of the single-block versions for any *contiguous* run of blocks: one real
-    /// ATA command (and, for writes, one `CACHE FLUSH`) per run instead of one per individual 4 KiB
-    /// block, a real, measured difference at this pool's own scale (tens of thousands of blocks).
-    /// `buf_ptr` must point to `count * BLOCK_SIZE` contiguous bytes.
-    fn oxidebsd_block_read_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64;
-    fn oxidebsd_block_write_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64;
     /// Real, kernel-allocated (not baked into this module's own object file) storage -- see
     /// `BLOCKS_PTR`'s own doc comment for why. Returns a zeroed, kernel-VA-mapped
     /// pointer to `size_bytes` of fresh memory, or `0` on failure (only ever called once each,
@@ -231,8 +212,6 @@ unsafe extern "C" {
     /// back with `oxidebsd_page_free`.
     fn oxidebsd_page_alloc() -> u64;
     fn oxidebsd_page_free(page: u64);
-    /// The data disk's size in 4 KiB blocks.
-    fn oxidebsd_block_device_blocks() -> u64;
     /// Makes every call into this module take the kernel's filesystem lock.
     fn oxidebsd_module_serialize();
     /// `1` when the root should be mounted read-only at boot (the real boot path).
@@ -317,7 +296,7 @@ const SYS_NMOUNT: u64 = 584;
 /// caller inside musl itself, `src/thread/synccall.c`) -- see that file's own comment on
 /// `__NR_flock` (right near `__NR_fsync`) for the full story on why 471-486 is provably
 /// collision-free instead. `SYS_FSYNC`/`SYS_SYNC` put delayed writes on the disk (`sync_file`,
-/// `bcache::flush_all`) -- one file's, or every one. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
+/// `buf::flush_all`) -- one file's, or every one. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
 /// directly at the block level (`resize_inode_data`, not `write_inode_data` -- materializing a
 /// whole file's content into one stack buffer first would risk overflowing this kernel's 128 KiB
 /// kernel-stack floor for anything near this filesystem's ~4 MiB per-file cap).
@@ -600,7 +579,7 @@ fn set_persistence_ready(ready: bool) {
 /// (below) checks alongside `persistence_ready()`. A plain wrapper around the kernel-exported probe
 /// result so call sites read naturally.
 fn block_device_present() -> bool {
-    unsafe { oxidebsd_block_device_present() != 0 }
+    buf::present()
 }
 
 
@@ -882,9 +861,10 @@ fn register_proc_render(render: u32) -> i64 {
 /// with a filesystem that has nowhere to actually store a block.
 fn init_pools() -> bool {
     // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures.
+    // SAFETY: FFI call to a kernel-exported function.
     let ram = unsafe { oxidebsd_physmem_bytes() };
-    let device_blocks = unsafe { oxidebsd_block_device_blocks() };
-    if !bcache::init(ram) {
+    let device_blocks = buf::device_blocks();
+    if !buf::init() {
         return false;
     }
     let (_, most_bitmap_blocks) = layout_for(device_blocks);
@@ -950,7 +930,7 @@ fn with_block<R>(n: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
         // SAFETY: an allocated block's page, which only `set_block_used` frees.
         f(tmpfs_ptr(n).map_or(&ZERO_BLOCK, |p| unsafe { &*p }))
     } else {
-        bcache::with(data_block_offset() + n, f)
+        buf::with(data_block_offset() + n, f)
     }
 }
 
@@ -1000,9 +980,9 @@ fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
             unsafe { *p = *data };
         }
     } else if let Some(owner) = delay_owner() {
-        bcache::store(data_block_offset() + n, data, bcache::Kind::Data(owner));
+        buf::store(data_block_offset() + n, data, buf::Kind::Data(owner));
     } else {
-        bcache::write(data_block_offset() + n, data, bcache::Kind::Meta);
+        buf::write(data_block_offset() + n, data, buf::Kind::Meta);
     }
 }
 
@@ -1015,9 +995,9 @@ fn write_index_block(n: u32, data: &[u8; BLOCK_SIZE]) {
             unsafe { *p = *data };
         }
     } else if let Some(owner) = delay_owner() {
-        bcache::store(data_block_offset() + n, data, bcache::Kind::Index(owner));
+        buf::store(data_block_offset() + n, data, buf::Kind::Index(owner));
     } else {
-        bcache::write(data_block_offset() + n, data, bcache::Kind::Meta);
+        buf::write(data_block_offset() + n, data, buf::Kind::Meta);
     }
 }
 
@@ -1031,7 +1011,7 @@ fn block_used(n: u32) -> bool {
         return tmpfs_ptr(n).is_some();
     }
     let (index, bit) = bitmap_position(n);
-    bcache::with(BITMAP_START + index, |b| b[bit / 8] & (1 << (bit % 8)) != 0)
+    buf::with(BITMAP_START + index, |b| b[bit / 8] & (1 << (bit % 8)) != 0)
 }
 
 /// Marks block `n` used or free: a read-modify-write of its bitmap block through the cache, with
@@ -1050,13 +1030,13 @@ fn set_block_used(n: u32, used: bool) {
         return;
     }
     let (index, bit) = bitmap_position(n);
-    let mut block = bcache::read(BITMAP_START + index);
+    let mut block = buf::read(BITMAP_START + index);
     let was = block[bit / 8] & (1 << (bit % 8)) != 0;
     if was == used {
         return;
     }
     block[bit / 8] ^= 1 << (bit % 8);
-    bcache::write(BITMAP_START + index, &block, bcache::Kind::Meta);
+    buf::write(BITMAP_START + index, &block, buf::Kind::Meta);
     let count = free_count(index);
     if used { *count -= 1 } else { *count += 1 }
 }
@@ -1093,13 +1073,13 @@ fn write_inode(n: u32, inode: Inode) {
         write_block(block, &data);
     } else {
         // An inode-file block: written after the dirty data and index blocks of the inodes in it
-        // (bcache's ordering); left dirty only for the file whose writes are being delayed.
-        let kind = bcache::Kind::Inodes(n - n % INODES_PER_BLOCK as u32);
+        // (the cache's ordering, `buf`); left dirty only for the file whose writes are being delayed.
+        let kind = buf::Kind::Inodes(n - n % INODES_PER_BLOCK as u32);
         let dev = data_block_offset() + block;
         if delay_owner() == Some(n) {
-            bcache::store(dev, &data, kind);
+            buf::store(dev, &data, kind);
         } else {
-            bcache::write(dev, &data, kind);
+            buf::write(dev, &data, kind);
         }
     }
     let is_free = inode.kind == InodeKind::Free;
@@ -1139,7 +1119,7 @@ fn alloc_block() -> Option<u32> {
             let base = index * BITS_PER_BITMAP_BLOCK;
             let from = start.max(base) - base;
             let end = (total - base).min(BITS_PER_BITMAP_BLOCK);
-            let found = bcache::with(BITMAP_START + index, |b| {
+            let found = buf::with(BITMAP_START + index, |b| {
                 (from..end).find(|&bit| b[bit as usize / 8] & (1 << (bit % 8)) == 0)
             });
             if let Some(bit) = found {
@@ -1181,7 +1161,7 @@ fn alloc_inode() -> Option<u32> {
 /// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
 fn free_block(n: u32) {
     if !is_tmpfs_block(n) {
-        bcache::discard(data_block_offset() + n);
+        buf::discard(data_block_offset() + n);
     }
     set_block_used(n, false);
     if !is_tmpfs_block(n) {
@@ -1267,7 +1247,7 @@ fn content_changed(inode_num: u32) {
 fn release_inode(n: u32, inode: Inode) {
     content_changed(n);
     // Its unwritten data and index blocks are about to be freed: never write them.
-    bcache::discard_owned(n);
+    buf::discard_owned(n);
     write_inode(n, Inode::FREE);
     free_inode_blocks(&inode);
     trim_inode_table(is_tmpfs_inode(n));
@@ -1977,8 +1957,8 @@ fn write_inode_with(
     write_inode(inode_num, inode);
     // Back-pressure (§3.2.5): a writer that has filled half the cache with unwritten blocks waits
     // for them, rather than leave eviction to write them a block at a time.
-    if bcache::mostly_dirty() {
-        bcache::flush_all();
+    if buf::mostly_dirty() {
+        buf::flush_all();
     }
     match result {
         Err(e) if written == 0 => Err(e),
@@ -3340,7 +3320,7 @@ extern "C" fn oxfs_inode_content_write(inode: u64, ptr: u64, len: u64) -> i64 {
 
 /// The kernel page cache's block map of `inode` (`DEMANDPAGE.md` §5.1): its delayed writes go to
 /// the disk first, then its data blocks are written into `out` (room for `cap`) as runs `[file
-/// page, disk block, length]`, the blocks numbered as `oxidebsd_block_read` takes them, holes left
+/// page, disk block, length]`, the blocks numbered as oxfs numbers them (4 KiB, from the device's start), holes left
 /// out. The number of runs, or minus the number needed when `cap` is short; `i64::MIN` for a tmpfs
 /// file, which isn't on the disk.
 extern "C" fn oxfs_content_block_map(inode: u64, out: *mut [u64; 3], cap: u64) -> i64 {
@@ -4461,15 +4441,14 @@ fn sync_file(n: u32) {
     if is_tmpfs_inode(n) {
         return;
     }
-    let inode_block = inode_location(n).map(|(block, _)| data_block_offset() + block);
-    bcache::flush_file(n, inode_block);
+    buf::flush_file(n);
 }
 
 /// Registered for `SYS_SYNC`: every delayed write goes to the disk before this returns (POSIX lets
 /// `sync(2)` return early; OxideBSD doesn't, since `update(8)` and shutdown rely on it). No
 /// failure return.
 extern "C" fn oxfs_sync(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    bcache::flush_all();
+    buf::flush_all();
     0
 }
 
@@ -4480,7 +4459,7 @@ extern "C" fn oxfs_shutdown() {
     if root_rdonly() {
         return; // nothing delayed, and the disk can't be written
     }
-    bcache::flush_all();
+    buf::flush_all();
     set_clean(true);
     write_superblock();
     log("[oxfs] filesystem synced and marked clean\n");
@@ -6610,14 +6589,14 @@ fn remount_root(rdonly: bool) -> i64 {
         if writing {
             return -EBUSY;
         }
-        bcache::flush_all();
+        buf::flush_all();
         set_clean(true);
         write_superblock();
         set_root_rdonly(true);
         log("[oxfs] root remounted read-only\n");
         return 0;
     }
-    bcache::invalidate_all();
+    buf::invalidate_all();
     if !mount_from_disk() {
         return -EIO;
     }
@@ -7215,8 +7194,8 @@ fn write_superblock() {
     let mut block = [0u8; BLOCK_SIZE];
     sb.encode(&mut block);
     // Written straight to the disk, never through the cache: nothing reads it after mount.
-    unsafe {
-        oxidebsd_block_write(0, block.as_ptr() as u64);
+    if !buf::write_direct(0, &block) {
+        log("[oxfs] superblock: write failed\n");
     }
 }
 
@@ -7228,7 +7207,7 @@ fn write_superblock() {
 /// formats instead.
 fn mount_from_disk() -> bool {
     let mut sb = [0u8; BLOCK_SIZE];
-    if unsafe { oxidebsd_block_read(0, sb.as_mut_ptr() as u64) } != 0 {
+    if !buf::read_direct(0, &mut sb) {
         return false;
     }
     let sb = match Superblock::decode(&sb) {
@@ -7240,7 +7219,7 @@ fn mount_from_disk() -> bool {
         }
     };
     let data_blocks = sb.data_blocks;
-    let (_, bitmap_most) = layout_for(unsafe { oxidebsd_block_device_blocks() });
+    let (_, bitmap_most) = layout_for(buf::device_blocks());
     let bitmap = sb.bitmap_blocks();
     if bitmap > bitmap_most {
         log("[oxfs] mount: on-disk layout doesn't match this build or disk -- falling back to format\n");
@@ -7256,7 +7235,7 @@ fn mount_from_disk() -> bool {
     for index in 0..bitmap {
         let base = index * BITS_PER_BITMAP_BLOCK;
         let bits = (data_blocks - base).min(BITS_PER_BITMAP_BLOCK);
-        let set = bcache::with(BITMAP_START + index, |b| {
+        let set = buf::with(BITMAP_START + index, |b| {
             (0..bits).filter(|&bit| b[bit as usize / 8] & (1 << (bit % 8)) != 0).count() as u32
         });
         *free_count(index) = bits - set;
@@ -7357,7 +7336,7 @@ pub extern "C" fn module_init() -> i32 {
     // comment) -- flipped here, once, right before real syscalls become reachable, so every write
     // a running process makes from this point on is persisted immediately.
     set_persistence_ready(true);
-    bcache::set_write_through(true);
+    buf::set_write_through(true);
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let rdonly = unsafe { oxidebsd_root_readonly_at_boot() } != 0;
     set_root_rdonly(rdonly);

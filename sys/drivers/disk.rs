@@ -12,8 +12,8 @@
 //! readable and writable by root, except that the root file system's can't be written while it's
 //! mounted read-write (RAM_FLOOR.md §3.4.3: the writes would go around its cache).
 //!
-//! The `oxidebsd_block_*` exports, oxfs's 4 KiB blocks on the root device, remain until oxfs reads
-//! through the buffer cache (VFS.md §11 step 1b).
+//! File systems reach their devices through `kern::vfs_bdev` and the buffer cache
+//! (`kern::vfs_bio`); this file finds the disk and serves the raw `/dev` nodes.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -194,48 +194,6 @@ pub(crate) fn write_sectors(memory: bool, lba: u64, buf: &[u8]) -> bool {
         VIRTIO => super::virtio_blk::write_sectors(lba, buf),
         _ => false,
     }
-}
-
-/// oxfs's 4 KiB blocks on the root device, until it reads through the buffer cache.
-fn root_io(start_block: u64, count: u64) -> Option<(u32, u64, usize)> {
-    Some((crate::kern::vfs_bdev::root()?, start_block * 8, (count * 4096) as usize))
-}
-
-/// Whether a data disk is attached this boot: `1` or `0`.
-pub extern "C" fn oxidebsd_block_device_present() -> i64 {
-    crate::kern::vfs_bdev::root().is_some() as i64
-}
-
-/// The size of oxfs's partition (or the memory disk) in 4 KiB blocks, `0` without one.
-pub extern "C" fn oxidebsd_block_device_blocks() -> u64 {
-    crate::kern::vfs_bdev::root().map_or(0, |h| crate::kern::vfs_bdev::oxidebsd_bdev_sectors(h as u64) / 8)
-}
-
-/// Reads block `block_no` into the 4096 bytes at `buf_ptr`.
-pub extern "C" fn oxidebsd_block_read(block_no: u64, buf_ptr: u64) -> i64 {
-    oxidebsd_block_read_batch(block_no, 1, buf_ptr)
-}
-
-/// Writes the 4096 bytes at `buf_ptr` to block `block_no`, durably.
-pub extern "C" fn oxidebsd_block_write(block_no: u64, buf_ptr: u64) -> i64 {
-    oxidebsd_block_write_batch(block_no, 1, buf_ptr)
-}
-
-/// Reads `count` consecutive blocks from `start_block` into `buf_ptr` (`count * 4096` bytes).
-pub extern "C" fn oxidebsd_block_read_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64 {
-    let Some((h, sector, len)) = root_io(start_block, count) else { return -1 };
-    // SAFETY: the caller (oxfs) passes `count * 4096` live, writable bytes.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
-    if crate::kern::vfs_bdev::read(h, sector, buf).is_ok() { 0 } else { -1 }
-}
-
-/// Writes `count` consecutive blocks from `buf_ptr` to `start_block`, durably: one flush for the
-/// whole batch, not one per block.
-pub extern "C" fn oxidebsd_block_write_batch(start_block: u64, count: u64, buf_ptr: u64) -> i64 {
-    let Some((h, sector, len)) = root_io(start_block, count) else { return -1 };
-    // SAFETY: the caller (oxfs) passes `count * 4096` live, readable bytes.
-    let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-    if crate::kern::vfs_bdev::write(h, sector, buf).is_ok() { 0 } else { -1 }
 }
 
 /// Asks oxfs to mount the root read-only (the real boot path, `kernel_main`).

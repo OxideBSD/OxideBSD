@@ -291,7 +291,7 @@ fn cpu_model() -> Vec<u8> {
 fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     let kern = add_node(t, &[], Some(CTL_KERN), "kern", "High kernel, proc, limits &c");
     let vm = add_node(t, &[], Some(CTL_VM), "vm", "Virtual memory");
-    add_node(t, &[], Some(CTL_VFS), "vfs", "File system");
+    let vfs = add_node(t, &[], Some(CTL_VFS), "vfs", "File system");
     add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
     let debug = add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
     let hw = add_node(t, &[], Some(CTL_HW), "hw", "hardware");
@@ -832,6 +832,17 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             &stats_vm,
             Leaf { number: None, name, kind: CTLTYPE_UINT, fmt: "IU", flags: CTLFLAG_RD, descr, get, set: None },
         );
+    }
+
+    // The buffer cache (`kern::vfs_bio`): FreeBSD's `vfs.bufspace` and `vfs.maxbufspace`, and the
+    // bytes of it dirty.
+    let bufs: [(&'static str, &'static str, Getter); 3] = [
+        ("bufspace", "Bytes of buffers holding disk blocks", || ulong(crate::kern::vfs_bio::stats().0)),
+        ("dirtybufspace", "Bytes of buffers not yet written", || ulong(crate::kern::vfs_bio::stats().1)),
+        ("maxbufspace", "Most bytes the buffers may hold", || ulong(crate::kern::vfs_bio::stats().2)),
+    ];
+    for (name, descr, get) in bufs {
+        add_leaf(t, &vfs, Leaf { number: None, name, kind: CTLTYPE_ULONG, fmt: "LU", flags: CTLFLAG_RD, descr, get, set: None });
     }
 
     add_node(t, &kern, None, "module", "Loaded kernel modules");

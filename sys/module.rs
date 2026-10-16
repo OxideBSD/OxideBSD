@@ -729,11 +729,20 @@ pub(crate) extern "C" fn oxidebsd_page_alloc() -> u64 {
 
 /// Gives back a page `oxidebsd_page_alloc` returned.
 pub(crate) extern "C" fn oxidebsd_page_free(va: u64) {
-    use x86_64::structures::paging::FrameDeallocator;
     let Some(offset) = phys_mem_offset() else { return };
     let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(va - offset.as_u64()));
-    // SAFETY: as `allocate_frame`; the page came from `oxidebsd_page_alloc` and its module no
-    // longer uses it.
+    // SAFETY: the page came from `oxidebsd_page_alloc` and its module no longer uses it.
+    unsafe { free_frame(frame) };
+}
+
+/// Gives back a frame `allocate_frame` returned, to whichever frame allocator is live.
+///
+/// # Safety
+///
+/// Nothing maps or uses `frame` any more.
+pub(crate) unsafe fn free_frame(frame: x86_64::structures::paging::PhysFrame) {
+    use x86_64::structures::paging::FrameDeallocator;
+    // SAFETY: as `allocate_frame`; the caller vouches for `frame`.
     if let Some(frame_allocator) = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() } {
         unsafe { frame_allocator.deallocate_frame(frame) };
         return;
@@ -1094,6 +1103,18 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_kmalloc" => Some(oxidebsd_kmalloc as *const () as u64),
         "oxidebsd_kfree" => Some(oxidebsd_kfree as *const () as u64),
         "oxidebsd_file_data" => Some(crate::fs::fd::oxidebsd_file_data as *const () as u64),
+        "oxidebsd_bread" => Some(crate::kern::vfs_bio::oxidebsd_bread as *const () as u64),
+        "oxidebsd_getblk" => Some(crate::kern::vfs_bio::oxidebsd_getblk as *const () as u64),
+        "oxidebsd_bdata" => Some(crate::kern::vfs_bio::oxidebsd_bdata as *const () as u64),
+        "oxidebsd_brelse" => Some(crate::kern::vfs_bio::oxidebsd_brelse as *const () as u64),
+        "oxidebsd_bdwrite" => Some(crate::kern::vfs_bio::oxidebsd_bdwrite as *const () as u64),
+        "oxidebsd_bwrite" => Some(crate::kern::vfs_bio::oxidebsd_bwrite as *const () as u64),
+        "oxidebsd_bflush" => Some(crate::kern::vfs_bio::oxidebsd_bflush as *const () as u64),
+        "oxidebsd_bdiscard" => Some(crate::kern::vfs_bio::oxidebsd_bdiscard as *const () as u64),
+        "oxidebsd_binval" => Some(crate::kern::vfs_bio::oxidebsd_binval as *const () as u64),
+        "oxidebsd_binvalall" => Some(crate::kern::vfs_bio::oxidebsd_binvalall as *const () as u64),
+        "oxidebsd_bmostly_dirty" => Some(crate::kern::vfs_bio::oxidebsd_bmostly_dirty as *const () as u64),
+        "oxidebsd_bio_set_hook" => Some(crate::kern::vfs_bio::oxidebsd_bio_set_hook as *const () as u64),
         "oxidebsd_bdev_root" => Some(crate::kern::vfs_bdev::oxidebsd_bdev_root as *const () as u64),
         "oxidebsd_bdev_sectors" => Some(crate::kern::vfs_bdev::oxidebsd_bdev_sectors as *const () as u64),
         "oxidebsd_bdev_read" => Some(crate::kern::vfs_bdev::oxidebsd_bdev_read as *const () as u64),
@@ -1437,12 +1458,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::process::oxidebsd_current_umask as *const () as u64)
         }
         "oxidebsd_unix_time" => Some(crate::cpu::rtc::oxidebsd_unix_time as *const () as u64),
-        "oxidebsd_block_device_present" => {
-            Some(crate::drivers::disk::oxidebsd_block_device_present as *const () as u64)
-        }
-        "oxidebsd_block_device_blocks" => {
-            Some(crate::drivers::disk::oxidebsd_block_device_blocks as *const () as u64)
-        }
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
         "oxidebsd_module_serialize" => Some(oxidebsd_module_serialize as *const () as u64),
         "oxidebsd_root_readonly_at_boot" => {
@@ -1453,16 +1468,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_register_shutdown_hook" => {
             Some(oxidebsd_register_shutdown_hook as *const () as u64)
-        }
-        "oxidebsd_block_read" => Some(crate::drivers::disk::oxidebsd_block_read as *const () as u64),
-        "oxidebsd_block_write" => {
-            Some(crate::drivers::disk::oxidebsd_block_write as *const () as u64)
-        }
-        "oxidebsd_block_read_batch" => {
-            Some(crate::drivers::disk::oxidebsd_block_read_batch as *const () as u64)
-        }
-        "oxidebsd_block_write_batch" => {
-            Some(crate::drivers::disk::oxidebsd_block_write_batch as *const () as u64)
         }
         _ => None,
     }

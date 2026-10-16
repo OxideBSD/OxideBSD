@@ -11,3 +11,4 @@ pub mod subr_uio;
 pub mod uipc_socket;
 pub mod uipc_usrreq;
 pub mod vfs_bdev;
+pub mod vfs_bio;

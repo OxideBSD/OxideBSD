@@ -263,7 +263,13 @@ pub fn fill(id: EntryId, page: u64, from: Fill) -> Result<PhysFrame<Size4KiB>, F
         Some(Some(block)) => {
             let _poll = (from == Fill::KernelFault).then(crate::fs::fslock::NoSleep::new);
             crate::fs::fslock::enter();
-            let ok = crate::drivers::disk::oxidebsd_block_read(block, ptr as u64) == 0;
+            // The file's block on the root's device (`kern::vfs_bdev`; a vnode's own device once
+            // files are vnodes, VFS.md §7.2), in its 4 KiB blocks: read around the buffer cache,
+            // which holds metadata only (§7.4).
+            // SAFETY: the frame's PAGE bytes, just allocated.
+            let page = unsafe { core::slice::from_raw_parts_mut(ptr, PAGE as usize) };
+            let ok = crate::kern::vfs_bdev::root()
+                .is_some_and(|dev| crate::kern::vfs_bdev::read(dev, block * 8, page).is_ok());
             if from == Fill::KernelFault {
                 crate::fs::fslock::exit_quiet();
             } else {

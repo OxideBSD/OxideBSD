@@ -93,6 +93,7 @@ pub fn init(
     memory::refs::init();
     kern::subr_msgbuf::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
+    kern::vfs_bio::reserve_window(&mut mapper, &mut frame_allocator);
     #[cfg(feature = "multiboot2")]
     boot::multiboot2::protect_kernel_image(&mut mapper, &mut frame_allocator);
     memory::usercopy::check_user_range_layout(&mapper);

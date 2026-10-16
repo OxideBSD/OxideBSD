@@ -20,7 +20,7 @@
 //!
 //! **One fixed target: secondary channel, master.** `bootimage` always attaches this kernel's own
 //! boot image as `-drive format=raw,file=<image>` with no explicit `if=`, which QEMU resolves to
-//! the *primary* IDE master by default -- so the block API below (`oxidebsd_block_*`) targets the
+//! the *primary* IDE master by default -- so the block layer (`kern::vfs_bdev`) targets the
 //! secondary channel's master drive specifically, to guarantee it can never be the same device the
 //! kernel itself booted from. See `Cargo.toml`'s `run-args`/`test-args` for the matching
 //! `-device ide-hd,bus=ide.1,unit=0` pinning.
@@ -99,12 +99,12 @@ const CMD_IDENTIFY: u8 = 0xEC;
 /// milliseconds; this only guards against a genuinely stuck or absent device, not real timing.
 const TIMEOUT_MS: u64 = 3000;
 
-/// The one channel/drive `oxidebsd_block_read`/`_write` target -- see this module's own doc
+/// The one channel/drive the data disk is -- see this module's own doc
 /// comment for why secondary/master specifically.
 const DATA_DISK_CHANNEL: Channel = Channel::Secondary;
 const DATA_DISK_DRIVE: Drive = Drive::Master;
 
-/// Set by `init()` once, read by `oxidebsd_block_device_present` -- whether the one fixed
+/// Set by `init()` once, read by the disk layer -- whether the one fixed
 /// channel/drive this driver's block API targets actually responded to `IDENTIFY` at boot.
 static DATA_DISK_PRESENT: AtomicBool = AtomicBool::new(false);
 /// The data disk's LBA28 capacity in sectors, from `IDENTIFY` (`capacity_sectors`).
@@ -404,7 +404,7 @@ fn identify(channel: Channel, drive: Drive) -> Option<u64> {
 
 /// Probes all four legacy channel/drive combinations via `IDENTIFY`, logging each. Never panics on
 /// absence -- a boot with no attached disk (most `cargo test` runs) must still succeed, oxfs simply
-/// falls back to its original pure-in-memory behavior (see `oxidebsd_block_device_present`).
+/// falls back to its original pure-in-memory behavior (see `drivers::disk::init`).
 pub fn init() {
     const COMBOS: [(Channel, Drive, &str); 4] = [
         (Channel::Primary, Drive::Master, "primary master"),
