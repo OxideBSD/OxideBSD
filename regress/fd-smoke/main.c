@@ -9,6 +9,11 @@
  * with getdents, not read() (EISDIR, as on OpenBSD and FreeBSD), and its offset is the record
  * cursor: rewinddir restarts the walk, seekdir returns to a telldir position.
  *
+ * The calls every descriptor answers (VFS.md §6.4), whatever it is: lseek on a pipe or socket is
+ * ESPIPE, ftruncate/fsync/fdatasync on one are EINVAL, fstat names its type, a terminal request on
+ * one is ENOTTY, FIONREAD counts a pipe's bytes; on a regular file lseek(SEEK_END) is its size and
+ * ftruncate on a read-only descriptor is EINVAL (POSIX).
+ *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -18,8 +23,11 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 static int failures;
@@ -235,12 +243,67 @@ static void sigpipe(void)
 	close(p[1]);
 }
 
+static void descriptor_ops(void)
+{
+	int p[2], s[2];
+	struct stat st;
+	CHECK(pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, s) == 0, "pipe and socketpair");
+	errno = 0;
+	CHECK(lseek(p[0], 0, SEEK_CUR) == -1 && errno == ESPIPE, "lseek on a pipe is ESPIPE");
+	errno = 0;
+	CHECK(lseek(s[0], 0, SEEK_SET) == -1 && errno == ESPIPE, "lseek on a socket is ESPIPE");
+	errno = 0;
+	CHECK(ftruncate(p[1], 0) == -1 && errno == EINVAL, "ftruncate on a pipe is EINVAL");
+	errno = 0;
+	CHECK(fsync(p[1]) == -1 && errno == EINVAL, "fsync on a pipe is EINVAL");
+	errno = 0;
+	CHECK(fdatasync(s[0]) == -1 && errno == EINVAL, "fdatasync on a socket is EINVAL");
+	CHECK(fstat(p[0], &st) == 0 && S_ISFIFO(st.st_mode), "fstat on a pipe is S_IFIFO");
+	CHECK(fstat(s[0], &st) == 0 && S_ISSOCK(st.st_mode), "fstat on a socket is S_IFSOCK");
+	struct winsize ws;
+	errno = 0;
+	CHECK(ioctl(p[0], TIOCGWINSZ, &ws) == -1 && errno == ENOTTY, "a terminal request on a pipe is ENOTTY");
+	CHECK(!isatty(s[0]), "a socket isn't a terminal");
+	int n = -1;
+	write(p[1], "abc", 3);
+	CHECK(ioctl(p[0], FIONREAD, &n) == 0 && n == 3, "FIONREAD on a pipe counts its bytes");
+	int on = 1;
+	CHECK(ioctl(p[0], FIONBIO, &on) == 0 && (fcntl(p[0], F_GETFL) & O_NONBLOCK), "FIONBIO sets O_NONBLOCK");
+	close(p[0]);
+	close(p[1]);
+	close(s[0]);
+	close(s[1]);
+
+	int f = open("/fd-smoke.file", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	CHECK(f >= 0 && write(f, "hello", 5) == 5, "write a regular file");
+	CHECK(lseek(f, 0, SEEK_END) == 5 && lseek(f, -2, SEEK_CUR) == 3, "lseek SEEK_END and SEEK_CUR");
+	errno = 0;
+	CHECK(lseek(f, -10, SEEK_SET) == -1 && errno == EINVAL, "lseek before the start is EINVAL");
+	CHECK(fsync(f) == 0 && fdatasync(f) == 0, "fsync and fdatasync a regular file");
+	CHECK(ftruncate(f, 2) == 0 && fstat(f, &st) == 0 && st.st_size == 2 && S_ISREG(st.st_mode),
+	      "ftruncate a regular file");
+	int r = open("/fd-smoke.file", O_RDONLY);
+	errno = 0;
+	CHECK(ftruncate(r, 0) == -1 && errno == EINVAL, "ftruncate on a read-only descriptor is EINVAL");
+	char c;
+	CHECK(pread(r, &c, 1, 1) == 1 && c == 'e' && lseek(r, 0, SEEK_CUR) == 0, "pread leaves the offset");
+	close(r);
+	close(f);
+	unlink("/fd-smoke.file");
+	int nul = open("/dev/null", O_RDWR);
+	CHECK(nul >= 0 && lseek(nul, 100, SEEK_SET) == 100, "/dev/null seeks (as on the BSDs)");
+	close(nul);
+	errno = 0;
+	CHECK(close(1000) == -1 && errno == EBADF, "close of an fd that isn't open is EBADF");
+}
+
 int main(void)
 {
 	fd_numbering();
 	fifos();
 	directories();
 	sigpipe();
+	descriptor_ops();
 	printf("fd-smoke: %d failure(s)\n", failures);
 	return failures;
 }

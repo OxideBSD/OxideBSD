@@ -8,7 +8,6 @@
 
 use x86_64::VirtAddr;
 
-use crate::serial_println;
 
 use super::{EBADF, EINVAL, ENOTTY, EPERM, EPIPE, ffi_result_to_result};
 use crate::kern::subr_uio::{FOF_OFFSET, IoSeg, Uio, UioRw, UioSeg};
@@ -802,23 +801,10 @@ pub(crate) fn sys_futex_requeue(
 /// this ABI's `SYS_IOCTL` reuses these verbatim as its own `request` argument values (they're
 /// already architecture-generic constants, not syscall numbers, so there's nothing to remap the
 /// way `open`/`execve` needed -- see `sys_ioctl`'s own doc comment).
-const TCGETS: u64 = 0x5401;
-const TCSETS: u64 = 0x5402;
-const TCSETSW: u64 = 0x5403;
-const TCSETSF: u64 = 0x5404;
-const TCSBRK: u64 = 0x5409;
-const TCXONC: u64 = 0x540A;
-const TCFLSH: u64 = 0x540B;
-const TIOCSCTTY: u64 = 0x540E;
-const TIOCGPGRP: u64 = 0x540F;
-const TIOCSPGRP: u64 = 0x5410;
-const TIOCOUTQ: u64 = 0x5411;
-const TIOCGWINSZ: u64 = 0x5413;
-const TIOCSWINSZ: u64 = 0x5414;
-const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
-const TIOCNOTTY: u64 = 0x5422;
-const TIOCGSID: u64 = 0x5429;
+/// `FIOCLEX`/`FIONCLEX`: set and clear `FD_CLOEXEC`, on any descriptor.
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
 /// OxideBSD's own invention, not real Linux's `FBIOGET_VSCREENINFO` (`0x4600`) -- deliberately a
 /// distinct, smaller wire struct (`RawFbInfo` below) rather than emulating that ioctl's real,
 /// much larger `struct fb_var_screeninfo` layout, since nothing in this port's roster needs real
@@ -839,11 +825,12 @@ struct RawFbInfo {
     bpp: u32,
 }
 
-/// `SYS_IOCTL` (`124`), with musl's (Linux's) request codes. Terminal requests (TTY.md §5.6) act
-/// on the terminal `fd` is a description of, and fail with `ENOTTY` on anything else -- musl's
-/// `isatty()` is `ioctl(fd, TIOCGWINSZ)`, so this is what makes a pipe or a file not a tty.
-/// `FBIOGET_OXIDEBSD` acts on a `/dev/fb0` descriptor, `DIOCGMEDIASIZE`/`DIOCGSECTORSIZE` on a raw
-/// disk device (`drivers::disk`). Unknown requests are logged.
+/// `SYS_IOCTL` (`124`), with musl's (Linux's) request codes. The requests every descriptor takes
+/// are the kernel's (`FIONBIO`, `FIOCLEX`/`FIONCLEX`, `FBIOGET_OXIDEBSD` on a framebuffer); the
+/// rest go to the file's own `ioctl` operation (`FileOps::ioctl`: terminal requests, TTY.md §5.6,
+/// on a terminal; pty master requests; `DIOCGMEDIASIZE`/`DIOCGSECTORSIZE` on a raw disk;
+/// `FIONREAD` on a pipe), and are `ENOTTY` on a file without one -- musl's `isatty()` is
+/// `ioctl(fd, TIOCGWINSZ)`, so this is what makes a pipe or a file not a tty.
 pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
     // musl's ioctl() takes the request as an int, so one with bit 31 set (`TIOCGPTN`,
     // 0x80045430) arrives sign-extended; requests are 32 bits.
@@ -861,74 +848,21 @@ pub(crate) fn sys_ioctl(fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         crate::fs::fd::set_nonblocking(real_fd, on);
         return Ok(0);
     }
-    if let Some(r) = crate::tty::pty::ioctl(real_fd, request, argp) {
-        return r;
+    if request == FIOCLEX || request == FIONCLEX {
+        crate::fs::fd::set_cloexec(crate::process::scheduler::current_tgid(), fd, request == FIOCLEX);
+        return Ok(0);
     }
-    if let Some(r) = crate::drivers::disk::ioctl(real_fd, request, argp) {
-        return r;
-    }
-    let Some(tty) = crate::tty::of_real_fd(real_fd) else {
-        if !matches!(request, TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TIOCSCTTY | TIOCGPGRP | TIOCSPGRP | TIOCNOTTY | TIOCGSID | FIONREAD | TCFLSH | TCXONC | TCSBRK | TIOCOUTQ) {
-            serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
-        }
+    // Everything else is the file's own (`FileOps::ioctl`): terminals, pty masters, raw disks,
+    // pipes' FIONREAD. A file without one isn't a terminal or anything else that takes requests.
+    let (ops, ..) = crate::fs::fd::file_of(real_fd).ok_or(EBADF)?;
+    let Some(ioctl) = ops.ioctl else {
         return Err(ENOTTY);
     };
-    let cx = crate::tty::caller(crate::fs::fd::is_nonblocking(real_fd));
-    let int_arg = || copyin_val::<i32>(UserPtr::new(argp));
-    match request {
-        TCGETS => {
-            copyout_val(&crate::tty::termios(tty), UserPtr::new(argp))?;
-            Ok(0)
-        }
-        TCSETS | TCSETSW | TCSETSF => {
-            let t: crate::tty::RawTermios = copyin_val(UserPtr::new(argp))?;
-            // Output is written synchronously, so draining it (TCSETSW) is immediate.
-            crate::tty::set_termios(tty, t, request == TCSETSF, &cx).map(|()| 0)
-        }
-        TIOCGWINSZ => {
-            copyout_val(&crate::tty::winsize(tty), UserPtr::new(argp))?;
-            Ok(0)
-        }
-        TIOCSWINSZ => {
-            crate::tty::set_winsize(tty, copyin_val(UserPtr::new(argp))?);
-            Ok(0)
-        }
-        TIOCSCTTY => crate::tty::set_controlling(tty, &cx).map(|()| 0),
-        TIOCNOTTY => crate::tty::release(tty, &cx).map(|()| 0),
-        TIOCGPGRP => {
-            let pgrp = crate::tty::pgrp(tty, &cx)?;
-            copyout_val(&(pgrp as i32), UserPtr::new(argp))?;
-            Ok(0)
-        }
-        TIOCSPGRP => {
-            let pgid = int_arg()?;
-            if pgid <= 0 {
-                return Err(EINVAL);
-            }
-            crate::tty::set_pgrp(tty, pgid as u64, &cx).map(|()| 0)
-        }
-        TIOCGSID => {
-            let sid = crate::tty::session_of(tty, &cx)?;
-            copyout_val(&(sid as i32), UserPtr::new(argp))?;
-            Ok(0)
-        }
-        FIONREAD => {
-            copyout_val(&(crate::tty::pending_input(tty) as i32), UserPtr::new(argp))?;
-            Ok(0)
-        }
-        // Output is never queued: nothing waits in it and draining finishes at once.
-        TIOCOUTQ => {
-            copyout_val(&0i32, UserPtr::new(argp))?;
-            Ok(0)
-        }
-        TCSBRK => Ok(0),
-        TCFLSH => crate::tty::flush(tty, argp).map(|()| 0),
-        TCXONC => crate::tty::flow(tty, argp).map(|()| 0),
-        _ => {
-            serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
-            Err(ENOTTY)
-        }
-    }
+    let r = {
+        let _lock = crate::fs::fslock::Guard::for_call_sleepable(ioctl as usize as u64);
+        ioctl(real_fd, request, argp)
+    };
+    if r < 0 { Err(r.unsigned_abs()) } else { Ok(r as u64) }
 }
 
 /// `SYS_GET_KEYEVENT` (`558`) — real, general-purpose raw keyboard-event polling: pops one

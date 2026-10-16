@@ -55,6 +55,7 @@ const O_CREAT: u64 = 0o100;
 /// granting write access regardless of what was actually asked for.
 const O_WRONLY: u64 = 0o1;
 const EAGAIN: u64 = 11;
+const EINVAL: u64 = 22;
 
 const LOCK_EX: u64 = 2;
 const LOCK_NB: u64 = 4;
@@ -293,9 +294,16 @@ pub extern "C" fn _start() -> ! {
     close(wlfd);
     write_bytes(b"needs-syscall-smoke: flock OK\n");
 
-    // --- ftruncate/fallocate: real shrink then real zero-extend, on a plain read-mode fd (no
-    // write-buffer-commit-on-close interaction to worry about). ---
-    let tfd = open_ro(f1).expect("open for ftruncate");
+    // --- ftruncate/fallocate: real shrink then real zero-extend, through a descriptor open for
+    // writing; one open only for reading can't (POSIX: EINVAL). ---
+    let rofd = open_ro(f1).expect("open read-only for ftruncate");
+    check!(
+        unsafe { syscall(SYS_FTRUNCATE, rofd, 1, 0) } == Err(EINVAL),
+        b"ftruncate through a read-only descriptor wasn't EINVAL"
+    );
+    close(rofd);
+    let tfd = unsafe { syscall(SYS_OPEN, f1.as_ptr() as u64, f1.len() as u64, O_WRONLY) }
+        .expect("open for ftruncate");
     check!(
         unsafe { syscall(SYS_FTRUNCATE, tfd, 1, 0) }.is_ok(),
         b"ftruncate shrink failed"
@@ -308,11 +316,14 @@ pub extern "C" fn _start() -> ! {
         tn == Ok(1) && tb[0] == b'A',
         b"file content didn't reflect the ftruncate shrink"
     );
+    close(tfd2);
+    let wfd = unsafe { syscall(SYS_OPEN, f1.as_ptr() as u64, f1.len() as u64, O_WRONLY) }
+        .expect("open for fallocate");
     check!(
-        unsafe { syscall4(SYS_FALLOCATE, tfd2, 0, 0, 4) }.is_ok(),
+        unsafe { syscall4(SYS_FALLOCATE, wfd, 0, 0, 4) }.is_ok(),
         b"fallocate grow failed"
     );
-    close(tfd2);
+    close(wfd);
     let tfd3 = open_ro(f1).expect("reopen after fallocate");
     let mut tb2 = [0xffu8; 8];
     let tn2 = unsafe { syscall(SYS_READ, tfd3, tb2.as_mut_ptr() as u64, 8) };

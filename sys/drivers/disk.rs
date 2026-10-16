@@ -354,8 +354,24 @@ static RAW_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(raw_read),
     write: Some(raw_write),
     close: Some(raw_close),
+    ioctl: Some(raw_ioctl),
+    sync: Some(raw_sync),
     ..crate::fs::fd::FileOps::NONE
 };
+
+/// `FileOps::ioctl`: the disk requests (`ioctl` below); `ENOTTY` for any other.
+extern "C" fn raw_ioctl(real_fd: u64, request: u64, argp: u64) -> i64 {
+    match ioctl(real_fd, request, argp) {
+        Some(Ok(v)) => v as i64,
+        Some(Err(e)) => -(e as i64),
+        None => -(crate::syscall::ENOTTY as i64),
+    }
+}
+
+/// `FileOps::sync`: nothing to do, every raw write goes straight to the disk.
+extern "C" fn raw_sync(_real_fd: u64, _data_only: u64) -> i64 {
+    0
+}
 
 /// Reads from the device at the descriptor's position (or `pread`'s offset), in whole blocks of
 /// the physical disk underneath, stopping at the device's end.

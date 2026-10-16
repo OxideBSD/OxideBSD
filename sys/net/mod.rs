@@ -79,27 +79,21 @@ enum Source {
 /// Current readiness of `real_fd` and how it changes. Regular files, devices and anything else
 /// without a blocking model are always readable and writable, as POSIX specifies for files.
 fn fd_readiness(real_fd: u64) -> (crate::fs::Readiness, Source) {
-    use crate::fs::Readiness;
-    if let Some(tty) = crate::tty::of_real_fd(real_fd) {
-        let sid = crate::tty::caller(false).sid;
-        let (readable, writable) = crate::tty::poll_state(tty, sid);
-        return (Readiness { readable, writable, ..Default::default() }, Source::Wakeable);
-    }
-    if let Some(r) = crate::tty::pty::readiness(real_fd) {
-        return (r, Source::Wakeable);
-    }
-    if let Some(r) = crate::fs::pipe::readiness(real_fd) {
-        return (r, Source::Wakeable);
-    }
-    if let Some(r) = crate::kern::subr_msgbuf::readiness(real_fd) {
-        // Kernel prints can't wake anyone, so its readers look again every 50 ms.
-        return (r, Source::Pulled);
-    }
-    if let Some((r, pulled)) = crate::kern::uipc_socket::readiness(real_fd) {
-        return (r, if pulled { Source::Pulled } else { Source::Wakeable });
-    }
-    let always = Readiness { readable: true, writable: true, ..Default::default() };
-    (always, Source::Wakeable)
+    use crate::fs::fd::{POLL_ERROR, POLL_HANGUP, POLL_PULLED, POLL_READABLE, POLL_WRITABLE};
+    let bits = match crate::fs::fd::file_of(real_fd).and_then(|(ops, ..)| ops.poll) {
+        Some(poll) => {
+            let _lock = crate::fs::fslock::Guard::for_call(poll as usize as u64);
+            poll(real_fd, 0)
+        }
+        None => POLL_READABLE | POLL_WRITABLE,
+    };
+    let r = crate::fs::Readiness {
+        readable: bits & POLL_READABLE != 0,
+        writable: bits & POLL_WRITABLE != 0,
+        hangup: bits & POLL_HANGUP != 0,
+        error: bits & POLL_ERROR != 0,
+    };
+    (r, if bits & POLL_PULLED != 0 { Source::Pulled } else { Source::Wakeable })
 }
 
 /// `poll(2)` `revents` for one fd: the requested subset of `POLLIN`/`POLLOUT` (and their `*NORM`

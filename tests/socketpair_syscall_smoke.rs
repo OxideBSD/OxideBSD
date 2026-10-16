@@ -15,7 +15,6 @@
 use core::panic::PanicInfo;
 
 use oxidebsd::boot::BootInfo;
-use oxidebsd::fs::fd::oxidebsd_close_fd;
 use oxidebsd::limine_entry_point;
 use oxidebsd::qemu::{QemuExitCode, exit_qemu};
 use oxidebsd::serial_println;
@@ -25,10 +24,6 @@ limine_entry_point!(main);
 
 /// Must match `regress/socketpair-syscall-smoke/src/main.rs`'s own constant.
 const SYS_TEST_EXIT: u64 = 9999;
-/// The real ABI number -- see this test's own module doc comment for why it's registered
-/// directly here instead of by loading the full `oxfs` module.
-const SYS_CLOSE: u64 = 6;
-
 extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
     serial_println!(
         "socketpair_syscall_smoke: child reported {}",
@@ -40,13 +35,6 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
         QemuExitCode::Failed
     });
     oxidebsd::hlt_loop();
-}
-
-/// `SYS_CLOSE`'s real handler (registered by `sys/modules/oxfs` at real boot) is pure
-/// filesystem-agnostic delegation to this same function -- see this test's own module doc comment
-/// for why loading all of `oxfs` isn't worth it just for this one generic close path.
-extern "C" fn test_close_handler(fd: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
-    oxidebsd_close_fd(fd) as i64
 }
 
 fn main(boot_info: &'static BootInfo) -> ! {
@@ -64,6 +52,11 @@ fn main(boot_info: &'static BootInfo) -> ! {
         &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
+    // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
+    const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
+    const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // vfork(2) (COW.md §7), as at boot: BusyBox's spawn() and musl's vfork() call it.
     const VFORK_MOD: &[u8] = include_bytes!(env!("VFORK_MOD_PATH"));
@@ -123,11 +116,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         oxidebsd_register_syscall(SYS_TEST_EXIT, test_exit_handler),
         0,
         "SYS_TEST_EXIT registration failed -- number collided with a real syscall?"
-    );
-    assert_eq!(
-        oxidebsd_register_syscall(SYS_CLOSE, test_close_handler),
-        0,
-        "SYS_CLOSE registration failed -- number collided with a real syscall?"
     );
 
     const SOCKETPAIR_SYSCALL_SMOKE_ELF: &[u8] =

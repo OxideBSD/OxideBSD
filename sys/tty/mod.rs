@@ -1381,5 +1381,107 @@ pub(crate) static TTY_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(fd_read),
     write: Some(fd_write),
     close: Some(fd_close),
+    ioctl: Some(fd_ioctl),
+    poll: Some(fd_poll),
     ..crate::fs::fd::FileOps::NONE
 };
+
+/// `ioctl(2)` request codes for terminals (musl's, `arch/generic/bits/ioctl.h`).
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const TCSETSW: u64 = 0x5403;
+const TCSETSF: u64 = 0x5404;
+const TCSBRK: u64 = 0x5409;
+const TCXONC: u64 = 0x540A;
+const TCFLSH: u64 = 0x540B;
+const TIOCSCTTY: u64 = 0x540E;
+const TIOCGPGRP: u64 = 0x540F;
+const TIOCSPGRP: u64 = 0x5410;
+const TIOCOUTQ: u64 = 0x5411;
+const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSWINSZ: u64 = 0x5414;
+const FIONREAD: u64 = 0x541B;
+const TIOCNOTTY: u64 = 0x5422;
+const TIOCGSID: u64 = 0x5429;
+
+/// `FileOps::ioctl` for a terminal: the terminal requests (TTY.md §5.6). An unknown one is logged
+/// and `ENOTTY`.
+extern "C" fn fd_ioctl(real_fd: u64, request: u64, argp: u64) -> i64 {
+    match ioctl(real_fd, request, argp) {
+        Ok(v) => v as i64,
+        Err(e) => -(e as i64),
+    }
+}
+
+fn ioctl(real_fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
+    use crate::memory::usercopy::{UserPtr, copyin_val, copyout_val};
+    use crate::syscall::{EINVAL, ENOTTY};
+    let Some(tty) = of_real_fd(real_fd) else {
+        return Err(ENOTTY);
+    };
+    let cx = caller(crate::fs::fd::is_nonblocking(real_fd));
+    let int_arg = || copyin_val::<i32>(UserPtr::new(argp));
+    match request {
+        TCGETS => {
+            copyout_val(&termios(tty), UserPtr::new(argp))?;
+            Ok(0)
+        }
+        TCSETS | TCSETSW | TCSETSF => {
+            let t: RawTermios = copyin_val(UserPtr::new(argp))?;
+            // Output is written synchronously, so draining it (TCSETSW) is immediate.
+            set_termios(tty, t, request == TCSETSF, &cx).map(|()| 0)
+        }
+        TIOCGWINSZ => {
+            copyout_val(&winsize(tty), UserPtr::new(argp))?;
+            Ok(0)
+        }
+        TIOCSWINSZ => {
+            set_winsize(tty, copyin_val(UserPtr::new(argp))?);
+            Ok(0)
+        }
+        TIOCSCTTY => set_controlling(tty, &cx).map(|()| 0),
+        TIOCNOTTY => release(tty, &cx).map(|()| 0),
+        TIOCGPGRP => {
+            let pgrp = pgrp(tty, &cx)?;
+            copyout_val(&(pgrp as i32), UserPtr::new(argp))?;
+            Ok(0)
+        }
+        TIOCSPGRP => {
+            let pgid = int_arg()?;
+            if pgid <= 0 {
+                return Err(EINVAL);
+            }
+            set_pgrp(tty, pgid as u64, &cx).map(|()| 0)
+        }
+        TIOCGSID => {
+            let sid = session_of(tty, &cx)?;
+            copyout_val(&(sid as i32), UserPtr::new(argp))?;
+            Ok(0)
+        }
+        FIONREAD => {
+            copyout_val(&(pending_input(tty) as i32), UserPtr::new(argp))?;
+            Ok(0)
+        }
+        // Output is never queued: nothing waits in it and draining finishes at once.
+        TIOCOUTQ => {
+            copyout_val(&0i32, UserPtr::new(argp))?;
+            Ok(0)
+        }
+        TCSBRK => Ok(0),
+        TCFLSH => flush(tty, argp).map(|()| 0),
+        TCXONC => flow(tty, argp).map(|()| 0),
+        _ => {
+            crate::serial_println!("[boot] unrecognized ioctl request 0x{:x}", request);
+            Err(ENOTTY)
+        }
+    }
+}
+
+/// `FileOps::poll`: input to read, room to write, as the caller's session sees the terminal.
+extern "C" fn fd_poll(real_fd: u64, _events: u64) -> i64 {
+    let Some(tty) = of_real_fd(real_fd) else {
+        return crate::fs::fd::POLL_READABLE | crate::fs::fd::POLL_WRITABLE;
+    };
+    let (readable, writable) = poll_state(tty, caller(false).sid);
+    crate::fs::fd::poll_bits(crate::fs::Readiness { readable, writable, ..Default::default() }, false)
+}

@@ -167,8 +167,17 @@ static KLOG_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(klog_read),
     write: Some(klog_write),
     close: Some(klog_close),
+    poll: Some(klog_poll),
     ..crate::fs::fd::FileOps::NONE
 };
+
+/// `FileOps::poll`. Kernel prints can't wake anyone, so its readers look again every 50 ms
+/// (`POLL_PULLED`).
+extern "C" fn klog_poll(real_fd: u64, _events: u64) -> i64 {
+    readiness(real_fd).map_or(crate::fs::fd::POLL_READABLE | crate::fs::fd::POLL_WRITABLE, |r| {
+        crate::fs::fd::poll_bits(r, true)
+    })
+}
 
 /// Reads what the buffer holds past the reader's position, advancing it; waits when there's
 /// nothing, woken every 50 ms to look again (a kernel print can't take the locks a wakeup needs).

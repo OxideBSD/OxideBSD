@@ -96,6 +96,11 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
+    // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
+    const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
+    const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
+    crate::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // The home for whatever POSIX/libc-surface syscalls BusyBox's applets need beyond what
     // native_abi already provides -- see CLAUDE.md's BusyBox section and

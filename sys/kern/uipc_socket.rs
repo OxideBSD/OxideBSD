@@ -361,8 +361,15 @@ static SOCKET_OPS: fd::FileOps = fd::FileOps {
     read: Some(so_read),
     write: Some(so_write),
     close: Some(so_close),
+    poll: Some(so_poll),
     ..fd::FileOps::NONE
 };
+
+/// `FileOps::poll`: the protocol's readiness; a network socket's must be looked at again
+/// (`POLL_PULLED`), since its packets arrive only when someone polls.
+extern "C" fn so_poll(real_fd: u64, _events: u64) -> i64 {
+    readiness(real_fd).map_or(fd::POLL_READABLE | fd::POLL_WRITABLE, |(r, pulled)| fd::poll_bits(r, pulled))
+}
 
 /// Gives the calling process a descriptor for the socket `so`, served by `proto`, with
 /// `SOCK_CLOEXEC`/`SOCK_NONBLOCK` from `flags`.

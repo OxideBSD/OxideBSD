@@ -289,11 +289,15 @@ pub(crate) fn create_pipe() -> Result<(u64, u64), u64> {
 static PIPE_READ_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(pipe_read),
     close: Some(pipe_close),
+    ioctl: Some(pipe_ioctl),
+    poll: Some(pipe_poll),
     ..NO_OPS
 };
 static PIPE_WRITE_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     write: Some(pipe_write),
     close: Some(pipe_close),
+    ioctl: Some(pipe_ioctl),
+    poll: Some(pipe_poll),
     ..NO_OPS
 };
 /// A FIFO's end, read, write or both: the open's access mode says which the kernel allows.
@@ -301,8 +305,31 @@ static FIFO_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(fifo_read),
     write: Some(fifo_write),
     close: Some(fifo_close),
+    ioctl: Some(pipe_ioctl),
+    poll: Some(pipe_poll),
     ..NO_OPS
 };
+
+/// `FileOps::ioctl` for pipes and FIFOs: `FIONREAD`, the bytes waiting to be read (as on the
+/// BSDs); any other request is `ENOTTY`.
+extern "C" fn pipe_ioctl(real_fd: u64, request: u64, argp: u64) -> i64 {
+    const FIONREAD: u64 = 0x541B;
+    if request != FIONREAD {
+        return -(crate::syscall::ENOTTY as i64);
+    }
+    let n = queued(real_fd) as i32;
+    match crate::memory::usercopy::copyout_val(&n, crate::memory::usercopy::UserPtr::new(argp)) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
+    }
+}
+
+/// `FileOps::poll` for both pipe ends and FIFOs (`readiness`).
+extern "C" fn pipe_poll(real_fd: u64, _events: u64) -> i64 {
+    readiness(real_fd).map_or(crate::fs::fd::POLL_READABLE | crate::fs::fd::POLL_WRITABLE, |r| {
+        crate::fs::fd::poll_bits(r, false)
+    })
+}
 const NO_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps::NONE;
 
 extern "C" fn pipe_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
@@ -361,6 +388,16 @@ fn write_side(pipes: &BTreeMap<u64, PipeBuffer>, pipe_id: u64) -> (bool, bool) {
         Some(p) => (PIPE_CAPACITY - p.data.len() >= PIPE_BUF, false),
         None => (false, true),
     }
+}
+
+/// The bytes waiting in the buffer behind pipe end or FIFO end `real_fd` (`FIONREAD`).
+fn queued(real_fd: u64) -> usize {
+    let pipe_id = if let Some(end) = FIFO_ENDS.lock().get(&real_fd).copied() {
+        FIFOS.lock().get(&end.key).map(|f| f.pipe_id)
+    } else {
+        PIPE_ENDS.lock().get(&real_fd).map(|&(id, _)| id)
+    };
+    pipe_id.and_then(|id| PIPES.lock().get(&id).map(|p| p.data.len())).unwrap_or(0)
 }
 
 pub(crate) fn readiness(real_fd: u64) -> Option<Readiness> {

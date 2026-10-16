@@ -198,8 +198,25 @@ static MASTER_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
     read: Some(master_read),
     write: Some(master_write),
     close: Some(master_close),
+    ioctl: Some(master_ioctl),
+    poll: Some(master_poll),
     ..crate::fs::fd::FileOps::NONE
 };
+
+/// `FileOps::ioctl` for a master: its requests (`ioctl` below); `ENOTTY` for any other.
+extern "C" fn master_ioctl(real_fd: u64, request: u64, argp: u64) -> i64 {
+    match ioctl(real_fd, request, argp) {
+        Some(Ok(v)) => v as i64,
+        Some(Err(e)) => -(e as i64),
+        None => -(crate::syscall::ENOTTY as i64),
+    }
+}
+
+extern "C" fn master_poll(real_fd: u64, _events: u64) -> i64 {
+    readiness(real_fd).map_or(crate::fs::fd::POLL_READABLE | crate::fs::fd::POLL_WRITABLE, |r| {
+        crate::fs::fd::poll_bits(r, false)
+    })
+}
 
 /// Opening `/dev/pts/N`: refused while the pair is locked (§3.1), else an ordinary terminal open.
 extern "C" fn pts_open(major: u64, minor: u64, flags: u64) -> i64 {

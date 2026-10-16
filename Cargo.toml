@@ -104,6 +104,7 @@ members = [
   "sys/modules/procctl",
   "sys/modules/vfork",
   "sys/modules/alloc_smoke",
+  "sys/modules/vfs",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
 exclude = ["lib/libcertstore", "lib/libkern-mod", "lib/liboxfs", "lib/libmtree"]

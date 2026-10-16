@@ -1198,6 +1198,15 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_setsid" => Some(crate::syscall::oxidebsd_sys_setsid as *const () as u64),
         "oxidebsd_sys_getsid" => Some(crate::syscall::oxidebsd_sys_getsid as *const () as u64),
         "oxidebsd_sys_ioctl" => Some(crate::syscall::oxidebsd_sys_ioctl as *const () as u64),
+        "oxidebsd_sys_close" => Some(crate::kern::kern_descrip::oxidebsd_sys_close as *const () as u64),
+        "oxidebsd_sys_lseek" => Some(crate::kern::kern_descrip::oxidebsd_sys_lseek as *const () as u64),
+        "oxidebsd_sys_fstat" => Some(crate::kern::kern_descrip::oxidebsd_sys_fstat as *const () as u64),
+        "oxidebsd_sys_ftruncate" => Some(crate::kern::kern_descrip::oxidebsd_sys_ftruncate as *const () as u64),
+        "oxidebsd_sys_fsync" => Some(crate::kern::kern_descrip::oxidebsd_sys_fsync as *const () as u64),
+        "oxidebsd_sys_fdatasync" => Some(crate::kern::kern_descrip::oxidebsd_sys_fdatasync as *const () as u64),
+        "oxidebsd_register_stat_fallback" => {
+            Some(crate::fs::fd::oxidebsd_register_stat_fallback as *const () as u64)
+        }
         "oxidebsd_sys_get_keyevent" => {
             Some(crate::syscall::oxidebsd_sys_get_keyevent as *const () as u64)
         }

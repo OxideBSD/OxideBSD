@@ -79,6 +79,9 @@ unsafe extern "C" {
         handler: extern "C" fn(u64, u64, u64, u64) -> i64,
     ) -> i32;
     fn oxidebsd_alloc_fd() -> u64;
+    /// `fstat(2)` of a file whose table has no `stat` operation (kernel tree:
+    /// `crate::fs::fd::stat_op`): oxfs names FIFOs, terminals and devices by their nodes.
+    fn oxidebsd_register_stat_fallback(stat: extern "C" fn(u64, u64) -> i64);
     /// Makes `real_fd` a file with operations `ops` (a static table: `FileOps`), object `data`,
     /// open flags `oflags` (`open(2)`'s), and gives the caller the lowest free fd for it. The fd,
     /// or `-errno` (kernel tree: `crate::fs::fd::finstall`).
@@ -2043,6 +2046,14 @@ unsafe impl Pod for MuslStat {}
 /// fields backed by something real (see `Inode::atime`/`Inode::mtime`'s own doc comments).
 /// Copied out byte for byte, so a userland `struct stat*` needs no particular alignment.
 fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
+    match copyout_val(&inode_stat(inode_num), buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// `write_stat`'s `struct stat`.
+fn inode_stat(inode_num: u32) -> MuslStat {
     let inode = read_inode(inode_num);
     // `File`/`Device` report a real, tracked link count (floored at `1` -- see `Inode::nlink`'s
     // own doc comment for why a decoded `0` means "written before this field existed", not "no
@@ -2066,7 +2077,7 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
     } else {
         0
     };
-    let stat = MuslStat {
+    MuslStat {
         st_dev: dev,
         st_ino: inode_num as u64,
         st_nlink: nlink,
@@ -2085,10 +2096,6 @@ fn write_stat(inode_num: u32, buf_ptr: u64) -> i64 {
         st_ctime_sec: inode.ctime,
         st_ctime_nsec: 0,
         __unused: [0; 3],
-    };
-    match copyout_val(&stat, buf_ptr) {
-        Ok(()) => 0,
-        Err(e) => e,
     }
 }
 
@@ -3247,9 +3254,9 @@ static OXFS_OPS: FileOps = FileOps {
     close: Some(oxfs_close),
     ioctl: None,
     poll: None,
-    stat: None,
-    truncate: None,
-    sync: None,
+    stat: Some(oxfs_fo_stat),
+    truncate: Some(oxfs_fo_truncate),
+    sync: Some(oxfs_fo_sync),
     content_id: Some(oxfs_content_id),
     fb_geometry: Some(oxfs_fb_geometry),
 };
@@ -3810,31 +3817,60 @@ fn for_each_dir_record(dir: u32, mut f: impl FnMut(&[u8], u32) -> bool) {
 /// reports its device node (TTY.md §6.2), so that `ttyname(3)`'s comparison of the two matches;
 /// pipes and sockets get the types they are.
 fn stat_real_fd(real_fd: u64, buf_ptr: u64) -> i64 {
+    match real_fd_stat(real_fd) {
+        Ok(stat) => match copyout_val(&stat, buf_ptr) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+        Err(e) => e,
+    }
+}
+
+/// `stat_real_fd`'s `struct stat`: an oxfs file's inode; a terminal or device by its node; a FIFO
+/// by the inode naming it; a pipe or socket synthetically.
+fn real_fd_stat(real_fd: u64) -> Result<MuslStat, i64> {
     let mut arg = 0u64;
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-    match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
-        FD_KIND_TTY => match dev_node_for(arg as u32) {
-            Some((inode, _, _)) => write_stat(inode, buf_ptr),
-            None => write_synthetic_stat(S_IFCHR | 0o600, arg, 0, buf_ptr),
+    Ok(match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
+        FD_KIND_TTY | FD_KIND_DEVICE => match dev_node_for(arg as u32) {
+            Some((inode, _, _)) => inode_stat(inode),
+            None => synthetic_stat(S_IFCHR | 0o600, arg, 0),
         },
-        FD_KIND_PIPE => write_synthetic_stat(S_IFIFO | 0o600, 0, arg, buf_ptr),
-        FD_KIND_SOCKET => write_synthetic_stat(S_IFSOCK | 0o777, 0, arg, buf_ptr),
-        FD_KIND_FIFO => write_stat(arg as u32, buf_ptr),
-        FD_KIND_DEVICE => match dev_node_for(arg as u32) {
-            Some((inode, _, _)) => write_stat(inode, buf_ptr),
-            None => write_synthetic_stat(S_IFCHR | 0o600, arg, 0, buf_ptr),
-        },
+        FD_KIND_PIPE => synthetic_stat(S_IFIFO | 0o600, 0, arg),
+        FD_KIND_SOCKET => synthetic_stat(S_IFSOCK | 0o777, 0, arg),
+        FD_KIND_FIFO => inode_stat(arg as u32),
         _ => match inode_of_open_file(real_fd) {
-            Some(inode_num) => write_stat(inode_num, buf_ptr),
-            None => -EBADF,
+            Some(inode_num) => inode_stat(inode_num),
+            None => return Err(-EBADF),
         },
+    })
+}
+
+/// `FileOps::stat` (oxfs's files) and the kernel's stat fallback (every file whose table has no
+/// `stat`: `oxidebsd_register_stat_fallback`): fills the `struct stat` at `out`, a kernel buffer.
+extern "C" fn oxfs_fo_stat(real_fd: u64, out: u64) -> i64 {
+    match real_fd_stat(real_fd) {
+        Ok(stat) => {
+            // SAFETY: `out` is the kernel's own `struct stat` buffer (kernel tree:
+            // `kern::kern_descrip::sys_fstat`), never a user pointer.
+            unsafe { core::ptr::write_unaligned(out as *mut MuslStat, stat) };
+            0
+        }
+        Err(e) => e,
     }
 }
 
 /// A `struct stat` for something no oxfs inode backs (pipes, sockets, a terminal whose node was
 /// removed).
 fn write_synthetic_stat(mode: u32, rdev: u64, ino: u64, buf_ptr: u64) -> i64 {
-    let stat = MuslStat {
+    match copyout_val(&synthetic_stat(mode, rdev, ino), buf_ptr) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+fn synthetic_stat(mode: u32, rdev: u64, ino: u64) -> MuslStat {
+    MuslStat {
         st_dev: 0,
         st_ino: ino,
         st_nlink: 1,
@@ -3853,10 +3889,6 @@ fn write_synthetic_stat(mode: u32, rdev: u64, ino: u64, buf_ptr: u64) -> i64 {
         st_ctime_sec: 0,
         st_ctime_nsec: 0,
         __unused: [0; 3],
-    };
-    match copyout_val(&stat, buf_ptr) {
-        Ok(()) => 0,
-        Err(e) => e,
     }
 }
 
@@ -4414,44 +4446,10 @@ extern "C" fn oxfs_close(fd: u64) -> i64 {
     0
 }
 
-/// Registered for `SYS_CLOSE`. Delegates to the kernel's own `oxidebsd_close_fd`, which removes
-/// `fd` from its registry and invokes `oxfs_close` above -- not a direct call, so a closed fd is
-/// also no longer reachable via `SYS_READ`/`SYS_WRITE` afterward.
-///
-/// `oxidebsd_close_fd`'s own return is a plain C-style `0`/`-1` boolean, not a registered
-/// handler's `-errno` wire format -- passing its literal `-1` straight through used to be
-/// silently read as `-errno` with `errno=1` (`EPERM`) instead of real close(2)'s one documented
-/// failure, `EBADF` (an already-closed/never-open fd -- `mq_close/3-1.c`, but really any
-/// double-close on any fd kind). Translated here, the only call site for this function.
-extern "C" fn sys_close(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    if unsafe { oxidebsd_close_fd(fd) } == 0 { 0 } else { -EBADF }
-}
-
-/// Registered for `SYS_FSYNC`: the file's delayed writes go to the disk (`sync_file`) before this
-/// returns.
-///
-/// A real, registered fd that just isn't one of *this* module's own (a pipe, socket, or mqueue
-/// end) resolves fine via `oxidebsd_real_fd_of` but has no `find_open_file` entry -- real POSIX
-/// `EINVAL` ("fildes does not refer to a file on which this operation is possible",
-/// `fsync/7-1.c`, a pipe), not `EBADF` (reserved for a real "no such fd at all").
-extern "C" fn oxfs_fsync(fd: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    let real_fd = unsafe { oxidebsd_real_fd_of(fd) };
-    if real_fd < 0 {
-        return -EBADF;
-    }
-    if find_open_file(real_fd as u64).is_none() {
-        // A disk device (a raw partition `newfs_oxfs` or `fsck_oxfs` wrote) has nothing left to
-        // put on the disk: its writes are durable when they return (`drivers::disk`). Anything
-        // else that isn't an oxfs file can't be synchronized (POSIX `EINVAL`).
-        let mut arg = 0u64;
-        // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-        return match unsafe { oxidebsd_real_fd_kind(real_fd as u64, &mut arg) } {
-            FD_KIND_DEVICE => 0,
-            _ => -EINVAL,
-        };
-    }
-    if let Some(inode) = inode_of_open_file(real_fd as u64) {
+/// `FileOps::sync` (`fsync(2)`, `fdatasync(2)`): the file's delayed writes go to the disk
+/// (`sync_file`) before this returns. A directory or synthetic file has nothing delayed.
+extern "C" fn oxfs_fo_sync(real_fd: u64, _data_only: u64) -> i64 {
+    if let Some(inode) = inode_of_open_file(real_fd) {
         sync_file(inode);
     }
     0
@@ -4493,29 +4491,18 @@ extern "C" fn oxfs_shutdown() {
 /// returns only the inode, with no access mode) -- see `OpenFile::Write::readonly`'s own doc
 /// comment.
 fn ftruncate_blocked_readonly(real_fd: u64) -> bool {
-    matches!(
-        find_open_file(real_fd),
-        Some(OpenFile::Write {
-            readonly: true,
-            ..
-        })
-    )
+    matches!(find_open_file(real_fd), Some(OpenFile::Write { readonly: true, .. } | OpenFile::FileRead { .. }))
 }
 
-/// Registered for `SYS_FTRUNCATE`. Resizes the fd's inode directly (`resize_inode_data`); writes
-/// are never held back, so whichever of `ftruncate()` and `write()` happens last wins, as on any
-/// Unix.
-extern "C" fn oxfs_ftruncate(fd: u64, len: u64, _a2: u64, _a3: u64) -> i64 {
-    let real_fd = unsafe { oxidebsd_real_fd_of(fd) };
-    if real_fd < 0 {
-        return -EBADF;
-    }
-    let real_fd = real_fd as u64;
+/// `FileOps::truncate` (`ftruncate(2)`; the kernel has checked the file is open for writing).
+/// Resizes the inode directly (`resize_inode_data`); writes are never held back, so whichever of
+/// `ftruncate()` and `write()` happens last wins, as on any Unix.
+extern "C" fn oxfs_fo_truncate(real_fd: u64, len: u64) -> i64 {
     if ftruncate_blocked_readonly(real_fd) {
         return -EINVAL;
     }
     let Some(inode_num) = inode_of_open_file(real_fd) else {
-        return -EBADF;
+        return -EINVAL;
     };
     if read_inode(inode_num).kind == InodeKind::Dir {
         return -EISDIR;
@@ -6929,63 +6916,6 @@ extern "C" fn oxfs_fstat(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
     stat_real_fd(real_fd as u64, buf_ptr)
 }
 
-/// Registered for `SYS_LSEEK` -- see that constant's own doc comment for why this exists at all
-/// (found live via TinyCC needing a real file size upfront to load `crt1.o`/`libc.a` whole).
-/// `offset`/`whence` arrive as real `u64` register values -- `offset` is reinterpreted as `i64`
-/// (real `lseek(2)`'s own signed-offset convention; musl's `off_t` is 64-bit on this arch, so no
-/// truncation). Real `SEEK_SET=0`/`SEEK_CUR=1`/`SEEK_END=2` -- no divergence to remap. The
-/// `{FileRead,DirListing,ProcRead,ProcDir}` variants have a real `position`/size to seek within,
-/// and so does every `Write` fd now, `O_WRONLY` included, not just `O_RDWR` ones -- only the
-/// synthetic `/dev/*` variants still report `ESPIPE`, the real POSIX answer for "this fd has no
-/// seekable position". **Real, previously-missing plain-`O_WRONLY` seek support**, found live via
-/// a real on-target Clang/LLVM `ld.lld` link: `llvm::raw_fd_ostream` backpatches a freshly
-/// written ELF object's header fields (`e_shoff`/`e_shnum`) via `lseek(SEEK_SET)` + `write()` +
-/// `lseek(SEEK_SET)` on its own `O_WRONLY` output fd -- with this reporting `ESPIPE` (silently
-/// ignored by LLVM's own error-handling, no crash), `oxfs_write`'s own append-only fast path
-/// never noticed the corresponding `write()`s were meant to overwrite the header in place, so
-/// they landed at the file's real tail instead (see `oxfs_write`'s own doc comment for the full
-/// story and the exact `ld.lld` error this produced).
-extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let real_fd = unsafe { oxidebsd_real_fd_of(fd) };
-    if real_fd < 0 {
-        return -EBADF;
-    }
-    let real_fd = real_fd as u64;
-    let Some(open_file) = find_open_file(real_fd) else {
-        return -EBADF;
-    };
-    let offset = offset as i64;
-    // SAFETY: FFI call to a kernel-exported function.
-    let current = unsafe { oxidebsd_file_offset(real_fd) } as i64;
-    let size = match open_file {
-        OpenFile::FileRead { inode, .. } | OpenFile::Write { inode, .. } => read_inode(*inode).size as i64,
-        // A directory's offset is `getdents`' record cursor (`d_off` is the next record's index),
-        // so `rewinddir`'s `lseek(fd, 0, SEEK_SET)` and `seekdir` land where they should.
-        OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } if whence == 2 => return -EINVAL,
-        OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } => 0,
-        OpenFile::ProcRead { len, .. } => *len as i64,
-        OpenFile::DevRandom
-        | OpenFile::DevNull
-        | OpenFile::DevZero
-        | OpenFile::Framebuffer { .. } => {
-            return -ESPIPE;
-        }
-    };
-    let new_pos = match whence {
-        0 => offset,           // SEEK_SET
-        1 => current + offset, // SEEK_CUR
-        2 => size + offset,    // SEEK_END
-        _ => return -EINVAL,
-    };
-    if new_pos < 0 {
-        return -EINVAL;
-    }
-    // SAFETY: FFI call to a kernel-exported function.
-    unsafe { oxidebsd_file_set_offset(real_fd, new_pos as u64) };
-    new_pos
-}
-
 /// Writes `value`'s decimal digits (no leading zeros; `0` prints as `"0"`) into `buf`, returning
 /// the byte count -- module-side equivalent of `sys/process.rs`'s own `push_decimal`, duplicated
 /// rather than shared for the same reason: modules can't depend on kernel-crate internals.
@@ -7453,9 +7383,11 @@ pub extern "C" fn module_init() -> i32 {
 
     // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures exactly.
     unsafe {
+        // close, lseek, fstat, ftruncate, fsync and fdatasync are the kernel's (the `vfs`
+        // module), through `OXFS_OPS`; fstat of anything else asks `oxfs_fo_stat` too.
+        oxidebsd_register_stat_fallback(oxfs_fo_stat);
         oxidebsd_register_syscall(SYS_OPEN, oxfs_open);
         oxidebsd_register_syscall(SYS_ACCESS, oxfs_access);
-        oxidebsd_register_syscall(SYS_CLOSE, sys_close);
         oxidebsd_register_syscall(SYS_CHDIR, oxfs_chdir);
         oxidebsd_register_syscall(SYS_CHROOT, oxfs_chroot);
         oxidebsd_register_syscall(SYS_MKDIR, oxfs_mkdir);
@@ -7469,8 +7401,6 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_SYMLINK, oxfs_symlink);
         oxidebsd_register_syscall(SYS_STAT, oxfs_stat);
         oxidebsd_register_syscall(SYS_LSTAT, oxfs_lstat);
-        oxidebsd_register_syscall(SYS_FSTAT, oxfs_fstat);
-        oxidebsd_register_syscall(SYS_LSEEK, oxfs_lseek);
         oxidebsd_register_syscall(SYS_GETDENTS, oxfs_getdents);
         oxidebsd_register_syscall(SYS_CHMOD, oxfs_chmod);
         oxidebsd_register_syscall(SYS_CHOWN, oxfs_chown);
@@ -7493,10 +7423,7 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_RENAMEAT2, oxfs_renameat2);
         oxidebsd_register_syscall(SYS_UMOUNT2, oxfs_umount2);
         oxidebsd_register_syscall(SYS_NMOUNT, oxfs_nmount);
-        oxidebsd_register_syscall(SYS_FSYNC, oxfs_fsync);
-        oxidebsd_register_syscall(SYS_FDATASYNC, oxfs_fsync);
         oxidebsd_register_syscall(SYS_SYNC, oxfs_sync);
-        oxidebsd_register_syscall(SYS_FTRUNCATE, oxfs_ftruncate);
         oxidebsd_register_syscall(SYS_FALLOCATE, oxfs_fallocate);
         oxidebsd_register_syscall(SYS_FLOCK, oxfs_flock);
         oxidebsd_register_syscall(SYS_STATFS, oxfs_statfs);
