@@ -278,23 +278,32 @@ pub(crate) fn create_pipe() -> Result<(u64, u64), u64> {
     PIPE_ENDS.lock().insert(read_fd, (pipe_id, End::Read));
     PIPE_ENDS.lock().insert(write_fd, (pipe_id, End::Write));
     // Can't fail: `check_room(2)` above, and nothing opens files in between.
-    let read_user_fd =
-        crate::fs::fd::oxidebsd_register_fd_ops(read_fd, pipe_read, write_denied, pipe_close);
-    let write_user_fd =
-        crate::fs::fd::oxidebsd_register_fd_ops(write_fd, read_denied, pipe_write, pipe_close);
-    crate::fs::fd::set_kind(read_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
-    crate::fs::fd::set_kind(write_fd, crate::fs::fd::FdKind::Pipe(pipe_id));
+    use crate::fs::fd::{FREAD, FWRITE, FdKind, finstall};
+    let read_user_fd = finstall(read_fd, &PIPE_READ_OPS, pipe_id, FREAD, FdKind::Pipe(pipe_id));
+    let write_user_fd = finstall(write_fd, &PIPE_WRITE_OPS, pipe_id, FWRITE, FdKind::Pipe(pipe_id));
 
     Ok((read_user_fd as u64, write_user_fd as u64))
 }
 
-extern "C" fn write_denied(_real_fd: u64, _uio: *mut Uio, _flags: u64) -> i64 {
-    -EBADF
-}
-
-extern "C" fn read_denied(_real_fd: u64, _uio: *mut Uio, _flags: u64) -> i64 {
-    -EBADF
-}
+/// A pipe's read end and write end. Neither seeks (`lseek` and `pread` are `ESPIPE`).
+static PIPE_READ_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    read: Some(pipe_read),
+    close: Some(pipe_close),
+    ..NO_OPS
+};
+static PIPE_WRITE_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    write: Some(pipe_write),
+    close: Some(pipe_close),
+    ..NO_OPS
+};
+/// A FIFO's end, read, write or both: the open's access mode says which the kernel allows.
+static FIFO_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    read: Some(fifo_read),
+    write: Some(fifo_write),
+    close: Some(fifo_close),
+    ..NO_OPS
+};
+const NO_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps::NONE;
 
 extern "C" fn pipe_read(real_fd: u64, uio: *mut Uio, _flags: u64) -> i64 {
     let Some(&(pipe_id, end)) = PIPE_ENDS.lock().get(&real_fd) else {
@@ -523,23 +532,17 @@ pub(crate) extern "C" fn oxidebsd_fifo_open(key: u64, flags: u64) -> i64 {
 
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     FIFO_ENDS.lock().insert(real_fd, FifoEnd { key, read, write });
-    if nonblock {
-        crate::fs::fd::set_nonblocking(real_fd, true);
-    }
-    let read_op = if read { fifo_read as FdOp } else { read_denied };
-    let write_op = if write { fifo_write as FdOp } else { write_denied };
-    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, read_op, write_op, fifo_close);
+    use crate::fs::fd::{FNONBLOCK, FREAD, FWRITE};
+    let flag = if read { FREAD } else { 0 } | if write { FWRITE } else { 0 } | if nonblock { FNONBLOCK } else { 0 };
+    let fd = crate::fs::fd::finstall(real_fd, &FIFO_OPS, key, flag, crate::fs::fd::FdKind::Fifo(key));
     if fd < 0 {
         // Files were opened elsewhere while this open waited for the other end.
         FIFO_ENDS.lock().remove(&real_fd);
         fifo_release(key, read, write);
         return fd;
     }
-    crate::fs::fd::set_kind(real_fd, crate::fs::fd::FdKind::Fifo(key));
     fd
 }
-
-type FdOp = crate::fs::fd::FdReadWrite;
 
 /// Called when `pid` terminates: undoes a FIFO open it was still blocked in.
 pub(crate) fn abandon_fifo_open(pid: process::Pid) {

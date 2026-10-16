@@ -356,17 +356,22 @@ fn copy_addr_out(ptr: u64, len_ptr: u64, addr: &[u8]) -> Result<(), i64> {
     user_out(ptr, &addr[..room.min(addr.len())])
 }
 
+/// A socket's file operations: it doesn't seek.
+static SOCKET_OPS: fd::FileOps = fd::FileOps {
+    read: Some(so_read),
+    write: Some(so_write),
+    close: Some(so_close),
+    ..fd::FileOps::NONE
+};
+
 /// Gives the calling process a descriptor for the socket `so`, served by `proto`, with
 /// `SOCK_CLOEXEC`/`SOCK_NONBLOCK` from `flags`.
 /// Callers have made room first (`fd::check_room`), so the registration can't fail.
 fn install(so: u64, domain: i64, ty: i64, protocol: i64, proto: &'static dyn Protocol, flags: i64) -> u64 {
     let socket = Socket { domain, ty, protocol, proto, opts: Options::new(), listening: false };
     SOCKETS.lock().insert(so, socket);
-    let user_fd = fd::oxidebsd_register_fd_ops(so, so_read, so_write, so_close) as u64;
-    fd::set_kind(so, FdKind::Socket(so));
-    if flags & SOCK_NONBLOCK != 0 {
-        fd::set_nonblocking(so, true);
-    }
+    let nonblock = if flags & SOCK_NONBLOCK != 0 { fd::FNONBLOCK } else { 0 };
+    let user_fd = fd::finstall(so, &SOCKET_OPS, so, fd::FREAD | fd::FWRITE | nonblock, FdKind::Socket(so)) as u64;
     if flags & SOCK_CLOEXEC != 0 {
         fd::set_cloexec(crate::process::scheduler::current_tgid(), user_fd, true);
     }

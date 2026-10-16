@@ -1093,6 +1093,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_log" => Some(oxidebsd_log as *const () as u64),
         "oxidebsd_kmalloc" => Some(oxidebsd_kmalloc as *const () as u64),
         "oxidebsd_kfree" => Some(oxidebsd_kfree as *const () as u64),
+        "oxidebsd_file_data" => Some(crate::fs::fd::oxidebsd_file_data as *const () as u64),
         "oxidebsd_register_syscall" => {
             Some(crate::syscall::oxidebsd_register_syscall as *const () as u64)
         }

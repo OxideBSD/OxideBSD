@@ -63,8 +63,8 @@ struct RawDev {
 }
 
 static RAW_DEVS: Mutex<Vec<RawDev>> = Mutex::new(Vec::new());
-/// Open raw devices: `real_fd -> (first sector, sectors, read position in bytes)`.
-static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, (u64, u64, u64)>> =
+/// Open raw devices: `real_fd -> (first sector, sectors)`. The offset is the file's (`fs::fd`).
+static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, (u64, u64)>> =
     Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Finds the data disk: virtio-blk first, then the IDE disk (setting up its DMA), else a memory
@@ -344,22 +344,29 @@ extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
         return -(e as i64);
     }
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
-    RAW_OPEN.lock().insert(real_fd, (first, sectors, 0));
-    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, raw_read, raw_write, raw_close);
-    crate::fs::fd::oxidebsd_set_fd_positioned(real_fd);
-    fd
+    RAW_OPEN.lock().insert(real_fd, (first, sectors));
+    crate::fs::fd::finstall(real_fd, &RAW_OPS, 0, crate::fs::fd::open_flag(flags), crate::fs::fd::FdKind::Module)
 }
+
+/// A raw disk or partition device's file operations: seekable, the kernel keeping the offset.
+static RAW_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    flags: crate::fs::fd::DFLAG_SEEKABLE,
+    read: Some(raw_read),
+    write: Some(raw_write),
+    close: Some(raw_close),
+    ..crate::fs::fd::FileOps::NONE
+};
 
 /// Reads from the device at the descriptor's position (or `pread`'s offset), in whole blocks of
 /// the physical disk underneath, stopping at the device's end.
 extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags: u64) -> i64 {
     // SAFETY: the fd layer passes the live transfer of this call.
     let uio = unsafe { &mut *uio };
-    let Some((first, sectors, pos)) = RAW_OPEN.lock().get(&real_fd).copied() else {
+    let Some((first, sectors)) = RAW_OPEN.lock().get(&real_fd).copied() else {
         return -(crate::syscall::EBADF as i64);
     };
-    let positioned = flags & crate::kern::subr_uio::FOF_OFFSET != 0;
-    let offset = if positioned { crate::kern::subr_uio::oxidebsd_uio_offset(uio) } else { pos };
+    let _ = flags; // seekable: the kernel always gives the offset (FOF_OFFSET)
+    let offset = uio.offset();
     let size = sectors * 512;
     let len = uio.resid().min(size.saturating_sub(offset));
     if len == 0 {
@@ -373,14 +380,10 @@ extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags
         return -(crate::syscall::EIO as i64);
     }
     let at = (start - first_block * 4096) as usize;
-    let n = match uio.uiomove_out(&buf[at..at + len as usize]) {
-        Ok(n) => n,
-        Err(e) => return -(e as i64),
-    };
-    if !positioned && let Some(entry) = RAW_OPEN.lock().get_mut(&real_fd) {
-        entry.2 = offset + n as u64;
+    match uio.uiomove_out(&buf[at..at + len as usize]) {
+        Ok(n) => n as i64,
+        Err(e) => -(e as i64),
     }
-    n as i64
 }
 
 /// Writes at the descriptor's position (or `pwrite`'s offset), a block of the physical disk at a
@@ -389,14 +392,14 @@ extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags
 extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags: u64) -> i64 {
     // SAFETY: the fd layer passes the live transfer of this call.
     let uio = unsafe { &mut *uio };
-    let Some((first, sectors, pos)) = RAW_OPEN.lock().get(&real_fd).copied() else {
+    let Some((first, sectors)) = RAW_OPEN.lock().get(&real_fd).copied() else {
         return -(crate::syscall::EBADF as i64);
     };
     if ROOT_MOUNTED_RW.load(Ordering::Relaxed) && overlaps_root(first, sectors) {
         return -(crate::syscall::EPERM as i64);
     }
-    let positioned = flags & crate::kern::subr_uio::FOF_OFFSET != 0;
-    let offset = if positioned { crate::kern::subr_uio::oxidebsd_uio_offset(uio) } else { pos };
+    let _ = flags; // seekable: the kernel always gives the offset (FOF_OFFSET)
+    let offset = uio.offset();
     let size = sectors * 512;
     let len = uio.resid().min(size.saturating_sub(offset));
     if len == 0 {
@@ -417,9 +420,6 @@ extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flag
     if write_physical(first_block, &buf) != 0 {
         return -(crate::syscall::EIO as i64);
     }
-    if !positioned && let Some(entry) = RAW_OPEN.lock().get_mut(&real_fd) {
-        entry.2 = offset + n as u64;
-    }
     n as i64
 }
 
@@ -437,7 +437,7 @@ pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> 
     if request != DIOCGSECTORSIZE && request != DIOCGMEDIASIZE {
         return None;
     }
-    let (_, sectors, _) = RAW_OPEN.lock().get(&real_fd).copied()?;
+    let (_, sectors) = RAW_OPEN.lock().get(&real_fd).copied()?;
     Some(if request == DIOCGSECTORSIZE {
         copyout_val(&512u32, UserPtr::new(argp)).map(|()| 0)
     } else {

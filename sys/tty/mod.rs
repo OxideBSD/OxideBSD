@@ -1323,11 +1323,6 @@ pub(crate) extern "C" fn fd_close(real_fd: u64) -> i64 {
     0
 }
 
-/// `F_GETFL`'s access mode (`fs::fd::FdAccessMode`: bit 0 readable, bit 1 writable).
-extern "C" fn fd_access_mode(real_fd: u64) -> i64 {
-    FDS.lock().get(&real_fd).map_or(0, |f| f.readable as i64 | (f.writable as i64) << 1)
-}
-
 /// Makes `real_fd` a read-write description of `id`.
 pub fn bind(real_fd: u64, id: TtyId) {
     bind_with(real_fd, id, true, true);
@@ -1352,7 +1347,6 @@ pub(crate) extern "C" fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -
     const O_ACCMODE: u64 = 3;
     const O_WRONLY: u64 = 1;
     const O_RDWR: u64 = 2;
-    const O_NONBLOCK: u64 = 0o4000;
     let enxio = -(crate::syscall::ENXIO as i64);
     let dev = (major as u32, minor as u32);
     let id = if dev == CTTY_DEVICE {
@@ -1378,10 +1372,14 @@ pub(crate) extern "C" fn oxidebsd_tty_open(major: u64, minor: u64, flags: u64) -
     }
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     bind_with(real_fd, id, readable, writable);
-    if flags & O_NONBLOCK != 0 {
-        crate::fs::fd::set_nonblocking(real_fd, true);
-    }
-    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, fd_read, fd_write, fd_close);
-    crate::fs::fd::oxidebsd_set_fd_access_mode(real_fd, fd_access_mode);
-    fd
+    let kind = crate::fs::fd::FdKind::Module;
+    crate::fs::fd::finstall(real_fd, &TTY_OPS, id as u64, crate::fs::fd::open_flag(flags), kind)
 }
+
+/// A terminal's file operations (the console's fds 0-2 too, `fs::fd::init`). It doesn't seek.
+pub(crate) static TTY_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    read: Some(fd_read),
+    write: Some(fd_write),
+    close: Some(fd_close),
+    ..crate::fs::fd::FileOps::NONE
+};

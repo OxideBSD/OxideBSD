@@ -103,7 +103,7 @@ extern "C" fn default_access_mode(_real_fd: u64) -> i64 {
 /// `access_mode` rather than cached here, same reasoning as both (the owning module already has
 /// to remember this for its own write-positioning logic, see `sys/modules/oxfs`'s `OpenFile::Write::
 /// append`). Unlike `O_NONBLOCK` (which `fcntl(F_SETFL, ...)` can flip after the fact, hence its
-/// own separate mutable `NONBLOCKING` set below), POSIX gives `O_APPEND` no such setter here (this
+/// own `FNONBLOCK` flag below), POSIX gives `O_APPEND` no such setter here (this
 /// port's `F_SETFL` only ever touches `O_NONBLOCK`), so a fixed-at-open callback is sufficient.
 ///
 /// Found live via the Open POSIX Test Suite's `aio_write/2-1.c`: `sys_fcntl`'s `F_GETFL` used to
@@ -137,6 +137,79 @@ pub(crate) type FdFbGeometry = extern "C" fn(u64, u64) -> i32;
 
 extern "C" fn no_fb_geometry(_real_fd: u64, _out: u64) -> i32 {
     -1
+}
+
+/// An open file's operations (FreeBSD's `struct fileops`, OxideBSD-doc `VFS.md` §6.4): one static
+/// table per kind of file, shared by every file of that kind, given to `finstall` with the file's
+/// own `data`. Every operation gets the file's handle (its `real_fd`), as the old per-descriptor
+/// callbacks did, so a backend keeps keying its state by it; `oxidebsd_file_data(handle)` gives
+/// the object `finstall` was handed. A null entry takes the kernel's default: `EBADF` for
+/// `read`/`write` (the access mode is checked first), nothing for `close`, no mapping for
+/// `content_id` and `fb_geometry`. `#[repr(C)]`: modules declare their own copies
+/// (`sys/modules/*`), so the field order is part of the module ABI.
+#[repr(C)]
+pub(crate) struct FileOps {
+    /// `DFLAG_*`.
+    pub flags: u32,
+    pub read: Option<FdReadWrite>,
+    pub write: Option<FdReadWrite>,
+    pub close: Option<FdClose>,
+    /// `(handle, request, arg) -> result | -errno`; `ENOTTY` when null. Not yet called (VFS.md
+    /// step 1a-3).
+    pub ioctl: Option<extern "C" fn(u64, u64, u64) -> i64>,
+    /// `(handle, events) -> revents`; always readable and writable when null. Not yet called.
+    pub poll: Option<extern "C" fn(u64, u64) -> i64>,
+    /// `(handle, out: *mut struct stat) -> 0 | -errno`. Not yet called.
+    pub stat: Option<extern "C" fn(u64, u64) -> i64>,
+    /// `(handle, length) -> 0 | -errno`; `EINVAL` when null. Not yet called.
+    pub truncate: Option<extern "C" fn(u64, u64) -> i64>,
+    /// `(handle, data_only) -> 0 | -errno`; `EINVAL` when null. Not yet called.
+    pub sync: Option<extern "C" fn(u64, u64) -> i64>,
+    pub content_id: Option<FdContentId>,
+    pub fb_geometry: Option<FdFbGeometry>,
+}
+
+impl FileOps {
+    /// Every operation the kernel's default, for `..FileOps::NONE` in a type's table.
+    pub(crate) const NONE: FileOps = FileOps {
+        flags: 0,
+        read: None,
+        write: None,
+        close: None,
+        ioctl: None,
+        poll: None,
+        stat: None,
+        truncate: None,
+        sync: None,
+        content_id: None,
+        fb_geometry: None,
+    };
+}
+
+/// `FileOps::flags`: the file has an offset (`lseek`, `pread`/`pwrite`), which the kernel keeps:
+/// every `read`/`write` reaches the backend with `FOF_OFFSET` and the uio at the offset, and the
+/// offset is stored back from the uio afterwards. Without it `pread`/`pwrite` are `ESPIPE`.
+pub(crate) const DFLAG_SEEKABLE: u32 = 1;
+
+/// A file's `f_flag` (FreeBSD's): open for reading, open for writing, and the open flags that
+/// stay with the description (musl's values, as `F_GETFL` reports them).
+pub(crate) const FREAD: u32 = 1;
+pub(crate) const FWRITE: u32 = 2;
+pub(crate) const FAPPEND: u32 = 0o2000;
+pub(crate) const FNONBLOCK: u32 = 0o4000;
+
+/// `f_flag` for a file opened with `open(2)` flags `oflags` (FreeBSD's `FFLAGS`): the access mode
+/// plus one is `FREAD`/`FWRITE`, and `O_APPEND`/`O_NONBLOCK` carry over.
+pub(crate) fn open_flag(oflags: u64) -> u32 {
+    (((oflags & 3) + 1) as u32 & (FREAD | FWRITE)) | (oflags as u32 & (FAPPEND | FNONBLOCK))
+}
+
+extern "C" fn fo_denied(_handle: u64, _uio: *mut Uio, _flags: u64) -> i64 {
+    -(crate::syscall::EBADF as i64)
+}
+
+extern "C" fn fo_no_close(_handle: u64) -> i64 {
+    0
 }
 
 #[derive(Clone, Copy)]
@@ -178,11 +251,6 @@ pub(crate) fn tag_device(real_fd: u64, dev: u64) {
             ops.kind = FdKind::Device(dev);
         }
     });
-}
-
-/// Tags `real_fd`'s kind, after it's registered.
-pub(crate) fn set_kind(real_fd: u64, kind: FdKind) {
-    with_description(real_fd, |ops| ops.kind = kind);
 }
 
 /// `oxidebsd_real_fd_kind`'s codes; `sys/modules/oxfs` mirrors them.
@@ -230,6 +298,16 @@ pub(crate) extern "C" fn oxidebsd_real_fd_of_pid(pid: u64, fd: u64) -> i64 {
 /// refer to it. The `close` callback fires when `refs` reaches zero.
 struct Description {
     ops: FdOps,
+    /// The static operations table, for a file made by `finstall`; `None` for one registered
+    /// through the older per-descriptor callbacks (`oxidebsd_register_fd_ops*`, oxfs's until it
+    /// moves over).
+    table: Option<&'static FileOps>,
+    data: u64,
+    /// `FREAD | FWRITE | FAPPEND | FNONBLOCK`. `FNONBLOCK` is kept for every file; the access mode
+    /// and `FAPPEND` only for a `finstall`ed one (the older callbacks answer for themselves).
+    flag: u32,
+    /// The file offset, for a seekable `finstall`ed file.
+    offset: u64,
     refs: u32,
 }
 
@@ -275,7 +353,6 @@ pub(crate) fn release(real_fd: u64) {
         let close = d.ops.close;
         descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
-        NONBLOCKING.lock().remove(&real_fd);
         let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
         close(real_fd);
     }
@@ -320,34 +397,68 @@ fn lookup(fd: u64) -> Option<(u64, FdOps)> {
     Some((real_fd, ops))
 }
 
-/// Applies `f` to `real_fd`'s description, if it has one.
+/// Applies `f` to `real_fd`'s description's callbacks, if it has one.
 fn with_description(real_fd: u64, f: impl FnOnce(&mut FdOps)) {
+    with_description_full(real_fd, |d| f(&mut d.ops));
+}
+
+fn with_description_full(real_fd: u64, f: impl FnOnce(&mut Description)) {
     if let Some(d) = DESCRIPTIONS.lock().get_mut(&real_fd) {
-        f(&mut d.ops);
+        f(d);
     }
 }
-/// `O_NONBLOCK`, as set via `fcntl(F_SETFL, ...)` (`syscall::sys_fcntl`). Keyed by `real_fd`, the
-/// same "open file description" scoping `DESCRIPTIONS` already uses -- POSIX defines `O_NONBLOCK` as
-/// a property of the *description*, shared correctly across `dup`/`dup2`/`fork_inherit` aliases,
-/// not the individual `(pid, fd)` handle, which is why this isn't a field on `FdOps` itself. Only
-/// `src/pipe.rs`'s `blocking_read` actually consults this today -- a real, deliberate
-/// simplification, not every blocking read path in this kernel honors it yet (see that module's
-/// own doc comment). Dropped when the description's last reference closes.
-static NONBLOCKING: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
-
+/// `O_NONBLOCK`, as set at open or by `fcntl(F_SETFL, ...)` (`syscall::sys_fcntl`): `FNONBLOCK` in
+/// the description's `flag`, so `dup`/`dup2`/`fork` aliases share it, as POSIX defines it.
 pub(crate) fn set_nonblocking(real_fd: u64, on: bool) {
-    if on {
-        NONBLOCKING.lock().insert(real_fd);
-    } else {
-        NONBLOCKING.lock().remove(&real_fd);
+    if let Some(d) = DESCRIPTIONS.lock().get_mut(&real_fd) {
+        if on {
+            d.flag |= FNONBLOCK;
+        } else {
+            d.flag &= !FNONBLOCK;
+        }
     }
 }
 
 pub(crate) fn is_nonblocking(real_fd: u64) -> bool {
-    NONBLOCKING.lock().contains(&real_fd)
+    DESCRIPTIONS.lock().get(&real_fd).is_some_and(|d| d.flag & FNONBLOCK != 0)
 }
 
-/// Real per-`(pid, fd)` `FD_CLOEXEC` state -- unlike `NONBLOCKING` above, POSIX defines this as a
+/// The object `finstall` was given for `handle` (a pipe's buffer id, a module's own slot), `0` if
+/// none.
+pub(crate) extern "C" fn oxidebsd_file_data(handle: u64) -> u64 {
+    DESCRIPTIONS.lock().get(&handle).map_or(0, |d| d.data)
+}
+
+/// Makes `real_fd` (from `oxidebsd_alloc_fd`) a file with operations `ops`, object `data`, open
+/// flags `flag` (`FREAD`/`FWRITE`/`FAPPEND`/`FNONBLOCK`) and kind `kind`, and gives the calling
+/// process the lowest free fd for it. Returns the fd, or `-ENFILE` past `kern.maxfiles` (callers
+/// have made room first, `check_room`).
+pub(crate) fn finstall(real_fd: u64, ops: &'static FileOps, data: u64, flag: u32, kind: FdKind) -> i64 {
+    let fd = register(
+        scheduler::current_tgid(),
+        real_fd,
+        ops.read.unwrap_or(fo_denied),
+        ops.write.unwrap_or(fo_denied),
+        ops.close.unwrap_or(fo_no_close),
+        ops.content_id.unwrap_or(no_content_id),
+    );
+    if fd < 0 {
+        return fd;
+    }
+    with_description_full(real_fd, |d| {
+        d.table = Some(ops);
+        d.data = data;
+        d.flag = flag;
+        d.ops.kind = kind;
+        d.ops.positioned = ops.flags & DFLAG_SEEKABLE != 0;
+        if let Some(g) = ops.fb_geometry {
+            d.ops.fb_geometry = g;
+        }
+    });
+    fd
+}
+
+/// Real per-`(pid, fd)` `FD_CLOEXEC` state -- unlike `O_NONBLOCK` above, POSIX defines this as a
 /// property of the file descriptor itself, not the underlying open file description, so it's keyed
 /// by the same `(pid, fd)` pair `TABLE` uses (found live via `shm_open/11-1.c`, the Open POSIX Test
 /// Suite pilot: musl's own `shm_open()` always passes real `O_CLOEXEC` to `open()`, and the test
@@ -544,7 +655,7 @@ fn register(
                 if descriptions.len() >= crate::kern::kern_sysctl::maxfiles() {
                     return -ENFILE;
                 }
-                descriptions.insert(real_fd, Description { ops, refs: 0 });
+                descriptions.insert(real_fd, Description { ops, table: None, data: 0, flag: 0, offset: 0, refs: 0 });
             }
         }
     }
@@ -619,7 +730,6 @@ fn close_one(pid: u64, fd: u64) -> bool {
         let close = d.ops.close;
         descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
-        NONBLOCKING.lock().remove(&real_fd);
         let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
         close(real_fd);
     } else {
@@ -736,18 +846,44 @@ pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, u64> {
 /// `ERESTART` or `EAGAIN`, the error otherwise (USERMEM.md §4.4).
 pub(crate) fn read(fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
     let (real_fd, ops) = lookup(fd)?;
-    Some(transfer(ops.read, ops.positioned, real_fd, uio, flags))
+    Some(transfer(ops.read, ops.positioned, FREAD, real_fd, uio, flags))
 }
 
 /// `write(2)` and its forms: as `read`, through the backend's write operation.
 pub(crate) fn write(fd: u64, uio: &mut Uio, flags: u64) -> Option<i64> {
     let (real_fd, ops) = lookup(fd)?;
-    Some(transfer(ops.write, ops.positioned, real_fd, uio, flags))
+    Some(transfer(ops.write, ops.positioned, FWRITE, real_fd, uio, flags))
 }
 
-fn transfer(op: FdReadWrite, positioned: bool, real_fd: u64, uio: &mut Uio, flags: u64) -> i64 {
+/// How the kernel takes part in a transfer on a `finstall`ed file: whether its access mode
+/// allows `need` (`FREAD`/`FWRITE`), and its offset if it is seekable. `None` for a file on the
+/// older callbacks, which do both themselves.
+fn table_file(real_fd: u64, need: u32) -> Option<(bool, Option<u64>)> {
+    let descriptions = DESCRIPTIONS.lock();
+    let d = descriptions.get(&real_fd)?;
+    let table = d.table?;
+    Some((d.flag & need != 0, (table.flags & DFLAG_SEEKABLE != 0).then_some(d.offset)))
+}
+
+fn transfer(op: FdReadWrite, positioned: bool, need: u32, real_fd: u64, uio: &mut Uio, flags: u64) -> i64 {
     if flags & FOF_OFFSET != 0 && !positioned {
         return -(ESPIPE as i64);
+    }
+    // A finstalled file: the access mode is the kernel's to check, and a seekable one's offset
+    // is the kernel's to keep (unless the call gives its own, pread/pwrite).
+    let mut kept_offset = false;
+    let mut flags = flags;
+    if let Some((allowed, offset)) = table_file(real_fd, need) {
+        if !allowed {
+            return -(crate::syscall::EBADF as i64);
+        }
+        if let Some(offset) = offset
+            && flags & FOF_OFFSET == 0
+        {
+            uio.set_offset(offset);
+            flags |= FOF_OFFSET;
+            kept_offset = true;
+        }
     }
     let len = uio.resid();
     if len == 0 {
@@ -757,6 +893,10 @@ fn transfer(op: FdReadWrite, positioned: bool, real_fd: u64, uio: &mut Uio, flag
         let _lock = crate::fs::fslock::Guard::for_call_sleepable(op as usize as u64);
         op(real_fd, uio, flags)
     };
+    if kept_offset {
+        let offset = uio.offset();
+        with_description_full(real_fd, |d| d.offset = offset);
+    }
     let moved = len - uio.resid();
     if r < 0 && moved > 0 && [EINTR, ERESTART, EAGAIN].contains(&(-r as u64)) {
         moved as i64
@@ -799,6 +939,9 @@ pub(crate) fn access_mode_of(fd: u64) -> (bool, bool) {
     let Some((real_fd, ops)) = lookup(fd) else {
         return (true, true);
     };
+    if let Some(flag) = DESCRIPTIONS.lock().get(&real_fd).filter(|d| d.table.is_some()).map(|d| d.flag) {
+        return (flag & FREAD != 0, flag & FWRITE != 0);
+    }
     let _lock = crate::fs::fslock::Guard::for_call(ops.access_mode as usize as u64);
     let bits = (ops.access_mode)(real_fd);
     (bits & 0b01 != 0, bits & 0b10 != 0)
@@ -812,6 +955,9 @@ pub(crate) fn is_append_of(fd: u64) -> bool {
     let Some((real_fd, ops)) = lookup(fd) else {
         return false;
     };
+    if let Some(flag) = DESCRIPTIONS.lock().get(&real_fd).filter(|d| d.table.is_some()).map(|d| d.flag) {
+        return flag & FAPPEND != 0;
+    }
     let _lock = crate::fs::fslock::Guard::for_call(ops.is_append as usize as u64);
     (ops.is_append)(real_fd) != 0
 }
@@ -1023,10 +1169,11 @@ pub fn init() {
     for fd in 0..3 {
         close_one(BOOTSTRAP_PID, fd);
     }
+    let table = &crate::tty::TTY_OPS;
     let ops = FdOps {
-        read: crate::tty::fd_read,
-        write: crate::tty::fd_write,
-        close: crate::tty::fd_close,
+        read: table.read.unwrap_or(fo_denied),
+        write: table.write.unwrap_or(fo_denied),
+        close: table.close.unwrap_or(fo_no_close),
         content_id: no_content_id,
         access_mode: default_access_mode,
         is_append: default_is_append,
@@ -1035,7 +1182,8 @@ pub fn init() {
         positioned: false,
     };
     crate::tty::console::init();
-    DESCRIPTIONS.lock().insert(0, Description { ops, refs: 0 });
+    let flag = FREAD | FWRITE;
+    DESCRIPTIONS.lock().insert(0, Description { ops, table: Some(table), data: 0, flag, offset: 0, refs: 0 });
     crate::tty::bind(0, crate::tty::TTYV0);
     let mut table = TABLE.lock();
     for fd in 0..3 {

@@ -347,7 +347,7 @@ static void message_buffer(void)
 	kernel_says(9872);
 	CHECK(poll(&p, 1, 2000) == 1 && (p.revents & POLLIN), "/dev/klog: readable after a kernel message");
 	CHECK(drain(k, "unrecognized syscall number 9872"), "/dev/klog reads only what's new");
-	CHECK_ERR(write(k, "x", 1), EOPNOTSUPP, "writing /dev/klog is EOPNOTSUPP");
+	CHECK_ERR(write(k, "x", 1), EBADF, "writing /dev/klog open read-only is EBADF");
 
 	pid_t pid = fork();
 	if (pid == 0) {

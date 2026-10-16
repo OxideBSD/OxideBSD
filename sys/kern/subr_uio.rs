@@ -74,6 +74,17 @@ impl Uio {
         self.resid
     }
 
+    /// The file offset the transfer is at: where it started, moved on by every `uiomove`.
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Starts the transfer at file offset `offset` (the kernel's own for a seekable file, or
+    /// end of file for `O_APPEND`).
+    pub(crate) fn set_offset(&mut self, offset: u64) {
+        self.offset = offset;
+    }
+
     /// Moves up to `kbuf.len()` bytes between `kbuf` and the next part of the segments: out of
     /// `kbuf` for `Read`, into it for `Write`. Returns how many moved (less than `kbuf.len()` only
     /// when the transfer is complete). On `EFAULT` nothing of the failing piece counts as moved.

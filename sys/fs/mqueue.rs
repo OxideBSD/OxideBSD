@@ -317,22 +317,23 @@ pub(crate) fn do_mq_open(name_ptr: u64, flags: u64, mode: u64, attr_ptr: u64) ->
             access: flags & O_ACCMODE,
         },
     );
-    let user_fd =
-        crate::fs::fd::oxidebsd_register_fd_ops(fd, mq_read_denied, mq_write_denied, mq_close) as u64;
-    crate::fs::fd::set_kind(fd, crate::fs::fd::FdKind::Mqueue);
-    if flags & (O_NONBLOCK as u64) != 0 {
-        crate::fs::fd::set_nonblocking(fd, true);
-    }
+    // `read`/`write` on a message queue descriptor are EBADF (mq_send/mq_receive are its I/O),
+    // the default for a table without them; the access mode is still the open's, for F_GETFL.
+    let user_fd = crate::fs::fd::finstall(
+        fd,
+        &MQUEUE_OPS,
+        mq_id as u64,
+        crate::fs::fd::open_flag(flags),
+        crate::fs::fd::FdKind::Mqueue,
+    ) as u64;
     Ok(user_fd)
 }
 
-extern "C" fn mq_read_denied(_real_fd: u64, _uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
-    -(EBADF as i64)
-}
-
-extern "C" fn mq_write_denied(_real_fd: u64, _uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
-    -(EBADF as i64)
-}
+/// A message queue descriptor's file operations: `close` only.
+static MQUEUE_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    close: Some(mq_close),
+    ..crate::fs::fd::FileOps::NONE
+};
 
 /// Registered as this mqd's `close` callback -- real `mq_close(3)` is a bare `syscall(SYS_close,
 /// mqd)` (see this module's own doc comment), so this fires from the ordinary `SYS_CLOSE` path via

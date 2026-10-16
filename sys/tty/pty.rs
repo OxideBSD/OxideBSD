@@ -136,7 +136,6 @@ fn maybe_free(n: usize) {
 
 /// Opening `/dev/ptmx`: a new pair, and its master as a descriptor of the caller's (§2.1).
 extern "C" fn ptmx_open(_major: u64, _minor: u64, flags: u64) -> i64 {
-    const O_NONBLOCK: u64 = 0o4000;
     if let Err(e) = crate::fs::fd::check_room(1) {
         return -(e as i64);
     }
@@ -190,11 +189,17 @@ extern "C" fn ptmx_open(_major: u64, _minor: u64, flags: u64) -> i64 {
 
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     MASTERS.lock().insert(real_fd, n);
-    if flags & O_NONBLOCK != 0 {
-        crate::fs::fd::set_nonblocking(real_fd, true);
-    }
-    crate::fs::fd::oxidebsd_register_fd_ops(real_fd, master_read, master_write, master_close)
+    let flag = crate::fs::fd::FREAD | crate::fs::fd::FWRITE | (flags as u32 & crate::fs::fd::FNONBLOCK);
+    crate::fs::fd::finstall(real_fd, &MASTER_OPS, n as u64, flag, crate::fs::fd::FdKind::Module)
 }
+
+/// A pseudo-terminal master's file operations (`posix_openpt`, `/dev/ptmx`).
+static MASTER_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    read: Some(master_read),
+    write: Some(master_write),
+    close: Some(master_close),
+    ..crate::fs::fd::FileOps::NONE
+};
 
 /// Opening `/dev/pts/N`: refused while the pair is locked (§3.1), else an ordinary terminal open.
 extern "C" fn pts_open(major: u64, minor: u64, flags: u64) -> i64 {

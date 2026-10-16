@@ -148,8 +148,6 @@ static KLOG_OPEN: AtomicBool = AtomicBool::new(false);
 /// The open `/dev/klog`'s `real_fd`, for `readiness`.
 static KLOG_FD: Mutex<Option<u64>> = Mutex::new(None);
 
-const O_NONBLOCK: u64 = 0o4000;
-
 /// Opens `/dev/klog` (oxfs hands its device node here, having checked its permissions): the new
 /// descriptor, or `-EBUSY` if it's already open.
 pub(crate) extern "C" fn oxidebsd_klog_open(flags: u64) -> i64 {
@@ -161,12 +159,16 @@ pub(crate) extern "C" fn oxidebsd_klog_open(flags: u64) -> i64 {
     }
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     *KLOG_FD.lock() = Some(real_fd);
-    let fd = crate::fs::fd::oxidebsd_register_fd_ops(real_fd, klog_read, klog_write, klog_close);
-    if flags & O_NONBLOCK != 0 {
-        crate::fs::fd::set_nonblocking(real_fd, true);
-    }
-    fd
+    crate::fs::fd::finstall(real_fd, &KLOG_OPS, 0, crate::fs::fd::open_flag(flags), crate::fs::fd::FdKind::Module)
 }
+
+/// `/dev/klog`'s file operations.
+static KLOG_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    read: Some(klog_read),
+    write: Some(klog_write),
+    close: Some(klog_close),
+    ..crate::fs::fd::FileOps::NONE
+};
 
 /// Reads what the buffer holds past the reader's position, advancing it; waits when there's
 /// nothing, woken every 50 ms to look again (a kernel print can't take the locks a wakeup needs).
