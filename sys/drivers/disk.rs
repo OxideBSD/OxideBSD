@@ -365,7 +365,7 @@ extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flags
     let Some((first, sectors)) = RAW_OPEN.lock().get(&real_fd).copied() else {
         return -(crate::syscall::EBADF as i64);
     };
-    let _ = flags; // seekable: the kernel always gives the offset (FOF_OFFSET)
+    let _ = flags; // seekable: the uio is always at an offset (FOF_OFFSET or FOF_NEXTOFF)
     let offset = uio.offset();
     let size = sectors * 512;
     let len = uio.resid().min(size.saturating_sub(offset));
@@ -398,7 +398,7 @@ extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, flag
     if ROOT_MOUNTED_RW.load(Ordering::Relaxed) && overlaps_root(first, sectors) {
         return -(crate::syscall::EPERM as i64);
     }
-    let _ = flags; // seekable: the kernel always gives the offset (FOF_OFFSET)
+    let _ = flags; // seekable: the uio is always at an offset (FOF_OFFSET or FOF_NEXTOFF)
     let offset = uio.offset();
     let size = sectors * 512;
     let len = uio.resid().min(size.saturating_sub(offset));

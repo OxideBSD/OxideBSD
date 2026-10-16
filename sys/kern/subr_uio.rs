@@ -15,8 +15,12 @@ use alloc::vec::Vec;
 use crate::memory::usercopy::{UserPtr, copyin, copyout};
 use crate::syscall::{EFAULT, EINVAL};
 
-/// `FOF_OFFSET`: use `Uio::offset`, not the description's own position (`pread`/`pwrite`).
+/// `FOF_OFFSET`: the caller gave the offset (`pread`/`pwrite`): use `Uio::offset`, leave the file's
+/// offset alone, and don't append.
 pub(crate) const FOF_OFFSET: u64 = 1;
+/// `FOF_NEXTOFF` (FreeBSD's name): `Uio::offset` is the file's own offset, which the kernel keeps
+/// for a seekable file and stores back from the uio after the call; `O_APPEND` applies.
+pub(crate) const FOF_NEXTOFF: u64 = 2;
 
 /// Which way data moves.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -209,7 +213,13 @@ pub(crate) extern "C" fn oxidebsd_uio_resid(uio: *const Uio) -> u64 {
     unsafe { (*uio).resid }
 }
 
-/// The transfer's file offset (meaningful with `FOF_OFFSET`), for modules.
+/// Moves a transfer to file offset `offset`, for modules (`O_APPEND`: the end of the file).
+pub(crate) extern "C" fn oxidebsd_uio_set_offset(uio: *mut Uio, offset: u64) {
+    // SAFETY: the module passes the `Uio` it was handed.
+    unsafe { (*uio).offset = offset };
+}
+
+/// The transfer's file offset (meaningful with `FOF_OFFSET` or `FOF_NEXTOFF`), for modules.
 pub(crate) extern "C" fn oxidebsd_uio_offset(uio: *const Uio) -> u64 {
     // SAFETY: as above.
     unsafe { (*uio).offset }

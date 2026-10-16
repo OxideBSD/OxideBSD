@@ -79,28 +79,15 @@ unsafe extern "C" {
         handler: extern "C" fn(u64, u64, u64, u64) -> i64,
     ) -> i32;
     fn oxidebsd_alloc_fd() -> u64;
-    fn oxidebsd_register_fd_ops(
-        fd: u64,
-        read: extern "C" fn(u64, u64, u64) -> i64,
-        write: extern "C" fn(u64, u64, u64) -> i64,
-        close: extern "C" fn(u64) -> i64,
-    ) -> i64;
+    /// Makes `real_fd` a file with operations `ops` (a static table: `FileOps`), object `data`,
+    /// open flags `oflags` (`open(2)`'s), and gives the caller the lowest free fd for it. The fd,
+    /// or `-errno` (kernel tree: `crate::fs::fd::finstall`).
+    fn oxidebsd_finstall(real_fd: u64, ops: *const FileOps, data: u64, oflags: u64) -> i64;
+    /// A file's offset, which the kernel keeps (`lseek`, and `getdents`' record cursor).
+    fn oxidebsd_file_offset(real_fd: u64) -> u64;
+    fn oxidebsd_file_set_offset(real_fd: u64, offset: u64);
     /// `0` if `n` more open files fit under `kern.maxfiles`, else `-ENFILE`.
     fn oxidebsd_fd_check_room(n: u64) -> i64;
-    /// Same as `oxidebsd_register_fd_ops`, plus a `content_id` callback — see
-    /// `crate::fs::fd::FdContentId`'s own doc comment (kernel tree) for why this exists: real
-    /// fd-backed `MAP_SHARED` mmap (`crate::process::mm::do_mmap`) needs a live "what real inode
-    /// does this fd resolve to right now" query, keyed by nothing this module already exposes
-    /// generically. Only used for oxfs's own real file-backed `OpenFile` variants below
-    /// (`register_open_file` calls this instead of the plain `oxidebsd_register_fd_ops`
-    /// unconditionally — `oxfs_content_id` itself returns `-1` for every non-file variant).
-    fn oxidebsd_register_fd_ops_with_content_id(
-        fd: u64,
-        read: extern "C" fn(u64, u64, u64) -> i64,
-        write: extern "C" fn(u64, u64, u64) -> i64,
-        close: extern "C" fn(u64) -> i64,
-        content_id: extern "C" fn(u64) -> i64,
-    ) -> i64;
     /// See `crate::fs::fd::ContentRead`/`ContentWrite`/`ContentSize`'s own doc comment (kernel
     /// tree) for why real fd-backed `MAP_SHARED` mmap needs this instead of the plain per-fd
     /// read/write callbacks. Called once, from this module's own `module_init`.
@@ -116,38 +103,22 @@ unsafe extern "C" {
     /// -- see `crate::fs::fd::oxidebsd_set_fd_cloexec`'s own doc comment (kernel tree). `oxfs_open`
     /// is the one caller here, right after a successful real `O_CLOEXEC` open.
     fn oxidebsd_set_fd_cloexec(fd: u64, on: u64) -> i64;
-    /// Marks `fd` as having a file position, so `pread`/`pwrite` reach `oxfs_read`/`oxfs_write`
-    /// with `FOF_OFFSET` (kernel tree: `crate::fs::fd::oxidebsd_set_fd_positioned`).
-    /// `register_open_file` is the one caller here.
-    fn oxidebsd_set_fd_positioned(fd: u64);
     /// Moves up to `len` bytes between this module's buffer `kbuf` and a read or write transfer
     /// (`uio`, opaque here; kernel tree: `crate::kern::subr_uio`, USERMEM.md §4.4). The count
     /// moved, or `-errno`.
     fn oxidebsd_uiomove(kbuf: *mut u8, len: u64, uio: u64) -> i64;
     /// Bytes a transfer still has to move.
     fn oxidebsd_uio_resid(uio: u64) -> u64;
-    /// A transfer's file offset, for `FOF_OFFSET`.
+    /// A transfer's file offset: every read and write here is at one.
     fn oxidebsd_uio_offset(uio: u64) -> u64;
+    /// Moves a transfer to `offset` (`O_APPEND`: the end of the file).
+    fn oxidebsd_uio_set_offset(uio: u64, offset: u64);
     /// Copies `len` bytes from user memory at `src` into this module's buffer `dst` (kernel tree:
     /// `crate::memory::usercopy`). `0`, or a positive errno (`EFAULT`).
     fn oxidebsd_copyin(src: u64, dst: *mut u8, len: usize) -> u64;
     /// Copies `len` bytes of this module's buffer `src` to user memory at `dst`. `0`, or a
     /// positive errno.
     fn oxidebsd_copyout(src: *const u8, len: usize, dst: u64) -> u64;
-    /// Overrides `fd`'s real `access_mode` callback -- see
-    /// `crate::fs::fd::oxidebsd_set_fd_access_mode`/`FdAccessMode`'s own doc comment (kernel tree).
-    /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_positioned`.
-    fn oxidebsd_set_fd_access_mode(fd: u64, access_mode: extern "C" fn(u64) -> i64);
-    /// Overrides `fd`'s real `is_append` callback -- see
-    /// `crate::fs::fd::oxidebsd_set_fd_append`/`FdIsAppend`'s own doc comment (kernel tree).
-    /// `register_open_file` is the one caller here, right alongside `oxidebsd_set_fd_access_mode`.
-    fn oxidebsd_set_fd_append(fd: u64, is_append: extern "C" fn(u64) -> i64);
-    /// Overrides `fd`'s real `fb_geometry` callback -- see
-    /// `crate::fs::fd::oxidebsd_set_fd_fb_geometry`/`FdFbGeometry`'s own doc comment (kernel tree).
-    /// `register_open_file` is the one caller, unconditionally for every fd (the callback itself
-    /// discriminates by `OpenFile` variant, same precedent `oxfs_access_mode`/`oxfs_content_id`
-    /// already establish).
-    fn oxidebsd_set_fd_fb_geometry(fd: u64, fb_geometry: extern "C" fn(u64, u64) -> i32);
     fn oxidebsd_get_cwd() -> u64;
     /// Whether the kernel still refers to an inode (a working or root directory, a file mapping,
     /// a bound socket file): see `maybe_release`.
@@ -413,10 +384,6 @@ const O_CREAT: u64 = 0o100;
 /// before: every open of an existing path used to always end up read-only regardless of what the
 /// caller actually asked for).
 const O_ACCMODE: u64 = 0o3;
-/// Real generic `open(2)` `O_RDWR` value -- see `OpenFile::Write`'s own `readwrite`/`position`
-/// fields for what this actually unlocks (real bidirectional read/write/seek through one fd,
-/// found missing live via the Open POSIX Test Suite's `aio_read`/`aio_write`/`lio_listio` pilot).
-const O_RDWR: u64 = 0o2;
 /// Real generic `open(2)` `O_EXCL` value -- combined with `O_CREAT`, real POSIX requires
 /// `open()` to fail `EEXIST` when the target name already exists (regardless of what it resolves
 /// to -- a symlink, a directory, an existing regular file all count), rather than transparently
@@ -896,7 +863,7 @@ fn proc_render(idx: usize) -> &'static [u8] {
 /// descriptor can be made.
 fn register_proc_render(render: u32) -> i64 {
     let len = proc_render(render as usize).len();
-    let fd = register_open_file(OpenFile::ProcRead { render, len, position: 0 });
+    let fd = register_open_file(OpenFile::ProcRead { render, len }, 0);
     if fd < 0 {
         free_proc_render(render as usize);
     }
@@ -1712,9 +1679,9 @@ fn read_inode_with(
     Ok(written)
 }
 
-/// `FOF_OFFSET` (kernel tree: `crate::kern::subr_uio`): `pread`/`pwrite`, at the transfer's
-/// offset instead of the descriptor's position.
-const FOF_OFFSET: u64 = 1;
+/// `FOF_NEXTOFF` (kernel tree: `crate::kern::subr_uio`): the transfer is at the file's own offset,
+/// not `pwrite`'s, so `O_APPEND` applies.
+const FOF_NEXTOFF: u64 = 2;
 
 /// Moves `data` out to a read transfer. `Ok(count)` or `Err(-errno)`.
 fn uio_out(uio: u64, data: &[u8]) -> Result<usize, i64> {
@@ -3134,7 +3101,6 @@ enum OpenFile {
     /// not by a fixed per-fd buffer.
     FileRead {
         inode: u32,
-        position: usize,
         /// The directory and name this was opened through, for `/proc/<pid>/fd/<n>`'s link
         /// (`open_file_path`).
         parent: u32,
@@ -3143,11 +3109,10 @@ enum OpenFile {
     },
     /// An open directory. `inode` is the directory's own inode number -- used by
     /// `inode_of_open_file` (`oxfs_fstat` on a directory fd) and by `oxfs_getdents`, which walks
-    /// its live records. `dirent_pos` is `oxfs_getdents`'s resume cursor and the descriptor's
+    /// its live records. the file's offset (the kernel's) is `oxfs_getdents`'s resume cursor and the descriptor's
     /// offset (`oxfs_lseek`). `read` is `EISDIR`.
     DirListing {
         inode: u32,
-        dirent_pos: usize,
     },
     /// A file opened for writing (or `O_RDONLY|O_CREAT`, see `readonly`). The inode exists, named,
     /// from `open` on: `write` stores straight into its blocks at `position`, so every other
@@ -3166,14 +3131,8 @@ enum OpenFile {
         /// (`EBADF`/`EINVAL`) -- `shm_open(O_RDONLY|O_CREAT, ...)` must not allow a later
         /// `ftruncate()` (`shm_open/13-1.c`).
         readonly: bool,
-        /// `O_RDWR` rather than `O_WRONLY`: `read()`/`pread()` work on this descriptor too
-        /// (`aio_read`/`aio_write`/`lio_listio` read back through the descriptor they wrote).
-        readwrite: bool,
-        /// The `read()`/`write()`/`lseek()` offset. Every `Write` descriptor seeks, `O_WRONLY`
-        /// included: `ld.lld` backpatches an ELF header with `lseek(SEEK_SET)` + `write()`.
-        position: usize,
-        /// `O_APPEND`: every `write` first moves `position` to the end of the file. Also reported
-        /// by `F_GETFL` (`oxfs_is_append`): musl's AIO serializes appending writes on it
+        /// `O_APPEND`: every `write` first moves to the end of the file. `F_GETFL` reports it from
+        /// the kernel's flag: musl's AIO serializes appending writes on it
         /// (`aio_write/2-1.c`).
         append: bool,
     },
@@ -3183,13 +3142,11 @@ enum OpenFile {
     ProcRead {
         render: u32,
         len: usize,
-        position: usize,
     },
     /// A synthetic `/proc` directory -- see `ProcDirKind` for what each variant lists.
-    /// `dirent_pos` has the same role as `DirListing::dirent_pos`.
+    /// The file's offset is its `getdents` cursor, as for `DirListing`.
     ProcDir {
         kind: ProcDirKind,
-        dirent_pos: usize,
     },
     /// A synthetic `/dev/random` or `/dev/urandom` fd -- see `dev_open`'s own doc comment for why
     /// both device nodes share this one variant. Reads delegate to `oxidebsd_random_bytes`
@@ -3237,7 +3194,7 @@ enum ProcDirKind {
     FdList(u32),
 }
 
-fn register_open_file(open_file: OpenFile) -> i64 {
+fn register_open_file(open_file: OpenFile, oflags: u64) -> i64 {
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let room = unsafe { oxidebsd_fd_check_room(1) };
     if room < 0 {
@@ -3249,74 +3206,55 @@ fn register_open_file(open_file: OpenFile) -> i64 {
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     let real_fd = unsafe { oxidebsd_alloc_fd() };
     *slot = Some((real_fd, open_file));
-    // SAFETY: oxfs_read/oxfs_write/oxfs_close/oxfs_content_id are this module's own functions,
-    // already relocated by the time module_init (which makes this function reachable) runs.
-    // Always the `_with_content_id` variant, not just for `FileRead`/`Write` -- `oxfs_content_id`
-    // itself already returns `-1` for every other variant, so there's no need to discriminate here.
-    let fd = unsafe {
-        let fd = oxidebsd_register_fd_ops_with_content_id(
-            real_fd,
-            oxfs_read,
-            oxfs_write,
-            oxfs_close,
-            oxfs_content_id,
-        );
-        // Always registered, unconditionally -- same "the callback itself discriminates by
-        // variant" reasoning `oxfs_content_id` above already established. See `oxfs_pread`/
-        // `oxfs_pwrite`'s own doc comments for what each real variant actually supports.
-        oxidebsd_set_fd_positioned(real_fd);
-        oxidebsd_set_fd_access_mode(real_fd, oxfs_access_mode);
-        oxidebsd_set_fd_append(real_fd, oxfs_is_append);
-        oxidebsd_set_fd_fb_geometry(real_fd, oxfs_fb_geometry);
-        fd
-    };
+    // SAFETY: `OXFS_OPS` is this module's own static table, already relocated by the time
+    // module_init (which makes this function reachable) runs.
+    let fd = unsafe { oxidebsd_finstall(real_fd, &OXFS_OPS, 0, oflags) };
+    if fd < 0 {
+        // SAFETY: as `free_open_file_slot`.
+        if let Some(slot) = open_file_slots().find(|s| matches!(s, Some((f, _)) if *f == real_fd)) {
+            *slot = None;
+        }
+    }
     fd
 }
 
-/// `access_mode` callback for `oxidebsd_set_fd_access_mode` -- see
-/// `crate::fs::fd::FdAccessMode`'s own doc comment (kernel tree) for the return-bits shape. Only
-/// `FileRead`/`Write` are ever real here (every other variant never reaches `do_mmap_file_backed`'s
-/// check at all -- `oxfs_content_id` already returns `-1` for them, so this is never even called
-/// against one, but the fallback is a harmless readable+writable default anyway):
-/// `FileRead` only ever exists for a real `O_RDONLY` open of an existing file (see `oxfs_open`'s own
-/// `want_write` branch) -- always readable, never writable. `Write` covers `O_WRONLY`/`O_RDWR`, and
-/// (via the create-path branch) a plain `O_RDONLY|O_CREAT` too -- `readonly` (real `O_RDONLY`) and
-/// `readwrite` (real `O_RDWR`) together already capture all three real access modes exactly:
-/// `readonly` or `readwrite` true means readable; anything but `readonly` means writable.
-extern "C" fn oxfs_access_mode(real_fd: u64) -> i64 {
-    match find_open_file(real_fd) {
-        Some(OpenFile::FileRead { .. }) => 0b01,
-        Some(OpenFile::Write {
-            readonly,
-            readwrite,
-            ..
-        }) => {
-            let mut bits = 0;
-            if *readonly || *readwrite {
-                bits |= 0b01;
-            }
-            if !*readonly {
-                bits |= 0b10;
-            }
-            bits
-        }
-        _ => 0b11,
-    }
+/// The kernel's file operations table (kernel tree: `crate::fs::fd::FileOps`, `VFS.md` §6.4),
+/// declared here as the module ABI has it: same fields, same order.
+#[repr(C)]
+struct FileOps {
+    flags: u32,
+    read: Option<extern "C" fn(u64, u64, u64) -> i64>,
+    write: Option<extern "C" fn(u64, u64, u64) -> i64>,
+    close: Option<extern "C" fn(u64) -> i64>,
+    ioctl: Option<extern "C" fn(u64, u64, u64) -> i64>,
+    poll: Option<extern "C" fn(u64, u64) -> i64>,
+    stat: Option<extern "C" fn(u64, u64) -> i64>,
+    truncate: Option<extern "C" fn(u64, u64) -> i64>,
+    sync: Option<extern "C" fn(u64, u64) -> i64>,
+    content_id: Option<extern "C" fn(u64) -> i64>,
+    fb_geometry: Option<extern "C" fn(u64, u64) -> i32>,
 }
 
-/// `is_append` callback for `oxidebsd_set_fd_append` -- see `crate::fs::fd::FdIsAppend`'s own doc
-/// comment (kernel tree) for the real bug this closes. `1` only for a `Write` fd actually opened
-/// with `O_APPEND`; every other `OpenFile` variant (including a `Write` fd without it) reports `0`,
-/// matching `oxfs_content_id`/`oxfs_access_mode`'s own "discriminates by variant, harmless default
-/// for everything else" shape.
-extern "C" fn oxfs_is_append(real_fd: u64) -> i64 {
-    match find_open_file(real_fd) {
-        Some(OpenFile::Write { append: true, .. }) => 1,
-        _ => 0,
-    }
-}
+/// `FileOps::flags`: the kernel keeps the file's offset.
+const DFLAG_SEEKABLE: u32 = 1;
 
-/// `fb_geometry` callback for `oxidebsd_set_fd_fb_geometry` -- see that import's own doc comment.
+/// Every oxfs file: seekable (the kernel keeps the offset; reads and writes come at the uio's
+/// offset, `getdents` and `lseek` read and set it), each operation dispatching on the `OpenFile`.
+static OXFS_OPS: FileOps = FileOps {
+    flags: DFLAG_SEEKABLE,
+    read: Some(oxfs_read),
+    write: Some(oxfs_write),
+    close: Some(oxfs_close),
+    ioctl: None,
+    poll: None,
+    stat: None,
+    truncate: None,
+    sync: None,
+    content_id: Some(oxfs_content_id),
+    fb_geometry: Some(oxfs_fb_geometry),
+};
+
+/// `FileOps::fb_geometry`.
 /// `-1` for every `OpenFile` variant except `Framebuffer`, matching `oxfs_content_id`'s own
 /// "discriminates by variant, harmless default for everything else" shape.
 extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
@@ -3348,8 +3286,7 @@ extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
     }
 }
 
-/// `content_id` callback for `oxidebsd_register_fd_ops_with_content_id` — see that import's own
-/// doc comment: the inode behind `real_fd`, so `mmap` and the page cache can find its content.
+/// `FileOps::content_id`: the inode behind `real_fd`, so `mmap` and the page cache can find its content.
 /// `-1` for the synthetic variants (`DirListing` aside), which have none.
 extern "C" fn oxfs_content_id(real_fd: u64) -> i64 {
     match inode_of_open_file(real_fd) {
@@ -3514,7 +3451,7 @@ fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
 
 /// Registers a descriptor for directory `dir_inode`, read with `getdents`.
 fn open_dir_listing(dir_inode: u32) -> i64 {
-    register_open_file(OpenFile::DirListing { inode: dir_inode, dirent_pos: 0 })
+    register_open_file(OpenFile::DirListing { inode: dir_inode }, 0)
 }
 
 /// Which synthetic `/proc/<pid>/*` leaf a call to `open_proc_leaf` should generate.
@@ -3545,25 +3482,25 @@ fn parse_pid(bytes: &[u8]) -> Option<u32> {
 /// `/proc` itself: the live pids (`oxidebsd_proc_pid_at`) and the system-wide files
 /// (`proc_dir_nth_entry`).
 fn open_proc_root_dir() -> i64 {
-    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::Root, dirent_pos: 0 })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::Root }, 0)
 }
 
 /// `/proc/<pid>`: the fixed three leaf names.
 fn open_proc_pid_dir(pid: u32) -> i64 {
-    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::PidFiles(pid), dirent_pos: 0 })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::PidFiles(pid) }, 0)
 }
 
 /// `/proc/<pid>/task`: exactly one entry, `pid`'s own decimal string -- see `ProcDirKind::TaskList`'s
 /// own doc comment for why this exists at all.
 fn open_task_dir(pid: u32) -> i64 {
-    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::TaskList(pid), dirent_pos: 0 })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::TaskList(pid) }, 0)
 }
 
 /// `/proc/<pid>/fd`: one entry per real fd this process has open -- see `ProcDirKind::FdList`'s
 /// own doc comment for why each entry is a plain placeholder rather than a real target-bearing
 /// symlink.
 fn open_fd_dir(pid: u32) -> i64 {
-    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::FdList(pid), dirent_pos: 0 })
+    register_open_file(OpenFile::ProcDir { kind: ProcDirKind::FdList(pid) }, 0)
 }
 
 /// Which system-wide (not per-pid) synthetic `/proc` file a call to `open_proc_sysfile` should
@@ -4309,21 +4246,18 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
                         name,
                         name_len: leaf.len() as u8,
                         readonly: false, // this whole arm only runs when want_write is true
-                        readwrite: flags & O_ACCMODE == O_RDWR,
-                        position: 0,
                         append: flags & O_APPEND != 0,
-                    })
+                    }, flags)
                 }
                 _ => {
                     let mut name = [0u8; NAME_MAX];
                     name[..leaf.len()].copy_from_slice(leaf);
                     register_open_file(OpenFile::FileRead {
                         inode: resolved,
-                        position: 0,
                         parent,
                         name,
                         name_len: leaf.len() as u8,
-                    })
+                    }, flags & !O_ACCMODE)
                 }
             }
         }
@@ -4359,10 +4293,8 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
                 // Real O_RDONLY is 0: an `O_RDONLY|O_CREAT` descriptor still makes the file but
                 // can't write it (`readonly`'s own doc comment).
                 readonly: flags & O_ACCMODE == 0,
-                readwrite: flags & O_ACCMODE == O_RDWR,
-                position: 0,
                 append: flags & O_APPEND != 0,
-            })
+            }, flags)
         }
         None => -ENOENT,
     };
@@ -4375,57 +4307,37 @@ fn open_path(path: &[u8], flags: u64, mode: u64) -> i64 {
     result
 }
 
-extern "C" fn oxfs_read(fd: u64, uio: u64, flags: u64) -> i64 {
-    if flags & FOF_OFFSET != 0 {
-        return oxfs_pread(fd, uio);
-    }
+/// `read(2)` and `pread(2)` (`FileOps::read`): at the uio's offset, which is the file's own (the
+/// kernel keeps it, `FOF_NEXTOFF`) or `pread`'s (`FOF_OFFSET`). The kernel has checked the file
+/// is open for reading.
+extern "C" fn oxfs_read(fd: u64, uio: u64, _flags: u64) -> i64 {
+    // SAFETY: FFI call to a kernel-exported function.
+    let offset = unsafe { oxidebsd_uio_offset(uio) } as usize;
     let Some(file) = find_open_file(fd) else {
         return -EBADF;
     };
     match file {
-        OpenFile::FileRead { inode, position, .. } => {
-            let n = match read_inode_uio(*inode, *position, uio) {
+        OpenFile::FileRead { inode, .. } | OpenFile::Write { inode, .. } => {
+            let inode = *inode;
+            let n = match read_inode_uio(inode, offset, uio) {
                 Ok(n) => n,
                 Err(e) => return e,
             };
-            *position += n;
             // Real POSIX read(): a real data access, marked for st_atime update -- skipped for a
             // zero-byte read (at or past EOF), matching real Unix's own "no state change" behavior
             // for that case.
             if n > 0 {
-                touch_atime(*inode);
+                touch_atime(inode);
             }
             n as i64
         }
         // read(2) on a directory is EISDIR, as on OpenBSD and FreeBSD 13+: getdents reads it.
         OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } => -EISDIR,
-        OpenFile::Write { inode, position, readwrite: true, .. } => {
-            let n = match read_inode_uio(*inode, *position, uio) {
-                Ok(n) => n,
-                Err(e) => return e,
-            };
-            *position += n;
-            if n > 0 {
-                touch_atime(*inode);
-            }
-            n as i64
-        }
-        OpenFile::Write { .. } => -EBADF,
-        OpenFile::ProcRead {
-            render,
-            len: total,
-            position,
-        } => {
-            let remaining = *total - *position;
-            let n = remaining.min(uio_resid(uio));
+        OpenFile::ProcRead { render, len: total, .. } => {
             let content = proc_render(*render as usize);
-            match uio_out(uio, &content[*position..*position + n]) {
-                Ok(m) => {
-                    *position += m;
-                    m as i64
-                }
-                Err(e) => e,
-            }
+            let start = offset.min(*total);
+            let n = (*total - start).min(uio_resid(uio));
+            uio_ret(uio_out(uio, &content[start..start + n]))
         }
         OpenFile::DevRandom => uio_ret(fill_uio(uio, |chunk| {
             // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
@@ -4443,21 +4355,20 @@ extern "C" fn oxfs_read(fd: u64, uio: u64, flags: u64) -> i64 {
     }
 }
 
-/// `write(2)`: stores straight into the inode's blocks at the descriptor's offset (the end of the
-/// file first, for `O_APPEND`), so the data is visible to every reader when this returns. A short
-/// count when the filesystem fills partway; `ENOSPC` when nothing fit.
+/// `write(2)` and `pwrite(2)` (`FileOps::write`): stores straight into the inode's blocks at the
+/// uio's offset -- for `write` on an `O_APPEND` file (`FOF_NEXTOFF`), the end of the file first --
+/// so the data is visible to every reader when this returns. A short count when the filesystem
+/// fills partway; `ENOSPC` when nothing fit. The kernel has checked the file is open for writing
+/// and keeps the offset.
 extern "C" fn oxfs_write(fd: u64, uio: u64, flags: u64) -> i64 {
-    if flags & FOF_OFFSET != 0 {
-        return oxfs_pwrite(fd, uio);
-    }
     let len = uio_resid(uio);
-    let (inode, offset) = match find_open_file(fd) {
-        Some(OpenFile::Write { readonly: true, .. }) => return -EBADF,
-        Some(OpenFile::Write { inode, position, append, .. }) => {
-            if *append {
-                *position = read_inode(*inode).size as usize;
+    let inode = match find_open_file(fd) {
+        Some(OpenFile::Write { inode, append, .. }) => {
+            if *append && flags & FOF_NEXTOFF != 0 {
+                // SAFETY: FFI call to a kernel-exported function, with the uio this call has.
+                unsafe { oxidebsd_uio_set_offset(uio, read_inode(*inode).size as u64) };
             }
-            (*inode, *position)
+            *inode
         }
         Some(OpenFile::DevRandom | OpenFile::DevNull | OpenFile::DevZero) => {
             // Matches real /dev/null's and /dev/zero's own write behavior (accept and discard);
@@ -4472,17 +4383,12 @@ extern "C" fn oxfs_write(fd: u64, uio: u64, flags: u64) -> i64 {
         return 0;
     }
     clear_setid_on_write(fd);
-    let n = match write_inode_uio(inode, offset, uio) {
-        Ok(n) => n,
-        Err(e) => return e,
-    };
-    if let Some(OpenFile::Write { position, .. }) = find_open_file(fd) {
-        *position = offset + n;
-    }
-    n as i64
+    // SAFETY: FFI call to a kernel-exported function.
+    let offset = unsafe { oxidebsd_uio_offset(uio) } as usize;
+    uio_ret(write_inode_uio(inode, offset, uio))
 }
 
-/// Registered as `fd`'s close callback via `oxidebsd_register_fd_ops`. Releases any `flock()`
+/// `FileOps::close`. Releases any `flock()`
 /// locks `fd` still holds (closing the locked fd releases its locks), and frees the file if this
 /// was the last thing keeping an unlinked file alive (`maybe_release`).
 extern "C" fn oxfs_close(fd: u64) -> i64 {
@@ -6940,9 +6846,9 @@ fn mount_devfs() -> bool {
 }
 
 /// The registry's open function for the devices oxfs implements itself.
-extern "C" fn oxfs_dev_open(major: u64, minor: u64, _flags: u64) -> i64 {
+extern "C" fn oxfs_dev_open(major: u64, minor: u64, flags: u64) -> i64 {
     match known_device(((major as u32) << 8) | minor as u32, true) {
-        Some(open_file) => register_open_file(open_file),
+        Some(open_file) => register_open_file(open_file, flags),
         None => -ENXIO,
     }
 }
@@ -7050,25 +6956,15 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         return -EBADF;
     };
     let offset = offset as i64;
-    let (position, size): (&mut usize, i64) = match open_file {
-        OpenFile::FileRead { inode, position, .. } | OpenFile::Write { inode, position, .. } => {
-            (position, read_inode(*inode).size as i64)
-        }
+    // SAFETY: FFI call to a kernel-exported function.
+    let current = unsafe { oxidebsd_file_offset(real_fd) } as i64;
+    let size = match open_file {
+        OpenFile::FileRead { inode, .. } | OpenFile::Write { inode, .. } => read_inode(*inode).size as i64,
         // A directory's offset is `getdents`' record cursor (`d_off` is the next record's index),
         // so `rewinddir`'s `lseek(fd, 0, SEEK_SET)` and `seekdir` land where they should.
-        OpenFile::DirListing { dirent_pos, .. } | OpenFile::ProcDir { dirent_pos, .. } => {
-            let new_pos = match whence {
-                0 => offset,
-                1 => *dirent_pos as i64 + offset,
-                _ => return -EINVAL,
-            };
-            if new_pos < 0 {
-                return -EINVAL;
-            }
-            *dirent_pos = new_pos as usize;
-            return new_pos;
-        }
-        OpenFile::ProcRead { len, position, .. } => (position, *len as i64),
+        OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } if whence == 2 => return -EINVAL,
+        OpenFile::DirListing { .. } | OpenFile::ProcDir { .. } => 0,
+        OpenFile::ProcRead { len, .. } => *len as i64,
         OpenFile::DevRandom
         | OpenFile::DevNull
         | OpenFile::DevZero
@@ -7077,61 +6973,17 @@ extern "C" fn oxfs_lseek(fd: u64, offset: u64, whence: u64, _a3: u64) -> i64 {
         }
     };
     let new_pos = match whence {
-        0 => offset,                     // SEEK_SET
-        1 => *position as i64 + offset,  // SEEK_CUR
-        2 => size + offset,              // SEEK_END
+        0 => offset,           // SEEK_SET
+        1 => current + offset, // SEEK_CUR
+        2 => size + offset,    // SEEK_END
         _ => return -EINVAL,
     };
     if new_pos < 0 {
         return -EINVAL;
     }
-    *position = new_pos as usize;
+    // SAFETY: FFI call to a kernel-exported function.
+    unsafe { oxidebsd_file_set_offset(real_fd, new_pos as u64) };
     new_pos
-}
-
-/// `oxfs_read` with `FOF_OFFSET` -- real `pread(2)`: like `oxfs_read`, but at an explicit `offset` that neither reads nor updates this
-/// fd's own `position` (real POSIX: `pread`/`pwrite` are independent of `lseek`'s cursor). A plain
-/// `FileRead` fd (`O_RDONLY`, or an existing path opened `O_RDWR` -- see `oxfs_open`'s own
-/// existing-path branch) already has a real, committed inode to read directly; a `Write` fd needs
-/// real `readwrite` (`O_RDWR`) support and the same forced-early-commit `oxfs_read`/`oxfs_lseek`
-/// already use. Every other variant (directories, `/proc`, `/dev/*`, and a plain `O_WRONLY`
-/// `Write` fd) has no real seekable position at all -- `ESPIPE`, matching `oxfs_lseek`'s own answer
-/// for the same fd kinds.
-fn oxfs_pread(real_fd: u64, uio: u64) -> i64 {
-    // SAFETY: FFI call to a kernel-exported function.
-    let offset = unsafe { oxidebsd_uio_offset(uio) };
-    let inode = match find_open_file(real_fd) {
-        Some(OpenFile::FileRead { inode, .. }) => *inode,
-        Some(OpenFile::Write { inode, readwrite: true, .. }) => *inode,
-        Some(_) => return -ESPIPE,
-        None => return -EBADF,
-    };
-    let n = match read_inode_uio(inode, offset as usize, uio) {
-        Ok(n) => n,
-        Err(e) => return e,
-    };
-    if n > 0 {
-        touch_atime(inode);
-    }
-    n as i64
-}
-
-/// `oxfs_write` with `FOF_OFFSET` -- real `pwrite(2)`, writing directly into the fd's inode blocks
-/// at `offset` without moving the descriptor's offset. Unlike `oxfs_pread`, this works for **any**
-/// fd open for writing -- `O_WRONLY` included, not just `readwrite` (`O_RDWR`) -- matching real
-/// POSIX: `pwrite()` only requires the fd be open for writing.
-fn oxfs_pwrite(real_fd: u64, uio: u64) -> i64 {
-    // SAFETY: FFI call to a kernel-exported function.
-    let offset = unsafe { oxidebsd_uio_offset(uio) };
-    match find_open_file(real_fd) {
-        Some(OpenFile::Write { readonly: false, .. }) => {}
-        Some(_) => return -EBADF,
-        None => return -EBADF,
-    }
-    let Some(inode) = inode_of_open_file(real_fd) else {
-        return -EIO;
-    };
-    uio_ret(write_inode_uio(inode, offset as usize, uio))
 }
 
 /// Writes `value`'s decimal digits (no leading zeros; `0` prints as `"0"`) into `buf`, returning
@@ -7245,9 +7097,13 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
     if real_fd < 0 {
         return -EBADF;
     }
-    let Some(file) = find_open_file(real_fd as u64) else {
+    let real_fd = real_fd as u64;
+    let Some(file) = find_open_file(real_fd) else {
         return -EBADF;
     };
+    // The record cursor is the file's offset, which the kernel keeps.
+    // SAFETY: FFI call to a kernel-exported function.
+    let mut cursor = unsafe { oxidebsd_file_offset(real_fd) } as usize;
     // Each record is built here, then copied out. A record that can't be copied out ends the
     // call: `-EFAULT` if it was the first, else the count already copied (as Linux does), with the
     // cursor left on that record.
@@ -7255,15 +7111,11 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
     let out_len = buf_len as usize;
     let mut fault = 0i64;
     match file {
-        OpenFile::DirListing {
-            inode: dir_inode,
-            dirent_pos,
-            ..
-        } => {
+        OpenFile::DirListing { inode: dir_inode, .. } => {
             let dir_inode = *dir_inode;
             let mut written = 0usize;
             while let Some((child_inode, name, name_len)) =
-                dir_nth_used_record(dir_inode, *dirent_pos)
+                dir_nth_used_record(dir_inode, cursor)
             {
                 let name = &name[..name_len as usize];
                 let reclen = dirent_record_len(name.len());
@@ -7283,7 +7135,7 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                 write_dirent_record(
                     &mut record[..reclen],
                     child_inode as u64,
-                    (*dirent_pos + 1) as i64,
+                    (cursor + 1) as i64,
                     dtype,
                     name,
                 );
@@ -7293,22 +7145,21 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                     break;
                 }
                 written += reclen;
-                *dirent_pos += 1;
+                cursor += 1;
             }
+            unsafe { oxidebsd_file_set_offset(real_fd, cursor as u64) };
             if written == 0 && fault != 0 { fault } else { written as i64 }
         }
-        OpenFile::ProcDir {
-            kind, dirent_pos, ..
-        } => {
+        OpenFile::ProcDir { kind, .. } => {
             let kind = *kind;
             let mut written = 0usize;
-            while let Some((ino, name, name_len, dtype)) = proc_dir_nth_entry(kind, *dirent_pos) {
+            while let Some((ino, name, name_len, dtype)) = proc_dir_nth_entry(kind, cursor) {
                 let name = &name[..name_len as usize];
                 let reclen = dirent_record_len(name.len());
                 if written + reclen > out_len {
                     break;
                 }
-                let off = (*dirent_pos + 1) as i64;
+                let off = (cursor + 1) as i64;
                 write_dirent_record(&mut record[..reclen], ino, off, dtype, name);
                 let dst = buf_ptr.wrapping_add(written as u64);
                 if let Err(e) = copyout_bytes(&record[..reclen], dst) {
@@ -7316,8 +7167,9 @@ extern "C" fn oxfs_getdents(fd: u64, buf_ptr: u64, buf_len: u64, _a3: u64) -> i6
                     break;
                 }
                 written += reclen;
-                *dirent_pos += 1;
+                cursor += 1;
             }
+            unsafe { oxidebsd_file_set_offset(real_fd, cursor as u64) };
             if written == 0 && fault != 0 { fault } else { written as i64 }
         }
         _ => -ENOTDIR,

@@ -187,8 +187,9 @@ impl FileOps {
 }
 
 /// `FileOps::flags`: the file has an offset (`lseek`, `pread`/`pwrite`), which the kernel keeps:
-/// every `read`/`write` reaches the backend with `FOF_OFFSET` and the uio at the offset, and the
-/// offset is stored back from the uio afterwards. Without it `pread`/`pwrite` are `ESPIPE`.
+/// every `read`/`write` reaches the backend with the uio at an offset, `FOF_OFFSET` when the
+/// caller gave it (`pread`/`pwrite`), `FOF_NEXTOFF` when it's the file's own, which is stored
+/// back from the uio afterwards. Without it `pread`/`pwrite` are `ESPIPE`.
 pub(crate) const DFLAG_SEEKABLE: u32 = 1;
 
 /// A file's `f_flag` (FreeBSD's): open for reading, open for writing, and the open flags that
@@ -298,9 +299,8 @@ pub(crate) extern "C" fn oxidebsd_real_fd_of_pid(pid: u64, fd: u64) -> i64 {
 /// refer to it. The `close` callback fires when `refs` reaches zero.
 struct Description {
     ops: FdOps,
-    /// The static operations table, for a file made by `finstall`; `None` for one registered
-    /// through the older per-descriptor callbacks (`oxidebsd_register_fd_ops*`, oxfs's until it
-    /// moves over).
+    /// The static operations table every file has been made with since `finstall`; `None` only
+    /// until a description made through `register` alone is given one.
     table: Option<&'static FileOps>,
     data: u64,
     /// `FREAD | FWRITE | FAPPEND | FNONBLOCK`. `FNONBLOCK` is kept for every file; the access mode
@@ -429,6 +429,23 @@ pub(crate) extern "C" fn oxidebsd_file_data(handle: u64) -> u64 {
     DESCRIPTIONS.lock().get(&handle).map_or(0, |d| d.data)
 }
 
+/// `finstall` for modules: `ops` is the module's static table (modules are never unloaded), the
+/// open flags are `open(2)`'s (`open_flag`). The fd, or `-errno`.
+pub(crate) extern "C" fn oxidebsd_finstall(real_fd: u64, ops: *const FileOps, data: u64, oflags: u64) -> i64 {
+    // SAFETY: a module's own `static` table, valid for the kernel's lifetime.
+    let ops: &'static FileOps = unsafe { &*ops };
+    finstall(real_fd, ops, data, open_flag(oflags), FdKind::Module)
+}
+
+/// A seekable file's offset (`lseek`, `getdents`' record cursor while oxfs answers it).
+pub(crate) extern "C" fn oxidebsd_file_offset(handle: u64) -> u64 {
+    DESCRIPTIONS.lock().get(&handle).map_or(0, |d| d.offset)
+}
+
+pub(crate) extern "C" fn oxidebsd_file_set_offset(handle: u64, offset: u64) {
+    with_description_full(handle, |d| d.offset = offset);
+}
+
 /// Makes `real_fd` (from `oxidebsd_alloc_fd`) a file with operations `ops`, object `data`, open
 /// flags `flag` (`FREAD`/`FWRITE`/`FAPPEND`/`FNONBLOCK`) and kind `kind`, and gives the calling
 /// process the lowest free fd for it. Returns the fd, or `-ENFILE` past `kern.maxfiles` (callers
@@ -542,7 +559,7 @@ pub(crate) fn close_range(first: u64, last: u64, flags: u64) -> Result<u64, u64>
 }
 
 /// A fresh `real_fd`: the identity a module keys its own state by, and later passes to
-/// `oxidebsd_register_fd_ops*` to give the calling process an fd for it.
+/// `finstall`/`oxidebsd_finstall` to make it a file and give the calling process an fd for it.
 pub(crate) extern "C" fn oxidebsd_alloc_fd() -> u64 {
     let mut next = NEXT_REAL_FD.lock();
     let real_fd = *next;
@@ -586,48 +603,8 @@ pub(crate) extern "C" fn oxidebsd_fd_check_room(n: u64) -> i64 {
     }
 }
 
-/// Gives the calling process an fd for `real_fd` (the lowest free number) and returns it, or
-/// `-ENFILE`.
-pub(crate) extern "C" fn oxidebsd_register_fd_ops(
-    real_fd: u64,
-    read: FdReadWrite,
-    write: FdReadWrite,
-    close: FdClose,
-) -> i64 {
-    register(
-        scheduler::current_tgid(),
-        real_fd,
-        read,
-        write,
-        close,
-        no_content_id,
-    )
-}
-
-/// Same as `oxidebsd_register_fd_ops`, plus a `content_id` callback — only `sys/modules/oxfs` calls
-/// this (for its own file-backed `OpenFile` variants; its synthetic ones still pass `no_content_id`
-/// via the plain function above), so every other fd-registering module (pipes, sockets, mqueues,
-/// ...) needed zero changes. See `FdContentId`'s own doc comment for why this exists.
-pub(crate) extern "C" fn oxidebsd_register_fd_ops_with_content_id(
-    real_fd: u64,
-    read: FdReadWrite,
-    write: FdReadWrite,
-    close: FdClose,
-    content_id: FdContentId,
-) -> i64 {
-    register(
-        scheduler::current_tgid(),
-        real_fd,
-        read,
-        write,
-        close,
-        content_id,
-    )
-}
-
-/// The non-`extern "C"` body every registration entry point (`oxidebsd_register_fd_ops`,
-/// `oxidebsd_register_fd_ops_with_content_id`) shares. Returns the
-/// new fd, or `-ENFILE` for a new description past `kern.maxfiles`.
+/// `finstall`'s registration of the description and the fd. Returns the new fd, or `-ENFILE` for
+/// a new description past `kern.maxfiles`.
 fn register(
     pid: u64,
     real_fd: u64,
@@ -663,39 +640,6 @@ fn register(
     let fd = lowest_free(&table, pid, 0);
     install(&mut table, pid, fd, real_fd);
     fd as i64
-}
-
-/// Overrides `real_fd`'s `access_mode` callback after the fact -- same "separate post-hoc setter,
-/// not a `register`/`oxidebsd_register_fd_ops*` parameter" shape `oxidebsd_set_fd_positioned`
-/// shares, for the identical reason: every existing fd-registering call site keeps the
-/// `default_access_mode` `register` already sets. `sys/modules/oxfs` is the one real caller today.
-/// Marks `real_fd` as having a file position, so `pread`/`pwrite` reach its backend with
-/// `FOF_OFFSET` instead of failing with `ESPIPE`. `sys/modules/oxfs` is the one caller; its
-/// unpositioned kinds (directories, `/proc`, devices) still answer `ESPIPE` themselves.
-pub(crate) extern "C" fn oxidebsd_set_fd_positioned(real_fd: u64) {
-    with_description(real_fd, |ops| ops.positioned = true);
-}
-
-pub(crate) extern "C" fn oxidebsd_set_fd_access_mode(real_fd: u64, access_mode: FdAccessMode) {
-    with_description(real_fd, |ops| ops.access_mode = access_mode);
-}
-
-/// Overrides `real_fd`'s `is_append` callback after the fact -- same shape
-/// `oxidebsd_set_fd_access_mode` already establishes. `sys/modules/oxfs` is the one real caller,
-/// unconditionally for every `OpenFile::Write` fd it registers (the callback itself discriminates
-/// by whether that fd was actually opened with `O_APPEND`, same "always registered, harmless
-/// default for everything else" precedent `oxidebsd_set_fd_access_mode`'s own call site sets).
-pub(crate) extern "C" fn oxidebsd_set_fd_append(real_fd: u64, is_append: FdIsAppend) {
-    with_description(real_fd, |ops| ops.is_append = is_append);
-}
-
-/// Overrides `real_fd`'s `fb_geometry` callback after the fact -- same shape
-/// `oxidebsd_set_fd_access_mode` already establishes. `sys/modules/oxfs` is the one real caller,
-/// unconditionally for every fd it registers (the callback itself discriminates by `OpenFile`
-/// variant, same "always registered, harmless default for everything else" precedent
-/// `oxidebsd_set_fd_access_mode`'s own call site already sets).
-pub(crate) extern "C" fn oxidebsd_set_fd_fb_geometry(real_fd: u64, fb_geometry: FdFbGeometry) {
-    with_description(real_fd, |ops| ops.fb_geometry = fb_geometry);
 }
 
 /// Removes the calling process's own `fd` from the registry; only actually invokes the underlying
@@ -881,7 +825,7 @@ fn transfer(op: FdReadWrite, positioned: bool, need: u32, real_fd: u64, uio: &mu
             && flags & FOF_OFFSET == 0
         {
             uio.set_offset(offset);
-            flags |= FOF_OFFSET;
+            flags |= crate::kern::subr_uio::FOF_NEXTOFF;
             kept_offset = true;
         }
     }
