@@ -64,6 +64,9 @@ struct Oid {
     fmt: &'static str,
     descr: &'static str,
     get: Option<Getter>,
+    /// A getter that takes an argument, for a family of leaves made at run time (FreeBSD's
+    /// `arg2`): `kern.module.<name>.alloc` passes the module's charge id.
+    get_arg: Option<(fn(u32) -> Vec<u8>, u32)>,
     set: Option<Setter>,
 }
 
@@ -110,7 +113,7 @@ fn add_node(
     let mut oid = parent.to_vec();
     oid.push(child_number(t, parent, number));
     let name = full_name(t, parent, name);
-    t.insert(oid.clone(), Oid { name, kind: CTLTYPE_NODE, flags: CTLFLAG_RD, fmt: "N", descr, get: None, set: None });
+    t.insert(oid.clone(), Oid { name, kind: CTLTYPE_NODE, flags: CTLFLAG_RD, fmt: "N", descr, get: None, get_arg: None, set: None });
     oid
 }
 
@@ -139,6 +142,7 @@ fn add_leaf(t: &mut BTreeMap<Vec<i32>, Oid>, parent: &[i32], leaf: Leaf) {
             fmt: leaf.fmt,
             descr: leaf.descr,
             get: Some(leaf.get),
+            get_arg: None,
             set: leaf.set,
         },
     );
@@ -785,6 +789,44 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             Leaf { number: None, name, kind: CTLTYPE_UINT, fmt: "IU", flags: CTLFLAG_RD, descr, get, set: None },
         );
     }
+
+    add_node(t, &kern, None, "module", "Loaded kernel modules");
+    for (name, id) in crate::module::charged_modules() {
+        add_module_leaves(t, name, id);
+    }
+}
+
+/// `kern.module.<name>.alloc` and `.allocs`: the bytes and the allocations module `name` (charge
+/// id `id`) holds from the kernel heap (`module::oxidebsd_kmalloc`), so a leak shows.
+fn add_module_leaves(t: &mut BTreeMap<Vec<i32>, Oid>, name: &'static str, id: u32) {
+    let Some(modules) = oid_of(t, "kern.module") else { return };
+    let node = add_node(t, &modules, None, name, "Kernel module");
+    let leaves: [(&'static str, &'static str, fn(u32) -> Vec<u8>); 2] = [
+        ("alloc", "Bytes allocated from the kernel heap", |id| {
+            ulong(crate::module::alloc_stats_by_id(id).map_or(0, |(bytes, _)| bytes))
+        }),
+        ("allocs", "Allocations held from the kernel heap", |id| {
+            ulong(crate::module::alloc_stats_by_id(id).map_or(0, |(_, count)| count))
+        }),
+    ];
+    for (leaf, descr, get) in leaves {
+        let mut oid = node.clone();
+        oid.push(child_number(t, &node, None));
+        let name = full_name(t, &node, leaf);
+        t.insert(
+            oid,
+            Oid { name, kind: CTLTYPE_ULONG, flags: CTLFLAG_RD, fmt: "LU", descr, get: None, get_arg: Some((get, id)), set: None },
+        );
+    }
+}
+
+/// Called by the module loader as each module loads: adds its `kern.module.<name>` leaves when the
+/// tree is already built (otherwise `populate` adds them). Id 0 is an uncharged module.
+pub(crate) fn module_loaded(name: &'static str, id: u32) {
+    let mut t = TREE.lock();
+    if !t.is_empty() && id != 0 {
+        add_module_leaves(&mut t, name, id);
+    }
 }
 
 /// FreeBSD's `struct vmtotal`: nine `uint64_t` page counts, then five `int16_t` thread counts and
@@ -921,16 +963,20 @@ fn sysctl(a: &Args) -> Result<(), i64> {
     if name[0] == 0 {
         return meta(a, &name);
     }
-    let (get, set, flags) = {
+    let (get, get_arg, set, flags) = {
         let t = tree();
         let o = t.get(&name).ok_or(ENOENT as i64)?;
         if o.kind == CTLTYPE_NODE {
             return Err(EISDIR);
         }
-        (o.get, o.set, o.flags)
+        (o.get, o.get_arg, o.set, o.flags)
     };
     // The value is produced outside the tree's lock: a getter may take other locks.
-    let value = get.map(|g| g()).unwrap_or_default();
+    let value = match (get, get_arg) {
+        (Some(g), _) => g(),
+        (None, Some((g, arg))) => g(arg),
+        (None, None) => Vec::new(),
+    };
     copy_out(a, &value)?;
     if a.newp != 0 {
         if crate::process::identity::oxidebsd_current_uid() != 0 {

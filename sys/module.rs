@@ -563,12 +563,27 @@ pub fn load(
     // Recorded before module_init runs, not after -- matches real Linux's own "present in
     // /proc/modules the instant relocation finishes" timing, and lets a module's own boot
     // self-check (see sys/modules/oxfs's) see itself already listed.
-    LOADED_MODULES.lock().push(LoadedModuleInfo {
-        name,
-        base,
-        size: region_size,
-        fatal_on_panic,
-    });
+    let charge_id = {
+        let mut modules = LOADED_MODULES.lock();
+        modules.push(LoadedModuleInfo {
+            name,
+            base,
+            size: region_size,
+            fatal_on_panic,
+        });
+        if modules.len() <= MAX_CHARGED_MODULES { modules.len() as u32 } else { 0 }
+    };
+    // Stamp the module's allocations with its charge id (`lib/libkern-mod`'s `kern_mod_id`), if it
+    // allocates at all: `--gc-sections` drops the symbol from a module that doesn't.
+    if let Some(&addr) = object
+        .find_defined_symbol(CHARGE_ID_SYMBOL)
+        .and_then(|index| symbol_addrs.get(&index))
+    {
+        // SAFETY: the symbol is a 4-byte atomic in the module's writable data group, mapped and
+        // relocated above; no module code has run yet.
+        unsafe { core::ptr::write_volatile(addr as *mut u32, charge_id) };
+    }
+    crate::kern::kern_sysctl::module_loaded(name, charge_id);
     // SAFETY: init_addr was computed above from module_init's own symbol table entry plus this
     // module's now-fully-relocated base -- every relocation touching its code has already been
     // applied, and module_init's real signature (established by every module crate's own
@@ -725,6 +740,116 @@ pub(crate) extern "C" fn oxidebsd_page_free(va: u64) {
     }
     crate::memory::with_frame_allocator(|frame_allocator| unsafe { frame_allocator.deallocate_frame(frame) });
 }
+
+/// The most modules allocation is charged to; a module loaded past it allocates uncharged.
+const MAX_CHARGED_MODULES: usize = 64;
+
+/// What one module has allocated through `oxidebsd_kmalloc` and not yet freed.
+struct ModuleAllocStats {
+    bytes: core::sync::atomic::AtomicU64,
+    count: core::sync::atomic::AtomicU64,
+}
+
+/// Indexed by a module's charge id (`LOADED_MODULES` position + 1); 0 is "no module", for an
+/// object the loader didn't stamp.
+static MODULE_ALLOC_STATS: [ModuleAllocStats; MAX_CHARGED_MODULES + 1] = [const {
+    ModuleAllocStats {
+        bytes: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    }
+}; MAX_CHARGED_MODULES + 1];
+
+/// The symbol `lib/libkern-mod` defines for its charge id: `load` writes the module's id into it,
+/// so a module can't forget to say who it is.
+const CHARGE_ID_SYMBOL: &str = "kern_mod_id";
+
+/// Kernel API for modules (VFS.md §3.1): `size` bytes aligned to `align` from the kernel heap,
+/// charged to module `id`; null when the heap can't satisfy it or the layout is invalid. Callable
+/// whenever module code runs, not only in `module_init`. `lib/libkern-mod`'s global allocator is
+/// the only caller.
+pub(crate) extern "C" fn oxidebsd_kmalloc(size: u64, align: u64, id: u32) -> *mut u8 {
+    use core::sync::atomic::Ordering;
+    let Ok(layout) = core::alloc::Layout::from_size_align(size as usize, align as usize) else {
+        return core::ptr::null_mut();
+    };
+    if layout.size() == 0 {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: a nonzero size, checked above.
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    if !ptr.is_null()
+        && let Some(stats) = MODULE_ALLOC_STATS.get(id as usize)
+    {
+        stats.bytes.fetch_add(size, Ordering::Relaxed);
+        stats.count.fetch_add(1, Ordering::Relaxed);
+    }
+    ptr
+}
+
+/// Kernel API for modules: gives back what `oxidebsd_kmalloc(size, align, id)` returned.
+pub(crate) extern "C" fn oxidebsd_kfree(ptr: *mut u8, size: u64, align: u64, id: u32) {
+    use core::sync::atomic::Ordering;
+    let Ok(layout) = core::alloc::Layout::from_size_align(size as usize, align as usize) else {
+        return;
+    };
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: the module hands back a block `oxidebsd_kmalloc` gave it, with the same layout
+    // (the `GlobalAlloc` contract its allocator is held to).
+    unsafe { alloc::alloc::dealloc(ptr, layout) };
+    if let Some(stats) = MODULE_ALLOC_STATS.get(id as usize) {
+        // A module's own stamp never changes, so these can't go below zero unless a module frees
+        // what it didn't allocate; saturate rather than wrap so the sysctl stays readable.
+        let _ = stats.bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| Some(b.saturating_sub(size)));
+        let _ = stats.count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
+    }
+}
+
+/// Bytes and allocations module `name` holds from `oxidebsd_kmalloc` (`kern.module.<name>.alloc`
+/// and `.allocs`); `None` for a module that isn't loaded or isn't charged.
+pub fn alloc_stats(name: &str) -> Option<(u64, u64)> {
+    let index = LOADED_MODULES.lock().iter().position(|m| m.name == name)?;
+    alloc_stats_by_id(index as u32 + 1)
+}
+
+/// As `alloc_stats`, by charge id.
+pub(crate) fn alloc_stats_by_id(id: u32) -> Option<(u64, u64)> {
+    use core::sync::atomic::Ordering;
+    let stats = MODULE_ALLOC_STATS.get(id as usize).filter(|_| id != 0)?;
+    Some((stats.bytes.load(Ordering::Relaxed), stats.count.load(Ordering::Relaxed)))
+}
+
+/// Every loaded module's name with its charge id, in load order, for `kern.module.*`.
+pub(crate) fn charged_modules() -> Vec<(&'static str, u32)> {
+    LOADED_MODULES
+        .lock()
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index < MAX_CHARGED_MODULES)
+        .map(|(index, m)| (m.name, index as u32 + 1))
+        .collect()
+}
+
+/// What a module's `alloc` calls when an allocation fails and nothing handled it: rustc wires
+/// `handle_alloc_error` to a `__rust_alloc_error_handler` symbol it would generate at a final link,
+/// which a module never has, so `resolve_external_symbol` points it here. Fatal to the call, as
+/// any module panic is (`module_panic_trampoline`). Code that can fail cleanly uses `try_reserve`
+/// and friends instead.
+extern "Rust" fn module_alloc_error(size: usize, align: usize) -> ! {
+    serial_println!("[module] panic: out of memory allocating {} bytes (align {})", size, align);
+    // SAFETY: single-core, no concurrent writer -- see CURRENT_MODULE_FATAL's own doc comment.
+    if unsafe { CURRENT_MODULE_FATAL } {
+        crate::reboot::reboot();
+    } else {
+        crate::hlt_loop();
+    }
+}
+
+/// `alloc` calls `__rust_no_alloc_shim_is_unstable_v2` before allocating, as a link-time check that
+/// the program went through rustc's allocator shim; a module never does, so the loader points it
+/// at this, which does nothing.
+extern "Rust" fn module_no_alloc_shim() {}
 
 /// `/proc/modules` -- real Linux's own seven-space-separated-field format per line (`name size
 /// refcount deps state address`), just with fixed placeholders for the three fields this loader
@@ -948,17 +1073,26 @@ fn apply_relocation(
 
 /// The kernel's hand-curated API surface for module code to call into, resolved by name against
 /// each module's undefined symbols. Deliberately small and explicit, not an automatically
-/// enumerated kernel symbol table -- see `CLAUDE.md`'s module-loading section for why modules
-/// avoid `alloc`/`Vec`/`BTreeMap` (so this table doesn't need to expose the internal, unstable
-/// `__rust_alloc`-family ABI `#[global_allocator]` wires up) and instead get an explicit
-/// `oxidebsd_*` C-ABI surface plus the fixed panic-entry trampoline every module needs whether it
-/// calls anything else here or not.
+/// enumerated kernel symbol table: an explicit `oxidebsd_*` C-ABI surface, plus the fixed
+/// panic-entry trampoline every module needs whether it calls anything else here or not. A module
+/// that uses `alloc` does so through `lib/libkern-mod`'s global allocator over
+/// `oxidebsd_kmalloc`/`oxidebsd_kfree`; the `__rust_alloc` family itself stays inside the module.
 fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
     if !panic_symbol.is_empty() && name == panic_symbol {
         return Some(module_panic_trampoline as *const () as u64);
     }
+    // The two symbols rustc's allocator shim would define at a final link (see
+    // `module_alloc_error`). Matched by suffix: their v0-mangled names carry a toolchain hash.
+    if name.ends_with("__rust_alloc_error_handler") {
+        return Some(module_alloc_error as *const () as u64);
+    }
+    if name.ends_with("__rust_no_alloc_shim_is_unstable_v2") {
+        return Some(module_no_alloc_shim as *const () as u64);
+    }
     match name {
         "oxidebsd_log" => Some(oxidebsd_log as *const () as u64),
+        "oxidebsd_kmalloc" => Some(oxidebsd_kmalloc as *const () as u64),
+        "oxidebsd_kfree" => Some(oxidebsd_kfree as *const () as u64),
         "oxidebsd_register_syscall" => {
             Some(crate::syscall::oxidebsd_register_syscall as *const () as u64)
         }
@@ -1331,9 +1465,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
     }
 }
 
-/// Writes `len` bytes at `ptr` to the kernel's serial/VGA console. Modules don't use `alloc`, so
-/// there's no `&str`/`String` to pass across the module boundary directly -- a raw pointer and
-/// length is the simplest shape that survives relocation without a shared ABI crate, matching how
+/// Writes `len` bytes at `ptr` to the kernel's serial/VGA console. A raw pointer and length (a `&str`'s
+/// parts) is the simplest shape that survives relocation without a shared ABI crate, matching how
 /// the userland ELF boundary already hand-duplicates syscall constants rather than sharing one.
 ///
 /// `extern "C"`, not `#[unsafe(no_mangle)]`: no external object ever needs to find this by

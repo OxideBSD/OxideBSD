@@ -262,8 +262,12 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 
 - Built with `cargo rustc --emit=obj` then `rust-lld -r --gc-sections -u module_init` (the gc is
   mandatory). `RUSTFLAGS="-C relocation-model=static -C code-model=kernel"`.
-- Module code: **no `alloc`, no `core::fmt`/`write!`**. State in `static mut` arrays, or large
-  pools via `oxidebsd_module_alloc_zeroed` from inside `module_init`.
+- Module code may use `alloc` and `core::fmt` by depending on `lib/libkern-mod` (`use kern_mod as
+  _;`): a global allocator over the kernel heap (1/8 of RAM, 8 MiB at 64 MB), charged per module
+  (`kern.module.<name>.alloc`). An infallible allocation that fails is a module panic: use
+  `try_reserve` and return `ENOMEM` where a call can fail. **Never hand out `&'static mut` into a
+  growable `Vec`** (it moves): grow in boxed chunks. Large boot-time pools still come from
+  `oxidebsd_module_alloc_zeroed` inside `module_init`.
 - A `static mut` written but never read through a syscall-reachable path can be optimised away.
 - `serial_println!` can't take implicit `{name}` captures.
 - A module panic is fatal to the call; oxfs's panic reboots.

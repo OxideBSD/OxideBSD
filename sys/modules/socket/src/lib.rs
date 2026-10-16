@@ -1,7 +1,6 @@
 //! The socket system calls, for every family, and the `poll` family (OxideBSD-doc `UNIX.md` §4).
 //! This module only registers them; the socket layer (`sys/kern/uipc_socket.rs`) and
-//! `sys/net/mod.rs` implement them, since a module can't use `alloc` (see CLAUDE.md's
-//! module-loading section).
+//! `sys/net/mod.rs` implement them (written when modules had no `alloc`).
 //!
 //! `sendmsg`/`recvmsg` carry every send and receive (the C library builds `sendto`/`recvfrom`/
 //! `send`/`recv` on them), and `getsockopt`/`setsockopt` take their four trailing arguments as

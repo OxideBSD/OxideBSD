@@ -1,8 +1,7 @@
 //! `SYS_CLOCK_GETTIME = 138` and `SYS_NANOSLEEP = 139` (see CLAUDE.md's "BusyBox gap analysis" —
 //! the "clock + nanosleep" gap), continuing the sequence past `sys/modules/posix_compat`'s
 //! `SYS_UNAME = 137`. Same "module registers, kernel implements" split every other syscall module
-//! in this codebase uses: real logic is kernel-resident, since this module can't use `alloc` (see
-//! CLAUDE.md's module-loading section) —
+//! in this codebase uses: real logic is kernel-resident (from when modules had no `alloc`) —
 //! `sys/syscall.rs`'s `sys_clock_gettime` (backed by `src/pit.rs`'s reprogrammed timer tick rate
 //! for `CLOCK_MONOTONIC` and `src/rtc.rs`'s CMOS read for `CLOCK_REALTIME`) for the former,
 //! `sys/process.rs`'s `do_nanosleep` (a real block-then-`scheduler::schedule()`, woken by

@@ -12,8 +12,7 @@
 
 unsafe extern "C" {
     /// Kernel-exported logging function (`sys/module.rs`) — writes `len` bytes at `ptr` to the
-    /// kernel's serial/VGA console. Modules don't use `alloc`, so there's no `&str`/`String` to
-    /// pass across the module boundary directly; a raw pointer + length is the simplest shape
+    /// kernel's serial/VGA console. A raw pointer + length (a `&str`'s parts) is the simplest shape
     /// that survives relocation without needing a shared ABI crate (matches how the userland ELF
     /// boundary already hand-duplicates syscall constants rather than sharing a crate).
     fn oxidebsd_log(ptr: *const u8, len: u64);

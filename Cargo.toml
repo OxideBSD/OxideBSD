@@ -63,6 +63,7 @@ members = [
   "regress/at-syscall-smoke",
   "regress/socket-syscall-smoke",
   "regress/sysctl-syscall-smoke",
+  "regress/kmod-alloc-syscall-smoke",
   "regress/pagecache-syscall-smoke",
   "regress/vfork-syscall-smoke",
   "regress/ipc-tools-syscall-smoke",
@@ -102,9 +103,10 @@ members = [
   "sys/modules/sysctl",
   "sys/modules/procctl",
   "sys/modules/vfork",
+  "sys/modules/alloc_smoke",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcertstore", "lib/liboxfs", "lib/libmtree"]
+exclude = ["lib/libcertstore", "lib/libkern-mod", "lib/liboxfs", "lib/libmtree"]
 
 [package]
 name = "oxidebsd"
@@ -374,6 +376,10 @@ harness = false
 
 [[test]]
 name = "sysctl_syscall_smoke"
+harness = false
+
+[[test]]
+name = "kmod_alloc_syscall_smoke"
 harness = false
 
 [[test]]

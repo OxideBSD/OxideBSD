@@ -343,7 +343,7 @@ const SYS_GETRANDOM_LINUX: u64 = 318;
 const SYS_SYSINFO: u64 = 527;
 /// Items 11-16 of the same 28-syscall pre-reserved batch -- the POSIX message-queue sub-batch,
 /// see `sys/fs/mqueue.rs`'s own doc comment for the real logic (`crate::fs::mqueue`, kernel-
-/// resident since this module can't use `alloc`). `mq_close` isn't its own number -- see that
+/// resident, from when modules had no `alloc`). `mq_close` isn't its own number -- see that
 /// module's doc comment for why an mqd rides the ordinary `SYS_CLOSE` path instead.
 const SYS_MQ_OPEN: u64 = 536;
 const SYS_MQ_UNLINK: u64 = 537;
@@ -352,8 +352,8 @@ const SYS_MQ_TIMEDRECEIVE: u64 = 539;
 const SYS_MQ_NOTIFY: u64 = 540;
 const SYS_MQ_GETSETATTR: u64 = 541;
 /// Items 25-28, last sub-batch of the same 28-syscall pre-reserved batch -- real SysV message
-/// queues, see `sys/fs/sysv_msg.rs`'s own doc comment (`crate::fs::sysv_msg`, kernel-resident
-/// since this module can't use `alloc`) for the real logic and how it differs from the POSIX
+/// queues, see `sys/fs/sysv_msg.rs`'s own doc comment (`crate::fs::sysv_msg`, kernel-resident,
+/// from when modules had no `alloc`) for the real logic and how it differs from the POSIX
 /// `mq_*` family just above.
 const SYS_MSGGET: u64 = 550;
 const SYS_MSGSND: u64 = 551;

@@ -5,8 +5,8 @@
 //! a dedicated new sys/modules/signal, whichever the user prefers"). Same "module registers, kernel
 //! implements" split every other syscall module in this codebase already uses: the real logic
 //! (`do_kill`/`do_sigaction`/`do_sigprocmask` in `sys/process.rs`, plus the pending-signal
-//! delivery/`sigreturn` machinery in `sys/syscall.rs`) all stays kernel-resident, since this
-//! module can't use `alloc` and the process table needs `BTreeMap` freely — this crate only ever
+//! delivery/`sigreturn` machinery in `sys/syscall.rs`) all stays kernel-resident, since the
+//! process table needs `BTreeMap` freely (and modules had no `alloc` when this was written) — this crate only ever
 //! gains thin `extern "C" fn handle_x` wrappers over kernel-resident `oxidebsd_sys_x` functions.
 //!
 //! `SYS_KILL = 116`/`SYS_SIGACTION = 117`/`SYS_SIGPROCMASK = 118` continue the existing

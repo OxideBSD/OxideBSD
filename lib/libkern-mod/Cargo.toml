@@ -1,0 +1,10 @@
+[package]
+name = "kern_mod"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# What a kernel module links to use `alloc` (VFS.md §3.1): a global allocator over the kernel
+# heap. No dependencies; its own workspace, like lib/liboxfs.
+[workspace]

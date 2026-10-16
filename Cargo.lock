@@ -7,6 +7,13 @@ name = "access-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "alloc_smoke"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+]
+
+[[package]]
 name = "at-syscall-smoke"
 version = "0.1.0"
 
@@ -246,7 +253,15 @@ name = "itimer-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "kern_mod"
+version = "0.1.0"
+
+[[package]]
 name = "keyevent-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "kmod-alloc-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
@@ -382,6 +397,7 @@ version = "0.1.0"
 name = "oxfs"
 version = "0.1.0"
 dependencies = [
+ "kern_mod",
  "oxfs_format",
 ]
 

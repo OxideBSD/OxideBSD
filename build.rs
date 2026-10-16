@@ -403,6 +403,7 @@ fn main() {
     build_userland_crate("at-syscall-smoke", "AT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("socket-syscall-smoke", "SOCKET_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sysctl-syscall-smoke", "SYSCTL_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("kmod-alloc-syscall-smoke", "KMOD_ALLOC_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("pagecache-syscall-smoke", "PAGECACHE_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("vfork-syscall-smoke", "VFORK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("ipc-tools-syscall-smoke", "IPC_TOOLS_SYSCALL_SMOKE_ELF_PATH");
@@ -449,6 +450,7 @@ fn main() {
     build_module_crate("sysctl", "SYSCTL", &[]);
     build_module_crate("procctl", "PROCCTL", &[]);
     build_module_crate("vfork", "VFORK", &[]);
+    build_module_crate("alloc_smoke", "ALLOC_SMOKE", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.

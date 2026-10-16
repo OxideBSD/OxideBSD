@@ -564,6 +564,25 @@ static void tunables(void)
 		"another user is refused ten processes sooner");
 }
 
+static unsigned long ulval(const char *name)
+{
+	unsigned long v = 0;
+	size_t len = sizeof v;
+	if (sysctlbyname(name, &v, &len, 0, 0) < 0 || len != sizeof v) return (unsigned long)-1;
+	return v;
+}
+
+/* kern.module.<name>.alloc{,s}: what each module holds from the kernel heap (VFS.md §3.1). */
+static void modules(void)
+{
+	CHECK((kind("kern.module.native_abi.alloc", 0) & CTLTYPE) == CTLTYPE_ULONG,
+		"kern.module.native_abi.alloc is an unsigned long");
+	CHECK(ulval("kern.module.native_abi.alloc") == 0 && ulval("kern.module.native_abi.allocs") == 0,
+		"native_abi holds nothing from the kernel heap");
+	errno = 0;
+	CHECK_ERR(sysctlbyname("kern.module.nosuchmodule.alloc", 0, 0, 0, 0), ENOENT, "an unknown module is ENOENT");
+}
+
 int main(void)
 {
 	setvbuf(stdout, 0, _IONBF, 0);
@@ -579,6 +598,7 @@ int main(void)
 	message_buffer();
 	memory();
 	load_average();
+	modules();
 	printf("sysctl-smoke: %d failure(s)\n", failures);
 	return failures;
 }

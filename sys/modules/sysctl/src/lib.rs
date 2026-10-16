@@ -1,5 +1,5 @@
 //! Registers `sysctl(2)` (OxideBSD-doc `SYSCTL.md` §4), system call 583. The tree and its
-//! variables are kernel-resident (`sys/kern/kern_sysctl.rs`): a module can't use `alloc`.
+//! variables are kernel-resident (`sys/kern/kern_sysctl.rs`), from when modules had no `alloc`.
 //!
 //! The call's six arguments don't fit the native ABI's four registers, so `sysctl(3)` passes one
 //! pointer to `{ name, namelen, oldp, oldlenp, newp, newlen }`.
