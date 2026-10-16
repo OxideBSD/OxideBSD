@@ -602,29 +602,50 @@ fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool) -
     (b.out, b.truncated, release)
 }
 
-type NodeFn = extern "C" fn(u64, u64) -> i64;
-
-/// oxfs's socket-file functions: `(create, lookup)`, each `(path_ptr, path_len) -> inode | -errno`.
-static NODE_FNS: Mutex<Option<(NodeFn, NodeFn)>> = Mutex::new(None);
-
-/// Called once by oxfs's `module_init`.
-pub(crate) extern "C" fn oxidebsd_register_socket_nodes(create: NodeFn, lookup: NodeFn) {
-    *NODE_FNS.lock() = Some((create, lookup));
-}
-
-/// Runs oxfs's `create` (`true`) or `lookup` on `path`, in the caller's context. Not under
-/// `STATE`'s lock: oxfs's work is its own.
+/// Makes (`create`) or looks up a socket file at `path` in the caller's context, through the VFS
+/// (`bind` makes the node, `connect` finds it). The socket's key is the node's file ID. Not under
+/// `STATE`'s lock: the file system's work is its own.
 fn node_call(create: bool, path: &[u8]) -> Result<u64, i64> {
-    let Some((c, l)) = *NODE_FNS.lock() else { return Err(uipc_socket::EAFNOSUPPORT) };
+    use vfs_if::{LOOKUP, VSOCK, VWRITE};
+    const EADDRINUSE: i64 = 98;
+    const EEXIST: i32 = 17;
+    const ENOTSOCK: i64 = 88;
     if path.len() >= SOCKADDR_UN_LEN - 2 {
         return Err(ENAMETOOLONG as i64);
     }
-    let f = if create { c } else { l };
-    let r = {
-        let _lock = crate::fs::fslock::Guard::for_call(f as usize as u64);
-        f(path.as_ptr() as u64, path.len() as u64)
+    let _giant = crate::fs::fslock::Giant::enter();
+    let cred = crate::kern::vfs_subr::current_ucred();
+    if create {
+        return match crate::kern::vfs_syscalls::make_node(path, core::ptr::null_mut(), VSOCK, 0o777, 0, &cred) {
+            Ok(vp) => {
+                // SAFETY: referenced.
+                let id = unsafe { (*vp).v_fileid };
+                crate::kern::vfs_subr::vrele(vp);
+                Ok(id)
+            }
+            Err(EEXIST) => Err(EADDRINUSE),
+            Err(e) => Err(e as i64),
+        };
+    }
+    let nd = crate::kern::vfs_lookup::NameiData {
+        path,
+        nameiop: LOOKUP,
+        follow: true,
+        startdir: core::ptr::null_mut(),
+        cred: &cred,
     };
-    if r < 0 { Err(-r) } else { Ok(r as u64) }
+    let vp = crate::kern::vfs_lookup::namei(&nd).map_err(|e| e as i64)?.into_vp();
+    // SAFETY: referenced.
+    let (vtype, id) = unsafe { ((*vp).v_type, (*vp).v_fileid) };
+    let r = if vtype != VSOCK {
+        Err(ENOTSOCK)
+    } else if crate::kern::vnode_if::vop_access(vp, VWRITE, &cred) != 0 {
+        Err(13)
+    } else {
+        Ok(id)
+    };
+    crate::kern::vfs_subr::vrele(vp);
+    r
 }
 
 /// The receive capacity of socket `so`: its `SO_RCVBUF`, or the default for a connection not yet

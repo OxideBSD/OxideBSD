@@ -223,9 +223,10 @@ pub extern "C" fn _start() -> ! {
         write_bytes(b"proc-smoke: relative chdir(fd) failed\n");
         test_exit(false);
     }
-    let empty = b"";
-    let Ok(dfd2) = (unsafe { syscall(SYS_OPEN, empty.as_ptr() as u64, 0, 0) }) else {
-        write_bytes(b"proc-smoke: relative open(\"\") inside fd dir failed\n");
+    // `.`, not `""`: an empty path is `ENOENT` (POSIX), since the VFS (oxfs opened the cwd).
+    let dot = b".";
+    let Ok(dfd2) = (unsafe { syscall(SYS_OPEN, dot.as_ptr() as u64, dot.len() as u64, 0) }) else {
+        write_bytes(b"proc-smoke: relative open(\".\") inside fd dir failed\n");
         test_exit(false);
     };
     let mut dbuf2 = [0u8; 512];

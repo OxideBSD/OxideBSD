@@ -729,8 +729,11 @@ pub(crate) struct SignalStackFrame {
 /// `Mutex` second — and never hold this lock across `scheduler::schedule()`. Same discipline
 /// `PROCESS_TABLE` itself already follows.
 pub struct ThreadGroupShared {
+    /// The working directory: a vnode this holds a use reference to (`kern::vfs_subr`), or 0 for
+    /// the system's root directory, which needs none (it's never released).
     pub cwd: u64,
-    pub root_inode: u64,
+    /// The root directory (`chroot(2)`), as `cwd`: 0 for the system's root.
+    pub root: u64,
     pub umask: u32,
     /// Real, effective and saved IDs and supplementary groups (`identity::Cred`).
     pub cred: identity::Cred,
@@ -756,6 +759,19 @@ pub struct ThreadGroupShared {
     /// private pages are weighted by `(1000 + oom_adj) / 1000` when choosing a victim, and `-1000`
     /// is never chosen. Inherited across fork and exec; set by `procctl(2)` (`kern::kern_procctl`).
     pub oom_adj: i16,
+}
+
+impl Drop for ThreadGroupShared {
+    /// The last thread of the group is gone: its directories' references go too, through the
+    /// deferred queue, since this runs wherever the last `Arc` drops (under the process table's
+    /// lock, as a process is reaped).
+    fn drop(&mut self) {
+        for vp in [self.cwd, self.root] {
+            if vp != 0 {
+                crate::kern::vfs_subr::vrele_deferred(vp as *mut vfs_if::Vnode);
+            }
+        }
+    }
 }
 
 pub struct Process {
@@ -818,7 +834,7 @@ pub struct Process {
     /// bare top of the mapped stack region (`process::USER_STACK_TOP`). Handed straight to
     /// `usermode::jump_to_usermode`/`syscall::redirect_frame` as the stack pointer.
     pub user_stack_top: VirtAddr,
-    /// Real `CLONE_THREAD`-shared state: `cwd`, `root_inode`, `umask`, `cred`, `sigactions` —
+    /// Real `CLONE_THREAD`-shared state: `cwd`, `root`, `umask`, `cred`, `sigactions` —
     /// see `ThreadGroupShared`'s own doc comment for why these moved
     /// out of `Process` itself and into one `Arc<Mutex<..>>` every thread in a real thread group
     /// shares. Every process today is still its own thread group of one (`spawn`/`fork` both build
@@ -846,7 +862,7 @@ pub struct Process {
     pub start_ticks: u64,
     pub fs_base: u64,
     /// Real `CLONE_CHILD_CLEARTID` support (`process::lifecycle::do_clone`'s own `ctid` argument)
-    /// — `0` doubles as "never set", same convention `cwd`/`root_inode` already use. Real musl
+    /// — `0` doubles as "never set", same convention `cwd`/`root` already use. Real musl
     /// `pthread_create()` sets this to `&__thread_list_lock`, not (as the name might suggest) a
     /// `tid`-reporting mechanism `pthread_join` itself needs — `pthread_join`'s own real
     /// completion signal is pure userspace futex logic against `detach_state`, no kernel help

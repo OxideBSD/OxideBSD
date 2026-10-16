@@ -322,6 +322,7 @@
 ./var/cron/tabs type=dir mode=0700
 ./tmp type=dir mode=1777
 ./dev type=dir
+./proc type=dir mode=0555
 ./etc/crontab type=file src=etc/crontab
 ./etc/fstab type=file src=etc/fstab
 ./etc/cron.d type=dir

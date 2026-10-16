@@ -1148,6 +1148,7 @@ fn main() {
     // oxfs embeds nothing (RAM_FLOOR.md §4.6.1): the system is installed into the images, from
     // these build products, by distrib/install.mtree.
     build_module_crate("oxfs", "OXFS", &[]);
+    build_module_crate("procfs", "PROCFS", &[]);
     build_sets_and_images(&oxfs_extra_env);
 
     // Multiboot2 boot path (see CLAUDE.md's Multiboot2 section): a genuinely separate final ELF,

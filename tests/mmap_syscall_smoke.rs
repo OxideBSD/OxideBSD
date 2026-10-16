@@ -139,6 +139,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
 
+    // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
+    const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
+    const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
+
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 

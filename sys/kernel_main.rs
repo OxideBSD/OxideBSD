@@ -188,6 +188,12 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
+
+    // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
+    const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
+    const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
+    crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
     let (transfers, irqs) = crate::drivers::disk::stats();
     serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
 

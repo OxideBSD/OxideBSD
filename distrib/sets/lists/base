@@ -9,6 +9,7 @@
 ./bin
 ./bin/**
 ./dev
+./proc
 ./etc
 ./etc/**
 ./home

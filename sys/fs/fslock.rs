@@ -142,6 +142,24 @@ impl Drop for Guard {
     }
 }
 
+/// Holds the lock for its lifetime, whatever is being called: the VFS's `VOP_*` and `VFS_*`
+/// calls (`kern::vnode_if`) and system calls (`kern::vfs_syscalls`). Unlike `Guard` it says nothing
+/// about sleeping: whether the disk may sleep is the caller's context (`NoSleep`).
+pub struct Giant(());
+
+impl Giant {
+    pub fn enter() -> Self {
+        enter();
+        Giant(())
+    }
+}
+
+impl Drop for Giant {
+    fn drop(&mut self) {
+        exit();
+    }
+}
+
 /// `for_call` guards in force: while any is, a disk transfer polls instead of sleeping.
 static NO_SLEEP: AtomicU64 = AtomicU64::new(0);
 

@@ -130,6 +130,35 @@ check "umount -a unmounts them" umount -a
 check "all of them" not sh -c "mount | grep -q ' on $T/m[12] '"
 cp $T/fstab.saved /etc/fstab
 
+# The VFS (OxideBSD-doc VFS.md §10): what oxfs's own lookup got wrong before the kernel's namei.
+V=$T/vfs
+mkdir -p $V/src/a/b $V/mnt $V/tm $V/root/bin
+check "nullfs: mount a directory from elsewhere" mount -t nullfs $V/src/a $V/mnt
+check "nullfs: .. at its root is the mount point's parent" [ "$(cd -P $V/mnt/.. && /bin/pwd)" = "$V" ]
+check "nullfs: getcwd inside it" [ "$(cd -P $V/mnt/b && /bin/pwd)" = "$V/mnt/b" ]
+check "nullfs: unmount" umount $V/mnt
+check "tmpfs: mount" mount -t tmpfs tmpfs $V/tm
+mkdir -p $V/tm/x
+check "tmpfs: getcwd inside it" [ "$(cd -P $V/tm/x && /bin/pwd)" = "$V/tm/x" ]
+check "unmount refused while a cwd is on it" not sh -c "cd $V/tm/x && umount $V/tm 2>/dev/null"
+echo z > $V/tm/z
+check "a hard link across mounts is refused" not ln $V/tm/z $V/z 2>/dev/null
+check "tmpfs: unmount" umount $V/tm
+check "/./proc is /proc" /bin/test -e /./proc/meminfo
+ln -s /proc $V/p
+check "a link to /proc reaches it" /bin/test -e $V/p/meminfo
+cp /bin/test $V/root/bin/test
+check "chroot runs a program inside" chroot $V/root /bin/test -e /bin/test
+check "chroot hides /proc" not chroot $V/root /bin/test -e /proc/meminfo
+long=
+i=0
+while [ $i -lt 200 ]; do long="$long./"; i=$((i + 1)); done
+long="${long}f"
+echo hi > $V/f
+ln -s "$long" $V/ll
+check "a link's 401-byte target is kept whole" [ "$(readlink $V/ll)" = "$long" ]
+check "and followed" [ "$(cat $V/ll)" = hi ]
+
 cd /
 rm -rf $T
 echo "bin-smoke: $fail failed"

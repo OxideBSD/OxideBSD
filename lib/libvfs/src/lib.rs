@@ -8,7 +8,9 @@
 //! (`mnt_data`, `v_data`, of the sizes its `VfsConf` declares).
 //!
 //! Errors: every operation returns `0` or a positive errno (musl's values), as FreeBSD's do. The
-//! kernel turns them into the system call ABI's negative returns.
+//! kernel turns them into the system call ABI's negative returns. The exceptions move data and
+//! return a count: `read`, `write`, `readdir` and `readlink` return the bytes moved, or a negative
+//! errno.
 #![no_std]
 
 use core::ffi::c_void;
@@ -38,6 +40,15 @@ unsafe impl Sync for VfsConf {}
 
 /// No backing device: synthetic (procfs, devfs) or memory (tmpfs).
 pub const VFCF_SYNTHETIC: u32 = 1;
+/// The name cache keeps nothing for this type: its names come and go behind the VFS's back
+/// (procfs's processes, devfs's devices).
+pub const VFCF_NOCACHE: u32 = 2;
+/// `from` names a directory the kernel looks up for the mount (`MountArgs::from_vp`): nullfs.
+pub const VFCF_FROM_VNODE: u32 = 4;
+/// Transitional, until the page cache is keyed by vnode (`VFS.md` §11 step 2c): a file ID of this
+/// type is also its content ID for the content accessors its module registered
+/// (`oxidebsd_register_content_accessors`), so `mmap` and exec reach the file through them.
+pub const VFCF_INODE_CONTENT: u32 = 8;
 
 /// Per-type mount operations (FreeBSD's `struct vfsops`). A null entry takes the kernel's
 /// default: `EOPNOTSUPP` for `mount`/`root`/`vget`, success for `unmount`/`sync`, zeros for
@@ -76,6 +87,9 @@ pub struct MountArgs {
     /// Options the kernel didn't consume, as `name\0value\0` pairs (`size=16m\0`).
     pub opts: *const u8,
     pub opts_len: usize,
+    /// `from` looked up, for a `VFCF_FROM_VNODE` type: referenced for the call only (`vref` it to
+    /// keep it); null otherwise.
+    pub from_vp: *mut Vnode,
 }
 
 /// `MountArgs::dev` for a file system with no device.
@@ -382,9 +396,9 @@ pub struct VopVector {
     /// The kernel checked permissions for the fields set (`VADMIN`, or `VWRITE` for a size or
     /// `VA_UTIMES_NULL`); the file system applies them.
     pub setattr: Option<extern "C" fn(vp: *mut Vnode, vap: *const Vattr, cred: *const Ucred) -> i32>,
-    /// Reads from the uio's offset; returns the bytes moved through the uio.
-    pub read: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: *const Ucred) -> i32>,
-    pub write: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: *const Ucred) -> i32>,
+    /// Reads from the uio's offset; returns the bytes moved through the uio, or `-errno`.
+    pub read: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: *const Ucred) -> i64>,
+    pub write: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: *const Ucred) -> i64>,
     pub ioctl: Option<extern "C" fn(vp: *mut Vnode, cmd: u64, data: u64, fflag: u32, cred: *const Ucred) -> i32>,
     /// Returns the `POLL*` events of `events` that are ready (not an errno).
     pub poll: Option<extern "C" fn(vp: *mut Vnode, events: u32) -> i32>,
@@ -422,9 +436,11 @@ pub struct VopVector {
         ) -> i32,
     >,
     /// Writes `Dirent` records from the directory position in the uio's offset (a cookie the file
-    /// system chose), stores the next position back, and sets `*eofflag` at the end.
-    pub readdir: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, cred: *const Ucred, eofflag: *mut i32) -> i32>,
-    pub readlink: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, cred: *const Ucred) -> i32>,
+    /// system chose), stores the next position back, and sets `*eofflag` at the end. Returns the
+    /// bytes written, or `-errno`; a record that doesn't fit whole isn't written.
+    pub readdir: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, cred: *const Ucred, eofflag: *mut i32) -> i64>,
+    /// The link's target into the uio; returns its length, or `-errno`.
+    pub readlink: Option<extern "C" fn(vp: *mut Vnode, uio: Uio, cred: *const Ucred) -> i64>,
     /// The last use reference went: free an unlinked file's storage.
     pub inactive: Option<extern "C" fn(vp: *mut Vnode) -> i32>,
     /// The kernel recycles the vnode: drop everything `v_data` holds. Never fails.
@@ -540,6 +556,12 @@ unsafe extern "C" {
     pub fn oxidebsd_vfs_hash_insert(vp: *mut Vnode);
     /// Changes a hashed vnode's file ID (msdosfs's rename).
     pub fn oxidebsd_vfs_hash_rehash(vp: *mut Vnode, fileid: u64);
+    /// Whether file `fileid` of `mp` has a vnode in use (a descriptor, a cwd, a mapping): a file
+    /// system keeps an unlinked file's storage until it hasn't.
+    pub fn oxidebsd_vfs_fileid_busy(mp: *mut Mount, fileid: u64) -> i32;
+    /// File `fileid` of `mp` is gone (its storage freed, the ID free for reuse): any vnode of it
+    /// is reclaimed (FreeBSD's `vrecycle`).
+    pub fn oxidebsd_vfs_recycle(mp: *mut Mount, fileid: u64);
     pub fn oxidebsd_vref(vp: *mut Vnode);
     pub fn oxidebsd_vrele(vp: *mut Vnode);
     /// FreeBSD's `vaccess`: whether `cred` may `accmode` a file of type `vtype`, mode `mode`,

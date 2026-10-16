@@ -121,8 +121,14 @@ fn check_root_access() -> bool {
         write_bytes(b"access-syscall-smoke: R_OK against /usr/tests/oxfs/hello.txt failed\n");
         return false;
     }
-    if access(hello, R_OK | W_OK | X_OK) != Ok(0) {
-        write_bytes(b"access-syscall-smoke: R_OK|W_OK|X_OK against /usr/tests/oxfs/hello.txt failed\n");
+    if access(hello, R_OK | W_OK) != Ok(0) {
+        write_bytes(b"access-syscall-smoke: R_OK|W_OK against /usr/tests/oxfs/hello.txt failed\n");
+        return false;
+    }
+    // Root may execute only what someone may (a mode-0644 file: no), as on the BSDs and Linux;
+    // POSIX allows either. Before the VFS, oxfs let root's X_OK through for any file.
+    if access(hello, X_OK) != Err(EACCES) {
+        write_bytes(b"access-syscall-smoke: root's X_OK against the mode-0644 hello.txt didn't fail EACCES\n");
         return false;
     }
     if access(b"/does-not-exist-xyz", F_OK) != Err(ENOENT) {

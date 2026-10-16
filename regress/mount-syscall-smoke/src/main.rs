@@ -259,7 +259,8 @@ pub extern "C" fn _start() -> ! {
         let _ = syscall(SYS_WRITE, fd, b"hi".as_ptr() as u64, 2);
         let _ = syscall(SYS_CLOSE, fd, 0, 0);
     }
-    if stat_dev(f) != Some(2) {
+    // Every mount has its own st_dev (VFS.md §8.1; tmpfs mounts all shared 2 before the VFS).
+    if stat_dev(f).is_none() || stat_dev(f) == stat_dev(b"/") {
         write_bytes(b"mount-syscall-smoke: /mnttest/f didn't report the tmpfs st_dev\n");
         test_exit(false);
     }

@@ -1197,7 +1197,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::kern::subr_uio::oxidebsd_uio_kernel_new as *const () as u64)
         }
         "oxidebsd_uio_free" => Some(crate::kern::subr_uio::oxidebsd_uio_free as *const () as u64),
-        "oxidebsd_get_cwd" => Some(crate::process::oxidebsd_get_cwd as *const () as u64),
         "oxidebsd_inode_in_use" => Some(crate::process::oxidebsd_inode_in_use as *const () as u64),
         "oxidebsd_content_changed" => {
             Some(crate::memory::pagecache::oxidebsd_content_changed as *const () as u64)
@@ -1207,9 +1206,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_dev_open" => Some(crate::fs::devfs::oxidebsd_dev_open as *const () as u64),
         "oxidebsd_dev_generation" => Some(crate::fs::devfs::oxidebsd_dev_generation as *const () as u64),
         "oxidebsd_dev_entry" => Some(crate::fs::devfs::oxidebsd_dev_entry as *const () as u64),
-        "oxidebsd_set_cwd" => Some(crate::process::oxidebsd_set_cwd as *const () as u64),
-        "oxidebsd_get_root" => Some(crate::process::oxidebsd_get_root as *const () as u64),
-        "oxidebsd_set_root" => Some(crate::process::oxidebsd_set_root as *const () as u64),
         "oxidebsd_sys_kill" => Some(crate::syscall::oxidebsd_sys_kill as *const () as u64),
         "oxidebsd_sys_sigaction" => {
             Some(crate::syscall::oxidebsd_sys_sigaction as *const () as u64)
@@ -1288,12 +1284,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_klog_open" => Some(crate::kern::subr_msgbuf::oxidebsd_klog_open as *const () as u64),
         "oxidebsd_sys_sysctl" => Some(crate::kern::kern_sysctl::oxidebsd_sys_sysctl as *const () as u64),
         "oxidebsd_sys_procctl" => Some(crate::kern::kern_procctl::oxidebsd_sys_procctl as *const () as u64),
-        "oxidebsd_register_kernel_open" => {
-            Some(crate::process::lifecycle::oxidebsd_register_kernel_open as *const () as u64)
-        }
-        "oxidebsd_register_socket_nodes" => {
-            Some(crate::kern::uipc_usrreq::oxidebsd_register_socket_nodes as *const () as u64)
-        }
         "oxidebsd_real_fd_kind" => Some(crate::fs::fd::oxidebsd_real_fd_kind as *const () as u64),
         "oxidebsd_real_fd_of_pid" => Some(crate::fs::fd::oxidebsd_real_fd_of_pid as *const () as u64),
         "oxidebsd_current_tgid" => Some(crate::process::procfs::oxidebsd_current_tgid as *const () as u64),
@@ -1470,12 +1460,17 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
         "oxidebsd_module_serialize" => Some(oxidebsd_module_serialize as *const () as u64),
         "oxidebsd_vfs_register" => Some(crate::kern::vfs_mount::oxidebsd_vfs_register as *const () as u64),
+        "oxidebsd_fd_link" => Some(crate::fs::fd::oxidebsd_fd_link as *const () as u64),
+        "oxidebsd_mounts_render" => Some(crate::kern::vfs_mount::oxidebsd_mounts_render as *const () as u64),
+        "oxidebsd_vfs_syscall" => Some(crate::kern::vfs_syscalls::oxidebsd_vfs_syscall as *const () as u64),
         "oxidebsd_sys_sync" => Some(crate::kern::vfs_mount::oxidebsd_sys_sync as *const () as u64),
         "oxidebsd_getnewvnode" => Some(crate::kern::vfs_subr::oxidebsd_getnewvnode as *const () as u64),
         "oxidebsd_vfs_hash_get" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_get as *const () as u64),
         "oxidebsd_vfs_hash_insert" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_insert as *const () as u64),
         "oxidebsd_vfs_hash_rehash" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_rehash as *const () as u64),
         "oxidebsd_vref" => Some(crate::kern::vfs_subr::oxidebsd_vref as *const () as u64),
+        "oxidebsd_vfs_fileid_busy" => Some(crate::kern::vfs_subr::oxidebsd_vfs_fileid_busy as *const () as u64),
+        "oxidebsd_vfs_recycle" => Some(crate::kern::vfs_subr::oxidebsd_vfs_recycle as *const () as u64),
         "oxidebsd_vrele" => Some(crate::kern::vfs_subr::oxidebsd_vrele as *const () as u64),
         "oxidebsd_vaccess" => Some(crate::kern::vfs_subr::oxidebsd_vaccess as *const () as u64),
         "oxidebsd_root_readonly_at_boot" => {

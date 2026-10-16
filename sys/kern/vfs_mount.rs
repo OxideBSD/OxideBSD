@@ -60,8 +60,12 @@ pub(crate) fn register(vfc: &'static VfsConf) -> i32 {
         return EEXIST;
     }
     TYPES.lock().push(vfc as *const VfsConf as usize);
-    if ROOTVNODE.load(Ordering::Acquire).is_null() && name_of(vfc) == root_fstype().as_bytes() {
-        return mountroot(vfc);
+    if ROOTVNODE.load(Ordering::Acquire).is_null() {
+        if name_of(vfc) == root_fstype().as_bytes() {
+            return mountroot(vfc);
+        }
+    } else {
+        automount_type(vfc);
     }
     0
 }
@@ -169,6 +173,7 @@ fn mountroot(vfc: &'static VfsConf) -> i32 {
         dev,
         opts: ptr::null(),
         opts_len: 0,
+        from_vp: ptr::null_mut(),
     };
     let e = {
         let _lock = fslock::Guard::for_call(mount as usize as u64);
@@ -189,7 +194,176 @@ fn mountroot(vfc: &'static VfsConf) -> i32 {
     unsafe { (*root).v_flag |= VV_ROOT };
     MOUNTS.lock().push(mp as usize);
     ROOTVNODE.store(root, Ordering::Release);
+    automount();
     0
+}
+
+/// Mounts registered synthetic types on their directories once the root is up (FreeBSD mounts
+/// devfs in `vfs_mountroot`): devfs on `/dev`, procfs on `/proc`, whichever are registered now;
+/// one that registers later is mounted then (`register`).
+fn automount() {
+    for name in [&b"devfs"[..], b"procfs"] {
+        if let Some(vfc) = find_type(name) {
+            automount_type(vfc);
+        }
+    }
+}
+
+fn automount_type(vfc: &'static VfsConf) {
+    // procfs is read-only: nothing in it can be made, removed or renamed (`EROFS`).
+    let (path, from, flags): (&[u8], &[u8], u64) = match name_of(vfc) {
+        b"devfs" => (b"/dev", b"devfs", 0),
+        b"procfs" => (b"/proc", b"procfs", MNT_RDONLY),
+        _ => return,
+    };
+    let cred = crate::kern::vfs_subr::current_ucred();
+    let nd = crate::kern::vfs_lookup::NameiData {
+        path,
+        nameiop: LOOKUP,
+        follow: true,
+        startdir: ptr::null_mut(),
+        cred: &cred,
+    };
+    let covered = match crate::kern::vfs_lookup::namei(&nd) {
+        Ok(ni) => ni.into_vp(),
+        Err(_) => {
+            crate::serial_println!("[vfs] no {} to mount {} on", core::str::from_utf8(path).unwrap_or("?"), core::str::from_utf8(from).unwrap_or("?"));
+            return;
+        }
+    };
+    // Already mounted (the root's /dev crossed to it): nothing to do.
+    // SAFETY: referenced.
+    if unsafe { (*covered).v_flag } & VV_ROOT != 0 && unsafe { (*covered).v_mount } != unsafe { (*rootvnode()).v_mount } {
+        crate::kern::vfs_subr::vrele(covered);
+        return;
+    }
+    if let Err(e) = domount(vfc, covered, flags, path, from, ptr::null_mut()) {
+        crate::serial_println!("[vfs] mounting {} failed: {}", core::str::from_utf8(from).unwrap_or("?"), e);
+    }
+}
+
+/// Mounts `vfc` on directory `covered` (referenced; the mount keeps the reference): `nmount(2)`'s
+/// work once its options are parsed. `onname` is the path as given, `fromname` what it's from.
+pub(crate) fn domount(
+    vfc: &'static VfsConf,
+    covered: *mut Vnode,
+    flags: u64,
+    onname: &[u8],
+    fromname: &[u8],
+    from_vp: *mut Vnode,
+) -> Result<(), i32> {
+    let Some(mount) = (unsafe { (*vfc.ops).mount }) else {
+        crate::kern::vfs_subr::vrele(covered);
+        return Err(EOPNOTSUPP);
+    };
+    let mp = match mount_alloc(vfc, flags, NODEV, onname, fromname) {
+        Ok(mp) => mp,
+        Err(e) => {
+            crate::kern::vfs_subr::vrele(covered);
+            return Err(e);
+        }
+    };
+    let args = MountArgs {
+        from: fromname.as_ptr(),
+        from_len: fromname.len(),
+        dev: NODEV,
+        opts: ptr::null(),
+        opts_len: 0,
+        from_vp,
+    };
+    let e = {
+        let _giant = fslock::Giant::enter();
+        mount(mp, &args)
+    };
+    if e != 0 {
+        mount_free(mp);
+        crate::kern::vfs_subr::vrele(covered);
+        return Err(e);
+    }
+    let root = match vfs_root(mp) {
+        Ok(vp) => vp,
+        Err(e) => {
+            mount_free(mp);
+            crate::kern::vfs_subr::vrele(covered);
+            return Err(e);
+        }
+    };
+    // SAFETY: referenced vnodes; `mp` is ours until it's on the list.
+    unsafe {
+        (*root).v_flag |= VV_ROOT;
+        (*mp).mnt_vnodecovered = covered;
+        (*covered).v_mountedhere = mp;
+    }
+    crate::kern::vfs_subr::vrele(root);
+    MOUNTS.lock().push(mp as usize);
+    Ok(())
+}
+
+/// Unmounts `mp` (`dounmount`): `EBUSY` while a vnode of it is in use or a mount sits on it, `EINVAL`
+/// for the root.
+pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
+    const EBUSY: i32 = 16;
+    const EINVAL: i32 = 22;
+    // SAFETY: a mounted mount.
+    let covered = unsafe { (*mp).mnt_vnodecovered };
+    if covered.is_null() {
+        return Err(EINVAL);
+    }
+    let stacked = mounts().into_iter().any(|m| {
+        // SAFETY: mounted mounts.
+        let c = unsafe { (*m).mnt_vnodecovered };
+        !c.is_null() && unsafe { (*c).v_mount } == mp
+    });
+    if stacked || crate::kern::vfs_subr::vflush(mp) != 0 {
+        return Err(EBUSY);
+    }
+    vfs_sync(mp, MNT_WAIT);
+    if let Some(unmount) = ops(mp).unmount {
+        let _giant = fslock::Giant::enter();
+        let e = unmount(mp, flags);
+        if e != 0 {
+            return Err(e);
+        }
+    }
+    // SAFETY: as above; nothing else refers to `mp` now.
+    unsafe { (*covered).v_mountedhere = ptr::null_mut() };
+    crate::kern::vfs_subr::vrele(covered);
+    MOUNTS.lock().retain(|&m| m != mp as usize);
+    mount_free(mp);
+    Ok(())
+}
+
+/// `mount -u /`: the root's read-only state, through its type's `mount` with `MNT_UPDATE`.
+pub(crate) fn update_root(rdonly: bool) -> Result<(), i32> {
+    let root = rootvnode();
+    if root.is_null() {
+        return Err(EOPNOTSUPP);
+    }
+    // SAFETY: the root vnode and its mount live for good.
+    let mp = unsafe { (*root).v_mount };
+    let Some(mount) = ops(mp).mount else { return Err(EOPNOTSUPP) };
+    let old = unsafe { (*mp).mnt_flag };
+    if rdonly && old & MNT_RDONLY == 0 && crate::fs::fd::writers_on(mp) {
+        return Err(16); // EBUSY
+    }
+    let new = (old & !MNT_RDONLY) | MNT_UPDATE | if rdonly { MNT_RDONLY } else { 0 };
+    // SAFETY: as above.
+    unsafe { (*mp).mnt_flag = new };
+    let args = MountArgs {
+        from: ptr::null(),
+        from_len: 0,
+        dev: unsafe { (*mp).mnt_dev },
+        opts: ptr::null(),
+        opts_len: 0,
+        from_vp: ptr::null_mut(),
+    };
+    let e = {
+        let _giant = fslock::Giant::enter();
+        mount(mp, &args)
+    };
+    // SAFETY: as above.
+    unsafe { (*mp).mnt_flag = if e == 0 { new & !MNT_UPDATE } else { old } };
+    if e != 0 { Err(e) } else { Ok(()) }
 }
 
 /// The root directory of the whole system, if the root is mounted.
@@ -234,4 +408,38 @@ pub(crate) extern "C" fn oxidebsd_vfs_register(vfc: *const VfsConf) -> i32 {
 pub(crate) extern "C" fn oxidebsd_sys_sync(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     sync_all();
     0
+}
+
+fn name_bytes(field: &[u8; MNAMELEN]) -> &[u8] {
+    let n = field.iter().position(|&b| b == 0).unwrap_or(MNAMELEN);
+    &field[..n]
+}
+
+/// `/proc/mounts` (Linux's `fstab`-like shape, which `mount(8)` without arguments and scripts
+/// read): `from on type options 0 0` per mount, in mount order. Exported to procfs; the length
+/// written, cut at `cap`.
+pub(crate) extern "C" fn oxidebsd_mounts_render(buf: *mut u8, cap: u64) -> i64 {
+    let mut out = Vec::new();
+    for mp in mounts() {
+        // SAFETY: mounted mounts and their registered types.
+        let (vfc, flags, from, on) = unsafe { (&*(*mp).mnt_vfc, (*mp).mnt_flag, &(*mp).mnt_fromname, &(*mp).mnt_onname) };
+        let from = name_bytes(from);
+        out.extend_from_slice(if from.is_empty() { name_of(vfc) } else { from });
+        out.push(b' ');
+        out.extend_from_slice(name_bytes(on));
+        out.push(b' ');
+        out.extend_from_slice(name_of(vfc));
+        out.extend_from_slice(if flags & MNT_RDONLY != 0 { b" ro" } else { b" rw" });
+        if flags & MNT_NOSUID != 0 {
+            out.extend_from_slice(b",nosuid");
+        }
+        if flags & MNT_WXALLOWED != 0 {
+            out.extend_from_slice(b",wxallowed");
+        }
+        out.extend_from_slice(b" 0 0\n");
+    }
+    let n = out.len().min(cap as usize);
+    // SAFETY: procfs passes a buffer of `cap` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), buf, n) };
+    n as i64
 }

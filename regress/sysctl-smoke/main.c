@@ -585,14 +585,16 @@ static void modules(void)
 	errno = 0;
 	CHECK_ERR(sysctlbyname("kern.module.nosuchmodule.alloc", 0, 0, 0, 0), ENOENT, "an unknown module is ENOENT");
 
-	/* oxfs renders an open /proc file into one heap allocation, freed at close. */
-	unsigned long before = ulval("kern.module.oxfs.allocs");
+	/* procfs renders a /proc file again for every read, into a heap buffer it frees before the
+	 * read returns (VFS.md §8.3): nothing stays charged to it, open or not. */
 	int fd = open("/proc/meminfo", O_RDONLY);
-	unsigned long during = ulval("kern.module.oxfs.allocs");
+	char buf[256];
+	ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf) : -1;
+	unsigned long during = ulval("kern.module.procfs.allocs");
 	close(fd);
-	unsigned long after = ulval("kern.module.oxfs.allocs");
-	printf("     oxfs allocations %lu, %lu with /proc/meminfo open, %lu after\n", before, during, after);
-	CHECK(fd >= 0 && during > before && after == during - 1, "an open /proc file is charged to oxfs until close");
+	unsigned long after = ulval("kern.module.procfs.alloc");
+	printf("     procfs allocations %lu with /proc/meminfo open, %lu bytes after\n", during, after);
+	CHECK(n > 0 && during == 0 && after == 0, "procfs keeps nothing on the heap between reads");
 	CHECK(ulval("kern.module.oxfs.alloc") > 0, "oxfs holds heap bytes (its open-file table)");
 
 	/* A /proc file is no longer cut at 1 KiB: a child with a 3000-byte argument reads its own

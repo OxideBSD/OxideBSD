@@ -490,6 +490,14 @@ name = "procctl"
 version = "0.1.0"
 
 [[package]]
+name = "procfs"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+ "vfs_if",
+]
+
+[[package]]
 name = "pshared-cond-crash-smoke"
 version = "0.1.0"
 

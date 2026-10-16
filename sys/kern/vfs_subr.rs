@@ -168,6 +168,14 @@ pub(crate) fn hash_rehash(vp: *mut Vnode, fileid: u64) {
     }
 }
 
+/// `vref` of a vnode stored as a `u64` (0: none, nothing to reference); returns it.
+pub(crate) fn vref_raw(vp: u64) -> u64 {
+    if vp != 0 {
+        vref(vp as *mut Vnode);
+    }
+    vp
+}
+
 /// Adds a use reference (`vref`), taking the vnode off the free list.
 pub(crate) fn vref(vp: *mut Vnode) {
     // SAFETY: the caller holds the vnode some way (a reference, the hash under its lock).
@@ -211,6 +219,52 @@ pub(crate) fn vrele(vp: *mut Vnode) {
     }
 }
 
+/// Drops a use reference from where a file system mustn't be entered (a spin lock held, the
+/// process table's for one: dropping a thread group's cwd as it's reaped): queued, and released by
+/// the next `drain_deferred`, which every VFS entry point runs.
+pub(crate) fn vrele_deferred(vp: *mut Vnode) {
+    // SAFETY: the caller's reference keeps it live.
+    let v = unsafe { &mut *vp };
+    if v.v_usecount > 1 {
+        v.v_usecount -= 1;
+        return;
+    }
+    DEFERRED.lock().push(VnodeRef(vp as usize));
+}
+
+static DEFERRED: Mutex<alloc::vec::Vec<VnodeRef>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Releases the references `vrele_deferred` queued.
+pub(crate) fn drain_deferred() {
+    loop {
+        let Some(v) = DEFERRED.lock().pop() else { return };
+        vrele(v.get());
+    }
+}
+
+/// The file `(mp, fileid)` is gone (its storage freed): its vnode, if one is hashed, is reclaimed
+/// so a new file given the same file ID gets a vnode of its own (FreeBSD's `vrecycle`). One on
+/// the free list goes now; one between its last `vrele` and the free list (inside `inactive`) is
+/// doomed, and that `vrele` frees it. One still in use is doomed.
+pub(crate) fn vrecycle(mp: *mut Mount, fileid: u64) {
+    let Some(v) = HASH.lock().get(&(mp as usize, fileid)).copied() else { return };
+    let vp = v.get();
+    let on_free_list = FREE.lock().age_of.contains_key(&v);
+    if on_free_list {
+        FREE.lock().remove(v);
+        vgone(vp);
+        free_vnode(vp);
+    } else {
+        vgone(vp);
+    }
+}
+
+/// Whether `(mp, fileid)` has a vnode in use.
+pub(crate) fn fileid_busy(mp: *mut Mount, fileid: u64) -> bool {
+    let busy = HASH.lock().get(&(mp as usize, fileid)).is_some_and(|v| unsafe { (*v.get()).v_usecount } > 0);
+    busy || DEFERRED.lock().iter().any(|v| unsafe { (*v.get()).v_mount == mp && (*v.get()).v_fileid == fileid })
+}
+
 /// Keeps the vnode's memory (`vhold`) without keeping the file active.
 pub(crate) fn vhold(vp: *mut Vnode) {
     // SAFETY: as `vref`.
@@ -251,6 +305,7 @@ pub(crate) fn vgone(vp: *mut Vnode) {
         return;
     }
     v.v_flag |= VI_DOOMED;
+    crate::kern::vfs_cache::purge(vp);
     {
         let mut hash = HASH.lock();
         let key = (v.v_mount as usize, v.v_fileid);
@@ -372,6 +427,14 @@ pub(crate) extern "C" fn oxidebsd_vfs_hash_insert(vp: *mut Vnode) {
 
 pub(crate) extern "C" fn oxidebsd_vfs_hash_rehash(vp: *mut Vnode, fileid: u64) {
     hash_rehash(vp, fileid)
+}
+
+pub(crate) extern "C" fn oxidebsd_vfs_fileid_busy(mp: *mut Mount, fileid: u64) -> i32 {
+    fileid_busy(mp, fileid) as i32
+}
+
+pub(crate) extern "C" fn oxidebsd_vfs_recycle(mp: *mut Mount, fileid: u64) {
+    vrecycle(mp, fileid)
 }
 
 pub(crate) extern "C" fn oxidebsd_vref(vp: *mut Vnode) {

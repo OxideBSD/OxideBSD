@@ -194,7 +194,7 @@ fn spawn_finish(
         user_stack_top: initial_rsp,
         shared: Arc::new(Mutex::new(ThreadGroupShared {
             cwd: 0,
-            root_inode: 0,
+            root: 0,
             umask: 0o022,
             cred: Cred::root(),
             sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
@@ -503,15 +503,15 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         let Ok(child_address_space) = child_address_space else {
             return Err(ENOMEM);
         };
-        // fork() semantics for the `ThreadGroupShared` fields: cwd/root_inode/umask/cred are
+        // fork() semantics for the `ThreadGroupShared` fields: cwd/root/umask/cred are
         // copied (a forked child is a process of its own, with its own ThreadGroupShared, never
         // the parent's -- sharing it is do_clone's CLONE_THREAD behaviour). The memory bookkeeping
         // goes with the address space instead (`mm::VmState`, filled by `inherit_vm_for_fork`).
         let child_shared = {
             let parent_shared = parent.shared.lock();
             Arc::new(Mutex::new(ThreadGroupShared {
-                cwd: parent_shared.cwd,
-                root_inode: parent_shared.root_inode,
+                cwd: crate::kern::vfs_subr::vref_raw(parent_shared.cwd),
+                root: crate::kern::vfs_subr::vref_raw(parent_shared.root),
                 umask: parent_shared.umask,
                 cred: parent_shared.cred.clone(),
                 // Real fork() semantics: signal disposition is copied (see ThreadGroupShared::
@@ -829,7 +829,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
                 .expect("clone: caller has no address space")
                 .share(),
             // Real CLONE_THREAD sharing: the new thread gets the exact same
-            // cwd/root_inode/umask/uid/gid/brk/mmap_file_regions Arc, not its own copy -- see
+            // cwd/root/umask/uid/gid/brk/mmap_file_regions Arc, not its own copy -- see
             // ThreadGroupShared's own doc comment.
             Arc::clone(&caller.shared),
             // Real CLONE_THREAD: getpid() reports the same value from every thread sharing this
@@ -1058,31 +1058,14 @@ fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// The kernel's open of a path in kernel memory (`kern::vfs_syscalls::kern_open`, BSD's `namei`
+/// with `UIO_SYSSPACE`): a held file's handle, not an fd.
+fn kernel_open_path(path: &[u8]) -> Result<u64, u64> {
+    crate::kern::vfs_syscalls::kern_open(path).map_err(|e| e as u64)
+}
+
 /// Opens a program for `exec_image` and reads its head (`ExecFile`), given the kernel's own copy of
 /// its path (a top-level `execve` target, or a `#!`/`PT_INTERP` interpreter parsed out of a file).
-/// oxfs's open for a path in kernel memory, `(path_ptr, path_len, flags) -> fd | -errno`, called
-/// inside `fd::kernel_open` so the result is a held file's handle, not an fd (BSD's
-/// `namei` with `UIO_SYSSPACE`): `SYS_OPEN` takes a user pointer, and exec's paths are the kernel's
-/// own copies (USERMEM.md). Registered by oxfs's `module_init`.
-type KernOpenFn = extern "C" fn(u64, u64, u64) -> i64;
-static KERN_OPEN: spin::Mutex<Option<KernOpenFn>> = spin::Mutex::new(None);
-
-/// Called once by oxfs's `module_init`.
-pub(crate) extern "C" fn oxidebsd_register_kernel_open(f: KernOpenFn) {
-    *KERN_OPEN.lock() = Some(f);
-}
-
-/// Opens `path` as a file the kernel holds (`fd::kernel_open`): no descriptor of the caller's.
-/// Its handle.
-fn kernel_open_path(path: &[u8]) -> Result<u64, u64> {
-    let open = (*KERN_OPEN.lock()).ok_or(ENOENT)?;
-    let handle = crate::fs::fd::kernel_open(|| {
-        let _lock = crate::fs::fslock::Guard::for_call(open as usize as u64);
-        open(path.as_ptr() as u64, path.len() as u64, 0)
-    });
-    if handle < 0 { Err(-handle as u64) } else { Ok(handle as u64) }
-}
-
 fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
     read_exec_head_and_release(kernel_open_path(path)?)
 }
@@ -2355,97 +2338,62 @@ pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
         _ => Err(EINVAL),
     }
 }
-/// Backing store for `oxidebsd_get_cwd`/`oxidebsd_set_cwd` while `scheduler::current_pid() == 0`
-/// -- i.e. only during boot, before `scheduler::start` ever runs a real process (pid 1 onward).
-/// `sys/modules/oxfs`'s own `module_init` self-check calls `chdir`/`mkdir`/etc. directly at exactly
-/// this point, with no `Process` yet in `PROCESS_TABLE` for pid 0 to store a cwd in -- mirrors
-/// `src/fd.rs`'s own `BOOTSTRAP_PID` idiom for the identical "boot-time, no real process exists
-/// yet" problem. Never touched again once a real process is running, since `current_pid()` is
-/// never `0` again after that.
-static BOOT_CWD: AtomicU64 = AtomicU64::new(0);
-
-/// Exposed to modules (see `sys/module.rs`'s `resolve_external_symbol`) so a filesystem module can
-/// track cwd per-process without the kernel needing to interpret what the value means -- see
-/// `Process::cwd`'s own doc comment. No pid crosses the module boundary; the kernel resolves
-/// `scheduler::current_pid()` itself, the same way `src/fd.rs` already does for the fd table.
 /// For oxfs, before it frees an inode nobody names or has open (its `maybe_release`): whether
-/// the kernel still refers to it, as a process's working or root directory, a file mapping's
-/// content, or a bound local socket's file. Every lock is only tried: a busy one answers "in
-/// use", and oxfs keeps the inode as an orphan to retry later, so this can't deadlock against a
-/// caller already holding one (the socket layer closes passed descriptors under its own lock).
+/// the kernel still refers to it, as a file mapping's content or a bound local socket's file.
+/// (Working and root directories are vnodes, whose use counts oxfs asks the VFS about.) Every lock
+/// is only tried: a busy one answers "in use", and oxfs keeps the inode as an orphan to retry
+/// later, so this can't deadlock against a caller already holding one (the socket layer closes
+/// passed descriptors under its own lock).
 pub(crate) extern "C" fn oxidebsd_inode_in_use(inode: u64) -> u64 {
     let busy = || -> Option<bool> {
-        if BOOT_CWD.load(Ordering::Relaxed) == inode || BOOT_ROOT.load(Ordering::Relaxed) == inode {
-            return Some(true);
-        }
-        if crate::process::mm::content_mapped(inode)? || crate::kern::uipc_usrreq::node_bound(inode)? {
-            return Some(true);
-        }
-        let table = table().try_lock()?;
-        for p in table.values() {
-            let shared = p.shared.try_lock()?;
-            if shared.cwd == inode || shared.root_inode == inode {
-                return Some(true);
-            }
-        }
-        Some(false)
+        Some(crate::process::mm::content_mapped(inode)? || crate::kern::uipc_usrreq::node_bound(inode)?)
     };
     busy().unwrap_or(true) as u64
 }
 
-pub(crate) extern "C" fn oxidebsd_get_cwd() -> u64 {
+/// The calling thread group's working directory (`cwd` true) or root directory, a vnode, not
+/// referenced for the caller; null for the system's root (and before any process exists).
+pub(crate) fn current_dir_vnode(cwd: bool) -> *mut vfs_if::Vnode {
     let pid = scheduler::current_pid();
     if pid == 0 {
-        return BOOT_CWD.load(Ordering::Relaxed);
+        return core::ptr::null_mut();
     }
-    table()
-        .lock()
-        .get(&pid)
-        .map(|p| p.shared.lock().cwd)
-        .unwrap_or(0)
+    let raw = table().lock().get(&pid).map_or(0, |p| {
+        let shared = p.shared.lock();
+        if cwd { shared.cwd } else { shared.root }
+    });
+    raw as *mut vfs_if::Vnode
 }
 
-pub(crate) extern "C" fn oxidebsd_set_cwd(inode: u64) {
+/// Makes `vp` (referenced by the caller, which gives the reference up; null for the system's
+/// root) the calling thread group's working directory (`cwd` true) or root directory. The old
+/// one's reference is released.
+pub(crate) fn set_current_dir_vnode(cwd: bool, vp: *mut vfs_if::Vnode) {
     let pid = scheduler::current_pid();
+    let mut vp = vp;
+    if vp == crate::kern::vfs_mount::rootvnode() && !vp.is_null() {
+        crate::kern::vfs_subr::vrele(vp);
+        vp = core::ptr::null_mut();
+    }
     if pid == 0 {
-        BOOT_CWD.store(inode, Ordering::Relaxed);
+        if !vp.is_null() {
+            crate::kern::vfs_subr::vrele(vp);
+        }
         return;
     }
-    if let Some(p) = table().lock().get(&pid) {
-        p.shared.lock().cwd = inode;
+    let old = table().lock().get(&pid).map(|p| {
+        let mut shared = p.shared.lock();
+        let slot = if cwd { &mut shared.cwd } else { &mut shared.root };
+        core::mem::replace(slot, vp as u64)
+    });
+    match old {
+        Some(old) if old != 0 => crate::kern::vfs_subr::vrele(old as *mut vfs_if::Vnode),
+        Some(_) => {}
+        None if !vp.is_null() => crate::kern::vfs_subr::vrele(vp),
+        None => {}
     }
 }
 
-/// `BOOT_CWD`'s own counterpart for `Process::root_inode` -- same "no real process exists yet
-/// during `sys/modules/oxfs`'s own boot self-check" reasoning, and the same `0`-doubles-as-"real root"
-/// default.
-static BOOT_ROOT: AtomicU64 = AtomicU64::new(0);
-
-/// Exposed to modules (see `sys/module.rs`'s `resolve_external_symbol`) for `SYS_CHROOT` --
-/// byte-for-byte mirrors `oxidebsd_get_cwd`/`oxidebsd_set_cwd` immediately above, right down to the
-/// `pid == 0` boot-time fallback.
-pub(crate) extern "C" fn oxidebsd_get_root() -> u64 {
-    let pid = scheduler::current_pid();
-    if pid == 0 {
-        return BOOT_ROOT.load(Ordering::Relaxed);
-    }
-    table()
-        .lock()
-        .get(&pid)
-        .map(|p| p.shared.lock().root_inode)
-        .unwrap_or(0)
-}
-
-pub(crate) extern "C" fn oxidebsd_set_root(inode: u64) {
-    let pid = scheduler::current_pid();
-    if pid == 0 {
-        BOOT_ROOT.store(inode, Ordering::Relaxed);
-        return;
-    }
-    if let Some(p) = table().lock().get(&pid) {
-        p.shared.lock().root_inode = inode;
-    }
-}
 /// The landing point for a never-run process's very first switch-in
 /// (`context_switch::spawn_trampoline_asm` `call`s straight into this). Reads the current
 /// process's stored entry point/user stack top and jumps into ring 3 exactly like the old one-shot

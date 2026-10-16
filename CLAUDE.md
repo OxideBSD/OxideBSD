@@ -31,9 +31,12 @@ required -- probe it and keep a fallback.
 - Per-process address spaces, ELF64 loading (static `ET_EXEC`, PIE with ASLR, `PT_INTERP` dynamic
   via musl's `ld.so`), ring 3, a native BSD-style syscall ABI over `SYSCALL`/`SYSRETQ`.
 - Syscalls are registered at runtime by dynamically loaded kernel modules (`sys/module.rs`,
-  `sys/modules/*`): `native_abi`, `posix_compat`, `signal`, `oxfs`, `socket`, `clock`, `sysctl`.
-- oxfs (`sys/modules/oxfs`): in-memory Unix inode/block filesystem, persisted to a virtio-blk or
-  IDE disk; scoped bind/tmpfs mount table; `/proc`.
+  `sys/modules/*`): `native_abi`, `posix_compat`, `signal`, `vfs`, `oxfs`, `procfs`, `socket`,
+  `clock`, `sysctl`.
+- A BSD vnode VFS (`OxideBSD-doc/VFS.md`, `sys/kern/vfs_*.rs`): the kernel's `namei`, name cache,
+  mounts and path system calls; file systems are modules serving vnode operations. oxfs
+  (`sys/modules/oxfs`): the disk's Unix inode/block file system, plus tmpfs, devfs and nullfs over
+  its inode space until VFS step 3; procfs (`sys/modules/procfs`) on `/proc`.
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
@@ -276,7 +279,13 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **File systems are VFS types** (`OxideBSD-doc/VFS.md`): a module registers a static `VfsConf`
   with `oxidebsd_vfs_register` and calls `oxidebsd_module_serialize` (the giant lock); the
   interface types live in `lib/libvfs` (crate `vfs_if`), shared with the kernel: never duplicate
-  them. The root mounts when its type (`/boot/fsconf`, else `oxfs`) registers.
+  them. The root mounts when its type (`/boot/fsconf`, else `oxfs`) registers; devfs and procfs
+  mount on `/dev` and `/proc` when theirs does. Path calls are the kernel's
+  (`kern::vfs_syscalls`): a file system never sees a path, only components (`vop_lookup`).
+- **Kernel code calling a vnode operation holds the giant lock** (`fslock::Giant`; the `vop_*`
+  wrappers in `kern::vnode_if` take it). **The last `vrele` can enter a file system**: from a
+  context holding a spin lock (the process table, as a process is reaped) use
+  `vfs_subr::vrele_deferred`.
 - Modules talk only to the kernel, never to each other. `sys/fs/fd.rs` is the shared fd registry:
   `(tgid, fd) -> real_fd -> Description` (a `struct file`: static `FileOps` table, data, `f_flag`,
   offset). A new kind of file is one `#[repr(C)] static FileOps` (null entry = kernel default),
@@ -344,15 +353,14 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
   disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`
   keeps it), and may be deleted to get a fresh one.
-- New mount options go through `oxfs_nmount` and `MountEntry` (`nosuid`, `wxallowed`), checked
-  at exec through the `ContentSetId` accessor.
+- New mount options go through `kern::vfs_syscalls::oxidebsd_sys_nmount` as `MNT_*` flags on the
+  `struct mount`, read where they apply (exec: `vfs_vnops::exec_setid`).
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
   (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
   seeding a node; every device node opens through `oxidebsd_dev_open` by number.
 - A new installed file goes in `distrib/install.mtree`, and its set in `distrib/sets/lists/*`
   (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
   default).
-- The mount redirect only fires inside `resolve_path_impl`'s component loop.
 - Disk: virtio-blk, else IDE secondary master (DMA, else PIO). The boot ISO is on virtio-scsi.
   `no-ata` protects real hardware from being formatted.
 - rtl8139 DMA is 32-bit: `rtl8139::init` must run before big allocations.
@@ -392,7 +400,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   drained by `net::poll`, never delivered inside the send (protocol locks would re-enter).
 - QEMU needs `-accel kvm -accel tcg` or everything runs under TCG.
 - A test using sockets, `poll`, or `socketpair` must load the `socket` module.
-- Every test that loads `native_abi` also loads `vfs` (close, lseek, fstat, ioctl, ...).
+- Every test that loads `native_abi` also loads `vfs` (close, lseek, fstat, ioctl, every path
+  call); every test that loads oxfs loads `procfs` after it.
 - TCP is stop-and-wait, fixed MSS.
 
 ## USB (`sys/drivers/usb/`)

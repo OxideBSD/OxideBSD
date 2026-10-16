@@ -196,6 +196,8 @@ pub(crate) enum FdKind {
     /// A device opened through devfs (`devfs::oxidebsd_dev_open`), by number: `major << 8 |
     /// minor`, as a device node's `st_rdev`. Its driver's callbacks are the description's.
     Device(u64),
+    /// A vnode's file (`kern::vfs_vnops::VN_OPS`): its data is the vnode.
+    Vnode,
 }
 
 /// Tags a description its driver registered as a plain module-owned one as device `dev`; one
@@ -216,9 +218,11 @@ const KIND_SOCKET: i64 = 3;
 const KIND_FIFO: i64 = 4;
 const KIND_MQUEUE: i64 = 5;
 const KIND_DEVICE: i64 = 6;
+const KIND_VNODE: i64 = 7;
 
 /// What description `real_fd` is: one of the `KIND_*` codes, with its argument (a terminal's
-/// packed `major << 8 | minor`, a pipe or socket's id, a FIFO's inode) stored through `arg`.
+/// packed `major << 8 | minor`, a pipe or socket's id, a FIFO's inode, a vnode file's vnode) stored
+/// through `arg`.
 /// `-1` if no such description exists.
 pub(crate) extern "C" fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64 {
     let (code, value) = if let Some(id) = crate::tty::of_real_fd(real_fd) {
@@ -235,6 +239,7 @@ pub(crate) extern "C" fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i
             FdKind::Fifo(inode) => (KIND_FIFO, inode),
             FdKind::Mqueue => (KIND_MQUEUE, 0),
             FdKind::Device(dev) => (KIND_DEVICE, dev),
+            FdKind::Vnode => (KIND_VNODE, file_of(real_fd).map_or(0, |f| f.3)),
         }
     };
     // SAFETY: a module-owned out-pointer into its own stack.
@@ -261,6 +266,10 @@ struct Description {
     offset: u64,
     kind: FdKind,
     refs: u32,
+    /// The vnode a device or FIFO was opened through (FreeBSD's `f_vnode`), referenced, or 0: what
+    /// `/proc/<pid>/fd/<n>` names, and what `revoke(2)` finds. A vnode file's own vnode is its
+    /// `data`.
+    vnode: u64,
 }
 
 /// A pseudo-pid, never a real running process (`process::alloc_pid` starts at `1`) — the identity
@@ -303,10 +312,17 @@ pub(crate) fn release(real_fd: u64) {
     d.refs -= 1;
     if d.refs == 0 {
         let close = d.ops.close.unwrap_or(fo_no_close);
-        descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
-        let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
-        close(real_fd);
+        // Closed before it leaves the table: the operation may ask for its own object
+        // (`oxidebsd_file_data`). Nothing can reach it meanwhile, with no reference left.
+        {
+            let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
+            close(real_fd);
+        }
+        let vnode = DESCRIPTIONS.lock().remove(&real_fd).map_or(0, |d| d.vnode);
+        if vnode != 0 {
+            crate::kern::vfs_subr::vrele_deferred(vnode as *mut vfs_if::Vnode);
+        }
     }
 }
 
@@ -359,6 +375,93 @@ pub(crate) fn file(fd: u64) -> Option<(u64, &'static FileOps, u32, u64)> {
     let real_fd = real_fd_of(fd)?;
     let (ops, flag, offset, _) = file_of(real_fd)?;
     Some((real_fd, ops, flag, offset))
+}
+
+/// Whether a vnode file of mount `mp` is open for writing (refusing a remount read-only).
+pub(crate) fn writers_on(mp: *mut vfs_if::Mount) -> bool {
+    DESCRIPTIONS.lock().values().any(|d| {
+        core::ptr::eq(d.ops, &crate::kern::vfs_vnops::VN_OPS)
+            && d.flag & FWRITE != 0
+            // SAFETY: an open vnode file holds its vnode.
+            && unsafe { (*(d.data as *mut vfs_if::Vnode)).v_mount } == mp
+    })
+}
+
+/// Records that `real_fd` was opened through `vp` (giving it the caller's reference); a
+/// description that already has one keeps it, and the reference is dropped.
+pub(crate) fn set_vnode(real_fd: u64, vp: *mut vfs_if::Vnode) {
+    let mut kept = false;
+    with_description_full(real_fd, |d| {
+        if d.vnode == 0 {
+            d.vnode = vp as u64;
+            kept = true;
+        }
+    });
+    if !kept {
+        crate::kern::vfs_subr::vrele_deferred(vp);
+    }
+}
+
+/// The vnode `real_fd` is open on or was opened through, if any (not referenced for the caller).
+pub(crate) fn vnode_of(real_fd: u64) -> Option<*mut vfs_if::Vnode> {
+    let descriptions = DESCRIPTIONS.lock();
+    let d = descriptions.get(&real_fd)?;
+    if core::ptr::eq(d.ops, &crate::kern::vfs_vnops::VN_OPS) {
+        return Some(d.data as *mut vfs_if::Vnode);
+    }
+    (d.vnode != 0).then_some(d.vnode as *mut vfs_if::Vnode)
+}
+
+/// What `/proc/<pid>/fd/<n>` links to (Linux's and FreeBSD's procfs shapes): the path of the file
+/// it was opened through, else `pipe:[id]`, `socket:[id]`, `anon_inode:[mqueue]`. Exported to
+/// procfs; the length written, or `-errno`.
+pub(crate) extern "C" fn oxidebsd_fd_link(pid: u64, fd: u64, buf: *mut u8, cap: u64) -> i64 {
+    let r = (|| -> Result<alloc::vec::Vec<u8>, i64> {
+        let real_fd = oxidebsd_real_fd_of_pid(pid, fd);
+        if real_fd < 0 {
+            return Err(-2);
+        }
+        let real_fd = real_fd as u64;
+        // A terminal is named as itself, whatever node it came through (`/dev/tty`, TTY.md §6.3).
+        if let Some(id) = crate::tty::of_real_fd(real_fd) {
+            return Ok(alloc::format!("/dev/{}", crate::tty::name(id)).into_bytes());
+        }
+        if let Some(vp) = vnode_of(real_fd) {
+            crate::kern::vfs_subr::vref(vp);
+            let _giant = crate::fs::fslock::Giant::enter();
+            let cred = crate::kern::vfs_subr::current_ucred();
+            let path = crate::kern::vfs_syscalls::fullpath(vp, &cred);
+            // An unlinked file is named as it was, marked (Linux's procfs shape).
+            let unlinked = crate::kern::vnode_if::vop_getattr(vp).is_ok_and(|va| va.va_nlink == 0);
+            crate::kern::vfs_subr::vrele(vp);
+            let mut path = path.map_err(|e| -(e as i64))?;
+            if unlinked {
+                path.extend_from_slice(b" (deleted)");
+            }
+            return Ok(path);
+        }
+        let kind = DESCRIPTIONS.lock().get(&real_fd).map(|d| d.kind).ok_or(-2i64)?;
+        let tagged = |tag: &str, n: u64| alloc::format!("{tag}:[{n}]").into_bytes();
+        Ok(match kind {
+            FdKind::Pipe(id) => tagged("pipe", id),
+            FdKind::Socket(id) => tagged("socket", id),
+            FdKind::Fifo(id) => tagged("fifo", id),
+            FdKind::Mqueue => alloc::vec::Vec::from(&b"anon_inode:[mqueue]"[..]),
+            _ => match crate::tty::of_real_fd(real_fd) {
+                Some(id) => alloc::format!("/dev/{}", crate::tty::name(id)).into_bytes(),
+                None => return Err(-2),
+            },
+        })
+    })();
+    match r {
+        Ok(text) => {
+            let n = text.len().min(cap as usize);
+            // SAFETY: procfs passes a buffer of `cap` bytes.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), buf, n) };
+            n as i64
+        }
+        Err(e) => e,
+    }
 }
 
 /// Sets a seekable file's offset (`lseek`).
@@ -439,7 +542,7 @@ pub(crate) fn finstall(real_fd: u64, ops: &'static FileOps, data: u64, flag: u32
             return -ENFILE;
         }
         let refs = held as u32;
-        descriptions.insert(real_fd, Description { ops, data, flag, offset: 0, kind, refs });
+        descriptions.insert(real_fd, Description { ops, data, flag, offset: 0, kind, refs, vnode: 0 });
     }
     if held {
         *KERNEL_OPEN.lock() = None;
@@ -558,6 +661,11 @@ fn free_below(table: &BTreeMap<(u64, u64), u64>, pid: u64, limit: u64) -> u64 {
 /// is the kernel's own (`kernel_open`).
 static KERNEL_OPEN: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Whether the current open is the kernel's own (`kernel_open`): its result is a handle, not an fd.
+pub(crate) fn is_kernel_opening() -> bool {
+    kernel_opening()
+}
+
 fn kernel_opening() -> bool {
     *KERNEL_OPEN.lock() == Some(scheduler::current_pid())
 }
@@ -628,10 +736,17 @@ fn close_one(pid: u64, fd: u64) -> bool {
     d.refs -= 1;
     if d.refs == 0 {
         let close = d.ops.close.unwrap_or(fo_no_close);
-        descriptions.remove(&real_fd);
         drop(descriptions); // don't hold the lock across the callback
-        let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
-        close(real_fd);
+        // Closed before it leaves the table: the operation may ask for its own object
+        // (`oxidebsd_file_data`). Nothing can reach it meanwhile, with no reference left.
+        {
+            let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
+            close(real_fd);
+        }
+        let vnode = DESCRIPTIONS.lock().remove(&real_fd).map_or(0, |d| d.vnode);
+        if vnode != 0 {
+            crate::kern::vfs_subr::vrele_deferred(vnode as *mut vfs_if::Vnode);
+        }
     } else {
         drop(descriptions);
         // What's left may be only messages in flight: a socket sent over itself (UNIX.md §8.4).
@@ -945,6 +1060,11 @@ pub(crate) fn content_block_map(content_id: u64) -> Option<alloc::vec::Vec<[u64;
 /// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
 /// `exec_setid` by handle.
 pub(crate) fn exec_setid_handle(real_fd: u64) -> Option<((u32, u32, u32), bool)> {
+    if let Some((ops, _, _, data)) = file_of(real_fd)
+        && core::ptr::eq(ops, &crate::kern::vfs_vnops::VN_OPS)
+    {
+        return crate::kern::vfs_vnops::exec_setid(data as *mut vfs_if::Vnode);
+    }
     let setid = (*CONTENT_ACCESSORS.lock())?.4;
     let _lock = crate::fs::fslock::Guard::for_call(setid as usize as u64);
     let mut out = [0u32; 4];
@@ -1060,7 +1180,7 @@ pub fn init() {
     crate::tty::console::init();
     let ops = &crate::tty::TTY_OPS;
     let kind = FdKind::Module;
-    DESCRIPTIONS.lock().insert(0, Description { ops, data: 0, flag: FREAD | FWRITE, offset: 0, kind, refs: 0 });
+    DESCRIPTIONS.lock().insert(0, Description { ops, data: 0, flag: FREAD | FWRITE, offset: 0, kind, refs: 0, vnode: 0 });
     crate::tty::bind(0, crate::tty::TTYV0);
     let mut table = TABLE.lock();
     for fd in 0..3 {
