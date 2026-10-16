@@ -165,12 +165,14 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 
 - `memory::init` walks `CR3` + HHDM offset; call once.
 - `BootInfoFrameAllocator` is built **before the heap exists**: no heap allocation inside it. Its
-  free list is intrusive (stored in the freed frames).
+  free list is intrusive (stored in the freed frames). Code that can run inside a `module_init`
+  (frames freed or mapped at boot) uses `module::phys_mem_offset`, not `memory::phys_mem_offset`.
 - Fresh mappings use `.ignore()` not `.flush()`.
 - Heap at fixed `allocator::HEAP_START` (L4 slot 386), size scales with RAM (clamped). **Nothing
   kernel-only may be mapped in the user range** `[VM_MINUSER, VM_MAXUSER)` (`memory/usercopy.rs`,
   checked at boot): copyin relies on it. Kernel stacks live in
   `memory::kstack`'s window (L4 slot 385) with guard gaps; overflow logs `KERNEL STACK OVERFLOW`.
+  The buffer cache's window (`kern::vfs_bio`) is L4 slot 387.
 - **Ring-0 stacks in `gdt.rs` (and any stack like them) must be `static mut`**, or they land in
   `.rodata`.
 - **The kernel image must end below `module::MODULE_VA_BASE` (`0xffff_ffff_a000_0000`).** Module
