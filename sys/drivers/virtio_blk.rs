@@ -172,10 +172,15 @@ pub fn capacity_sectors() -> u64 {
 
 /// Reads blocks from `start_block` into `buf` (a whole number of 4 KiB blocks).
 pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> bool {
+    read_sectors(start_block * 8, buf)
+}
+
+/// Reads sectors from `lba` into `buf` (a whole number of 512-byte sectors).
+pub fn read_sectors(lba: u64, buf: &mut [u8]) -> bool {
     let mut guard = DISK.lock();
     let Some(disk) = guard.as_mut() else { return false };
     for (i, chunk) in buf.chunks_mut(BUFFER_BLOCKS * 4096).enumerate() {
-        let sector = (start_block + (i * BUFFER_BLOCKS) as u64) * 8;
+        let sector = lba + (i * BUFFER_BLOCKS * 8) as u64;
         if !disk.request(T_IN, sector, chunk.len()) {
             return false;
         }
@@ -187,10 +192,15 @@ pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> bool {
 
 /// Writes blocks from `buf` at `start_block`, then flushes, so they're durable on return.
 pub fn write_blocks(start_block: u64, buf: &[u8]) -> bool {
+    write_sectors(start_block * 8, buf)
+}
+
+/// Writes sectors at `lba` from `buf` (whole sectors), then flushes.
+pub fn write_sectors(lba: u64, buf: &[u8]) -> bool {
     let mut guard = DISK.lock();
     let Some(disk) = guard.as_mut() else { return false };
     for (i, chunk) in buf.chunks(BUFFER_BLOCKS * 4096).enumerate() {
-        let sector = (start_block + (i * BUFFER_BLOCKS) as u64) * 8;
+        let sector = lba + (i * BUFFER_BLOCKS * 8) as u64;
         // SAFETY: no request is in flight.
         unsafe { disk.buffer.slice_mut(0, chunk.len()) }.copy_from_slice(chunk);
         if !disk.request(T_OUT, sector, chunk.len()) {

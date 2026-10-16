@@ -50,6 +50,49 @@ pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> bool {
     true
 }
 
+/// Reads sectors from `lba` into `buf` (whole 512-byte sectors): the block layer's way in, for a
+/// file system with smaller blocks than the disk's 4 KiB frames.
+pub fn read_sectors(lba: u64, buf: &mut [u8]) -> bool {
+    let guard = DISK.lock();
+    let Some(disk) = guard.as_ref() else { return false };
+    for (i, sector) in buf.chunks_mut(512).enumerate() {
+        let at = lba + i as u64;
+        let Some(&frame) = disk.frames.get((at / 8) as usize) else { return false };
+        if frame == 0 {
+            sector.fill(0);
+        } else {
+            let off = (at % 8) as usize * 512;
+            // SAFETY: as in `read_blocks`.
+            let src = unsafe { &*((disk.phys_mem_offset + frame).as_ptr::<[u8; BLOCK]>()) };
+            sector.copy_from_slice(&src[off..off + 512]);
+        }
+    }
+    true
+}
+
+/// Writes sectors at `lba` from `buf` (whole sectors). A block's frame, taken on its first write,
+/// starts zeroed: the rest of the block reads as zeros, as it did before.
+pub fn write_sectors(lba: u64, buf: &[u8]) -> bool {
+    let mut guard = DISK.lock();
+    let Some(disk) = guard.as_mut() else { return false };
+    let offset = disk.phys_mem_offset;
+    for (i, sector) in buf.chunks(512).enumerate() {
+        let at = lba + i as u64;
+        let Some(slot) = disk.frames.get_mut((at / 8) as usize) else { return false };
+        if *slot == 0 {
+            let Some(frame) = crate::module::allocate_frame() else { return false };
+            *slot = frame.start_address().as_u64();
+            // SAFETY: a frame just allocated, reached through the HHDM.
+            unsafe { core::ptr::write_bytes((offset + *slot).as_mut_ptr::<u8>(), 0, BLOCK) };
+        }
+        let off = (at % 8) as usize * 512;
+        // SAFETY: as in `write_blocks`.
+        let dst = unsafe { &mut *((offset + *slot).as_mut_ptr::<[u8; BLOCK]>()) };
+        dst[off..off + 512].copy_from_slice(sector);
+    }
+    true
+}
+
 /// Writes blocks from `buf` at `start_block`, backing each with a frame on its first write.
 pub fn write_blocks(start_block: u64, buf: &[u8]) -> bool {
     let mut guard = DISK.lock();

@@ -450,20 +450,33 @@ const MAX_BLOCKS_PER_COMMAND: u64 = 31;
 /// one command per `MAX_BLOCKS_PER_COMMAND` -- the per-command overhead (drive select, status
 /// polling) is fixed, so fewer, larger commands are faster.
 pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> Result<(), AtaError> {
-    for (i, chunk) in buf.chunks_mut((MAX_BLOCKS_PER_COMMAND * 4096) as usize).enumerate() {
-        let block = start_block + i as u64 * MAX_BLOCKS_PER_COMMAND;
+    read_disk_sectors(start_block * 8, buf)
+}
+
+/// Reads the data disk's sectors from `lba` into `buf` (a whole number of 512-byte sectors), one
+/// command per `MAX_BLOCKS_PER_COMMAND` blocks' worth.
+pub fn read_disk_sectors(lba: u64, buf: &mut [u8]) -> Result<(), AtaError> {
+    let per_command = (MAX_BLOCKS_PER_COMMAND * 8) as usize;
+    for (i, chunk) in buf.chunks_mut(per_command * 512).enumerate() {
+        let at = lba + (i * per_command) as u64;
         let sectors = (chunk.len() / 512) as u8;
-        read_sectors(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, (block * 8) as u32, sectors, chunk)?;
+        read_sectors(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, at as u32, sectors, chunk)?;
     }
     Ok(())
 }
 
 /// Writes `count` consecutive blocks from `buf`, then one `CACHE FLUSH` for all of them.
 pub fn write_blocks(start_block: u64, buf: &[u8]) -> Result<(), AtaError> {
-    for (i, chunk) in buf.chunks((MAX_BLOCKS_PER_COMMAND * 4096) as usize).enumerate() {
-        let block = start_block + i as u64 * MAX_BLOCKS_PER_COMMAND;
+    write_disk_sectors(start_block * 8, buf)
+}
+
+/// Writes the data disk's sectors at `lba` from `buf` (whole sectors), then one `CACHE FLUSH`.
+pub fn write_disk_sectors(lba: u64, buf: &[u8]) -> Result<(), AtaError> {
+    let per_command = (MAX_BLOCKS_PER_COMMAND * 8) as usize;
+    for (i, chunk) in buf.chunks(per_command * 512).enumerate() {
+        let at = lba + (i * per_command) as u64;
         let sectors = (chunk.len() / 512) as u8;
-        write_sectors_unflushed(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, (block * 8) as u32, sectors, chunk)?;
+        write_sectors_unflushed(DATA_DISK_CHANNEL, DATA_DISK_DRIVE, at as u32, sectors, chunk)?;
     }
     cache_flush(DATA_DISK_CHANNEL, DATA_DISK_DRIVE)
 }
