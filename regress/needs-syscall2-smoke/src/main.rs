@@ -405,7 +405,20 @@ fn check_mknod() -> bool {
         write_bytes(b"needs-syscall2-smoke: /n2null didn't report real S_IFCHR/rdev\n");
         return false;
     }
-    let Ok(fd) = (unsafe { syscall(SYS_OPEN, dev_path.as_ptr() as u64, dev_path.len() as u64, 1) })
+    // Write-only, a read is EBADF (POSIX: not open for reading); read-write, it's /dev/null's EOF.
+    let Ok(wfd) = (unsafe { syscall(SYS_OPEN, dev_path.as_ptr() as u64, dev_path.len() as u64, 1) })
+    else {
+        write_bytes(b"needs-syscall2-smoke: open /n2null write-only failed\n");
+        return false;
+    };
+    let mut probe = [0u8; 1];
+    let denied = unsafe { syscall(SYS_READ, wfd, probe.as_mut_ptr() as u64, 1) };
+    close(wfd);
+    if denied != Err(9) {
+        write_bytes(b"needs-syscall2-smoke: read through a write-only /n2null wasn't EBADF\n");
+        return false;
+    }
+    let Ok(fd) = (unsafe { syscall(SYS_OPEN, dev_path.as_ptr() as u64, dev_path.len() as u64, 2) })
     else {
         write_bytes(b"needs-syscall2-smoke: open /n2null failed\n");
         return false;

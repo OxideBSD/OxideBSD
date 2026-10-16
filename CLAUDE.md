@@ -272,8 +272,12 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - `serial_println!` can't take implicit `{name}` captures.
 - A module panic is fatal to the call; oxfs's panic reboots.
 - Modules talk only to the kernel, never to each other. `sys/fs/fd.rs` is the shared fd registry:
-  `(tgid, fd) -> real_fd -> Description`. `oxidebsd_alloc_fd` returns a `real_fd`;
-  `oxidebsd_register_fd_ops*` returns the user fd (return that to userspace).
+  `(tgid, fd) -> real_fd -> Description` (a `struct file`: static `FileOps` table, data, `f_flag`,
+  offset). A new kind of file is one `#[repr(C)] static FileOps` (null entry = kernel default),
+  made with `finstall`/`oxidebsd_finstall(real_fd, &OPS, data, oflags)`, which returns the user fd.
+  The kernel checks the access mode and keeps a `DFLAG_SEEKABLE` file's offset (`FOF_NEXTOFF` vs
+  `pread`'s `FOF_OFFSET`); close/lseek/fstat/ioctl/ftruncate/fsync go through the table. An open
+  the kernel makes for itself goes inside `fd::kernel_open` (no fd; `release` the handle).
 
 ## Processes, scheduling, threads (`sys/process/`)
 
@@ -382,6 +386,7 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   drained by `net::poll`, never delivered inside the send (protocol locks would re-enter).
 - QEMU needs `-accel kvm -accel tcg` or everything runs under TCG.
 - A test using sockets, `poll`, or `socketpair` must load the `socket` module.
+- Every test that loads `native_abi` also loads `vfs` (close, lseek, fstat, ioctl, ...).
 - TCP is stop-and-wait, fixed MSS.
 
 ## USB (`sys/drivers/usb/`)
