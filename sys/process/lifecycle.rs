@@ -2346,6 +2346,7 @@ pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
     if !matches!(cmd, RB_AUTOBOOT | RB_HALT_SYSTEM | RB_POWER_OFF) {
         return Err(EINVAL);
     }
+    crate::kern::vfs_mount::unmount_all();
     crate::module::run_shutdown_hooks();
     match cmd {
         RB_AUTOBOOT => crate::reboot::reboot(),

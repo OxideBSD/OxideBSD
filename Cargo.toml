@@ -107,7 +107,7 @@ members = [
   "sys/modules/vfs",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcertstore", "lib/libkern-mod", "lib/liboxfs", "lib/libmtree"]
+exclude = ["lib/libcertstore", "lib/libkern-mod", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
 
 [package]
 name = "oxidebsd"
@@ -143,6 +143,8 @@ sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 chacha20 = { version = "0.10", default-features = false, features = ["cipher"] }
 # oxfs's on-disk format: the partition type IDs (sys/drivers/part.rs).
 oxfs_format = { path = "lib/liboxfs" }
+# The VFS's kernel/file system interface (VFS.md §3-§6), shared with file system modules.
+vfs_if = { path = "lib/libvfs" }
 
 [build-dependencies]
 # The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.

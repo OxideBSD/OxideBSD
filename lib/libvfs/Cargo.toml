@@ -1,0 +1,12 @@
+[package]
+name = "vfs_if"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# The VFS's interface between the kernel and file system modules (OxideBSD-doc VFS.md §3-§6):
+# struct mount, struct vnode, vfsops, the vnode operations vector, vattr, componentname. The kernel
+# and every file system module depend on it, so neither side duplicates these by hand. No
+# dependencies; its own workspace, like lib/liboxfs.
+[workspace]

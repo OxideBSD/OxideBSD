@@ -273,6 +273,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - A `static mut` written but never read through a syscall-reachable path can be optimised away.
 - `serial_println!` can't take implicit `{name}` captures.
 - A module panic is fatal to the call; oxfs's panic reboots.
+- **File systems are VFS types** (`OxideBSD-doc/VFS.md`): a module registers a static `VfsConf`
+  with `oxidebsd_vfs_register` and calls `oxidebsd_module_serialize` (the giant lock); the
+  interface types live in `lib/libvfs` (crate `vfs_if`), shared with the kernel: never duplicate
+  them. The root mounts when its type (`/boot/fsconf`, else `oxfs`) registers.
 - Modules talk only to the kernel, never to each other. `sys/fs/fd.rs` is the shared fd registry:
   `(tgid, fd) -> real_fd -> Description` (a `struct file`: static `FileOps` table, data, `f_flag`,
   offset). A new kind of file is one `#[repr(C)] static FileOps` (null entry = kernel default),

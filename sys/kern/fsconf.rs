@@ -44,6 +44,12 @@ pub fn parse(bytes: &[u8]) -> Option<Vec<Entry>> {
 /// The root file system's device as `/boot/fsconf` names it (`/dev/gpt/rootfs`), if the boot
 /// loader loaded a valid one with an entry for `/`.
 pub fn root_device() -> Option<String> {
+    root_entry().map(|e| e.device)
+}
+
+/// The root file system's entry in `/boot/fsconf`, if the boot loader loaded a valid one with an
+/// entry for `/`.
+pub fn root_entry() -> Option<Entry> {
     let entries = parse(crate::boot::boot_module("/boot/fsconf")?)?;
-    entries.into_iter().find(|e| e.mount_point == "/").map(|e| e.device)
+    entries.into_iter().find(|e| e.mount_point == "/")
 }

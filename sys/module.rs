@@ -659,26 +659,35 @@ pub(crate) fn phys_mem_offset() -> Option<VirtAddr> {
     crate::memory::try_phys_mem_offset()
 }
 
-/// The code range of the module whose calls are serialized by the filesystem lock
-/// (`fs::fslock`): set by `oxidebsd_module_serialize`. One such module (oxfs) for now.
-static SERIALIZED_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static SERIALIZED_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The code ranges of the modules whose calls are serialized by the VFS's giant lock
+/// (`fs::fslock`, OxideBSD-doc `VFS.md` §5.4): set by `oxidebsd_module_serialize`, which every
+/// file system module calls. Lock-free (`(base, end)` pairs of atomics, filled once each), since an
+/// interrupt handler may ask while a module loads.
+const MAX_SERIALIZED: usize = 8;
+static SERIALIZED: [(core::sync::atomic::AtomicU64, core::sync::atomic::AtomicU64); MAX_SERIALIZED] =
+    [const { (core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)) }; MAX_SERIALIZED];
+static SERIALIZED_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Kernel API exposed to modules: called from a module's `module_init`, makes every later call
-/// into that module take the filesystem lock (`fs::fslock`) -- for a module whose state assumes
-/// one system call at a time while its own calls can sleep (oxfs, waiting for the disk).
+/// into that module take the VFS's giant lock (`fs::fslock`) -- for a module whose state assumes
+/// one system call at a time while its own calls can sleep (a file system, waiting for the disk).
 pub(crate) extern "C" fn oxidebsd_module_serialize() {
     use core::sync::atomic::Ordering;
     if let Some(m) = LOADED_MODULES.lock().last() {
-        SERIALIZED_BASE.store(m.base, Ordering::Release);
-        SERIALIZED_END.store(m.base + m.size, Ordering::Release);
+        let i = SERIALIZED_COUNT.load(Ordering::Acquire);
+        assert!(i < MAX_SERIALIZED, "too many serialized modules");
+        SERIALIZED[i].0.store(m.base, Ordering::Release);
+        SERIALIZED[i].1.store(m.base + m.size, Ordering::Release);
+        SERIALIZED_COUNT.store(i + 1, Ordering::Release);
     }
 }
 
-/// Whether `function` (an address about to be called) is in the serialized module.
+/// Whether `function` (an address about to be called) is in a serialized module.
 pub(crate) fn is_serialized(function: u64) -> bool {
     use core::sync::atomic::Ordering;
-    function >= SERIALIZED_BASE.load(Ordering::Acquire) && function < SERIALIZED_END.load(Ordering::Acquire)
+    SERIALIZED[..SERIALIZED_COUNT.load(Ordering::Acquire)]
+        .iter()
+        .any(|(base, end)| function >= base.load(Ordering::Acquire) && function < end.load(Ordering::Acquire))
 }
 
 /// Hooks modules registered to run before an orderly reboot, halt or power-off
@@ -1460,6 +1469,15 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_unix_time" => Some(crate::cpu::rtc::oxidebsd_unix_time as *const () as u64),
         "oxidebsd_physmem_bytes" => Some(crate::memory::oxidebsd_physmem_bytes as *const () as u64),
         "oxidebsd_module_serialize" => Some(oxidebsd_module_serialize as *const () as u64),
+        "oxidebsd_vfs_register" => Some(crate::kern::vfs_mount::oxidebsd_vfs_register as *const () as u64),
+        "oxidebsd_sys_sync" => Some(crate::kern::vfs_mount::oxidebsd_sys_sync as *const () as u64),
+        "oxidebsd_getnewvnode" => Some(crate::kern::vfs_subr::oxidebsd_getnewvnode as *const () as u64),
+        "oxidebsd_vfs_hash_get" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_get as *const () as u64),
+        "oxidebsd_vfs_hash_insert" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_insert as *const () as u64),
+        "oxidebsd_vfs_hash_rehash" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_rehash as *const () as u64),
+        "oxidebsd_vref" => Some(crate::kern::vfs_subr::oxidebsd_vref as *const () as u64),
+        "oxidebsd_vrele" => Some(crate::kern::vfs_subr::oxidebsd_vrele as *const () as u64),
+        "oxidebsd_vaccess" => Some(crate::kern::vfs_subr::oxidebsd_vaccess as *const () as u64),
         "oxidebsd_root_readonly_at_boot" => {
             Some(crate::drivers::disk::oxidebsd_root_readonly_at_boot as *const () as u64)
         }

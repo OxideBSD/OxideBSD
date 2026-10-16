@@ -188,6 +188,7 @@ const KERN_OSRELEASE: i32 = 2;
 const KERN_VERSION: i32 = 4;
 const KERN_MAXPROC: i32 = 6;
 const KERN_MAXFILES: i32 = 7;
+const KERN_MAXVNODES: i32 = 5;
 const KERN_MAXFILESPERPROC: i32 = 29;
 const KERN_ARGMAX: i32 = 8;
 const KERN_HOSTNAME: i32 = 10;
@@ -250,6 +251,9 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
             .filter(|v| (4096..=16 * 1024 * 1024).contains(v))
             .map(|v| crate::kern::subr_msgbuf::SIZE.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
         "kern.maxproc" => parsed.filter(|v| (32..=1_000_000).contains(v)).map(|v| *MAXPROC.lock() = v as i32),
+        "kern.maxvnodes" => parsed
+            .filter(|v| (64..=(64 << 20)).contains(v))
+            .map(|v| crate::kern::vfs_subr::MAXVNODES.store(v, core::sync::atomic::Ordering::Relaxed)),
         "kern.maxfiles" => parsed.filter(|v| (64..=1_000_000).contains(v)).map(|v| *MAXFILES.lock() = v as i32),
         "kern.maxfilesperproc" => {
             parsed.filter(|v| (16..=1_000_000).contains(v)).map(|v| *MAXFILESPERPROC.lock() = v as i32)
@@ -378,6 +382,23 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             descr: "Maximum number of files",
             get: || int(maxfiles() as i32),
             set: None,
+        },
+        Leaf {
+            number: Some(KERN_MAXVNODES),
+            name: "maxvnodes",
+            kind: CTLTYPE_ULONG,
+            fmt: "LU",
+            flags: CTLFLAG_RW,
+            descr: "Target for maximum number of vnodes",
+            get: || ulong(crate::kern::vfs_subr::maxvnodes()),
+            set: Some(|new| {
+                let v = new.try_into().map(u64::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                if !(64..=(64 << 20)).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                crate::kern::vfs_subr::MAXVNODES.store(v, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
         },
         Leaf {
             number: Some(KERN_MAXFILESPERPROC),
@@ -841,7 +862,11 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
         ("dirtybufspace", "Bytes of buffers not yet written", || ulong(crate::kern::vfs_bio::stats().1)),
         ("maxbufspace", "Most bytes the buffers may hold", || ulong(crate::kern::vfs_bio::stats().2)),
     ];
-    for (name, descr, get) in bufs {
+    let vnodes: [(&'static str, &'static str, Getter); 2] = [
+        ("numvnodes", "Number of vnodes in existence", || ulong(crate::kern::vfs_subr::stats().0)),
+        ("freevnodes", "Number of vnodes on the free list", || ulong(crate::kern::vfs_subr::stats().1)),
+    ];
+    for (name, descr, get) in bufs.into_iter().chain(vnodes) {
         add_leaf(t, &vfs, Leaf { number: None, name, kind: CTLTYPE_ULONG, fmt: "LU", flags: CTLFLAG_RD, descr, get, set: None });
     }
 

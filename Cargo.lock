@@ -399,6 +399,7 @@ version = "0.1.0"
 dependencies = [
  "kern_mod",
  "oxfs_format",
+ "vfs_if",
 ]
 
 [[package]]
@@ -422,6 +423,7 @@ dependencies = [
  "pc-keyboard",
  "sha2",
  "spin",
+ "vfs_if",
  "x86_64",
 ]
 
@@ -713,6 +715,10 @@ version = "0.1.0"
 
 [[package]]
 name = "vfs"
+version = "0.1.0"
+
+[[package]]
+name = "vfs_if"
 version = "0.1.0"
 
 [[package]]

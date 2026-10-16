@@ -7,3 +7,4 @@ publish = false
 [dependencies]
 oxfs_format = { path = "../../../lib/liboxfs" }
 kern_mod = { path = "../../../lib/libkern-mod" }
+vfs_if = { path = "../../../lib/libvfs" }

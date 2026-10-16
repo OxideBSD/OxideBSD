@@ -1,6 +1,6 @@
 //! Registers the system calls every descriptor answers (OxideBSD-doc `VFS.md` §6.4): `close` (6),
 //! `lseek` (8), `fdatasync` (75), `ioctl` (124), `fstat` (126), `fsync` (471) and `ftruncate`
-//! (473). The work is the kernel's (`kern::kern_descrip`, `syscall::ffi::sys_ioctl`), through each
+//! (473), and `sync` (472) over every mount. The work is the kernel's (`kern::kern_descrip`, `syscall::ffi::sys_ioctl`), through each
 //! file's operations (`fs::fd::FileOps`). The VFS's other calls join it as they move to the kernel
 //! (`VFS.md` §11 step 2: `namei`, `nmount`, `unmount`).
 #![no_std]
@@ -18,6 +18,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_fsync(fd: u64, a1: u64, a2: u64, a3: u64) -> i64;
     fn oxidebsd_sys_fdatasync(fd: u64, a1: u64, a2: u64, a3: u64) -> i64;
     fn oxidebsd_sys_ioctl(fd: u64, request: u64, argp: u64) -> i64;
+    fn oxidebsd_sys_sync(a0: u64, a1: u64, a2: u64, a3: u64) -> i64;
 }
 
 const SYS_CLOSE: u64 = 6;
@@ -27,6 +28,7 @@ const SYS_IOCTL: u64 = 124;
 const SYS_FSTAT: u64 = 126;
 const SYS_FSYNC: u64 = 471;
 const SYS_FTRUNCATE: u64 = 473;
+const SYS_SYNC: u64 = 472;
 
 extern "C" fn handle_close(a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     unsafe { oxidebsd_sys_close(a0, a1, a2, a3) }
@@ -52,13 +54,17 @@ extern "C" fn handle_fdatasync(a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     unsafe { oxidebsd_sys_fdatasync(a0, a1, a2, a3) }
 }
 
+extern "C" fn handle_sync(a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    unsafe { oxidebsd_sys_sync(a0, a1, a2, a3) }
+}
+
 extern "C" fn handle_ioctl(fd: u64, request: u64, argp: u64, _a3: u64) -> i64 {
     unsafe { oxidebsd_sys_ioctl(fd, request, argp) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn module_init() -> i32 {
-    let calls: [(u64, extern "C" fn(u64, u64, u64, u64) -> i64); 7] = [
+    let calls: [(u64, extern "C" fn(u64, u64, u64, u64) -> i64); 8] = [
         (SYS_CLOSE, handle_close),
         (SYS_LSEEK, handle_lseek),
         (SYS_FDATASYNC, handle_fdatasync),
@@ -66,11 +72,12 @@ pub extern "C" fn module_init() -> i32 {
         (SYS_FSTAT, handle_fstat),
         (SYS_FSYNC, handle_fsync),
         (SYS_FTRUNCATE, handle_ftruncate),
+        (SYS_SYNC, handle_sync),
     ];
     for (number, handler) in calls {
         unsafe { oxidebsd_register_syscall(number, handler) };
     }
-    let message = "[module] vfs: module_init running (registered SYS_CLOSE/SYS_LSEEK/SYS_FDATASYNC/SYS_IOCTL/SYS_FSTAT/SYS_FSYNC/SYS_FTRUNCATE)\n";
+    let message = "[module] vfs: module_init running (registered SYS_CLOSE/SYS_LSEEK/SYS_FDATASYNC/SYS_IOCTL/SYS_FSTAT/SYS_FSYNC/SYS_FTRUNCATE/SYS_SYNC)\n";
     unsafe { oxidebsd_log(message.as_ptr(), message.len() as u64) };
     0
 }

@@ -67,6 +67,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 mod buf;
+mod vfs;
 
 // The on-disk format: layout constants, `Inode`, `pack_inode`/`unpack_inode`, directory records
 // and the superblock (`lib/liboxfs`, shared with fsck_oxfs and the host tools).
@@ -214,12 +215,8 @@ unsafe extern "C" {
     fn oxidebsd_page_free(page: u64);
     /// Makes every call into this module take the kernel's filesystem lock.
     fn oxidebsd_module_serialize();
-    /// `1` when the root should be mounted read-only at boot (the real boot path).
-    fn oxidebsd_root_readonly_at_boot() -> u64;
     /// Tells the kernel whether the root is mounted read-write (`1`) or read-only.
     fn oxidebsd_root_mounted_rw(rw: u64);
-    /// `hook` runs before an orderly reboot, halt or power-off (`reboot(2)`).
-    fn oxidebsd_register_shutdown_hook(hook: extern "C" fn());
 }
 
 /// Changes whenever a file this module embeds changes (`build.rs`'s `build_module_crate`); reading
@@ -295,8 +292,8 @@ const SYS_NMOUNT: u64 = 584;
 /// `external/mit/musl/arch/x86_64/bits/syscall.h.in` (e.g. real `__NR_gettid=186`, which has a live
 /// caller inside musl itself, `src/thread/synccall.c`) -- see that file's own comment on
 /// `__NR_flock` (right near `__NR_fsync`) for the full story on why 471-486 is provably
-/// collision-free instead. `SYS_FSYNC`/`SYS_SYNC` put delayed writes on the disk (`sync_file`,
-/// `buf::flush_all`) -- one file's, or every one. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
+/// collision-free instead. `SYS_FSYNC` puts a file's delayed writes on the disk (`sync_file`);
+/// `sync(2)` is the kernel's, through `vfs::oxfs_vfs_sync`. `SYS_FTRUNCATE`/`SYS_FALLOCATE` resize a file's real content
 /// directly at the block level (`resize_inode_data`, not `write_inode_data` -- materializing a
 /// whole file's content into one stack buffer first would risk overflowing this kernel's 128 KiB
 /// kernel-stack floor for anything near this filesystem's ~4 MiB per-file cap).
@@ -309,7 +306,6 @@ const SYS_NMOUNT: u64 = 584;
 /// block/inode-usage counts (separately for the real vs. tmpfs pool, `write_statfs`), backing
 /// `df`'s real `statvfs(3)` call.
 const SYS_FSYNC: u64 = 471;
-const SYS_SYNC: u64 = 472;
 /// Real, unremapped Linux `__NR_fdatasync=75` (confirmed unclaimed -- this ABI's own invented
 /// numbers start at 100, and `external/mit/musl/src/unistd/fdatasync.c` issues this exact number
 /// directly, no OxideBSD-side remap needed, matching `SYS_PREAD`/`SYS_PWRITE`'s own precedent).
@@ -4444,27 +4440,6 @@ fn sync_file(n: u32) {
     buf::flush_file(n);
 }
 
-/// Registered for `SYS_SYNC`: every delayed write goes to the disk before this returns (POSIX lets
-/// `sync(2)` return early; OxideBSD doesn't, since `update(8)` and shutdown rely on it). No
-/// failure return.
-extern "C" fn oxfs_sync(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    buf::flush_all();
-    0
-}
-
-/// Registered with the kernel as the shutdown hook (`oxidebsd_register_shutdown_hook`): an
-/// orderly reboot, halt or power-off writes everything delayed, then marks the filesystem clean
-/// (§3.4.1). Not called on a panic or a fault.
-extern "C" fn oxfs_shutdown() {
-    if root_rdonly() {
-        return; // nothing delayed, and the disk can't be written
-    }
-    buf::flush_all();
-    set_clean(true);
-    write_superblock();
-    log("[oxfs] filesystem synced and marked clean\n");
-}
-
 /// Real POSIX `ftruncate(2)`/`fallocate(2)`: `EINVAL` when `fd` isn't open for writing -- shared by
 /// both callers below. Peeks the registered `OpenFile::Write` state directly (`inode_of_open_file`
 /// returns only the inode, with no access mode) -- see `OpenFile::Write::readonly`'s own doc
@@ -6593,6 +6568,7 @@ fn remount_root(rdonly: bool) -> i64 {
         set_clean(true);
         write_superblock();
         set_root_rdonly(true);
+        vfs::set_mount_rdonly(true);
         log("[oxfs] root remounted read-only\n");
         return 0;
     }
@@ -6601,6 +6577,7 @@ fn remount_root(rdonly: bool) -> i64 {
         return -EIO;
     }
     set_root_rdonly(false);
+    vfs::set_mount_rdonly(false);
     set_clean(false);
     write_superblock();
     sweep_unnamed_inodes();
@@ -7321,40 +7298,12 @@ pub extern "C" fn module_init() -> i32 {
     }
     register_oxfs_devices();
 
-    // The root file system is the disk's oxfs partition, made by newfs_oxfs(8) or installed from
-    // a system image; the kernel never formats one (`OxideBSD-doc/RAM_FLOOR.md` §4.2.1). Without
-    // one there's nothing to boot: say why, and fail the load (the kernel then stops).
-    if !block_device_present() {
-        log("[oxfs] no root file system: no disk (and the memory disk is empty)\n");
+    // The root file system: the kernel mounts it through oxfs's type as soon as it's registered
+    // (`vfs::oxfs_vfs_mount`). Without one there's nothing to boot: fail the load (the kernel then
+    // stops).
+    // SAFETY: FFI call to a kernel-exported function, with a static table.
+    if unsafe { vfs_if::oxidebsd_vfs_register(&vfs::OXFS_VFSCONF) } != 0 || vfs::root_mount().is_null() {
         return -1;
-    }
-    if !mount_from_disk() {
-        log("[oxfs] no root file system: the root partition holds no oxfs of this version (make one with newfs_oxfs(8), or install a system image)\n");
-        return -1;
-    }
-    // Mounting leaves PERSISTENCE_READY false through its own reads (see that flag's own doc
-    // comment) -- flipped here, once, right before real syscalls become reachable, so every write
-    // a running process makes from this point on is persisted immediately.
-    set_persistence_ready(true);
-    buf::set_write_through(true);
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let rdonly = unsafe { oxidebsd_root_readonly_at_boot() } != 0;
-    set_root_rdonly(rdonly);
-    if rdonly {
-        log("[oxfs] root mounted read-only\n");
-    } else {
-        // Mounted: not clean on the disk until an orderly shutdown says so (§3.4.1).
-        set_clean(false);
-        write_superblock();
-    }
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    unsafe { oxidebsd_register_shutdown_hook(oxfs_shutdown) };
-    if !rdonly {
-        sweep_unnamed_inodes();
-    }
-    // /dev (`DEVFS.md` §4.1): devfs over the disk's /dev, before any process runs.
-    if !mount_devfs() {
-        log("[oxfs] failed to mount devfs on /dev\n");
     }
 
     // The boot-time cwd is the root (a real process's own starts at Process::cwd's default).
@@ -7402,7 +7351,6 @@ pub extern "C" fn module_init() -> i32 {
         oxidebsd_register_syscall(SYS_RENAMEAT2, oxfs_renameat2);
         oxidebsd_register_syscall(SYS_UMOUNT2, oxfs_umount2);
         oxidebsd_register_syscall(SYS_NMOUNT, oxfs_nmount);
-        oxidebsd_register_syscall(SYS_SYNC, oxfs_sync);
         oxidebsd_register_syscall(SYS_FALLOCATE, oxfs_fallocate);
         oxidebsd_register_syscall(SYS_FLOCK, oxfs_flock);
         oxidebsd_register_syscall(SYS_STATFS, oxfs_statfs);
