@@ -8,6 +8,8 @@
 .
 ./bin
 ./bin/**
+./boot
+./boot/**
 ./dev
 ./proc
 ./etc

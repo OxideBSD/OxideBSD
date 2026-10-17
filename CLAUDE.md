@@ -32,12 +32,12 @@ required -- probe it and keep a fallback.
   via musl's `ld.so`), ring 3, a native BSD-style syscall ABI over `SYSCALL`/`SYSRETQ`.
 - Syscalls are registered at runtime by dynamically loaded kernel modules (`sys/module.rs`,
   `sys/modules/*`): `native_abi`, `posix_compat`, `signal`, `vfs`, `oxfs`, `procfs`, `socket`,
-  `clock`, `sysctl`.
+  `clock`, `sysctl`, `msdosfs`.
 - A BSD vnode VFS (`OxideBSD-doc/VFS.md`, `sys/kern/vfs_*.rs`): the kernel's `namei`, name cache,
   mounts and path system calls; file systems are modules serving vnode operations. oxfs
   (`sys/modules/oxfs`): the disk's Unix inode/block file system; tmpfs, devfs (`/dev`), procfs
-  (`/proc`) and nullfs (layered over any type through the kernel's `oxidebsd_vop_*`) are modules
-  of their own.
+  (`/proc`), nullfs (layered over any type through the kernel's `oxidebsd_vop_*`) and msdosfs
+  (FAT12/16/32; `/boot/efi` on disks with an ESP) are modules of their own.
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
@@ -287,6 +287,12 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   wrappers in `kern::vnode_if` take it). **The last `vrele` can enter a file system**: from a
   context holding a spin lock (the process table, as a process is reaped) use
   `vfs_subr::vrele_deferred`.
+- A type neither `VFCF_SYNTHETIC` nor `VFCF_FROM_VNODE` gets its device from `nmount`, which
+  opens the disk node `from` names (`MountArgs::dev`); one mount per device. devfs's `v_rdev` is
+  musl's `makedev` encoding (`major << 8 | minor`).
+- msdosfs's format is `lib/libmsdosfs` (shared with makefs, newfs_msdos, fsck_msdosfs); FAT times
+  are local (`kern.utc_offset`, `adjkerntz(8)`). Its bio hook orders writes data, then FAT, then
+  directories; anything freeing clusters writes the entry naming them first.
 - Modules talk only to the kernel, never to each other. `sys/fs/fd.rs` is the shared fd registry:
   `(tgid, fd) -> real_fd -> Description` (a `struct file`: static `FileOps` table, data, `f_flag`,
   offset). A new kind of file is one `#[repr(C)] static FileOps` (null entry = kernel default),

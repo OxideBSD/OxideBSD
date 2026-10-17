@@ -65,6 +65,16 @@ and
 .Xr gzip 1
 are what a repair actually uses, so they are here, not in
 .Pa /usr/bin .
+.It Pa /boot
+Boot files.
+.Bl -tag -width "efi/" -compact
+.It Pa efi/
+The EFI system partition, an
+.Xr msdosfs 5
+volume mounted here on disks that have one: the boot loader, the kernel and
+.Xr fsconf 5
+the loader hands it.
+.El
 .It Pa /dev
 Devices: a
 .Xr devfs 4

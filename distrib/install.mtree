@@ -15,6 +15,8 @@
 #
 /set uid=0 gid=0
 . type=dir
+./boot type=dir
+./boot/efi type=dir
 ./bin type=dir
 ./sbin type=dir
 ./lost+found type=dir mode=0700
