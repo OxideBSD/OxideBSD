@@ -1,0 +1,24 @@
+#!/sbin/init_sh
+#
+# PROVIDE: adjkerntz
+# REQUIRE: sysctl
+# BEFORE: fsck
+#
+# Tells the kernel the local time zone's offset (kern.utc_offset, adjkerntz(8)) before any file
+# system whose timestamps are local time (msdosfs) is checked or mounted. cron(8) runs it again
+# every hour, for daylight saving time.
+
+. /etc/rc.subr
+
+name="adjkerntz"
+desc="Set the kernel's local time zone offset"
+start_cmd="adjkerntz_start"
+stop_cmd=":"
+
+adjkerntz_start()
+{
+	/sbin/adjkerntz -a
+}
+
+load_rc_config $name
+run_rc_command "$1"

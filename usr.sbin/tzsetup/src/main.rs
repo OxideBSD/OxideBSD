@@ -19,16 +19,20 @@ use std::process::ExitCode;
 struct Paths {
     localtime: PathBuf,
     zoneinfo: PathBuf,
+    /// The running system's zone, so the kernel's offset (`adjkerntz(8)`) follows a change.
+    live: bool,
 }
 
 impl Paths {
     fn from_env() -> Paths {
-        let root = std::env::var_os("TZSETUP_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-        Paths::under(&root)
+        match std::env::var_os("TZSETUP_ROOT") {
+            Some(root) => Paths::under(Path::new(&root)),
+            None => Paths { live: true, ..Paths::under(Path::new("/")) },
+        }
     }
 
     fn under(root: &Path) -> Paths {
-        Paths { localtime: root.join("etc/localtime"), zoneinfo: root.join("usr/share/zoneinfo") }
+        Paths { localtime: root.join("etc/localtime"), zoneinfo: root.join("usr/share/zoneinfo"), live: false }
     }
 }
 
@@ -105,7 +109,12 @@ fn install(paths: &Paths, zone: &str, dry_run: bool, out: &mut dyn Write) -> Res
     std::fs::rename(&tmp, &paths.localtime).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("{}: {e}", paths.localtime.display())
-    })
+    })?;
+    if paths.live {
+        // The kernel's offset for msdosfs times; adjkerntz reports its own failure.
+        let _ = std::process::Command::new("/sbin/adjkerntz").arg("-a").status();
+    }
+    Ok(())
 }
 
 /// The zone the current link names (`-r`): its target, less the database directory.

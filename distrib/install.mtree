@@ -126,6 +126,7 @@
 ./usr/bin/diff type=file src=artifact:OXFS_DIFF_ELF_PATH
 ./sbin/dmesg type=file src=artifact:OXFS_SBIN_DMESG_ELF_PATH
 ./sbin/update type=file src=artifact:OXFS_UPDATE_ELF_PATH
+./sbin/adjkerntz type=file src=artifact:OXFS_ADJKERNTZ_ELF_PATH
 ./sbin/fsck type=file src=artifact:OXFS_FSCK_ELF_PATH
 ./sbin/fsck_oxfs type=file src=artifact:OXFS_FSCK_OXFS_ELF_PATH
 ./sbin/newfs_oxfs type=file src=artifact:OXFS_NEWFS_OXFS_ELF_PATH
@@ -288,6 +289,7 @@
 ./etc/rc.d/syslogd type=file src=etc/rc.d/syslogd
 ./etc/rc.d/cron type=file src=etc/rc.d/cron
 ./etc/rc.d/update type=file src=etc/rc.d/update
+./etc/rc.d/adjkerntz type=file src=etc/rc.d/adjkerntz
 ./etc/rc.d/mountcritlocal type=file src=etc/rc.d/mountcritlocal
 ./etc/sysctl.conf type=file src=etc/sysctl.conf
 ./etc/devfs.conf type=file src=etc/devfs.conf
@@ -444,6 +446,7 @@
 ./usr/share/man/man8/emergency.8 type=file src=share/man/man8/emergency.8
 ./usr/share/man/man8/dmesg.8 type=file src=share/man/man8/dmesg.8
 ./usr/share/man/man8/update.8 type=file src=share/man/man8/update.8
+./usr/share/man/man8/adjkerntz.8 type=file src=share/man/man8/adjkerntz.8
 ./usr/share/man/man8/fsck.8 type=file src=share/man/man8/fsck.8
 ./usr/share/man/man8/fsck_oxfs.8 type=file src=share/man/man8/fsck_oxfs.8
 ./usr/share/man/man8/newfs_oxfs.8 type=file src=share/man/man8/newfs_oxfs.8

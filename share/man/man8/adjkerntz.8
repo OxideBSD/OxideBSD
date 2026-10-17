@@ -1,0 +1,75 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt ADJKERNTZ 8
+.Os OxideBSD
+.Sh NAME
+.Nm adjkerntz
+.Nd tell the kernel the local time zone's offset from UTC
+.Sh SYNOPSIS
+.Nm
+.Fl a
+.Sh DESCRIPTION
+The system clock keeps UTC.
+A few on-disk formats store local time instead, the FAT file system's timestamps
+among them, so the kernel needs the local zone's offset to convert:
+.Nm
+sets it.
+.Pp
+The option is as follows:
+.Bl -tag -width indent
+.It Fl a
+Read the offset in effect now from
+.Pa /etc/localtime
+and set the
+.Va kern.utc_offset
+.Xr sysctl 8
+variable, in minutes east of UTC, if it differs.
+Without
+.Pa /etc/localtime
+the offset is 0.
+The
+.Ev TZ
+environment variable is ignored: the kernel's offset is the system's, not a
+user's.
+.El
+.Pp
+.Xr rc 8
+runs
+.Nm
+.Fl a
+at boot, before any file system is checked or mounted.
+The system
+.Xr crontab 5
+runs it again at one minute past every hour, so the offset follows daylight
+saving time, and
+.Xr tzsetup 8
+runs it after changing the zone.
+.Sh FILES
+.Bl -tag -width /etc/localtime -compact
+.It Pa /etc/localtime
+The local time zone.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr tzfile 5 ,
+.Xr mount_msdosfs 8 ,
+.Xr sysctl 8 ,
+.Xr tzsetup 8
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.Fx 1.0 ,
+where it also adjusts a hardware clock kept in local time.
+The
+.Va kern.utc_offset
+variable is
+.Ox Ns 's
+name; there it is the hardware clock's offset.
+.Sh BUGS
+Times are converted with the offset in effect now, not the one in effect at the
+time converted: a file written in summer shows an hour off in winter, as it does
+on
+.Fx
+and Windows.

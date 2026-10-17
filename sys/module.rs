@@ -736,6 +736,12 @@ pub(crate) extern "C" fn oxidebsd_page_alloc() -> u64 {
     va.as_u64()
 }
 
+/// Kernel API: `kern.utc_offset`, the local time zone's offset from UTC in minutes east (for
+/// msdosfs, whose timestamps are local time).
+pub(crate) extern "C" fn oxidebsd_utc_offset() -> i32 {
+    crate::kern::kern_sysctl::UTC_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// `vfs.tmpfs.memory_reserved`: the free memory, in bytes, below which no tmpfs takes a page
 /// (`oxidebsd_tmpfs_page_alloc`), FreeBSD's knob and default.
 pub(crate) static TMPFS_MEMORY_RESERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(4 << 20);
@@ -1156,6 +1162,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_module_alloc_zeroed" => Some(oxidebsd_module_alloc_zeroed as *const () as u64),
         "oxidebsd_page_alloc" => Some(oxidebsd_page_alloc as *const () as u64),
         "oxidebsd_tmpfs_page_alloc" => Some(oxidebsd_tmpfs_page_alloc as *const () as u64),
+        "oxidebsd_utc_offset" => Some(oxidebsd_utc_offset as *const () as u64),
         "oxidebsd_page_free" => Some(oxidebsd_page_free as *const () as u64),
         "oxidebsd_copyin" => Some(crate::memory::usercopy::oxidebsd_copyin as *const () as u64),
         "oxidebsd_copyout" => Some(crate::memory::usercopy::oxidebsd_copyout as *const () as u64),

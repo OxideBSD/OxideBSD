@@ -11,6 +11,9 @@ PATH=/etc:/bin:/sbin:/usr/bin:/usr/sbin
 # Rotate log files every hour, if necessary.
 0	*	*	*	*	root	newsyslog
 #
+# Follow daylight saving time in the kernel's local time offset (msdosfs times); see adjkerntz(8).
+1	*	*	*	*	root	adjkerntz -a
+#
 # The daily, weekly and monthly maintenance runs; see periodic(8).
 1	3	*	*	*	root	periodic daily
 15	4	*	*	6	root	periodic weekly

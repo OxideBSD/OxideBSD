@@ -221,6 +221,13 @@ pub(crate) static MAXFILES: Mutex<i32> = Mutex::new(0);
 /// What `RLIMIT_NOFILE` can't exceed (`process::limits::current_nofile`).
 pub(crate) static MAXFILESPERPROC: Mutex<i32> = Mutex::new(0);
 
+/// `kern.utc_offset`: the local time zone's offset from UTC, in minutes east, OpenBSD's name and
+/// unit. The clock keeps UTC (`TIMEZONE.md` §4.3); this is for the formats that store local time,
+/// FAT's timestamps (msdosfs). `adjkerntz(8)` sets it from `/etc/localtime` at boot and from cron,
+/// so it follows daylight saving time within the hour. Modules read it with
+/// `module::oxidebsd_utc_offset`.
+pub(crate) static UTC_OFFSET: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
 /// RAM per open file `kern.maxfiles` allows by default: an open file costs the kernel heap (an
 /// eighth of RAM) a few hundred bytes between its description and its file system's state, so
 /// every file open at once still leaves most of the heap: 2048 files at 64 MB, 262144 at 8 GB.
@@ -426,6 +433,24 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             descr: "Maximum bytes of argument to execve(2)",
             get: || int(crate::process::MAX_EXEC_ARG_BYTES as i32),
             set: None,
+        },
+        Leaf {
+            number: None,
+            name: "utc_offset",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Offset of local time from UTC in minutes East",
+            get: || int(UTC_OFFSET.load(core::sync::atomic::Ordering::Relaxed)),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                // Every real zone is within a day of UTC (the extremes are -12 and +14 hours).
+                if !(-24 * 60..=24 * 60).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                UTC_OFFSET.store(v, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
         },
         Leaf {
             number: Some(KERN_HOSTNAME),

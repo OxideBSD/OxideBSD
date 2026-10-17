@@ -576,6 +576,8 @@ fn main() {
     let update_elf_path =
         build_static_std_crate("sbin/update", "OXFS_UPDATE_ELF_PATH", &musl_sysroot);
     let fsck_elf_path = build_static_std_crate("sbin/fsck", "OXFS_FSCK_ELF_PATH", &musl_sysroot);
+    let adjkerntz_elf_path =
+        build_static_std_crate("sbin/adjkerntz", "OXFS_ADJKERNTZ_ELF_PATH", &musl_sysroot);
     // fsck_oxfs, the oxfs module and the kernel's partition code share oxfs's on-disk format,
     // lib/liboxfs (RAM_FLOOR.md §4.1).
     println!(
@@ -960,6 +962,7 @@ fn main() {
         ("OXFS_SBIN_DMESG_ELF_PATH", dmesg_elf_path.to_str().unwrap()),
         ("OXFS_UPDATE_ELF_PATH", update_elf_path.to_str().unwrap()),
         ("OXFS_FSCK_ELF_PATH", fsck_elf_path.to_str().unwrap()),
+        ("OXFS_ADJKERNTZ_ELF_PATH", adjkerntz_elf_path.to_str().unwrap()),
         ("OXFS_FSCK_OXFS_ELF_PATH", fsck_oxfs_elf_path.to_str().unwrap()),
         ("OXFS_NEWFS_OXFS_ELF_PATH", newfs_oxfs_elf_path.to_str().unwrap()),
         ("OXFS_SYSLOGD_ELF_PATH", syslogd_elf_path.to_str().unwrap()),

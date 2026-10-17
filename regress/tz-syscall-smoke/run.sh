@@ -94,6 +94,25 @@ check "... to the same zone" links_to /usr/share/zoneinfo/Europe/Berlin
 printf 'q\n' | tzsetup > /dev/null
 check "quitting the menu changes nothing" links_to /usr/share/zoneinfo/Europe/Berlin
 
+# --- The kernel's offset (kern.utc_offset, adjkerntz(8)), set by tzsetup ----------------------
+utc_offset_is() { [ "$(sysctl -n kern.utc_offset)" = "$1" ]; }
+tzsetup Asia/Tokyo
+check "tzsetup sets kern.utc_offset (Tokyo, +540)" utc_offset_is 540
+tzsetup Asia/Kolkata
+check "... in minutes, for a half-hour zone (+330)" utc_offset_is 330
+tzsetup America/Los_Angeles
+check "... west of UTC is negative" eval 'o=$(sysctl -n kern.utc_offset); [ "$o" = -420 -o "$o" = -480 ]'
+TZ=Asia/Tokyo adjkerntz -a
+check "adjkerntz ignores TZ" eval 'o=$(sysctl -n kern.utc_offset); [ "$o" = -420 -o "$o" = -480 ]'
+rm -f /etc/localtime
+check "adjkerntz -a without /etc/localtime: 0" adjkerntz -a
+check "... is UTC" utc_offset_is 0
+check "kern.utc_offset refuses more than a day" not sysctl kern.utc_offset=1500
+check "... and keeps its value" utc_offset_is 0
+check "adjkerntz needs -a" not adjkerntz
+check "the system crontab runs adjkerntz hourly" has /etc/crontab "adjkerntz -a"
+tzsetup Europe/Berlin
+
 # --- A running program follows a changed /etc/localtime (musl re-checks it every second) -----
 tzsetup UTC
 mkdir -p /tmp/tzsl
