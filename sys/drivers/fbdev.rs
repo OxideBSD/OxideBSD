@@ -1,16 +1,10 @@
-//! Real framebuffer geometry query, backing `/dev/fb0` (`sys/modules/oxfs`'s `OpenFile::Framebuffer`)
-//! and the `do_mmap` MMIO-mapping path (`process::mm::do_mmap_fb`). Deliberately thin: this file
-//! owns no state of its own, just translates `boot::primary_framebuffer()`'s already-real,
-//! boot-path-agnostic `FbInfo` response into a plain, `#[repr(C)]`, syscall/module-boundary-safe
-//! shape.
-//!
-//! This is genuine, general-purpose framebuffer-device infrastructure (not doomgeneric-specific)
-//! -- the first real graphical-output primitive a future desktop environment could also build on.
+//! The framebuffer device, `/dev/fb0` (`init`), and its geometry query, which `mmap` of it
+//! (`process::mm::do_mmap_fb`) maps from: `boot::primary_framebuffer()`'s `FbInfo` as a plain
+//! `#[repr(C)]` record.
 
 use crate::boot;
 
-/// The wire format both `sys/modules/oxfs` (seeding a `/dev/fb0` device inode's backing info) and
-/// `process::mm::do_mmap_fb` (deriving the physical range to map) consume. `#[repr(C)]`, same
+/// What `FileOps::fb_geometry` writes, and `process::mm::do_mmap_fb` maps from. `#[repr(C)]`, same
 /// "plain-old-data struct read through a raw pointer" discipline every other module-boundary
 /// struct in this codebase already uses (`RawTermios`, `RawWinsize`, ...).
 #[repr(C)]
@@ -48,14 +42,12 @@ pub fn current_fb_geometry() -> Option<FbGeometry> {
     })
 }
 
-/// Module-callable wrapper (see `sys/module.rs`'s hand-curated symbol table) -- writes the real
-/// geometry through `out` and returns `0`, or returns `-1` (writing nothing) if no usable
-/// framebuffer exists this boot. Same "plain `u64`/`i32` at the module boundary, raw pointer cast
-/// inside" shape `random::oxidebsd_random_bytes` already establishes.
-pub extern "C" fn oxidebsd_fb_geometry(out: u64) -> i32 {
+/// `FileOps::fb_geometry` of `/dev/fb0`: writes the geometry through `out` and returns `0`, or
+/// `-1` (writing nothing) if no usable framebuffer exists this boot.
+extern "C" fn fb_geometry(_real_fd: u64, out: u64) -> i32 {
     match current_fb_geometry() {
         Some(geom) => {
-            // SAFETY: `out` is the calling module's own kernel buffer (`oxfs`), never a user
+            // SAFETY: `out` is a kernel buffer (`fd::framebuffer_geometry_of`'s), never a user
             // pointer, so not a `copyout` (USERMEM.md).
             unsafe { *(out as *mut FbGeometry) = geom };
             0
@@ -63,3 +55,29 @@ pub extern "C" fn oxidebsd_fb_geometry(out: u64) -> i32 {
         None => -1,
     }
 }
+
+/// Registers `/dev/fb0` (major 29, Linux's), when there is a usable framebuffer. Its pixels are
+/// reached only through `mmap` (`process::mm::do_mmap_fb`); `read` and `write` fail `EBADF`.
+pub fn init() {
+    if current_fb_geometry().is_some() {
+        let _ = crate::fs::devfs::make_dev("fb0", 29, 0, 0, 0, 0o666, fb_open);
+    }
+}
+
+extern "C" fn fb_open(_major: u64, _minor: u64, flags: u64) -> i64 {
+    use crate::fs::fd;
+    if current_fb_geometry().is_none() {
+        return -(crate::syscall::ENXIO as i64);
+    }
+    if let Err(e) = fd::check_room(1) {
+        return -(e as i64);
+    }
+    let real_fd = fd::oxidebsd_alloc_fd();
+    fd::finstall(real_fd, &FB_OPS, 0, fd::open_flag(flags), fd::FdKind::Module)
+}
+
+static FB_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps {
+    flags: crate::fs::fd::DFLAG_SEEKABLE,
+    fb_geometry: Some(fb_geometry),
+    ..crate::fs::fd::FileOps::NONE
+};

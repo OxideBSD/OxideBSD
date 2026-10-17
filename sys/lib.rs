@@ -91,6 +91,9 @@ pub fn init(
     memory::allocator::init_heap(&mut mapper, &mut frame_allocator, heap_size)
         .expect("heap initialization failed");
     memory::refs::init();
+    // The memory devices and the framebuffer, registered for devfs before any module loads.
+    drivers::null::init();
+    drivers::fbdev::init();
     kern::subr_msgbuf::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
     kern::vfs_bio::reserve_window(&mut mapper, &mut frame_allocator);

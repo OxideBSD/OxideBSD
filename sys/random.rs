@@ -1,5 +1,5 @@
 //! A real, cryptographically-mixed random byte source backing `/dev/random`/`/dev/urandom`
-//! (`sys/modules/oxfs/`'s synthetic `/dev` -- see that module's own `dev_open`). Every call gathers
+//! (`drivers::null`). Every call gathers
 //! several independent, hard-for-an-outside-observer-to-predict values (the CPU cycle counter,
 //! PIT tick count, RTC wall-clock, a monotonic call counter, a stack address, real hardware
 //! `RDRAND`/`RDSEED` output when the CPU supports it, and the persistent entropy pool below),
@@ -265,14 +265,12 @@ pub(crate) fn kernel_random_u64() -> u64 {
 }
 
 /// Fills the **kernel** buffer `[ptr, ptr+len)` with real, cryptographically-mixed random bytes --
-/// backs oxfs's synthetic `/dev/random`/`/dev/urandom` and `AT_RANDOM` (see this module's own doc
+/// backs `/dev/random`/`/dev/urandom` (`drivers::null`) and `AT_RANDOM` (see this module's own doc
 /// comment for the full design). `getrandom(2)` fills a kernel buffer with it and copies that out.
 ///
 /// `pub`, not `pub(crate)` -- same "kept public for test use" precedent `syscall::
 /// oxidebsd_sys_read`/`oxidebsd_sys_write` already have; `tests/random_smoke.rs` calls this
-/// directly (oxfs's own `/dev` wiring can only really be exercised by a real process actually
-/// opening the path, which needs a full module-loading boot -- this covers the new, riskier logic
-/// this pass actually added).
+/// directly.
 pub extern "C" fn oxidebsd_random_bytes(ptr: u64, len: u64) -> i64 {
     let key = gather_seed();
     let nonce = [0u8; 12];

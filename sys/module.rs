@@ -1240,9 +1240,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_fcntl" => Some(crate::syscall::oxidebsd_sys_fcntl as *const () as u64),
         "oxidebsd_sys_shutdown" => Some(crate::kern::uipc_socket::oxidebsd_sys_shutdown as *const () as u64),
         "oxidebsd_random_bytes" => Some(crate::random::oxidebsd_random_bytes as *const () as u64),
-        "oxidebsd_fb_geometry" => {
-            Some(crate::drivers::fbdev::oxidebsd_fb_geometry as *const () as u64)
-        }
         "oxidebsd_sys_clock_gettime" => {
             Some(crate::syscall::oxidebsd_sys_clock_gettime as *const () as u64)
         }

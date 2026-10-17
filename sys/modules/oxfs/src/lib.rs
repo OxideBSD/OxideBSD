@@ -27,8 +27,6 @@
 extern crate alloc;
 use kern_mod as _;
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 mod buf;
 mod vfs;
@@ -39,13 +37,6 @@ use oxfs_format::*;
 
 unsafe extern "C" {
     fn oxidebsd_log(ptr: *const u8, len: u64);
-    fn oxidebsd_alloc_fd() -> u64;
-    /// Makes `real_fd` a file with operations `ops` (a static table: `FileOps`), object `data`,
-    /// open flags `oflags` (`open(2)`'s), and gives the caller the lowest free fd for it. The fd,
-    /// or `-errno` (kernel tree: `crate::fs::fd::finstall`).
-    fn oxidebsd_finstall(real_fd: u64, ops: *const FileOps, data: u64, oflags: u64) -> i64;
-    /// `0` if `n` more open files fit under `kern.maxfiles`, else `-ENFILE`.
-    fn oxidebsd_fd_check_room(n: u64) -> i64;
     /// Moves up to `len` bytes between this module's buffer `kbuf` and a read or write transfer
     /// (`uio`, opaque here; kernel tree: `crate::kern::subr_uio`, USERMEM.md §4.4). The count
     /// moved, or `-errno`.
@@ -57,25 +48,8 @@ unsafe extern "C" {
     /// Moves a transfer to `offset` (`O_APPEND`: the end of the file).
     fn oxidebsd_uio_set_offset(uio: u64, offset: u64);
     /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
-    fn oxidebsd_make_dev(
-        name_ptr: u64,
-        name_len: u64,
-        major: u64,
-        minor: u64,
-        owner: u64,
-        mode: u64,
-        open: extern "C" fn(u64, u64, u64) -> i64,
-    ) -> i64;
     fn oxidebsd_dev_generation() -> u64;
     fn oxidebsd_dev_entry(index: u64, out: *mut RawDevEntry) -> i64;
-    fn oxidebsd_random_bytes(ptr: u64, len: u64) -> i64;
-    /// Real framebuffer geometry -- see `sys/drivers/fbdev.rs`'s own doc comment (kernel tree).
-    /// Writes a `RawFbGeometry` (this module's own local copy of that file's `FbGeometry` --
-    /// modules can't depend on kernel-crate types directly, so this is duplicated, not shared;
-    /// see this codebase's own "audit duplicated wire structs on kernel-side change" precedent)
-    /// through `out`, returning `0` on success or `-1` if no usable (32bpp) framebuffer exists
-    /// this boot. `known_device`'s `(29, 0)` arm is the one caller.
-    fn oxidebsd_fb_geometry(out: u64) -> i32;
     /// Real Unix epoch seconds, whole-second precision -- see `sys/cpu/rtc.rs`'s own doc comment
     /// on `oxidebsd_unix_time`. Backs real `st_mtime`/`st_ctime` (`write_inode_data`/
     /// `resize_inode_data`).
@@ -118,9 +92,7 @@ const S_IFBLK: u32 = 0o060000;
 const S_IFIFO: u32 = 0o010000;
 const S_IFSOCK: u32 = 0o140000;
 
-const EBADF: i64 = 9;
 const ENOENT: i64 = 2;
-const ENOMEM: i64 = 12;
 const ENOSPC: i64 = 28;
 const EIO: i64 = 5;
 /// Real value, no Linux/BSD divergence -- returned when a real, whole path argument exceeds
@@ -128,11 +100,6 @@ const EIO: i64 = 5;
 /// per-component `InvalidPath`/`EINVAL` check in `resolve_parent` below -- real POSIX uses
 /// `ENAMETOOLONG` specifically for *this* case.
 const ENAMETOOLONG: i64 = 36;
-/// musl's real *compiled* value (`external/mit/musl/arch/generic/bits/errno.h:6`). Returned by
-/// `oxfs_open` when a real `InodeKind::Device` entry's major:minor doesn't match one of the four
-/// synthetic devices this kernel can actually service -- see `known_device`'s own doc comment for
-/// the deliberately small, honestly documented scope boundary this represents.
-const ENXIO: i64 = 6;
 
 /// The disk filesystem's size in data blocks, from its superblock (or, at format, from the
 /// device: `layout_for`). Block numbers `0..disk_blocks()` are the disk pool's; tmpfs's start at
@@ -215,31 +182,6 @@ fn block_device_present() -> bool {
     buf::present()
 }
 
-
-/// **Bumped 8 -> 256 -> 2048 (2026-09-05)**. First bumped 8->256 chasing a pilot-run cascade: this
-/// table is *global*, not per-process, and this kernel has no orphan-reaping mechanism (see
-/// `do_wait4`'s own doc comment) -- a process whose real parent already exited (or that itself
-/// gets stuck) leaves any fd it opened here permanently leaked. The POSIX pilot's own `shm_open/
-/// 23-1.c` (up to 1000 processes x 1000 loop iterations, each a real `shm_open(..., O_CREAT|
-/// O_EXCL, ...)` that never closes the fd until its own process exits) drove this straight to
-/// exhaustion at just 8 slots -- and because the table is global, that exhaustion didn't just fail
-/// `shm_open/23-1.c` itself, it made `hush` (pid 1) unable to open *its own* redirect file for
-/// every single test that ran afterward, silently misclassifying hundreds of unrelated,
-/// individually-correct tests as FAIL for the rest of the boot. At the time, each slot cost a full
-/// write buffer regardless of use (`OpenFile::Write` was the enum's dominant variant), so 256
-/// was chosen as "enough headroom to stop the cascade, cheap enough to afford" -- not enough to
-/// let `shm_open/23-1.c` itself actually pass (it needs up to 1000 real objects live at once, one
-/// per `shm_open`'d name, held open until each holding process's own loop finishes).
-///
-/// **Bumped again to 2048 once the real fix landed**: `OpenFile::Write`'s buffer moved out of the
-/// enum into a separate pool. Since the 128 MB floor (`OxideBSD-doc/RAM_FLOOR.md` §3.1.5-6) no
-/// variant has a content buffer at all (writes go straight to the inode, directory fds have no
-/// formatted listing, `/proc` renders live in `PROC_RENDERS`): the largest variants are the ones
-/// carrying a name, a few hundred bytes.
-///
-/// **No fixed size since the module allocator (VFS.md §3.1)**: `OPEN_FILES` grows a chunk of this
-/// many slots at a time from the kernel heap, as files are opened; `kern.maxfiles` is the limit.
-const OPEN_FILE_CHUNK: usize = 32;
 
 /// Real POSIX `{PATH_MAX}` (musl's own compiled value, `external/mit/musl/include/limits.h`) --
 /// the real whole-path-length limit, real `ENAMETOOLONG` when exceeded. Distinct from `NAME_MAX`'s
@@ -358,32 +300,6 @@ fn inode_table(tmpfs: bool) -> &'static mut InodeTable {
 /// The table `n` belongs to, and its slot there.
 fn table_slot(n: u32) -> (bool, u32) {
     if is_tmpfs_inode(n) { (true, n - TMPFS_INODE_BASE) } else { (false, n) }
-}
-
-/// Every oxfs descriptor's state, keyed by `real_fd`: chunks of `OPEN_FILE_CHUNK` slots. A chunk
-/// never moves once allocated, so `find_open_file`'s `&'static mut` stays valid while another file
-/// is opened and the table grows (a flat `Vec` would reallocate under it).
-static mut OPEN_FILES: Vec<Box<[Option<(u64, OpenFile)>]>> = Vec::new();
-
-/// Every slot of `OPEN_FILES`, used or free.
-fn open_file_slots() -> impl Iterator<Item = &'static mut Option<(u64, OpenFile)>> {
-    // SAFETY: single-core, syscall-serialized (`oxidebsd_module_serialize`), as every pool here.
-    unsafe { (*core::ptr::addr_of_mut!(OPEN_FILES)).iter_mut().flat_map(|chunk| chunk.iter_mut()) }
-}
-
-/// A free `OPEN_FILES` slot, growing the table by a chunk when every slot is in use; `None` when
-/// the heap can't spare one.
-fn free_open_file_slot() -> Option<&'static mut Option<(u64, OpenFile)>> {
-    // SAFETY: as `open_file_slots`; the borrow ends before the table is touched again.
-    let chunks = unsafe { &mut *core::ptr::addr_of_mut!(OPEN_FILES) };
-    if !chunks.iter().any(|chunk| chunk.iter().any(Option::is_none)) {
-        let mut chunk = Vec::new();
-        chunks.try_reserve(1).ok()?;
-        chunk.try_reserve_exact(OPEN_FILE_CHUNK).ok()?;
-        chunk.resize(OPEN_FILE_CHUNK, None);
-        chunks.push(chunk.into_boxed_slice());
-    }
-    open_file_slots().find(|slot| slot.is_none())
 }
 
 /// Claims real kernel-allocated storage for the cache, `FREE_COUNTS` and `TMPFS_PAGES` -- must run
@@ -1123,20 +1039,6 @@ fn uio_resid(uio: u64) -> usize {
     unsafe { oxidebsd_uio_resid(uio) as usize }
 }
 
-/// Fills a read transfer from `make`, a small buffer at a time (`/dev/zero`, `/dev/random`).
-fn fill_uio(uio: u64, mut make: impl FnMut(&mut [u8]) -> Result<(), i64>) -> Result<usize, i64> {
-    let mut chunk = [0u8; 256];
-    let mut total = 0;
-    loop {
-        let n = uio_resid(uio).min(chunk.len());
-        if n == 0 {
-            return Ok(total);
-        }
-        make(&mut chunk[..n])?;
-        total += uio_out(uio, &chunk[..n])?;
-    }
-}
-
 /// `Ok(count)` / `Err(-errno)` as an operation's return value.
 fn uio_ret(r: Result<usize, i64>) -> i64 {
     match r {
@@ -1620,146 +1522,11 @@ fn dir_nth_used_record(dir_inode: u32, n: usize) -> Option<(u32, [u8; NAME_MAX],
 // this kernel, and modules can't call each other directly -- nothing else exists to plug in). See
 // CLAUDE.md's own "Mount table" section for the full design and its known limitations.
 
-/// An open device oxfs drives itself (`oxfs_dev_open`, through the kernel's registry): what a
-/// descriptor of `OXFS_OPS` is. Files, directories and symbolic links are the kernel's vnode files
-/// since the VFS (`VFS.md` §11 step 2b).
-#[derive(Clone, Copy)]
-enum OpenFile {
-    /// A synthetic `/dev/random` or `/dev/urandom` fd -- see `dev_open`'s own doc comment for why
-    /// both device nodes share this one variant. Reads delegate to `oxidebsd_random_bytes`
-    /// (`sys/random.rs` in the kernel tree); writes are accepted and discarded (matching real
-    /// Linux's own behavior for these two nodes, though real entropy-pool mixing from a write
-    /// isn't modeled here at all).
-    DevRandom,
-    /// A synthetic `/dev/null` fd -- every read is an immediate EOF, every write succeeds and
-    /// discards its input.
-    DevNull,
-    /// A synthetic `/dev/zero` fd -- every read fills the caller's buffer with zero bytes (never
-    /// EOF), every write succeeds and discards its input, same as `DevNull`.
-    DevZero,
-    /// A real `/dev/fb0` fd -- see `known_device`'s `(29, 0)` arm and `sys/drivers/fbdev.rs`'s own
-    /// module doc comment (kernel tree). Real pixel I/O happens only through `mmap()` (see
-    /// `process::mm::do_mmap_fb`, kernel tree) -- `read`/`write`/`lseek` on this fd are all
-    /// real, honest failures (`EBADF`/`ESPIPE`), matching real Linux's own `/dev/fb0` (which does
-    /// support `write()`, but no target in this port's roster needs that path, so it's left
-    /// unimplemented rather than half-modeled).
-    Framebuffer {
-        phys_base: u64,
-        len: u64,
-        width: u32,
-        height: u32,
-        pitch: u32,
-        bpp: u32,
-    },
-}
-
-fn register_open_file(open_file: OpenFile, oflags: u64) -> i64 {
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let room = unsafe { oxidebsd_fd_check_room(1) };
-    if room < 0 {
-        return room;
-    }
-    let Some(slot) = free_open_file_slot() else {
-        return -ENOMEM;
-    };
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let real_fd = unsafe { oxidebsd_alloc_fd() };
-    *slot = Some((real_fd, open_file));
-    // SAFETY: `OXFS_OPS` is this module's own static table, already relocated by the time
-    // module_init (which makes this function reachable) runs.
-    let fd = unsafe { oxidebsd_finstall(real_fd, &OXFS_OPS, 0, oflags) };
-    if fd < 0 {
-        // SAFETY: as `free_open_file_slot`.
-        if let Some(slot) = open_file_slots().find(|s| matches!(s, Some((f, _)) if *f == real_fd)) {
-            *slot = None;
-        }
-    }
-    fd
-}
-
-/// The kernel's file operations table (kernel tree: `crate::fs::fd::FileOps`, `VFS.md` §6.4),
-/// declared here as the module ABI has it: same fields, same order.
-#[repr(C)]
-struct FileOps {
-    flags: u32,
-    read: Option<extern "C" fn(u64, u64, u64) -> i64>,
-    write: Option<extern "C" fn(u64, u64, u64) -> i64>,
-    close: Option<extern "C" fn(u64) -> i64>,
-    ioctl: Option<extern "C" fn(u64, u64, u64) -> i64>,
-    poll: Option<extern "C" fn(u64, u64) -> i64>,
-    stat: Option<extern "C" fn(u64, u64) -> i64>,
-    truncate: Option<extern "C" fn(u64, u64) -> i64>,
-    sync: Option<extern "C" fn(u64, u64) -> i64>,
-    fb_geometry: Option<extern "C" fn(u64, u64) -> i32>,
-}
-
-/// `FileOps::flags`: the kernel keeps the file's offset.
-const DFLAG_SEEKABLE: u32 = 1;
-
-/// Every oxfs file: seekable (the kernel keeps the offset; reads and writes come at the uio's
-/// offset, `getdents` and `lseek` read and set it), each operation dispatching on the `OpenFile`.
-static OXFS_OPS: FileOps = FileOps {
-    flags: DFLAG_SEEKABLE,
-    read: Some(oxfs_read),
-    write: Some(oxfs_write),
-    close: Some(oxfs_close),
-    ioctl: None,
-    poll: None,
-    stat: None,
-    truncate: None,
-    sync: None,
-    fb_geometry: Some(oxfs_fb_geometry),
-};
-
-/// `FileOps::fb_geometry`: `-1` for every `OpenFile` variant except `Framebuffer`.
-extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
-    match find_open_file(real_fd) {
-        Some(OpenFile::Framebuffer {
-            phys_base,
-            len,
-            width,
-            height,
-            pitch,
-            bpp,
-        }) => {
-            let geom = RawFbGeometry {
-                phys_base: *phys_base,
-                len: *len,
-                width: *width,
-                height: *height,
-                pitch: *pitch,
-                bpp: *bpp,
-            };
-            // SAFETY: same known pointer-validation gap every other module-boundary write in this
-            // file already has -- `out` is always a kernel-owned stack buffer in practice (see
-            // `fs::fd::framebuffer_geometry_of`, the only caller, kernel tree), never a raw
-            // userland pointer.
-            unsafe { *(out as *mut RawFbGeometry) = geom };
-            0
-        }
-        _ => -1,
-    }
-}
-
 /// Whether `dir` is devfs's `/dev/shm`, where musl's `shm_open` creates its objects.
 fn is_shm_dir(dir: u32) -> bool {
     let root = devfs_root();
     root != u32::MAX && dir_lookup(root, b"shm") == Some(dir)
 }
-
-fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
-    for (slot_fd, file) in open_file_slots().flatten() {
-        if *slot_fd == fd {
-            return Some(file);
-        }
-    }
-    None
-}
-
-// --- terminals and /proc symlinks (TTY.md §6) ------------------------------------------------
-
-
-
 
 /// Splits a raw `dev_t` register value into `(major, minor)` the same way musl's own
 /// `major()`/`minor()` macros do (`external/mit/musl/include/sys/sysmacros.h`) for any major <
@@ -1772,114 +1539,6 @@ fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
 /// this same split for the `oxfs_open` dispatch below.
 fn dev_major_minor(dev: u32) -> (u32, u32) {
     ((dev >> 8) & 0xfff, dev & 0xff)
-}
-
-/// The only major:minor pairs an `InodeKind::Device` node's `open()` can actually service -- real
-/// Linux's own standard values for `/dev/null`(1,3)/`zero`(1,5)/`random`(1,8)/`urandom`(1,9), so a
-/// real `mknod /dev/null c 1 3` genuinely works. No general device-driver framework exists (mirrors
-/// `dev_open`'s own scope, just reached via a real inode instead of magic-path interception) --
-/// anything else is a real, listable, stat-able device node whose `open()` honestly fails `-ENXIO`,
-/// matching real Linux's own behavior for a device number with no bound driver.
-fn known_device(rdev: u32, device_char: bool) -> Option<OpenFile> {
-    if !device_char {
-        return None;
-    }
-    match dev_major_minor(rdev) {
-        (1, 3) => Some(OpenFile::DevNull),
-        (1, 5) => Some(OpenFile::DevZero),
-        (1, 8) | (1, 9) => Some(OpenFile::DevRandom),
-        // Real Linux's own standard fbdev major:minor (29, 0) -- cosmetic here (no general
-        // device-driver framework backs this number choice), but matches a real `mknod /dev/fb0 c
-        // 29 0`. Queries the real, current framebuffer geometry at *open* time, not once at boot
-        // -- harmless to re-query every open since Limine's response never changes across a boot.
-        (29, 0) => framebuffer_open_file(),
-        _ => None,
-    }
-}
-
-/// This module's own local copy of `sys/drivers/fbdev.rs`'s `FbGeometry` (kernel tree) -- modules
-/// can't depend on kernel-crate types directly, only on the plain `u64`/`i32` FFI boundary, so the
-/// wire layout is duplicated rather than shared. Any future change to the kernel-side struct needs
-/// the identical change mirrored here (same "audit duplicated wire structs" precedent this
-/// codebase already follows for userland smoke-test crates that hand-duplicate kernel structs).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawFbGeometry {
-    phys_base: u64,
-    len: u64,
-    width: u32,
-    height: u32,
-    pitch: u32,
-    bpp: u32,
-}
-
-/// `known_device`'s `(29, 0)` arm -- `None` if no usable (32bpp) framebuffer exists this boot,
-/// matching real Linux's own `-ENXIO` for a device number with no bound driver (the `known_device`
-/// caller already turns a `None` here into exactly that).
-fn framebuffer_open_file() -> Option<OpenFile> {
-    let mut geom = RawFbGeometry {
-        phys_base: 0,
-        len: 0,
-        width: 0,
-        height: 0,
-        pitch: 0,
-        bpp: 0,
-    };
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    let ok = unsafe { oxidebsd_fb_geometry(&mut geom as *mut RawFbGeometry as u64) };
-    if ok != 0 {
-        return None;
-    }
-    Some(OpenFile::Framebuffer {
-        phys_base: geom.phys_base,
-        len: geom.len,
-        width: geom.width,
-        height: geom.height,
-        pitch: geom.pitch,
-        bpp: geom.bpp,
-    })
-}
-
-/// `read(2)` of a device oxfs drives (`FileOps::read`).
-extern "C" fn oxfs_read(fd: u64, uio: u64, _flags: u64) -> i64 {
-    let Some(file) = find_open_file(fd) else {
-        return -EBADF;
-    };
-    match file {
-        OpenFile::DevRandom => uio_ret(fill_uio(uio, |chunk| {
-            // SAFETY: FFI call to a kernel-exported function, with this module's own buffer.
-            let r = unsafe { oxidebsd_random_bytes(chunk.as_mut_ptr() as u64, chunk.len() as u64) };
-            if r < 0 { Err(r) } else { Ok(()) }
-        })),
-        OpenFile::DevNull => 0, // immediate EOF, matching real /dev/null's own read behavior
-        OpenFile::DevZero => uio_ret(fill_uio(uio, |chunk| {
-            chunk.fill(0);
-            Ok(())
-        })),
-        // Real pixel I/O only ever happens through mmap() (process::mm::do_mmap_fb, kernel
-        // tree) -- see OpenFile::Framebuffer's own doc comment.
-        OpenFile::Framebuffer { .. } => -EBADF,
-    }
-}
-
-/// `write(2)` of a device oxfs drives (`FileOps::write`): `/dev/null`, `/dev/zero` and
-/// `/dev/random` accept and discard (this kernel has no entropy pool to mix writes into).
-extern "C" fn oxfs_write(fd: u64, uio: u64, _flags: u64) -> i64 {
-    match find_open_file(fd) {
-        Some(OpenFile::DevRandom | OpenFile::DevNull | OpenFile::DevZero) => uio_resid(uio) as i64,
-        _ => -EBADF,
-    }
-}
-
-/// `FileOps::close`.
-extern "C" fn oxfs_close(fd: u64) -> i64 {
-    match open_file_slots().find(|s| matches!(s, Some((slot_fd, _)) if *slot_fd == fd)) {
-        Some(slot) => {
-            *slot = None;
-            0
-        }
-        None => -EBADF,
-    }
 }
 
 /// Puts regular file `n`'s delayed writes on the disk: its data, its index blocks, then its inode
@@ -2133,33 +1792,6 @@ fn device_registered(major: u32, minor: u32) -> bool {
     }
 }
 
-/// The registry's open function for the devices oxfs implements itself.
-extern "C" fn oxfs_dev_open(major: u64, minor: u64, flags: u64) -> i64 {
-    match known_device(((major as u32) << 8) | minor as u32, true) {
-        Some(open_file) => register_open_file(open_file, flags),
-        None => -ENXIO,
-    }
-}
-
-/// Registers the devices oxfs implements (`DEVFS.md` §3.4-3.5): `null`, `zero`, `random`,
-/// `urandom`, and `fb0` when there is a framebuffer. Open to all, as on the BSDs.
-fn register_oxfs_devices() {
-    let fb = framebuffer_open_file().is_some();
-    let devices: [(&[u8], u64, u64, bool); 5] = [
-        (b"null", 1, 3, true),
-        (b"zero", 1, 5, true),
-        (b"random", 1, 8, true),
-        (b"urandom", 1, 9, true),
-        (b"fb0", 29, 0, fb),
-    ];
-    for (name, major, minor, present) in devices {
-        if present {
-            // SAFETY: FFI call to a kernel-exported function, with a live name buffer.
-            unsafe { oxidebsd_make_dev(name.as_ptr() as u64, name.len() as u64, major, minor, 0, 0o666, oxfs_dev_open) };
-        }
-    }
-}
-
 fn log_bytes(bytes: &[u8]) {
     unsafe { oxidebsd_log(bytes.as_ptr(), bytes.len() as u64) };
 }
@@ -2394,7 +2026,6 @@ pub extern "C" fn module_init() -> i32 {
     if !init_pools() {
         return -1;
     }
-    register_oxfs_devices();
 
     // The types this module serves (`vfs`): devfs, tmpfs and nullfs first, so the kernel can mount
     // devfs on `/dev` as soon as oxfs's type, registered last, has mounted the root. Without a root

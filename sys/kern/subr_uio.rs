@@ -154,6 +154,25 @@ impl Uio {
         Ok(done)
     }
 
+    /// Counts up to `n` bytes as moved without touching them (`/dev/null`'s write, FreeBSD's
+    /// `uio_resid = 0`).
+    pub(crate) fn skip(&mut self, mut n: u64) {
+        while n > 0 && self.resid > 0 {
+            let s = self.iov[self.idx];
+            let avail = s.len - self.seg_off;
+            if avail == 0 {
+                self.idx += 1;
+                self.seg_off = 0;
+                continue;
+            }
+            let k = avail.min(n);
+            self.seg_off += k;
+            self.resid -= k;
+            self.offset = self.offset.wrapping_add(k);
+            n -= k;
+        }
+    }
+
     /// Gives back the last `n` bytes moved, as if they hadn't been: for a writer that copied in
     /// more than its backend then took.
     pub(crate) fn rewind(&mut self, mut n: u64) {
