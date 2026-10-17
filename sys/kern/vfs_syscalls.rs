@@ -1244,11 +1244,11 @@ pub(crate) fn fullpath(vp: *mut Vnode, cred: &Ucred) -> Result<Vec<u8>, i32> {
     Ok(path)
 }
 
-/// `vp`'s name in directory `dvp`, by reading `dvp` for its file ID.
+/// `vp`'s name in directory `dvp`, by reading `dvp` for its file's serial number: its attribute,
+/// which a layered vnode (nullfs, whose `v_fileid` is its hash key) takes from the file below.
 fn name_in(dvp: *mut Vnode, vp: *mut Vnode, cred: &Ucred) -> Result<Vec<u8>, i32> {
     use crate::kern::subr_uio::{IoSeg, Uio, UioRw, UioSeg};
-    // SAFETY: held.
-    let fileid = unsafe { (*vp).v_fileid };
+    let fileid = vop_getattr(vp)?.va_fileid;
     let mut buf = alloc::vec![0u8; 4096];
     let mut cookie = 0u64;
     loop {
@@ -1565,7 +1565,7 @@ pub(crate) extern "C" fn oxidebsd_sys_flock(fd: u64, op: u64, _a2: u64, _a3: u64
     let _g = enter();
     ret((|| {
         let real_fd = fd::real_fd_of(fd).ok_or(EBADF)?;
-        with_vnode(fd_vnode(fd)?, |vp| match crate::kern::vfs_advlock::flock(vp, real_fd, op as u32) {
+        with_vnode(fd_vnode(fd)?, |vp| match crate::kern::vfs_advlock::flock(vfs_vnops::object_vp(vp), real_fd, op as u32) {
             0 => Ok(0),
             e => Err(e),
         })

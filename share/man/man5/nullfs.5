@@ -1,0 +1,72 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt NULLFS 5
+.Os OxideBSD
+.Sh NAME
+.Nm nullfs
+.Nd a directory seen again at another place
+.Sh SYNOPSIS
+.Nm mount_nullfs
+.Op Fl o Ar options
+.Ar target node
+.Nm mount
+.Fl t Cm nullfs
+.Op Fl o Ar options
+.Ar target node
+.Sh DESCRIPTION
+A
+.Nm
+mount shows the directory
+.Ar target ,
+of any mounted file system, at
+.Ar node :
+the same files, which a change made through either path changes in both.
+Linux calls this a bind mount
+.Pq Nm mount Fl -bind .
+.Pp
+The mount has a device number
+.Pq Fa st_dev
+of its own; a file keeps its serial number.
+Its options are its own, whatever the file system below has:
+.Cm ro
+makes it read-only
+.Pq Er EROFS ,
+.Cm nosuid
+ignores set-user-ID and set-group-ID bits and
+.Cm noexec
+runs nothing from it, all only through
+.Ar node .
+A file can't be linked or renamed between it and another mount, the
+.Ar target Ns 's
+own included
+.Pq Er EXDEV .
+.Pp
+While it is mounted, the file system holding
+.Ar target
+can't be unmounted
+.Pq Er EBUSY ,
+except by force, after which the
+.Nm
+mount shows nothing.
+.Pp
+.Ar node Ns 's
+.Pa ..
+is the directory
+.Ar node
+is in, not
+.Ar target Ns 's
+parent.
+.Sh EXAMPLES
+The sources, read-only, inside a
+.Xr chroot 8 :
+.Bd -literal -offset indent
+mount_nullfs -o ro /usr/src /jail/usr/src
+.Ed
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr mount 8
+.Sh HISTORY
+.Nm
+appeared in 4.4BSD.
+In OxideBSD it was a part of oxfs, showing only oxfs's directories, until it became a file
+system type of its own over any other in 0.3.0.

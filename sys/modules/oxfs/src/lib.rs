@@ -1,6 +1,5 @@
 //! `oxfs`: OxideBSD's disk file system (inodes with direct, single- and double-indirect block
-//! pointers, directories as ordinary inodes holding fixed-size records), and, until VFS step 3d
-//! makes it a module of its own, nullfs over the same inode space.
+//! pointers, directories as ordinary inodes holding fixed-size records).
 //!
 //! Since the VFS (OxideBSD-doc `VFS.md` §11 step 2b) this module serves vnode operations
 //! (`vfs.rs`): the kernel does path lookup (`namei`), the path system calls, mounts and the cwd,
@@ -1598,11 +1597,10 @@ pub extern "C" fn module_init() -> i32 {
         return -1;
     }
 
-    // The types this module serves (`vfs`): nullfs, then oxfs, which mounts the root as it
-    // registers. Without a root there's nothing to boot: fail the load (the kernel then stops).
-    // SAFETY: FFI calls to a kernel-exported function, with static tables.
+    // The type (`vfs`), which mounts the root as it registers. Without a root there's nothing to
+    // boot: fail the load (the kernel then stops).
+    // SAFETY: FFI call to a kernel-exported function, with a static table.
     unsafe {
-        vfs_if::oxidebsd_vfs_register(&vfs::NULLFS_VFSCONF);
         if vfs_if::oxidebsd_vfs_register(&vfs::OXFS_VFSCONF) != 0 || vfs::root_mount().is_null() {
             return -1;
         }

@@ -1,10 +1,5 @@
-//! oxfs's VFS types (OxideBSD-doc `VFS.md` §4-§5): `oxfs` (the disk), and `nullfs` over its inode
-//! space until step 3d makes nullfs a module of its own (tmpfs and devfs went in 3b and 3c). A
-//! vnode's file ID is the inode number; the kernel does path lookup and the system calls, and these
-//! are the operations it asks for.
-//!
-//! A nullfs mount shows another mount's directory under a mount of its own (so `..` at its root
-//! leaves through the directory it covers, which the kernel's `namei` handles).
+//! oxfs as a VFS type (OxideBSD-doc `VFS.md` §4-§5). A vnode's file ID is the inode number; the
+//! kernel does path lookup and the system calls, and these are the operations it asks for.
 
 use alloc::vec::Vec;
 use core::ptr;
@@ -18,7 +13,6 @@ const VFS_ENOENT: i32 = 2;
 const VFS_EIO: i32 = 5;
 const VFS_ENXIO: i32 = 6;
 const VFS_EFAULT: i32 = 14;
-const VFS_EXDEV: i32 = 18;
 const VFS_ENOTDIR: i32 = 20;
 const VFS_EISDIR: i32 = 21;
 const VFS_EINVAL: i32 = 22;
@@ -26,21 +20,12 @@ const VFS_ENOSPC: i32 = 28;
 const VFS_EMLINK: i32 = 31;
 const VFS_ENOTEMPTY: i32 = 39;
 
-/// What a mount of one of these types is. The kernel allocates it zeroed with the mount.
+/// What a mount of oxfs is. The kernel allocates it zeroed with the mount.
 #[repr(C)]
 struct OxMount {
     /// The inode the mount's root is.
     root: u32,
-    kind: u32,
-    /// A nullfs mount's: the mount it shows a directory of, whose vnodes hold the contents.
-    lower: *mut Mount,
-    /// A nullfs mount's: that directory, in use for as long as it's mounted, so the lower mount
-    /// can't be unmounted from under it (`EBUSY`).
-    lower_root: *mut Vnode,
 }
-
-const KIND_DISK: u32 = 0;
-const KIND_NULLFS: u32 = 3;
 
 macro_rules! vfsconf {
     ($name:ident, $str:literal, $ops:ident, $flags:expr) => {
@@ -57,7 +42,6 @@ macro_rules! vfsconf {
 }
 
 vfsconf!(OXFS_VFSCONF, b"oxfs", OXFS_VFSOPS, 0);
-vfsconf!(NULLFS_VFSCONF, b"nullfs", NULLFS_VFSOPS, VFCF_FROM_VNODE);
 
 macro_rules! vfsops {
     ($name:ident, $mount:ident) => {
@@ -73,7 +57,6 @@ macro_rules! vfsops {
 }
 
 vfsops!(OXFS_VFSOPS, oxfs_vfs_mount);
-vfsops!(NULLFS_VFSOPS, nullfs_vfs_mount);
 
 static OXFS_VOPS: VopVector = VopVector {
     lookup: Some(oxfs_vop_lookup),
@@ -93,7 +76,6 @@ static OXFS_VOPS: VopVector = VopVector {
     readdir: Some(oxfs_vop_readdir),
     readlink: Some(oxfs_vop_readlink),
     inactive: Some(oxfs_vop_inactive),
-    reclaim: Some(oxfs_vop_reclaim),
     bmap: Some(oxfs_vop_bmap),
     allocate: Some(oxfs_vop_allocate),
     ..VopVector::DEFAULT
@@ -196,7 +178,7 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     }
     // SAFETY: before any process runs; nothing else reads it yet.
     unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = mp };
-    *oxmount(mp) = OxMount { root: ROOT_INODE, kind: KIND_DISK, lower: ptr::null_mut(), lower_root: ptr::null_mut() };
+    *oxmount(mp) = OxMount { root: ROOT_INODE };
     registered(mp);
     // Mounting leaves PERSISTENCE_READY false through its own reads (see that flag's own doc
     // comment) -- flipped here, once, right before real syscalls become reachable, so every write
@@ -218,52 +200,11 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     0
 }
 
-/// For a mount that takes no options of its own: `Some(result)` to return at once for a remount
-/// (`MNT_UPDATE`: only the kernel's flags change) or for options it doesn't know (`EINVAL`).
-fn no_options(mp: *mut Mount, args: *const MountArgs) -> Option<i32> {
-    // SAFETY: the kernel's mount and arguments, live for the call.
-    let (update, has_opts) = unsafe { ((*mp).mnt_flag & MNT_UPDATE != 0, (*args).opts_len != 0) };
-    if has_opts {
-        return Some(VFS_EINVAL);
-    }
-    update.then_some(0)
-}
-
-/// A directory of one of these types shown at another place (`mount -t nullfs`).
-extern "C" fn nullfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
-    if let Some(e) = no_options(mp, args) {
-        return e;
-    }
-    // SAFETY: the kernel passes its arguments.
-    let from = unsafe { (*args).from_vp };
-    if from.is_null() {
-        return VFS_EINVAL;
-    }
-    // SAFETY: referenced by the kernel for the call.
-    let from_vfc = unsafe { (*(*from).v_mount).mnt_vfc };
-    let ours = [&OXFS_VFSCONF, &NULLFS_VFSCONF];
-    if !ours.iter().any(|&c| ptr::eq(c, from_vfc)) {
-        return VFS_EXDEV;
-    }
-    // SAFETY: referenced by the kernel for the call; kept in use until this mount goes.
-    unsafe { oxidebsd_vref(from) };
-    let lower = unsafe { (*from).v_mount };
-    *oxmount(mp) = OxMount { root: inode_of(from), kind: KIND_NULLFS, lower, lower_root: from };
-    registered(mp);
-    0
-}
-
 /// The disk's at shutdown (`vfs_unmountall`): everything delayed is written, and the file system
-/// marked clean (§3.4.1). Not called on a panic or a fault. A nullfs mount lets go of its
-/// directory.
+/// marked clean (§3.4.1). Not called on a panic or a fault.
 extern "C" fn oxfs_vfs_unmount(mp: *mut Mount, _flags: u64) -> i32 {
     our_mounts().retain(|&m| m != mp);
-    let lower_root = oxmount(mp).lower_root;
-    if !lower_root.is_null() {
-        // SAFETY: kernel export; the reference `nullfs_vfs_mount` took.
-        unsafe { oxidebsd_vrele(lower_root) };
-    }
-    if oxmount(mp).kind != KIND_DISK || root_rdonly() {
+    if root_rdonly() {
         return 0;
     }
     buf::flush_all();
@@ -300,10 +241,8 @@ extern "C" fn oxfs_vfs_statfs(_mp: *mut Mount, sbp: *mut Statfs) -> i32 {
     0
 }
 
-extern "C" fn oxfs_vfs_sync(mp: *mut Mount, _waitfor: i32) -> i32 {
-    if oxmount(mp).kind == KIND_DISK {
-        buf::flush_all();
-    }
+extern "C" fn oxfs_vfs_sync(_mp: *mut Mount, _waitfor: i32) -> i32 {
+    buf::flush_all();
     0
 }
 
@@ -321,13 +260,6 @@ fn vtype_of(kind: InodeKind, device_char: bool) -> VType {
 }
 
 extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -> i32 {
-    // A nullfs mount whose lower mount was forcibly unmounted: its directory (still held) is
-    // doomed and the mount gone, so nothing below can be reached.
-    let lower_root = oxmount(mp).lower_root;
-    // SAFETY: held by this mount until it's unmounted.
-    if !lower_root.is_null() && unsafe { (*lower_root).v_flag } & VI_DOOMED != 0 {
-        return VFS_EIO;
-    }
     // SAFETY: kernel exports, called as declared.
     unsafe {
         let vp = oxidebsd_vfs_hash_get(mp, fileid);
@@ -349,18 +281,6 @@ extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -
         }
         if fileid == oxmount(mp).root as u64 {
             (*vp).v_flag |= VV_ROOT;
-        }
-        // A nullfs vnode's contents are the lower mount's vnode's (VFS.md §13): it holds that one,
-        // or the one that one holds, so the page cache, mappings, FIFOs and sockets see one file.
-        let lower_mp = oxmount(mp).lower;
-        if !lower_mp.is_null() {
-            let mut lower = ptr::null_mut();
-            if oxfs_vfs_vget(lower_mp, fileid, &mut lower) == 0 {
-                let object = if (*lower).v_lower.is_null() { lower } else { (*lower).v_lower };
-                oxidebsd_vhold(object);
-                (*vp).v_lower = object;
-                oxidebsd_vrele(lower);
-            }
         }
         oxidebsd_vfs_hash_insert(vp);
         *vpp = vp;
@@ -770,15 +690,3 @@ extern "C" fn oxfs_vop_bmap(vp: *mut Vnode, lblkno: u64, bnp: *mut u64, runp: *m
     0
 }
 
-/// The vnode is going: a nullfs vnode lets go of the lower one it holds (`v_lower`).
-extern "C" fn oxfs_vop_reclaim(vp: *mut Vnode) -> i32 {
-    // SAFETY: the kernel's vnode, being reclaimed.
-    unsafe {
-        let lower = (*vp).v_lower;
-        if !lower.is_null() {
-            (*vp).v_lower = ptr::null_mut();
-            oxidebsd_vdrop(lower);
-        }
-    }
-    0
-}

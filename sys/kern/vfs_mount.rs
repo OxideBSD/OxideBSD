@@ -135,6 +135,18 @@ pub(crate) fn vfs_sync(mp: *mut Mount, waitfor: i32) -> i32 {
 }
 
 /// `VFS_STATFS`, with the kernel's fields filled.
+/// `statfs` for modules: a layered file system's (nullfs) counts are its lower mount's.
+pub(crate) extern "C" fn oxidebsd_vfs_statfs(mp: *mut Mount, sbp: *mut Statfs) -> i32 {
+    match vfs_statfs(mp) {
+        Ok(sb) => {
+            // SAFETY: the calling module's record.
+            unsafe { *sbp = sb };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
 pub(crate) fn vfs_statfs(mp: *mut Mount) -> Result<Statfs, i32> {
     let mut sb = Statfs::ZERO;
     if let Some(statfs) = ops(mp).statfs {

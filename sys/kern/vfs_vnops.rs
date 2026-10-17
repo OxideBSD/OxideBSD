@@ -279,7 +279,7 @@ extern "C" fn vn_write(handle: u64, uio: *mut KUio, flags: u64) -> i64 {
 extern "C" fn vn_close(handle: u64) -> i64 {
     let vp = vnode_of(handle);
     let flag = fd::file_of(handle).map_or(0, |(_, f, _, _)| f);
-    crate::kern::vfs_advlock::release_all(vp, handle);
+    crate::kern::vfs_advlock::release_all(object_vp(vp), handle);
     if flag & FWRITE != 0 && vtype(vp) == VREG {
         // SAFETY: the open file holds `vp`, and it its lower vnode.
         unsafe { (*object_vp(vp)).v_writecount -= 1 };

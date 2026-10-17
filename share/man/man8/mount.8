@@ -1,10 +1,11 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 13, 2026
+.Dd October 17, 2026
 .Dt MOUNT 8
 .Os OxideBSD
 .Sh NAME
 .Nm mount ,
-.Nm mount_nullfs
+.Nm mount_nullfs ,
+.Nm mount_tmpfs
 .Nd mount file systems
 .Sh SYNOPSIS
 .Nm
@@ -26,10 +27,13 @@
 .Nm mount_nullfs
 .Op Fl o Ar options
 .Ar target node
+.Nm mount_tmpfs
+.Op Fl o Ar options
+.Cm tmpfs Ar node
 .Nm
 .Fl u
 .Op Fl rvw
-.Op Fl o Cm ro | Cm rw
+.Op Fl o Ar options
 .Ar node | special
 .Sh DESCRIPTION
 .Nm
@@ -45,17 +49,24 @@ The file system types are:
 A new, empty file system in memory; its
 .Ar special
 is conventionally
-.Dq tmpfs .
+.Dq tmpfs
+.Pq Xr tmpfs 5 .
 .It Cm nullfs
 The directory
 .Ar special
 (the
 .Ar target ) ,
-seen again at
+of any file system, seen again at
 .Ar node ;
-what is created or removed in one is in the other.
+what is created or removed in one is in the other
+.Pq Xr nullfs 5 .
 Linux calls this a bind mount, hence
 .Fl -bind .
+.It Cm devfs
+A view of the devices
+.Pq Xr devfs 5 ;
+the kernel mounts one on
+.Pa /dev .
 .El
 .Pp
 With a single
@@ -77,31 +88,33 @@ and isn't the root, in the order listed.
 Comma-separated mount options:
 .Bl -tag -width wxallowed
 .It Cm rw
-Read-write; for a new mount, the only mode there is, accepted and ignored.
-With
-.Fl u ,
-mount the file system read-write.
+Read-write, the default.
 .It Cm ro
-With
-.Fl u ,
-mount the file system read-only.
+Read-only: nothing on it can be created, changed or removed
+.Pq Er EROFS .
+.It Cm noexec
+Run no program from the file system
+.Pq Er EACCES .
 .It Cm nosuid
 Ignore the set-user-ID and set-group-ID bits of programs on the file
 system.
-On a
-.Cm nullfs
-mount this also covers the directory mounted, wherever it is reached from.
 .It Cm wxallowed
 Let programs on the file system that are marked as needing it (linked with
 .Fl z Cm wxneeded )
 map memory writable and executable at once, which is otherwise refused.
-On a
-.Cm nullfs
-mount this also covers the directory mounted, wherever it is reached from:
-mount only a tree no one but the superuser can write.
+Mount only a tree no one but the superuser can write.
 .El
 .Pp
-The kernel refuses other options.
+Any other option is the type's, which refuses one it doesn't take:
+.Cm size ,
+.Cm nodes ,
+.Cm maxfilesize ,
+.Cm mode ,
+.Cm uid
+and
+.Cm gid
+for
+.Cm tmpfs .
 .It Fl r
 With
 .Fl u :
@@ -114,8 +127,11 @@ the types to mount, or with a leading
 .Dq no ,
 the types not to.
 .It Fl u
-Change a mounted file system between read-only and read-write; only the root,
-for now.
+Change a mounted file system: between read-only and read-write
+.Pq Fl r , Fl w ; No without either it stays as it is ,
+and its type's
+.Ar options
+.Pq Cm size No for Cm tmpfs .
 The kernel mounts the root read-only at boot, and
 .Xr rc 8
 mounts it read-write once it's been checked.
@@ -139,13 +155,17 @@ what is mounted
 .Ex -std
 .Sh EXAMPLES
 .Bd -literal -offset indent
-mount -t tmpfs tmpfs /mnt/scratch
-mount -t nullfs /usr/src /mnt/src
+mount -t tmpfs -o size=64m tmpfs /mnt/scratch
+mount -u -o size=128m /mnt/scratch
+mount -t nullfs -o ro /usr/src /mnt/src
 mount_nullfs /usr/src /mnt/src
 .Ed
 .Sh SEE ALSO
 .Xr nmount 2 ,
+.Xr devfs 5 ,
 .Xr fstab 5 ,
+.Xr nullfs 5 ,
+.Xr tmpfs 5 ,
 .Xr umount 8
 .Sh HISTORY
 A

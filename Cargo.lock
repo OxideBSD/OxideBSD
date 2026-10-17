@@ -394,6 +394,14 @@ name = "ninja-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "nullfs"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+ "vfs_if",
+]
+
+[[package]]
 name = "oom-syscall-smoke"
 version = "0.1.0"
 

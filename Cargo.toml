@@ -99,6 +99,7 @@ members = [
   "sys/modules/signal",
   "sys/modules/clock",
   "sys/modules/devfs",
+  "sys/modules/nullfs",
   "sys/modules/oxfs",
   "sys/modules/procfs",
   "sys/modules/socket",

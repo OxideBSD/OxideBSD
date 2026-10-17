@@ -420,6 +420,7 @@
 ./usr/share/man/man5/gettytab.5 type=file src=share/man/man5/gettytab.5
 ./usr/share/man/man5/login.conf.5 type=file src=share/man/man5/login.conf.5
 ./usr/share/man/man5/man.conf.5 type=file src=share/man/man5/man.conf.5
+./usr/share/man/man5/nullfs.5 type=file src=share/man/man5/nullfs.5
 ./usr/share/man/man5/newsyslog.conf.5 type=file src=share/man/man5/newsyslog.conf.5
 ./usr/share/man/man5/passwd.5 type=file src=share/man/man5/passwd.5
 ./usr/share/man/man5/master.passwd.5 type=file hardlink=./usr/share/man/man5/passwd.5

@@ -97,8 +97,8 @@ pub(crate) struct FileOps {
     /// as POSIX has regular files.
     pub poll: Option<extern "C" fn(u64, u64) -> i64>,
     /// `(handle, out) -> 0 | -errno` (`fstat(2)`): fills the musl `struct stat` at `out`, a kernel
-    /// buffer. When null, the registered fallback answers (`register_stat_fallback`: oxfs, which
-    /// still names FIFOs, terminals and devices by their nodes).
+    /// buffer. When null, `fallback_stat` answers: the vnode the file was opened through
+    /// (`f_vnode`), for a FIFO, terminal or device.
     pub stat: Option<extern "C" fn(u64, u64) -> i64>,
     /// `(handle, length) -> 0 | -errno` (`ftruncate(2)`, open for writing); `EINVAL` when null.
     pub truncate: Option<extern "C" fn(u64, u64) -> i64>,

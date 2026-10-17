@@ -202,3 +202,159 @@ pub(crate) fn vop_allocate(vp: *mut Vnode, offset: u64, len: u64) -> i32 {
     contents_changing(vp);
     vop!(vp, allocate, EBADF, EOPNOTSUPP, |f| f(vp, offset, len))
 }
+
+// --- The calls for modules ---------------------------------------------------------------------------
+//
+// A file system layered over others (nullfs) calls the vnode operations of vnodes that aren't its
+// own through these, never another module directly: each is the `vop_*` above, with its default,
+// its doomed-vnode answer and the giant lock, in the vector's own C shape (`0` or an errno; a count
+// or `-errno` for the transfers). New vnodes come back referenced in `*vpp`.
+
+fn cred<'a>(c: *const Ucred) -> &'a Ucred {
+    // SAFETY: the calling module passes the kernel's credentials it was given, live for the call.
+    unsafe { &*c }
+}
+
+fn cn<'a>(c: *const ComponentName) -> &'a ComponentName {
+    // SAFETY: as `cred`.
+    unsafe { &*c }
+}
+
+fn out_vp(r: Result<*mut Vnode, i32>, vpp: *mut *mut Vnode) -> i32 {
+    match r {
+        Ok(vp) => {
+            // SAFETY: the calling module's out-parameter.
+            unsafe { *vpp = vp };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+fn count(r: Result<usize, i32>) -> i64 {
+    match r {
+        Ok(n) => n as i64,
+        Err(e) => -(e as i64),
+    }
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_lookup(dvp: *mut Vnode, cnp: *const ComponentName, vpp: *mut *mut Vnode) -> i32 {
+    out_vp(vop_lookup(dvp, cn(cnp)), vpp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_create(dvp: *mut Vnode, vpp: *mut *mut Vnode, cnp: *const ComponentName, vap: *const Vattr) -> i32 {
+    // SAFETY: as `cred`.
+    out_vp(vop_create(dvp, cn(cnp), unsafe { &*vap }), vpp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_mknod(dvp: *mut Vnode, vpp: *mut *mut Vnode, cnp: *const ComponentName, vap: *const Vattr) -> i32 {
+    // SAFETY: as `cred`.
+    out_vp(vop_mknod(dvp, cn(cnp), unsafe { &*vap }), vpp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_mkdir(dvp: *mut Vnode, vpp: *mut *mut Vnode, cnp: *const ComponentName, vap: *const Vattr) -> i32 {
+    // SAFETY: as `cred`.
+    out_vp(vop_mkdir(dvp, cn(cnp), unsafe { &*vap }), vpp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_symlink(
+    dvp: *mut Vnode,
+    vpp: *mut *mut Vnode,
+    cnp: *const ComponentName,
+    vap: *const Vattr,
+    target: *const u8,
+    target_len: usize,
+) -> i32 {
+    // SAFETY: as `cred`; the module's buffer of `target_len` bytes.
+    let (va, t) = unsafe { (&*vap, core::slice::from_raw_parts(target, target_len)) };
+    out_vp(vop_symlink(dvp, cn(cnp), va, t), vpp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_open(vp: *mut Vnode, fflag: u32, c: *const Ucred) -> i32 {
+    vop_open(vp, fflag, cred(c))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_close(vp: *mut Vnode, fflag: u32, c: *const Ucred) -> i32 {
+    vop_close(vp, fflag, cred(c))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_access(vp: *mut Vnode, accmode: u32, c: *const Ucred) -> i32 {
+    vop_access(vp, accmode, cred(c))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_setattr(vp: *mut Vnode, vap: *const Vattr, c: *const Ucred) -> i32 {
+    // SAFETY: as `cred`.
+    vop_setattr(vp, unsafe { &*vap }, cred(c))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_read(vp: *mut Vnode, uio: Uio, ioflag: u32, c: *const Ucred) -> i64 {
+    count(vop_read(vp, uio, ioflag, cred(c)))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_write(vp: *mut Vnode, uio: Uio, ioflag: u32, c: *const Ucred) -> i64 {
+    count(vop_write(vp, uio, ioflag, cred(c)))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_ioctl(vp: *mut Vnode, cmd: u64, data: u64, fflag: u32, c: *const Ucred) -> i32 {
+    vop_ioctl(vp, cmd, data, fflag, cred(c))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_fsync(vp: *mut Vnode, waitfor: i32, data_only: u32) -> i32 {
+    vop_fsync(vp, waitfor, data_only != 0)
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_remove(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    vop_remove(dvp, vp, cn(cnp))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_link(tdvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    vop_link(tdvp, vp, cn(cnp))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_rename(
+    fdvp: *mut Vnode,
+    fvp: *mut Vnode,
+    fcnp: *const ComponentName,
+    tdvp: *mut Vnode,
+    tvp: *mut Vnode,
+    tcnp: *const ComponentName,
+) -> i32 {
+    vop_rename(fdvp, fvp, cn(fcnp), tdvp, tvp, cn(tcnp))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_rmdir(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    vop_rmdir(dvp, vp, cn(cnp))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_readdir(vp: *mut Vnode, uio: Uio, c: *const Ucred, eofflag: *mut i32) -> i64 {
+    match vop_readdir(vp, uio, cred(c)) {
+        Ok((n, eof)) => {
+            // SAFETY: the calling module's out-parameter.
+            unsafe { *eofflag = eof as i32 };
+            n as i64
+        }
+        Err(e) => -(e as i64),
+    }
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_readlink(vp: *mut Vnode, uio: Uio, c: *const Ucred) -> i64 {
+    count(vop_readlink(vp, uio, cred(c)))
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_bmap(vp: *mut Vnode, lblkno: u64, bnp: *mut u64, runp: *mut u64) -> i32 {
+    match vop_bmap(vp, lblkno) {
+        Ok((bn, run)) => {
+            // SAFETY: the calling module's out-parameters.
+            unsafe {
+                *bnp = bn;
+                *runp = run;
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+pub(crate) extern "C" fn oxidebsd_vop_allocate(vp: *mut Vnode, offset: u64, len: u64) -> i32 {
+    vop_allocate(vp, offset, len)
+}

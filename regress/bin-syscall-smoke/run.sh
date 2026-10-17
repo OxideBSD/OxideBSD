@@ -184,6 +184,40 @@ check "and what was under it shows again" not /bin/test -e $V/tf/f
 wait $busy 2>/dev/null
 check "mount lists through getvfsstat" sh -c "mount | grep -q ' on /proc '"
 
+# nullfs (nullfs(5), its own module over any type since VFS step 3d).
+N=$T/nullx
+mkdir -p $N/t $N/n $N/d $N/p $N/ro
+mount -t tmpfs tmpfs $N/t
+mkdir $N/t/sub
+echo below > $N/t/sub/f
+check "nullfs over a tmpfs" mount -t nullfs $N/t $N/n
+check "nullfs: shows its files" [ "$(cat $N/n/sub/f)" = below ]
+echo above > $N/n/sub/g
+check "nullfs: a file made through it is below" [ "$(cat $N/t/sub/g)" = above ]
+check "nullfs: has its own st_dev" [ "$(stat -t $N/n/sub/f | cut -d" " -f7)" != "$(stat -t $N/t/sub/f | cut -d" " -f7)" ]
+check "nullfs: keeps the file's serial number" sh -c "a=\$(stat -t $N/n/sub/f | cut -d' ' -f8); b=\$(stat -t $N/t/sub/f | cut -d' ' -f8); [ \"\$a\" = \"\$b\" ] || { echo \"ino \$a vs \$b\"; false; }"
+check "nullfs: a hard link to the lower path is EXDEV" not ln $N/n/sub/f $N/t/sub/h 2>/dev/null
+rm $N/n/sub/g
+check "nullfs: removing through it removes below" [ ! -e $N/t/sub/g ]
+check "nullfs: the lower file system is busy" not umount $N/t 2>/dev/null
+cp /bin/true $N/n/tr
+check "nullfs: runs programs" $N/n/tr
+check "nullfs: flock through it conflicts with the lower path" flock -n $N/t/sub/f sh -c "! flock -n $N/n/sub/f true"
+check "nullfs: unmount" umount $N/n
+check "nullfs: then the tmpfs" umount $N/t
+check "nullfs over devfs" mount -t nullfs /dev $N/d
+check "nullfs: devices open through it" sh -c "echo x > $N/d/null"
+check "nullfs: unmount the devfs one" umount $N/d
+check "nullfs over procfs" mount -t nullfs /proc $N/p
+check "nullfs: /proc through it" [ -e $N/p/meminfo ]
+check "nullfs: unmount the procfs one" umount $N/p
+mkdir -p $N/src
+echo ro > $N/src/f
+check "nullfs: ro" mount -t nullfs -o ro $N/src $N/ro
+check "nullfs: refuses writes through it" not sh -c ": > $N/ro/g" 2>/dev/null
+check "nullfs: while the lower path takes them" sh -c ": > $N/src/g"
+check "nullfs: unmount the ro one" umount $N/ro
+
 # tmpfs (tmpfs(5), its own module since VFS step 3b).
 X=$T/tmpx
 mkdir -p $X/a $X/b

@@ -261,7 +261,7 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
 /// Loads the file system modules (OxideBSD-doc `VFS.md`), in the order they must come: oxfs, whose
 /// type mounts the root as it registers, then the types the kernel mounts on the root's
 /// directories (devfs on `/dev`, procfs on `/proc`) and the ones `/etc/fstab` and `mount(8)` name
-/// (tmpfs). The data
+/// (tmpfs, nullfs). The data
 /// disk must be attached first (`drivers::disk::init`). Test kernels call it too, so each loads
 /// the same set.
 pub fn load_file_systems(
@@ -308,6 +308,11 @@ pub fn load_file_systems(
     const TMPFS_PANIC_SYMBOL: &str = env!("TMPFS_MOD_PANIC_SYMBOL");
     crate::module::load("tmpfs", TMPFS_MOD, TMPFS_PANIC_SYMBOL, false, mapper, frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the tmpfs module: {e:?}"));
+
+    const NULLFS_MOD: &[u8] = include_bytes!(env!("NULLFS_MOD_PATH"));
+    const NULLFS_PANIC_SYMBOL: &str = env!("NULLFS_MOD_PANIC_SYMBOL");
+    crate::module::load("nullfs", NULLFS_MOD, NULLFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the nullfs module: {e:?}"));
 }
 
 /// For test kernels, which run no `/etc/rc`: mounts the tmpfs on `/dev/shm` that `/etc/fstab`
