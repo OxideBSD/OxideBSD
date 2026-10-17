@@ -593,6 +593,11 @@ fn main() {
         build_static_std_crate("sbin/fsck_oxfs", "OXFS_FSCK_OXFS_ELF_PATH", &musl_sysroot);
     let newfs_oxfs_elf_path =
         build_static_std_crate("sbin/newfs_oxfs", "OXFS_NEWFS_OXFS_ELF_PATH", &musl_sysroot);
+    // fsck_msdosfs and newfs_msdos share FAT's on-disk format with makefs, lib/libmsdosfs.
+    let fsck_msdosfs_elf_path =
+        build_static_std_crate("sbin/fsck_msdosfs", "OXFS_FSCK_MSDOSFS_ELF_PATH", &musl_sysroot);
+    let newfs_msdos_elf_path =
+        build_static_std_crate("sbin/newfs_msdos", "OXFS_NEWFS_MSDOS_ELF_PATH", &musl_sysroot);
     let nologin_elf_path =
         build_static_std_crate("sbin/nologin", "OXFS_NOLOGIN_ELF_PATH", &musl_sysroot);
     // mount(8) and umount(8), over nmount(2), replacing BusyBox's under the same oxfs names (pushed
@@ -965,6 +970,8 @@ fn main() {
         ("OXFS_ADJKERNTZ_ELF_PATH", adjkerntz_elf_path.to_str().unwrap()),
         ("OXFS_FSCK_OXFS_ELF_PATH", fsck_oxfs_elf_path.to_str().unwrap()),
         ("OXFS_NEWFS_OXFS_ELF_PATH", newfs_oxfs_elf_path.to_str().unwrap()),
+        ("OXFS_FSCK_MSDOSFS_ELF_PATH", fsck_msdosfs_elf_path.to_str().unwrap()),
+        ("OXFS_NEWFS_MSDOS_ELF_PATH", newfs_msdos_elf_path.to_str().unwrap()),
         ("OXFS_SYSLOGD_ELF_PATH", syslogd_elf_path.to_str().unwrap()),
         ("OXFS_NEWSYSLOG_ELF_PATH", newsyslog_elf_path.to_str().unwrap()),
         ("OXFS_LOGGER_ELF_PATH", logger_elf_path.to_str().unwrap()),

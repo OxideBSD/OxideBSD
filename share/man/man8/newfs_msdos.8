@@ -1,0 +1,122 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt NEWFS_MSDOS 8
+.Os OxideBSD
+.Sh NAME
+.Nm newfs_msdos
+.Nd construct a new FAT file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl N
+.Op Fl @ Ar offset
+.Op Fl C Ar create-size
+.Op Fl F Ar FAT-type
+.Op Fl I Ar VolumeID
+.Op Fl L Ar label
+.Op Fl S Ar sector-size
+.Op Fl T Ar timestamp
+.Op Fl b Ar block-size
+.Op Fl c Ar cluster-size
+.Op Fl e Ar DirEnts
+.Op Fl m Ar media
+.Op Fl n Ar FATs
+.Op Fl o Ar hidden
+.Op Fl r Ar reserved
+.Op Fl s Ar total
+.Ar special
+.Sh DESCRIPTION
+.Nm
+makes an empty FAT12, FAT16 or FAT32 file system on
+.Ar special ,
+a disk device or a file, for
+.Xr mount_msdosfs 8 .
+What isn't given is chosen from the size, by Microsoft's tables: the FAT type
+(FAT12 under 16 MB, FAT16 under 512 MB, FAT32 above), the cluster size, the
+root directory's size (FAT12 and FAT16) and the reserved sectors.
+.Pp
+Sizes may end in
+.Cm k ,
+.Cm m
+or
+.Cm g
+(bytes) or
+.Cm s
+(sectors).
+The options are as follows:
+.Bl -tag -width indent
+.It Fl N
+Show the layout; write nothing.
+.It Fl @ Ar offset
+Start the file system
+.Ar offset
+bytes into
+.Ar special .
+.It Fl C Ar create-size
+Create
+.Ar special
+as a file of this size first (or grow it to it).
+.It Fl F Ar FAT-type
+12, 16 or 32.
+.It Fl I Ar VolumeID
+The volume's serial number; by default one derived from the time.
+.It Fl L Ar label
+The volume label, also written to the root directory.
+.It Fl S Ar sector-size
+Bytes per sector, a power of two from 512 to 4096; 512 by default.
+.It Fl T Ar timestamp
+Seconds since the epoch to derive the serial number and stamp the label from,
+for repeatable images.
+.It Fl b Ar block-size
+Bytes per cluster.
+.It Fl c Ar cluster-size
+Sectors per cluster, a power of two.
+.It Fl e Ar DirEnts
+Root directory entries (FAT12 and FAT16).
+.It Fl m Ar media
+The media descriptor: 0xf0, or 0xf8 to 0xff; 0xf8 by default.
+.It Fl n Ar FATs
+Copies of the FAT; 2 by default.
+.It Fl o Ar hidden
+Hidden sectors, the partition's start, recorded in the boot sector.
+.It Fl r Ar reserved
+Reserved sectors.
+.It Fl s Ar total
+Use only
+.Ar total
+sectors of
+.Ar special .
+.El
+.Pp
+FAT32's FSInfo sector is sector 1 and its backup boot sector sector 6.
+The boot sector holds no boot code.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+A FAT32 EFI system partition:
+.Dl newfs_msdos -F 32 -L EFISYS /dev/gpt/efi
+.Pp
+A 1.44 MB floppy image:
+.Dl newfs_msdos -C 1440k floppy.img
+.Sh SEE ALSO
+.Xr msdosfs 5 ,
+.Xr fsck_msdosfs 8 ,
+.Xr makefs 8 ,
+.Xr mount_msdosfs 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 3.0 .
+.Sh BUGS
+.Fx Ns 's
+.Fl A ,
+.Fl B ,
+.Fl O ,
+.Fl a ,
+.Fl f ,
+.Fl h ,
+.Fl i ,
+.Fl k
+and
+.Fl u
+are not supported.

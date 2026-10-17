@@ -72,6 +72,24 @@ The volume label, as
 .Xr newfs_oxfs 8 Fl L
 sets it.
 .El
+.Pp
+For msdos (FreeBSD's names):
+.Bl -tag -width indent
+.It Cm fat_type Ns = Ns Ar 12 | 16 | 32
+The FAT type; 32 by default.
+.It Cm volume_label Ns = Ns Ar name
+The volume label.
+.It Cm volume_id Ns = Ns Ar number
+The volume's serial number; by default one derived from the label and the
+time, so that building twice gives the same image.
+.It Cm sectors_per_cluster Ns = Ns Ar n
+The cluster size, in 512-byte sectors.
+.El
+.Pp
+FAT keeps no owners, modes or links: a file without its owner's write bit is
+read-only, a hard link becomes a copy, and symbolic links and FIFOs are refused.
+Names are case-preserving and unique regardless of case; one that isn't an 8.3
+name gets a long name and a short alias in code page 437.
 .It Fl s Ar image-size
 The image's size, in bytes or with a
 .Cm b
@@ -86,10 +104,11 @@ Without it the image is just large enough, with a little room to spare.
 Give every file and directory this time, in seconds since the epoch, so that
 building twice gives the same image.
 .It Fl t Ar fs-type
-The file system type.
-Only
+The file system type:
 .Cm oxfs ,
-the default, is supported.
+the default, or
+.Cm msdos
+(FAT).
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -100,8 +119,11 @@ makefs -t oxfs -o label=rootfs -s 1g -T 1792000000 root.img base.mtree
 .Ed
 .Sh SEE ALSO
 .Xr mkimg 1 ,
+.Xr msdosfs 5 ,
 .Xr mtree 5 ,
+.Xr fsck_msdosfs 8 ,
 .Xr fsck_oxfs 8 ,
+.Xr newfs_msdos 8 ,
 .Xr newfs_oxfs 8
 .Sh HISTORY
 A

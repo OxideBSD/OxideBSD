@@ -130,6 +130,8 @@
 ./sbin/fsck type=file src=artifact:OXFS_FSCK_ELF_PATH
 ./sbin/fsck_oxfs type=file src=artifact:OXFS_FSCK_OXFS_ELF_PATH
 ./sbin/newfs_oxfs type=file src=artifact:OXFS_NEWFS_OXFS_ELF_PATH
+./sbin/fsck_msdosfs type=file src=artifact:OXFS_FSCK_MSDOSFS_ELF_PATH
+./sbin/newfs_msdos type=file src=artifact:OXFS_NEWFS_MSDOS_ELF_PATH
 ./sbin/zstd type=file src=artifact:OXFS_ZSTD_ELF_PATH
 ./sbin/unzstd type=file hardlink=./sbin/zstd
 ./sbin/zstdcat type=file hardlink=./sbin/zstd
@@ -450,6 +452,8 @@
 ./usr/share/man/man8/fsck.8 type=file src=share/man/man8/fsck.8
 ./usr/share/man/man8/fsck_oxfs.8 type=file src=share/man/man8/fsck_oxfs.8
 ./usr/share/man/man8/newfs_oxfs.8 type=file src=share/man/man8/newfs_oxfs.8
+./usr/share/man/man8/fsck_msdosfs.8 type=file src=share/man/man8/fsck_msdosfs.8
+./usr/share/man/man8/newfs_msdos.8 type=file src=share/man/man8/newfs_msdos.8
 ./usr/share/man/man8/getty.8 type=file src=share/man/man8/getty.8
 ./usr/share/man/man8/init.8 type=file src=share/man/man8/init.8
 ./usr/share/man/man8/makewhatis.8 type=file src=share/man/man8/makewhatis.8
@@ -493,6 +497,37 @@
 ./usr/lib type=tree src=gen:LIBCXX_LIB_FILES
 ./usr/share/terminfo type=dir
 ./usr/share/terminfo type=tree src=gen:NCURSES_TERMINFO_FILES
+./usr/share/msdosfs type=dir
+./usr/share/msdosfs/CP1250 type=file src=share/msdosfs/CP1250
+./usr/share/msdosfs/CP1251 type=file src=share/msdosfs/CP1251
+./usr/share/msdosfs/CP1252 type=file src=share/msdosfs/CP1252
+./usr/share/msdosfs/CP1253 type=file src=share/msdosfs/CP1253
+./usr/share/msdosfs/CP1254 type=file src=share/msdosfs/CP1254
+./usr/share/msdosfs/CP1255 type=file src=share/msdosfs/CP1255
+./usr/share/msdosfs/CP1256 type=file src=share/msdosfs/CP1256
+./usr/share/msdosfs/CP1257 type=file src=share/msdosfs/CP1257
+./usr/share/msdosfs/CP1258 type=file src=share/msdosfs/CP1258
+./usr/share/msdosfs/CP437 type=file src=share/msdosfs/CP437
+./usr/share/msdosfs/CP737 type=file src=share/msdosfs/CP737
+./usr/share/msdosfs/CP775 type=file src=share/msdosfs/CP775
+./usr/share/msdosfs/CP850 type=file src=share/msdosfs/CP850
+./usr/share/msdosfs/CP852 type=file src=share/msdosfs/CP852
+./usr/share/msdosfs/CP855 type=file src=share/msdosfs/CP855
+./usr/share/msdosfs/CP857 type=file src=share/msdosfs/CP857
+./usr/share/msdosfs/CP858 type=file src=share/msdosfs/CP858
+./usr/share/msdosfs/CP860 type=file src=share/msdosfs/CP860
+./usr/share/msdosfs/CP861 type=file src=share/msdosfs/CP861
+./usr/share/msdosfs/CP862 type=file src=share/msdosfs/CP862
+./usr/share/msdosfs/CP863 type=file src=share/msdosfs/CP863
+./usr/share/msdosfs/CP864 type=file src=share/msdosfs/CP864
+./usr/share/msdosfs/CP865 type=file src=share/msdosfs/CP865
+./usr/share/msdosfs/CP866 type=file src=share/msdosfs/CP866
+./usr/share/msdosfs/CP869 type=file src=share/msdosfs/CP869
+./usr/share/msdosfs/CP874 type=file src=share/msdosfs/CP874
+./usr/share/msdosfs/CP932 type=file src=share/msdosfs/CP932
+./usr/share/msdosfs/CP936 type=file src=share/msdosfs/CP936
+./usr/share/msdosfs/CP949 type=file src=share/msdosfs/CP949
+./usr/share/msdosfs/CP950 type=file src=share/msdosfs/CP950
 ./usr/share/zoneinfo type=dir
 ./usr/share/zoneinfo type=tree src=gen:TZ_ZONEINFO_FILES
 ./usr/share/zoneinfo type=tree src=gen:TZ_ZONEINFO_LINKS

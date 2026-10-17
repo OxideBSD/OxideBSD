@@ -7,6 +7,9 @@
 
 #![no_std]
 
+pub mod codepage;
+pub mod fat;
+
 pub const DIR_ENTRY_SIZE: usize = 32;
 
 pub const ATTR_READ_ONLY: u8 = 0x01;
@@ -104,6 +107,41 @@ pub struct Bpb {
     pub volume_label: [u8; 11],
 }
 
+/// What `Bpb::layout` is asked for; zero (or `None`) fields are chosen for the size.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub kind: Option<FatType>,
+    pub bytes_per_sector: u16,
+    pub total_sectors: u32,
+    pub sectors_per_cluster: u8,
+    pub reserved_sectors: u16,
+    pub fats: u8,
+    pub root_entries: u16,
+    pub media: u8,
+    pub hidden_sectors: u32,
+    pub volume_id: u32,
+    pub volume_label: [u8; 11],
+}
+
+impl Layout {
+    /// Everything chosen for a volume of `total_sectors` 512-byte sectors.
+    pub fn new(total_sectors: u32) -> Layout {
+        Layout {
+            kind: None,
+            bytes_per_sector: 512,
+            total_sectors,
+            sectors_per_cluster: 0,
+            reserved_sectors: 0,
+            fats: 0,
+            root_entries: 0,
+            media: 0xF8,
+            hidden_sectors: 0,
+            volume_id: 0,
+            volume_label: *b"NO NAME    ",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BpbError {
     /// No `0x55 0xAA` at the end of the sector.
@@ -158,6 +196,112 @@ impl Bpb {
             volume_label,
         };
         if bpb.fat_type()? != FatType::Fat32 {
+            return Err(BpbError::Geometry);
+        }
+        Ok(bpb)
+    }
+
+    /// A layout for any FAT type (newfs_msdos(8), `makefs -o fat_type=`): the type, cluster size,
+    /// reserved sectors and root directory entries `l` leaves at 0 are chosen from the volume's
+    /// size (§3.5's tables), the FAT is sized to its cluster count, and the result is checked to
+    /// be of the type asked for.
+    pub fn layout(l: &Layout) -> Result<Bpb, BpbError> {
+        let bps = l.bytes_per_sector as u32;
+        if !l.bytes_per_sector.is_power_of_two() || !(512..=4096).contains(&bps) {
+            return Err(BpbError::Field("bytes per sector"));
+        }
+        // Sizes below are in 512-byte units, as Microsoft's tables give them.
+        let units = l.total_sectors as u64 * bps as u64 / 512;
+        let kind = l.kind.unwrap_or(if units < 32_680 {
+            FatType::Fat12
+        } else if units < 1_048_576 {
+            FatType::Fat16
+        } else {
+            FatType::Fat32
+        });
+        let fats = if l.fats == 0 { 2 } else { l.fats as u32 };
+        let reserved = match (l.reserved_sectors, kind) {
+            (0, FatType::Fat32) => 32,
+            (0, _) => 1,
+            (n, _) => n as u32,
+        };
+        let root_entries = match (l.root_entries, kind) {
+            (_, FatType::Fat32) => 0,
+            (0, FatType::Fat12) if units <= 2880 => 224,
+            (0, _) => 512,
+            (n, _) => n as u32,
+        };
+        let root_sectors = (root_entries * DIR_ENTRY_SIZE as u32).div_ceil(bps);
+        // Bytes per cluster, in 512-byte units: FAT16 and FAT32 from §3.5's tables, FAT12 the
+        // smallest that keeps it under its cluster limit.
+        let spc_units: u64 = match l.sectors_per_cluster {
+            0 => match kind {
+                FatType::Fat12 => {
+                    let mut u = 1u64;
+                    while units / u > FAT12_MAX_CLUSTERS as u64 && u < 128 {
+                        u *= 2;
+                    }
+                    u
+                }
+                FatType::Fat16 => match units {
+                    ..=32_680 => 2,
+                    ..=262_144 => 4,
+                    ..=524_288 => 8,
+                    ..=1_048_576 => 16,
+                    ..=2_097_152 => 32,
+                    ..=4_194_304 => 64,
+                    _ => 128,
+                },
+                FatType::Fat32 => match units {
+                    ..=532_480 => 1,
+                    ..=16_777_216 => 8,
+                    ..=33_554_432 => 16,
+                    ..=67_108_864 => 32,
+                    _ => 64,
+                },
+            },
+            n => n as u64 * bps as u64 / 512,
+        };
+        let spc = (spc_units * 512 / bps as u64).max(1);
+        if !spc.is_power_of_two() || spc > 128 || spc * bps as u64 > 64 * 1024 {
+            return Err(BpbError::Field("sectors per cluster"));
+        }
+        let spc = spc as u32;
+        // The FAT's size and the cluster count depend on each other: grow the FAT until it holds
+        // an entry for every cluster the rest leaves room for.
+        let fixed = reserved + root_sectors;
+        let mut fat_sectors = 1u32;
+        loop {
+            let data = (l.total_sectors as u64).checked_sub(fixed as u64 + fats as u64 * fat_sectors as u64).ok_or(BpbError::Geometry)?;
+            let clusters = (data / spc as u64).min(u32::MAX as u64) as u32;
+            let need = kind.fat_bytes(clusters + 2).div_ceil(bps as u64) as u32;
+            if need <= fat_sectors {
+                break;
+            }
+            fat_sectors = need;
+        }
+        let bpb = Bpb {
+            bytes_per_sector: l.bytes_per_sector,
+            sectors_per_cluster: spc as u8,
+            reserved_sectors: reserved as u16,
+            fats: fats as u8,
+            root_entries: root_entries as u16,
+            total_sectors: l.total_sectors,
+            media: l.media,
+            fat_sectors,
+            sectors_per_track: 63,
+            heads: 255,
+            hidden_sectors: l.hidden_sectors,
+            root_cluster: if kind == FatType::Fat32 { FIRST_CLUSTER } else { 0 },
+            fsinfo_sector: if kind == FatType::Fat32 { 1 } else { 0 },
+            backup_boot_sector: if kind == FatType::Fat32 { 6 } else { 0 },
+            volume_id: l.volume_id,
+            volume_label: l.volume_label,
+        };
+        if kind == FatType::Fat16 && root_entries > u16::MAX as u32 || fat_sectors > u16::MAX as u32 && kind != FatType::Fat32 {
+            return Err(BpbError::Geometry);
+        }
+        if bpb.fat_type()? != kind {
             return Err(BpbError::Geometry);
         }
         Ok(bpb)
@@ -497,12 +641,32 @@ pub enum ShortName {
     Basis { name: [u8; 11], lossy: bool },
 }
 
-/// The short name for long name `name` (§7.4), before any numeric tail. `name` is UTF-8 and
-/// valid as a long name.
+/// The short name for long name `name` (§7.4), before any numeric tail, in CP437.
 pub fn short_name_for(name: &str) -> ShortName {
+    short_name_in(name, &codepage::Codepage::Cp437)
+}
+
+/// The upper-case form a name is compared and stored in: one character to one (a character
+/// whose upper case is several, `ß`, stays as it is). Lookups on FAT are case-insensitive by it.
+pub fn fold(c: char) -> char {
+    let mut up = c.to_uppercase();
+    match (up.next(), up.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    }
+}
+
+/// Whether two names are the same name on FAT: equal after `fold`.
+pub fn same_name(a: &str, b: &str) -> bool {
+    a.chars().map(fold).eq(b.chars().map(fold))
+}
+
+/// The short name for long name `name` (§7.4), before any numeric tail, with the characters
+/// code page `cp` has; `name` is UTF-8 and valid as a long name.
+pub fn short_name_in(name: &str, cp: &codepage::Codepage) -> ShortName {
     let mut out = [b' '; 11];
-    // An exact 8.3 name: one optional dot, base 1-8 and extension 0-3 valid characters, each part
-    // all lower or all upper case.
+    // An exact 8.3 name: one optional dot, base 1-8 and extension 0-3 valid ASCII characters,
+    // each part all lower or all upper case.
     let (base, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i + 1..]),
         _ => (name, ""),
@@ -525,7 +689,13 @@ pub fn short_name_for(name: &str) -> ShortName {
         Some(lower.unwrap_or(false))
     };
     let dot_ok = name.bytes().filter(|&c| c == b'.').count() <= 1 && !name.ends_with('.');
-    if dot_ok && (1..=8).contains(&base.len()) && ext.len() <= 3 && name != "." && name != ".." {
+    // A code page may move an ASCII character (CP932's yen sign at `\`'s 0x5C): exact only if
+    // every character keeps its byte.
+    let ascii_kept = name.chars().all(|c| {
+        let mut b = [0u8; 2];
+        cp.encode(c.to_ascii_uppercase(), &mut b) == 1 && b[0] == c.to_ascii_uppercase() as u8
+    });
+    if ascii_kept && dot_ok && (1..=8).contains(&base.len()) && ext.len() <= 3 && name != "." && name != ".." {
         if let (Some(bl), Some(el)) = (part_case(base), part_case(ext)) {
             for (i, c) in base.bytes().enumerate() {
                 out[i] = c.to_ascii_uppercase();
@@ -533,11 +703,15 @@ pub fn short_name_for(name: &str) -> ShortName {
             for (i, c) in ext.bytes().enumerate() {
                 out[8 + i] = c.to_ascii_uppercase();
             }
+            if out[0] == ENTRY_FREE {
+                out[0] = 0x05;
+            }
             return ShortName::Exact { name: out, nt_case: if bl { 0x08 } else { 0 } | if el { 0x10 } else { 0 } };
         }
     }
-    // §7.4: upper-case; drop spaces and leading periods; invalid characters become `_`; the base
-    // is up to 8 characters before the last period, the extension up to 3 after it.
+    // §7.4: upper-case; drop spaces and leading periods; characters the code page lacks or a
+    // short name can't hold become `_`; the base is up to 8 bytes before the last period, the
+    // extension up to 3 after it, a two-byte character never split.
     let mut lossy = false;
     let trimmed = name.trim_start_matches('.');
     lossy |= trimmed.len() != name.len();
@@ -554,15 +728,30 @@ pub fn short_name_for(name: &str) -> ShortName {
                 dropped = true;
                 continue;
             }
-            let b = if c.is_ascii() && short_name_char((c as u8).to_ascii_uppercase()) { (c as u8).to_ascii_uppercase() } else { b'_' };
-            if b == b'_' && c != '_' {
-                dropped = true;
-            }
-            if n == out.len() {
+            let up = fold(c);
+            let mut code = [0u8; 2];
+            let len = if up.is_ascii() {
+                if short_name_char(up as u8) {
+                    cp.encode(up, &mut code)
+                } else {
+                    0
+                }
+            } else {
+                cp.encode(up, &mut code)
+            };
+            let (code, len) = if len == 0 || (len == 1 && code[0] < 0x80 && !short_name_char(code[0])) {
+                if c != '_' {
+                    dropped = true;
+                }
+                ([b'_', 0], 1)
+            } else {
+                (code, len)
+            };
+            if n + len > out.len() {
                 return true;
             }
-            out[n] = b;
-            n += 1;
+            out[n..n + len].copy_from_slice(&code[..len]);
+            n += len;
         }
         dropped
     };
@@ -572,7 +761,37 @@ pub fn short_name_for(name: &str) -> ShortName {
         out[0] = b'_';
         lossy = true;
     }
+    if out[0] == ENTRY_FREE {
+        out[0] = 0x05;
+    }
     ShortName::Basis { name: out, lossy }
+}
+
+/// A short name as text (§6.1): base, a period and the extension if there is one, each lower
+/// case where `nt_case` says, decoded with `cp` (an undefined code shows as `?`). Written as
+/// UTF-8 into `out`; returns its length.
+pub fn short_name_text(raw: &[u8; 11], nt_case: u8, cp: &codepage::Codepage, out: &mut [u8; 48]) -> usize {
+    let mut name = *raw;
+    if name[0] == 0x05 {
+        name[0] = ENTRY_FREE;
+    }
+    let mut n = 0;
+    let part = |bytes: &[u8], lower: bool, out: &mut [u8; 48], n: &mut usize| {
+        let end = bytes.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+        let mut at = 0;
+        while at < end {
+            let c = cp.decode(&bytes[..end], &mut at).unwrap_or('?');
+            let c = if lower { c.to_lowercase().next().filter(|_| c.is_ascii()).unwrap_or(c) } else { c };
+            *n += c.encode_utf8(&mut out[*n..]).len();
+        }
+    };
+    part(&name[..8], nt_case & 0x08 != 0, out, &mut n);
+    if name[8..].iter().any(|&b| b != b' ') {
+        out[n] = b'.';
+        n += 1;
+        part(&name[8..], nt_case & 0x10 != 0, out, &mut n);
+    }
+    n
 }
 
 /// `basis` with numeric tail `~n` (§7.4 step 7): the base is cut so that the tail fits in its
@@ -630,6 +849,25 @@ mod tests {
     }
 
     #[test]
+    fn layouts() {
+        for (sectors, kind) in [(2880, FatType::Fat12), (16_384, FatType::Fat12), (65_536, FatType::Fat16), (1_000_000, FatType::Fat16), (2_000_000, FatType::Fat32)] {
+            let bpb = Bpb::layout(&Layout::new(sectors)).unwrap();
+            assert_eq!(bpb.fat_type().unwrap(), kind, "{sectors}");
+            let mut s = [0u8; 512];
+            bpb.write_boot_sector(&mut s).unwrap();
+            assert_eq!(Bpb::read_boot_sector(&s).unwrap(), bpb);
+            // The FAT holds every cluster, and errs large by little.
+            let need = kind.fat_bytes(bpb.clusters().unwrap() + 2).div_ceil(512) as u32;
+            assert!(bpb.fat_sectors >= need && bpb.fat_sectors <= need + need / 100 + 1, "{sectors}");
+        }
+        assert_eq!(Bpb::layout(&Layout::new(2880)).unwrap().root_entries, 224);
+        // Asking for a type the size can't be is an error.
+        assert_eq!(Bpb::layout(&Layout { kind: Some(FatType::Fat32), ..Layout::new(65_536) }), Err(BpbError::Geometry));
+        let f16 = Bpb::layout(&Layout { kind: Some(FatType::Fat16), ..Layout::new(65_536) }).unwrap();
+        assert_eq!(f16.sectors_per_cluster, 4);
+    }
+
+    #[test]
     fn too_small_for_fat32() {
         assert_eq!(Bpb::fat32(40_000, 1, 0, volume_label("")), Err(BpbError::Geometry));
     }
@@ -654,6 +892,16 @@ mod tests {
         assert!(matches!(short_name_for("Mixed.txt"), ShortName::Basis { lossy: false, .. }));
         assert_eq!(&with_numeric_tail(b"LIMINE  CON", 1), b"LIMINE~1CON");
         assert_eq!(&with_numeric_tail(b"LIMINE-BSYS", 12), b"LIMIN~12SYS");
+        // CP437 has É: a short name for café keeps it, upper case.
+        assert!(matches!(short_name_for("café.txt"), ShortName::Basis { name, lossy: false } if &name == b"CAF\x90    TXT"));
+        assert!(matches!(short_name_for("日本.txt"), ShortName::Basis { name, lossy: true } if &name == b"__      TXT"));
+        let mut out = [0u8; 48];
+        let n = short_name_text(b"KERNEL     ", 0x08, &codepage::Codepage::Cp437, &mut out);
+        assert_eq!(&out[..n], b"kernel");
+        let n = short_name_text(b"CAF\x90    TXT", 0, &codepage::Codepage::Cp437, &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "CAFÉ.TXT");
+        assert!(same_name("Café.TXT", "CAFÉ.txt"));
+        assert!(!same_name("a", "b"));
     }
 
     #[test]

@@ -11,7 +11,8 @@
 //! - `-c capacity`: the disk's size at least, in bytes or with a `k`, `m` or `g` suffix; the last
 //!   partition does not grow into it.
 //! - `-p type[/label]:=file`: a partition holding `file`; `-p type[/label]::size`: an empty one
-//!   of `size`. Types: `oxfs`, `efi`, `bios` (a GPT BIOS boot partition, for `-b`). A label is
+//!   of `size`. Types: `oxfs`, `efi`, `bios` (a GPT BIOS boot partition, for `-b`), `fat16b`, `fat32`,
+//!   `fat32lba`, `ms-basic-data` (FAT; on GPT all a Microsoft basic data partition). A label is
 //!   GPT's partition name (`/dev/gpt/<label>`).
 //! - `-b bootcode`: BIOS boot code, Limine's hard-disk image (`limine-bios-hdd.bin`), installed
 //!   as `limine bios-install` does (`RAM_FLOOR.md` §4.4.4): its first sector becomes the boot
@@ -41,6 +42,9 @@ const GPT_ENTRY_SECTORS: u64 = GPT_ENTRIES * GPT_ENTRY_SIZE / SECTOR;
 /// The EFI system partition's type, `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`.
 const EFI_TYPE_GUID: [u8; 16] = guid_bytes(0xC12A_7328, 0xF81F, 0x11D2, [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B]);
 const EFI_MBR_TYPE: u8 = 0xEF;
+/// A Microsoft basic data partition's type (a FAT volume other than the ESP),
+/// `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`.
+const MS_BASIC_DATA_GUID: [u8; 16] = guid_bytes(0xEBD0_A0A2, 0xB9E5, 0x4433, [0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7]);
 /// A BIOS boot partition's type, `21686148-6449-6E6F-744E-656564454649` ("Hah!IdontNeedEFI").
 const BIOS_TYPE_GUID: [u8; 16] = *b"Hah!IdontNeedEFI";
 /// Where Limine's boot sector keeps stage 2's byte offset.
@@ -65,6 +69,9 @@ enum PartType {
     Oxfs,
     Efi,
     Bios,
+    /// FAT, under FreeBSD's MBR names: `fat16b` (0x06), `fat32` (0x0b), `fat32lba` (0x0c); on GPT
+    /// each is a Microsoft basic data partition, as is `ms-basic-data`.
+    Fat(u8),
 }
 
 impl PartType {
@@ -73,6 +80,7 @@ impl PartType {
             PartType::Oxfs => OXFS_TYPE_GUID,
             PartType::Efi => EFI_TYPE_GUID,
             PartType::Bios => BIOS_TYPE_GUID,
+            PartType::Fat(_) => MS_BASIC_DATA_GUID,
         }
     }
 
@@ -81,6 +89,7 @@ impl PartType {
             PartType::Oxfs => OXFS_MBR_TYPE,
             PartType::Efi => EFI_MBR_TYPE,
             PartType::Bios => unreachable!("refused on MBR"),
+            PartType::Fat(t) => t,
         }
     }
 }
@@ -113,7 +122,10 @@ fn parse_part(s: &str) -> Result<Part, String> {
         "oxfs" => PartType::Oxfs,
         "efi" => PartType::Efi,
         "bios" => PartType::Bios,
-        _ => return Err(format!("{kind}: unknown partition type (oxfs, efi, bios)")),
+        "fat16b" => PartType::Fat(0x06),
+        "fat32" => PartType::Fat(0x0B),
+        "fat32lba" | "ms-basic-data" => PartType::Fat(0x0C),
+        _ => return Err(format!("{kind}: unknown partition type (oxfs, efi, bios, fat16b, fat32, fat32lba, ms-basic-data)")),
     };
     if label.encode_utf16().count() > 36 || label.contains('/') {
         return Err(format!("{label}: a label is at most 36 characters, without `/`"));

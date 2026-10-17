@@ -1,20 +1,22 @@
-//! `makefs -t msdos`: a FAT32 image from the tree (OxideBSD-doc `RAM_FLOOR.md` §4.4.4), for the
-//! EFI system partition. The format is `lib/libmsdosfs`'s.
+//! `makefs -t msdos`: a FAT image from the tree (OxideBSD-doc `RAM_FLOOR.md` §4.4.4), for the
+//! EFI system partition and msdosfs's test volumes. The format is `lib/libmsdosfs`'s.
 //!
-//! Everything is laid out before anything is written: the root directory in cluster 2, then
-//! every directory and file in path order, each in one contiguous run of clusters. Names that
+//! Everything is laid out before anything is written: the root directory (FAT32: in cluster 2;
+//! FAT12 and FAT16: in its fixed area after the FATs), then every directory and file in path
+//! order, each in one contiguous run of clusters. Names that
 //! aren't 8.3 get long-name entries and a short alias with a numeric tail. FAT keeps no owners,
 //! modes or links: a file without its owner's write bit is read-only, a hard link becomes a copy,
 //! and symbolic links and FIFOs are refused.
 //!
-//! Options (`-o`, FreeBSD's names): `fat_type=32` (the only type written), `volume_label=`,
+//! Options (`-o`, FreeBSD's names): `fat_type=12|16|32` (32 by default), `volume_label=`,
 //! `volume_id=` (default: derived from the label and the time, so an image is reproducible),
 //! `sectors_per_cluster=`.
 
 use crate::{Body, Node, Tree, show};
 use msdosfs_format::{
-    ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_READ_ONLY, ATTR_VOLUME_ID, Bpb, DIR_ENTRY_SIZE, DirEntry, DosTime, FAT32_EOC, FIRST_CLUSTER,
-    LFN_MAX, ShortName, lfn_entries, long_name_char, short_name_checksum, short_name_for, with_numeric_tail, write_fsinfo, write_lfn_entry,
+    ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_READ_ONLY, ATTR_VOLUME_ID, Bpb, DIR_ENTRY_SIZE, DirEntry, DosTime, FIRST_CLUSTER, FatType, LFN_MAX,
+    Layout, ShortName, fat, lfn_entries, long_name_char, short_name_checksum, short_name_for, with_numeric_tail, write_fsinfo,
+    write_lfn_entry,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -155,9 +157,12 @@ fn derived_volume_id(label: &str, time: i64) -> u32 {
 }
 
 pub fn build(image: &Path, tree: &Tree, size: Option<u64>, opts: &Options, timestamp: Option<i64>) -> Result<(u64, usize), String> {
-    if opts.fat_type.is_some_and(|t| t != 32) {
-        return Err("only fat_type=32 is written".into());
-    }
+    let kind = match opts.fat_type.unwrap_or(32) {
+        12 => FatType::Fat12,
+        16 => FatType::Fat16,
+        32 => FatType::Fat32,
+        t => return Err(format!("fat_type={t}: not 12, 16 or 32")),
+    };
     let time = |n: &Node| timestamp.unwrap_or(n.time);
     let root_time = time(&tree[&b""[..]]);
     let label = msdosfs_format::volume_label(&opts.volume_label);
@@ -177,34 +182,62 @@ pub fn build(image: &Path, tree: &Tree, size: Option<u64>, opts: &Options, times
         }
         needs.push((path, node, bytes));
     }
+    // FAT12 and FAT16 keep the root in a fixed area of at least 512 entries (a whole sector's).
+    let root_slots = dir_slots(b"", &dirs[&b""[..]], has_label);
+    let fixed_root = kind != FatType::Fat32;
+    let root_entries = if fixed_root { (root_slots.max(512).div_ceil(16) * 16).min(0xFFF0) as u16 } else { 0 };
+    if fixed_root && root_slots > root_entries as usize {
+        return Err("too many names in the root directory for FAT12/16".into());
+    }
+    let make = |sectors: u32| -> Result<Bpb, String> {
+        if kind == FatType::Fat32 {
+            return Bpb::fat32(sectors, opts.sectors_per_cluster, volume_id, label).map_err(|e| format!("{e:?}"));
+        }
+        let l = Layout { kind: Some(kind), sectors_per_cluster: opts.sectors_per_cluster, root_entries, volume_id, volume_label: label, ..Layout::new(sectors) };
+        Bpb::layout(&l).map_err(|e| format!("{e:?}"))
+    };
+    let in_clusters = |p: &[u8]| !(fixed_root && p.is_empty());
 
-    // The volume: as given, or the smallest FAT32 that holds everything with a twentieth spare.
+    // The volume: as given, or the smallest of the type that holds everything with a twentieth
+    // spare.
     let bpb = match size {
         Some(bytes) => {
-            let sectors = u32::try_from(bytes / SECTOR).map_err(|_| "too large for FAT32 with 512-byte sectors")?;
-            Bpb::fat32(sectors, opts.sectors_per_cluster, volume_id, label).map_err(|e| format!("{bytes} bytes can't be FAT32 ({e:?}); FAT32 needs about 33 MiB or more"))?
+            let sectors = u32::try_from(bytes / SECTOR).map_err(|_| "too large for FAT with 512-byte sectors")?;
+            make(sectors).map_err(|e| format!("{bytes} bytes can't be FAT{} ({e})", opts.fat_type.unwrap_or(32)))?
         }
         None => {
-            let mut sectors: u32 = 66_600 + 32 + 2 * 520;
+            let mut sectors: u32 = match kind {
+                FatType::Fat12 => 64,
+                FatType::Fat16 => 8400,
+                FatType::Fat32 => 66_600 + 32 + 2 * 520,
+            };
             loop {
-                if let Ok(b) = Bpb::fat32(sectors, opts.sectors_per_cluster, volume_id, label) {
+                if let Ok(b) = make(sectors) {
                     let cb = b.cluster_bytes() as u64;
-                    let used: u64 = needs.iter().map(|(_, n, bytes)| bytes.div_ceil(cb).max(u64::from(matches!(n.body, Body::Dir)))).sum();
+                    let used: u64 = needs
+                        .iter()
+                        .filter(|(p, ..)| in_clusters(p))
+                        .map(|(_, n, bytes)| bytes.div_ceil(cb).max(u64::from(matches!(n.body, Body::Dir))))
+                        .sum();
                     if used + used / 20 + 16 <= b.clusters().unwrap() as u64 {
                         break b;
                     }
                 }
-                sectors = sectors.checked_add(sectors / 8).ok_or("too large for FAT32")?;
+                sectors = sectors.checked_add(sectors / 8).ok_or("too large for FAT")?;
             }
         }
     };
     let cb = bpb.cluster_bytes() as u64;
     let total_clusters = bpb.clusters().map_err(|e| format!("{e:?}"))?;
 
-    // Clusters, in path order from cluster 2 (the root comes first).
+    // Clusters, in path order from cluster 2 (the FAT32 root comes first).
     let mut placed: Vec<Placed> = Vec::new();
     let mut next = FIRST_CLUSTER;
     for (path, node, bytes) in needs {
+        if !in_clusters(path) {
+            placed.push(Placed { path, node, cluster: 0, clusters: 0, size: bytes });
+            continue;
+        }
         let clusters = bytes.div_ceil(cb).max(u64::from(matches!(node.body, Body::Dir))) as u32;
         let cluster = if clusters == 0 { 0 } else { next };
         next = next.checked_add(clusters).ok_or("the image is full (-s)")?;
@@ -226,27 +259,31 @@ pub fn build(image: &Path, tree: &Tree, size: Option<u64>, opts: &Options, times
     file.set_len(total_bytes).map_err(|e| format!("{}: {e}", image.display()))?;
     let io = |e: std::io::Error| format!("{}: {e}", image.display());
 
-    // Boot sector, FSInfo, and their backups.
+    // Boot sector, and on FAT32 FSInfo and their backups.
     let mut sector = [0u8; 512];
     let used_clusters = next - FIRST_CLUSTER;
-    for base in [0u64, bpb.backup_boot_sector as u64] {
+    let bases: &[u64] = if kind == FatType::Fat32 { &[0, bpb.backup_boot_sector as u64] } else { &[0] };
+    for &base in bases {
         bpb.write_boot_sector(&mut sector).map_err(|e| format!("{e:?}"))?;
         file.write_all_at(&sector, base * SECTOR).map_err(io)?;
-        write_fsinfo(&mut sector, total_clusters - used_clusters, next);
-        file.write_all_at(&sector, (base + bpb.fsinfo_sector as u64) * SECTOR).map_err(io)?;
+        if kind == FatType::Fat32 {
+            write_fsinfo(&mut sector, total_clusters - used_clusters, next);
+            file.write_all_at(&sector, (base + bpb.fsinfo_sector as u64) * SECTOR).map_err(io)?;
+        }
     }
 
-    // The FAT, every copy the same: each run chained, its last cluster the end.
-    let mut fat = vec![0u32; total_clusters as usize + 2];
-    fat[0] = 0x0FFF_FF00 | bpb.media as u32;
-    fat[1] = FAT32_EOC;
+    // The FAT, every copy the same: each run chained, its last cluster the end. Entry 1 is an
+    // end of chain with the clean bit set.
+    let mut fat_bytes = vec![0u8; bpb.fat_sectors as usize * SECTOR as usize];
+    let mut put = |c: u32, v: u32| fat::set(kind, c, &mut fat_bytes[fat::entry_offset(kind, c)..], v);
+    put(0, fat::entry0(kind, bpb.media));
+    put(1, kind.eoc());
     for p in &placed {
         for i in 0..p.clusters {
             let c = p.cluster + i;
-            fat[c as usize] = if i + 1 == p.clusters { FAT32_EOC } else { c + 1 };
+            put(c, if i + 1 == p.clusters { kind.eoc() } else { c + 1 });
         }
     }
-    let fat_bytes: Vec<u8> = fat.iter().flat_map(|e| e.to_le_bytes()).collect();
     for copy in 0..bpb.fats as u64 {
         file.write_all_at(&fat_bytes, (bpb.fat_start() as u64 + copy * bpb.fat_sectors as u64) * SECTOR).map_err(io)?;
     }
@@ -263,11 +300,13 @@ pub fn build(image: &Path, tree: &Tree, size: Option<u64>, opts: &Options, times
         size,
     };
     let mut buf = vec![0u8; 1 << 20];
+    let root_at = (bpb.fat_start() + bpb.fats as u32 * bpb.fat_sectors) as u64 * SECTOR;
     for p in &placed {
-        let at = bpb.cluster_sector(p.cluster.max(FIRST_CLUSTER)) as u64 * SECTOR;
+        let at = if in_clusters(p.path) { bpb.cluster_sector(p.cluster.max(FIRST_CLUSTER)) as u64 * SECTOR } else { root_at };
         match &p.node.body {
             Body::Dir => {
-                let mut data = vec![0u8; (p.clusters as u64 * cb) as usize];
+                let room = if in_clusters(p.path) { p.clusters as u64 * cb } else { bpb.root_dir_sectors() as u64 * SECTOR };
+                let mut data = vec![0u8; room as usize];
                 let mut slot = 0;
                 let put = |e: &DirEntry, data: &mut [u8], slot: &mut usize| {
                     e.write(&mut data[*slot * DIR_ENTRY_SIZE..]);

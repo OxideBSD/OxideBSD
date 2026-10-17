@@ -1,0 +1,90 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt FSCK_MSDOSFS 8
+.Os OxideBSD
+.Sh NAME
+.Nm fsck_msdosfs
+.Nd check and repair a FAT file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl CfnpyM
+.Ar device
+.Sh DESCRIPTION
+.Nm
+checks a FAT12, FAT16 or FAT32 file system, and repairs what it can.
+.Xr fsck 8
+runs it for
+.Xr fstab 5
+lines of type
+.Cm msdosfs
+with a pass number.
+.Pp
+It reads the boot sector and every copy of the FAT, and checks that each FAT
+entry names a cluster of the volume, the end of a chain, a bad cluster or a free
+one.
+It walks the tree from the root, each file and directory claiming its chain of
+clusters, finding chains that cross another or loop, that run past their file's
+size or stop short of it, broken
+.Ql \&.
+and
+.Ql \&..
+entries, long-name entries without their short entry, and volume labels outside
+the root.
+Clusters nothing claims are lost: each lost chain is saved as
+.Pa LOST.DIR/FILE Ns Ar nnnn Ns Pa .CHK ,
+.Pa LOST.DIR
+made if missing.
+Last, the free cluster count and FAT32's FSInfo sector are corrected, and the
+volume is marked clean: FAT16 and FAT32 keep a clean bit in the FAT, cleared
+while the volume is mounted read-write; FAT12 has none.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl C
+Skip a volume marked clean.
+.It Fl f
+Check a clean volume even in preen mode.
+.It Fl n
+Report only: open the device read-only and answer no to every repair.
+.It Fl p
+Preen: repair, without asking, what an interrupted write leaves (FAT copies that
+differ, a chain longer or shorter than its file or ending in a free cluster, lost
+clusters, stray long-name entries); stop with status 8 at anything worse.
+A volume marked clean is skipped unless
+.Fl f
+is given, and one mounted read-write is left alone.
+.It Fl y
+Repair everything: truncate a chain where it crosses another, loops or leaves
+the volume, remove broken entries.
+.It Fl M
+Accepted for compatibility; ignored.
+.El
+.Pp
+Without
+.Fl p ,
+.Fl y
+or
+.Fl n ,
+nothing is repaired.
+.Sh EXIT STATUS
+0 if the volume is consistent or was made so, 8 if inconsistencies remain (or
+were found with
+.Fl n ) ,
+16 on a usage error.
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr msdosfs 5 ,
+.Xr fsck 8 ,
+.Xr mount_msdosfs 8 ,
+.Xr newfs_msdos 8
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.Nx 1.2
+and
+.Fx 3.0 .
+.Sh BUGS
+A crossed chain is cut where it crosses, not copied: the later file loses its
+tail.
+Names are not checked against the characters FAT forbids.
