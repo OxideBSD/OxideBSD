@@ -48,6 +48,9 @@ A name FAT can't hold
 .Pq a control character, or one of Qo \e * / : < > ? \e| Qc
 is refused with
 .Er EINVAL .
+Renaming a file to a name differing only in case does nothing, as POSIX
+requires of a rename whose two names are the same entry: rename it through
+another name.
 .Pp
 FAT keeps local time, without a zone: times are converted with the kernel's
 .Va kern.utc_offset ,

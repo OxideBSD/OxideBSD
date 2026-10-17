@@ -28,6 +28,8 @@ perm() { printf '%o' $(( 0x$(field "$1" 4) & 0777 )); }
 owner() { echo "$(field "$1" 5):$(field "$1" 6)"; }
 mtime() { field "$1" 13; }
 links() { field "$1" 9; }
+# Whether $3 bytes of $1 from byte $2 are all zeros.
+zeros_at() { [ "$(dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | tr -d '\000' | wc -c | tr -d ' ')" = 0 ]; }
 # OVMF (UEFI) keeps its variables in NvVars on the first FAT volume it finds: not ours to count.
 count_tree() {
 	_n=$(find "$1" | grep -v '/NvVars$' | wc -l | tr -d ' ')
@@ -78,7 +80,6 @@ done
 
 # --- Options and errors ------------------------------------------------------------------------
 D=/tmp/fat16
-check "read-write is refused (read-only support only)" not mount -t msdosfs /dev/gpt/fat16 $D
 check "uid, gid, mask and dirmask options" mount -t msdosfs -o ro,uid=5,gid=6,mask=640,dirmask=750 /dev/gpt/fat16 $D
 check "... owner" is "$(owner $D/README.TXT)" 5:6
 check "... file mode" is "$(perm $D/README.TXT)" 640
@@ -99,6 +100,82 @@ check "... an hour earlier in UTC" is "$(mtime $D/README.TXT)" $((STAMP - 3600))
 sysctl kern.utc_offset=0 > /dev/null
 check "statfs counts clusters" eval "df -k $D | tail -1 | awk '{exit !(\$2 > 20000)}'"
 umount $D
+
+# --- Writing -----------------------------------------------------------------------------------
+for t in 12 16 32; do
+	D=/tmp/fat$t
+	check "FAT$t: mounts read-write" mount -t msdosfs /dev/gpt/fat$t $D
+	check "FAT$t: create and read back" eval "echo new > $D/new.txt && [ \"\$(cat $D/new.txt)\" = new ]"
+	check "FAT$t: ... a lower-case 8.3 name keeps its case" eval "ls $D | grep -qx new.txt"
+	check "FAT$t: a long name" eval "echo x > '$D/A Long Name, With Commas.data' && ls $D | grep -qx 'A Long Name, With Commas.data'"
+	check "FAT$t: a UTF-8 name" eval "echo u > $D/naïve.txt && [ \"\$(cat $D/NAÏVE.TXT)\" = u ]"
+	check "FAT$t: a name only differing in case is the same file" eval "echo again > $D/NEW.TXT && [ \"\$(cat $D/new.txt)\" = again ] && [ \$(ls $D | grep -ci '^new.txt\$') = 1 ]"
+	check "FAT$t: a name FAT can't hold is refused" not eval "echo > '$D/a:b'"
+	check "FAT$t: appending" eval "echo more >> $D/new.txt && [ \$(wc -l < $D/new.txt) = 2 ]"
+	check "FAT$t: a file over many clusters" eval "cp /tmp/big.expected $D/big2 && cmp $D/big2 /tmp/big.expected"
+	check "FAT$t: overwriting in place" eval "printf 'XYZ' | dd bs=1 seek=100000 1<>$D/big2 2>/dev/null && is \"\$(dd if=$D/big2 bs=1 skip=100000 count=3 2>/dev/null)\" XYZ && is \$(field $D/big2 2) 288894"
+	check "FAT$t: truncating" eval ": > $D/big2 && [ ! -s $D/big2 ]"
+	check "FAT$t: growing with truncate reads zeros" eval "truncate -s 70000 $D/big2 && [ \$(field $D/big2 2) = 70000 ] && zeros_at $D/big2 69990 4"
+	check "FAT$t: writing past the end leaves zeros between" eval "printf 'E' | dd of=$D/sparse bs=1 seek=9000 2>/dev/null && [ \$(field $D/sparse 2) = 9001 ] && zeros_at $D/sparse 4000 2"
+	check "FAT$t: mkdir and a file in it" eval "mkdir $D/newdir && echo in > $D/newdir/f && [ \"\$(cat $D/newdir/f)\" = in ]"
+	check "FAT$t: ... nested" eval "mkdir -p $D/newdir/a/b/c && [ -d $D/NEWDIR/A/B/C ]"
+	check "FAT$t: ... its .. leads back" is "$(cd $D/newdir/a/b/c/.. && /bin/pwd)" "$D/newdir/a/b"
+	check "FAT$t: rename within a directory" eval "mv $D/new.txt $D/renamed.txt && [ \"\$(head -n 1 $D/renamed.txt)\" = again ] && [ ! -e $D/new.txt ]"
+	check "FAT$t: rename across directories" eval "mv $D/renamed.txt $D/newdir/a/moved.txt && [ -f $D/newdir/a/moved.txt ]"
+	check "FAT$t: rename over a file" eval "echo old > $D/target && echo src > $D/source && mv $D/source $D/target && [ \"\$(cat $D/target)\" = src ] && [ ! -e $D/source ]"
+	check "FAT$t: rename a directory across" eval "mv $D/newdir/a/b $D/b2 && [ -d $D/b2/c ] && [ \"\$(cd $D/b2/c/../.. && /bin/pwd)\" = $D ]"
+	check "FAT$t: rmdir of a non-empty directory is refused" not rmdir $D/newdir
+	check "FAT$t: rm and rmdir" eval "rm -r $D/b2 $D/newdir && [ ! -e $D/newdir ]"
+	check "FAT$t: a removed file stays readable while open" eval "exec 3< $D/target; rm $D/target; [ \"\$(cat <&3)\" = src ]; exec 3<&-"
+	check "FAT$t: 200 new files in a directory (it grows)" eval "mkdir $D/lots && i=0; while [ \$i -lt 200 ]; do echo \$i > $D/lots/a_long_file_name_\$i; i=\$((i+1)); done; [ \$(ls $D/lots | wc -l) = 200 ] && [ \"\$(cat $D/lots/a_long_file_name_199)\" = 199 ]"
+	check "FAT$t: chmod a-w sets read-only" eval "chmod a-w $D/sparse && [ \$(perm $D/sparse) = 555 ] && chmod u+w $D/sparse && [ \$(perm $D/sparse) = 755 ]"
+	check "FAT$t: chown to another owner is refused" not chown 5 $D/sparse
+	check "FAT$t: a write sets the modification time" eval "[ \$(mtime $D/sparse) -gt $STAMP ]"
+	check "FAT$t: links are refused" not ln $D/sparse $D/hard
+	check "FAT$t: symbolic links are refused" not ln -s sparse $D/soft
+	check "FAT$t: unmounts" umount $D
+	check "FAT$t: fsck_msdosfs -n finds it clean after" fsck_msdosfs -n /dev/gpt/fat$t
+	check "FAT$t: ... and marked clean" eval "[ $t = 12 ] || fsck_msdosfs -n -C /dev/gpt/fat$t | grep -q clean"
+	check "FAT$t: remounted, everything is there" eval "mount -t msdosfs -o ro /dev/gpt/fat$t $D && [ \$(ls $D/lots | wc -l) = 200 ] && [ \"\$(cat $D/NAÏVE.TXT)\" = u ] && umount $D"
+done
+
+# --- mount_msdosfs's flags --------------------------------------------------------------------
+D=/tmp/fat16
+check "mount_msdosfs -u user -m 600 -M 700" mount_msdosfs -o ro -u user -m 600 -M 700 /dev/gpt/fat16 $D
+check "... the user's uid" eval "[ \$(field $D/README.TXT 5) = \$(id -u user) ]"
+check "... modes" eval "[ \$(perm $D/README.TXT) = 600 ] && [ \$(perm $D/sub) = 700 ]"
+umount $D
+check "mount_msdosfs -D CP932 (a double-byte code page)" mount_msdosfs -D cp932 /dev/gpt/fat16 $D
+check "... a CJK name gets a CJK short name" eval "echo j > $D/日本.txt && mount | grep -q fat16"
+umount $D
+check "... which reads back with -D CP932 -s" eval "mount_msdosfs -o ro -s -D CP932 /dev/gpt/fat16 $D && ls $D | grep -qx '日本.TXT'"
+umount $D
+check "-D with no such code page is refused" not mount_msdosfs -o ro -D CP99999 /dev/gpt/fat16 $D
+check "-L with a code set other than UTF-8 is refused" not mount_msdosfs -o ro -L ru_RU.KOI8-R /dev/gpt/fat16 $D
+check "-L with UTF-8 is taken" eval "mount_msdosfs -o ro -L en_US.UTF-8 /dev/gpt/fat16 $D && umount $D"
+
+# --- A volume not marked clean ---------------------------------------------------------------
+D=/tmp/fat16
+mount -t msdosfs /dev/gpt/fat16 $D
+echo crash > $D/crash.txt
+sync
+# Unmounting would mark it clean: a forced reboot's state is had by copying the device while
+# mounted, then checking the copy.
+check "the device can't be written while mounted read-write" not dd if=/dev/zero of=/dev/gpt/fat16 bs=512 count=1 seek=100 conv=notrunc 2>/dev/null
+dd if=/dev/gpt/fat16 of=/tmp/dirty.img bs=64k 2>/dev/null
+umount $D
+check "a copy taken while mounted isn't clean" not eval "fsck_msdosfs -p /tmp/dirty.img | grep -q '^/tmp/dirty.img: clean'"
+check "fsck_msdosfs -p marks it clean" eval "fsck_msdosfs -p -f /tmp/dirty.img && fsck_msdosfs -p /tmp/dirty.img | grep -q clean"
+
+# The real device made unclean: FAT 0's entry 1 (bytes 514-515 of this FAT16, one reserved
+# sector) without its clean bit, 0x8000.
+printf '\377\177' | dd bs=1 seek=514 1<>/dev/gpt/fat16 2>/dev/null
+check "an unclean volume mounts read-only" eval "mount -t msdosfs /dev/gpt/fat16 $D && mount | grep 'fat16' | grep -q read-only"
+check "... and can't be written" not eval "echo x > $D/nope"
+umount $D
+check "mount -f mounts it read-write" eval "mount -f -t msdosfs /dev/gpt/fat16 $D && echo forced > $D/forced.txt && umount $D"
+check "... and unmounting marks it clean" eval "fsck_msdosfs -p /dev/gpt/fat16 | grep -q clean"
+check "... the write is there" eval "mount -t msdosfs -o ro /dev/gpt/fat16 $D && [ \"\$(cat $D/forced.txt)\" = forced ] && umount $D"
 
 # --- newfs_msdos -------------------------------------------------------------------------------
 check "newfs_msdos FAT12 into a file" newfs_msdos -F 12 -C 2m /tmp/n12.img
