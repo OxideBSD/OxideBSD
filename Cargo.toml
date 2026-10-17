@@ -98,6 +98,7 @@ members = [
   "sys/modules/posix_compat",
   "sys/modules/signal",
   "sys/modules/clock",
+  "sys/modules/devfs",
   "sys/modules/oxfs",
   "sys/modules/procfs",
   "sys/modules/socket",

@@ -69,8 +69,26 @@ check "... and makes nothing" [ ! -e /dev/mynull ]
 check "a symbolic link can be made in /dev" ln -s null /dev/mylink
 check "... and used" sh -c 'echo x > /dev/mylink'
 check "a directory can be made in /dev" mkdir /dev/mydir
+check "... and removed" rmdir /dev/mydir
+check "a regular file can't be made in /dev (FreeBSD's)" not sh -c ': > /dev/myfile' 2>/dev/null
+check "... nor a hard link" not ln /dev/null /dev/hardnull 2>/dev/null
+check "... nor a rename" not mv /dev/mylink /dev/mylink2 2>/dev/null
+chown 1:1 /dev/null
+check "chown of a node sticks" sh -c 'ls -ln /dev/null | grep -q " 1 *1 "'
+chown 0:0 /dev/null
+check "/dev/shm is a tmpfs" grep -q " /dev/shm tmpfs " /proc/mounts
 check "a file can be made under /dev/shm" sh -c 'echo shm > /dev/shm/myfile'
 check "... and read back" [ "$(cat /dev/shm/myfile)" = shm ]
+
+# --- Other views --------------------------------------------------------------------------------
+mkdir -p /tmp/devfs/view
+check "devfs mounts elsewhere too" mount -t devfs devfs /tmp/devfs/view
+check "... with the registry's nodes" [ -c /tmp/devfs/view/null ]
+check "... including one removed from /dev" [ -c /tmp/devfs/view/zero ]
+rm /tmp/devfs/view/random
+check "removing a node there leaves /dev's" [ -c /dev/random ]
+check "... and the empty shm directory" [ -d /tmp/devfs/view/shm ]
+check "the view unmounts" umount /tmp/devfs/view
 
 # --- A node made on disk opens through the registry --------------------------------------------
 mkdir -p /tmp/devfs

@@ -1,0 +1,85 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt DEVFS 5
+.Os OxideBSD
+.Sh NAME
+.Nm devfs
+.Nd device file system
+.Sh SYNOPSIS
+.Nm mount
+.Fl t Cm devfs
+.Cm devfs Ar node
+.Sh DESCRIPTION
+.Nm
+shows the devices the kernel has, a node for each, under the name, owner, group and mode its
+driver registered it with
+.Pq Pa /dev/null , /dev/ttyv0 , /dev/pts/0 , /dev/gpt/rootfs .
+The kernel mounts it on
+.Pa /dev
+at boot; it may be mounted elsewhere too
+.Pq a Xr chroot 8 Ns 's Pa /dev ,
+and each mount is a view of its own.
+A device that appears gets a node in every view as soon as the view is looked at, and one that
+goes loses its node.
+.Pp
+In a view, until it is unmounted
+.Pq for Pa /dev , No until the system stops :
+.Bl -bullet
+.It
+.Xr chmod 1 ,
+.Xr chown 8
+and
+.Xr touch 1
+change a node;
+.It
+removing a device's node hides that device in the view;
+.It
+directories and symbolic links can be made and removed.
+.El
+.Pp
+Nothing else can be made:
+regular files fail with
+.Er EOPNOTSUPP ,
+.Xr mknod 8
+with
+.Er EPERM ,
+and hard links and renames with
+.Er EOPNOTSUPP .
+.Pp
+Every view has an empty directory
+.Pa shm ,
+mode 1777, where
+.Xr fstab 5
+mounts the
+.Xr tmpfs 5
+holding the POSIX shared memory objects of
+.Xr shm_open 3 .
+.Pp
+A device node made with
+.Xr mknod 8
+on another file system opens the same device as the one here with its number.
+.Sh FILES
+.Bl -tag -width /dev/shm -compact
+.It Pa /dev
+the
+.Nm
+mounted at boot
+.It Pa /dev/shm
+a
+.Xr tmpfs 5 ,
+from the default
+.Xr fstab 5
+.El
+.Sh SEE ALSO
+.Xr devfs.conf 5 ,
+.Xr fstab 5 ,
+.Xr tmpfs 5 ,
+.Xr mount 8
+.Sh HISTORY
+.Nm
+appeared in FreeBSD 2.0.
+In OxideBSD it was a part of oxfs until it became a file system type of its own in 0.3.0.
+.Sh BUGS
+FreeBSD's rulesets, which hide and show devices per view
+.Pq Xr devfs 8 ,
+aren't there yet.

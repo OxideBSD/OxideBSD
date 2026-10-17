@@ -56,6 +56,7 @@ status=$?
 echo "$out"
 check "rc exits 0" [ $status -eq 0 ]
 check "rc reports no failures" not contains "$out" "failed"
+check "fstab mounts a tmpfs on /dev/shm" grep -q " /dev/shm tmpfs " /proc/mounts
 check "rc.d/hostname sets the host name" [ "$(uname -n)" = rcsmoke ]
 check "rc.d/hostname says so" contains "$out" "Setting hostname: rcsmoke."
 check "rc.d/cleanvar empties /var/run" [ ! -e /var/run/stale.pid ]

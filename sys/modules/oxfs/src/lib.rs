@@ -1,21 +1,19 @@
 //! `oxfs`: OxideBSD's disk file system (inodes with direct, single- and double-indirect block
-//! pointers, directories as ordinary inodes holding fixed-size records), and, until VFS step 3
-//! splits them out, tmpfs, devfs and nullfs over the same inode space.
+//! pointers, directories as ordinary inodes holding fixed-size records), and, until VFS step 3d
+//! makes it a module of its own, nullfs over the same inode space.
 //!
 //! Since the VFS (OxideBSD-doc `VFS.md` §11 step 2b) this module serves vnode operations
 //! (`vfs.rs`): the kernel does path lookup (`namei`), the path system calls, mounts and the cwd,
 //! and asks oxfs for one directory's component (`vop_lookup`), a file's attributes, its contents.
 //! A vnode's file ID is the inode number. What's left here is storage: blocks, inodes, directory
-//! records, the tmpfs pool, devfs's tree, and the devices oxfs drives itself (`/dev/null`,
-//! `/dev/zero`, `/dev/random`, `/dev/fb0`).
+//! records.
 //!
 //! The on-disk format is `lib/liboxfs`'s. This module only mounts: the root file system is made
 //! by `newfs_oxfs(8)` or installed from a system image built by `makefs(8)` from
 //! `distrib/install.mtree` (`OxideBSD-doc/RAM_FLOOR.md` §4).
 //!
 //! **Storage**: blocks through the kernel's buffer cache (`buf.rs`), and inodes packed into an
-//! inode file in that pool, which grows as needed (`InodeTable`; the disk pool and the tmpfs pool
-//! each have one). An inode addresses its data via `DIRECT_BLOCKS` direct block numbers, one
+//! inode file in that pool, which grows as needed (`InodeTable`). An inode addresses its data via `DIRECT_BLOCKS` direct block numbers, one
 //! single-indirect block, and one double-indirect block -- `MAX_FILE_SIZE` (~4.1 GiB) is the
 //! ceiling on any one file.
 //!
@@ -47,9 +45,6 @@ unsafe extern "C" {
     fn oxidebsd_uio_offset(uio: u64) -> u64;
     /// Moves a transfer to `offset` (`O_APPEND`: the end of the file).
     fn oxidebsd_uio_set_offset(uio: u64, offset: u64);
-    /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
-    fn oxidebsd_dev_generation() -> u64;
-    fn oxidebsd_dev_entry(index: u64, out: *mut RawDevEntry) -> i64;
     /// Real Unix epoch seconds, whole-second precision -- see `sys/cpu/rtc.rs`'s own doc comment
     /// on `oxidebsd_unix_time`. Backs real `st_mtime`/`st_ctime` (`write_inode_data`/
     /// `resize_inode_data`).
@@ -61,12 +56,6 @@ unsafe extern "C" {
     /// other `module_init` failure -- see this module's own `fatal_on_panic = true` in
     /// `sys/kernel_main.rs`, kernel tree).
     fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
-    /// Usable RAM in bytes, for sizing pools.
-    fn oxidebsd_physmem_bytes() -> u64;
-    /// A zeroed page (its kernel address) for a tmpfs block, `0` when memory is exhausted; given
-    /// back with `oxidebsd_page_free`.
-    fn oxidebsd_page_alloc() -> u64;
-    fn oxidebsd_page_free(page: u64);
     /// Makes every call into this module take the kernel's filesystem lock.
     fn oxidebsd_module_serialize();
     /// Tells the kernel whether the root is mounted read-write (`1`) or read-only.
@@ -102,8 +91,7 @@ const EIO: i64 = 5;
 const ENAMETOOLONG: i64 = 36;
 
 /// The disk filesystem's size in data blocks, from its superblock (or, at format, from the
-/// device: `layout_for`). Block numbers `0..disk_blocks()` are the disk pool's; tmpfs's start at
-/// `TMPFS_BLOCK_BASE`, far above any disk this can describe. (Until the 128 MB floor,
+/// device: `layout_for`). (Until the 128 MB floor,
 /// `OxideBSD-doc/RAM_FLOOR.md` §3.1.3, this was a compile-time 1 GiB `NUM_BLOCKS`, every block of
 /// it held in RAM.)
 static mut DISK_BLOCKS: u32 = 0;
@@ -136,30 +124,6 @@ fn set_layout(data_blocks: u32, bitmap: u32) {
         *core::ptr::addr_of_mut!(DATA_BLOCK_OFFSET) = BITMAP_START + bitmap;
     }
 }
-/// Inode numbers: the disk filesystem's are `0..TMPFS_INODE_BASE`, tmpfs mounts' are
-/// `TMPFS_INODE_BASE..TMPFS_INODE_LIMIT`. Neither pool has a fixed inode count: each keeps its
-/// inodes in an inode file (`InodeTable`) that grows a block at a time from its own block pool, so
-/// the practical limit is free space (a 1 GiB pool holds at most ~8.4 million 128-byte inodes).
-/// The disk pool gets nearly all of `u32`; tmpfs, scratch space, gets the top 2^24 numbers.
-/// (Until `SUPERBLOCK_VERSION` 4 the disk pool was a fixed table of 8192 inodes, raised by hand
-/// each time the seeded tree outgrew it.)
-const TMPFS_INODE_BASE: u32 = MAX_DISK_INODES;
-/// One past the last tmpfs inode number (`u32::MAX` itself is never handed out).
-const TMPFS_INODE_LIMIT: u32 = u32::MAX;
-
-/// A second, purely in-memory pool for tmpfs mounts and devfs, whose `/dev/shm` holds POSIX
-/// shared memory; not persisted. Its blocks are pages taken from the kernel as files grow and
-/// given back as they shrink (`TMPFS_PAGES`), up to a limit set at boot from RAM
-/// (`tmpfs_pool_blocks`): `RAM / 16`, at least `TMPFS_MIN_BLOCKS` (8 MiB: a 4 MiB `shm_open`
-/// object, `mmap/1-2.c`, must fit) and at most `TMPFS_MAX_BLOCKS` (64 MiB). Nothing is reserved. Block numbers from `TMPFS_BLOCK_BASE` and inode
-/// numbers from `TMPFS_INODE_BASE` belong to it, far above anything the disk pool hands out, so
-/// every accessor (`read_block`/`write_block`/`read_inode`/`dir_lookup`/...) works over one number
-/// space and only the allocators (`inode_ensure_block_at`, `alloc_inode_in`), `block_ptr` and the
-/// disk-persistence hooks need to know which pool a number is in.
-const TMPFS_BLOCK_BASE: u32 = MAX_DISK_BLOCKS;
-const TMPFS_MIN_BLOCKS: usize = 2048;
-const TMPFS_MAX_BLOCKS: usize = 16384;
-
 
 /// Gates `write_block`/`write_inode`/`set_block_used`'s own write-through persistence (see those
 /// functions below). `false` while `mount_from_disk` reads the filesystem in; `module_init` sets it
@@ -212,44 +176,10 @@ const OXFS_PATH_MAX: usize = 4096;
 /// allocator and `statfs` never read a full bitmap block to learn it's full. Allocated in
 /// `init_pools` for the largest filesystem the device can hold; counts are set at mount/format.
 static mut FREE_COUNTS: *mut u32 = core::ptr::null_mut();
-/// tmpfs's blocks (`TMPFS_BLOCK_BASE`): at most `TMPFS_BLOCKS`, each a page from the kernel taken
-/// when the block is allocated and given back when it's freed (`oxidebsd_page_alloc`), so tmpfs
-/// holds only what its files hold. `TMPFS_PAGES[i]` is block `TMPFS_BLOCK_BASE + i`'s page, `0`
-/// while the block is free.
-static mut TMPFS_PAGES: *mut u64 = core::ptr::null_mut();
-static mut TMPFS_BLOCKS: u32 = 0;
-
 /// A fresh inode of `kind`, stamped with the current time.
 fn fresh_inode(kind: InodeKind) -> Inode {
     Inode::new(kind, unsafe { oxidebsd_unix_time() })
 }
-
-fn is_tmpfs_block(n: u32) -> bool {
-    n >= TMPFS_BLOCK_BASE
-}
-
-/// How many blocks tmpfs may hold at once on a machine with `ram` bytes (its limit, not a
-/// reservation).
-fn tmpfs_pool_blocks(ram: u64) -> usize {
-    (ram as usize / 16 / BLOCK_SIZE).clamp(TMPFS_MIN_BLOCKS, TMPFS_MAX_BLOCKS)
-}
-
-/// tmpfs block `n`'s slot in `TMPFS_PAGES`.
-fn tmpfs_page_slot(n: u32) -> *mut u64 {
-    // SAFETY: the table is set once by `init_pools` before any syscall can reach here, and every
-    // tmpfs block number this module hands out is below `TMPFS_BLOCK_BASE + TMPFS_BLOCKS`.
-    unsafe { TMPFS_PAGES.add((n - TMPFS_BLOCK_BASE) as usize) }
-}
-
-/// tmpfs block `n`'s storage, `None` while the block is free. Disk blocks live in the cache.
-fn tmpfs_ptr(n: u32) -> Option<*mut [u8; BLOCK_SIZE]> {
-    // SAFETY: see `tmpfs_page_slot`.
-    let page = unsafe { *tmpfs_page_slot(n) };
-    (page != 0).then_some(page as *mut [u8; BLOCK_SIZE])
-}
-
-/// What a free tmpfs block reads as.
-static ZERO_BLOCK: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
 
 /// Bitmap block `index`'s free count.
 fn free_count(index: u32) -> &'static mut u32 {
@@ -257,10 +187,9 @@ fn free_count(index: u32) -> &'static mut u32 {
     unsafe { &mut *FREE_COUNTS.add(index as usize) }
 }
 
-/// One pool's inodes: an inode file whose data blocks, from that pool, hold packed inodes
-/// (`INODES_PER_BLOCK` per block, inode number `base + slot` at byte `slot * INODE_STRIDE`). The
-/// file's own inode record isn't numbered: the disk pool's is kept in the superblock, the tmpfs
-/// pool's only here. The table grows a block (32 inodes) at a time when no slot is free; freshly
+/// The inodes: an inode file whose data blocks hold packed inodes (`INODES_PER_BLOCK` per block,
+/// inode number `n` at byte `n * INODE_STRIDE`). The file's own inode record isn't numbered: it's
+/// kept in the superblock. The table grows a block (32 inodes) at a time when no slot is free; freshly
 /// allocated blocks are zeroed, and a zeroed record decodes as `InodeKind::Free`.
 #[derive(Clone, Copy)]
 struct InodeTable {
@@ -278,31 +207,14 @@ impl InodeTable {
 }
 
 static mut DISK_INODES: InodeTable = InodeTable::EMPTY;
-static mut TMPFS_INODES: InodeTable = InodeTable::EMPTY;
 
-/// Whether `n` is a tmpfs mount's inode rather than the disk filesystem's.
-fn is_tmpfs_inode(n: u32) -> bool {
-    n >= TMPFS_INODE_BASE
-}
-
-fn inode_table(tmpfs: bool) -> &'static mut InodeTable {
+fn inode_table() -> &'static mut InodeTable {
     // SAFETY: single-core, syscall-serialized access (as every pool here); callers never hold the
     // reference across a call that takes it again.
-    unsafe {
-        if tmpfs {
-            &mut *core::ptr::addr_of_mut!(TMPFS_INODES)
-        } else {
-            &mut *core::ptr::addr_of_mut!(DISK_INODES)
-        }
-    }
+    unsafe { &mut *core::ptr::addr_of_mut!(DISK_INODES) }
 }
 
-/// The table `n` belongs to, and its slot there.
-fn table_slot(n: u32) -> (bool, u32) {
-    if is_tmpfs_inode(n) { (true, n - TMPFS_INODE_BASE) } else { (false, n) }
-}
-
-/// Claims real kernel-allocated storage for the cache, `FREE_COUNTS` and `TMPFS_PAGES` -- must run
+/// Claims real kernel-allocated storage for the cache and `FREE_COUNTS` -- must run
 /// first, before
 /// `module_init`'s mount-or-format decision (or anything else) ever calls `read_block`/
 /// `write_block`. Returns `false` on failure (kernel out of memory), which
@@ -310,9 +222,6 @@ fn table_slot(n: u32) -> (bool, u32) {
 /// `fatal_on_panic = true` (see `sys/kernel_main.rs`, kernel tree) reboots rather than resuming
 /// with a filesystem that has nowhere to actually store a block.
 fn init_pools() -> bool {
-    // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures.
-    // SAFETY: FFI call to a kernel-exported function.
-    let ram = unsafe { oxidebsd_physmem_bytes() };
     let device_blocks = buf::device_blocks();
     if !buf::init() {
         return false;
@@ -324,29 +233,13 @@ fn init_pools() -> bool {
     }
     // SAFETY: inside `module_init`, before any syscall.
     unsafe { FREE_COUNTS = counts as *mut u32 };
-    // tmpfs takes pages as its files grow; only the table of them is reserved.
-    let tmpfs_blocks = tmpfs_pool_blocks(ram);
-    let table = unsafe { oxidebsd_module_alloc_zeroed((tmpfs_blocks * 8) as u64) };
-    if table == 0 {
-        return false;
-    }
-    // SAFETY: freshly kernel-allocated, zeroed, mapped read/write for exactly this size.
-    unsafe {
-        TMPFS_PAGES = table as *mut u64;
-        TMPFS_BLOCKS = tmpfs_blocks as u32;
-    }
     true
 }
 
 /// Runs `f` on block `n` in place, for reads that don't want `read_block`'s 4 KiB copy (index
 /// blocks, inode records). `f` must not touch another block: a disk block is lent from the cache.
 fn with_block<R>(n: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
-    if is_tmpfs_block(n) {
-        // SAFETY: an allocated block's page, which only `set_block_used` frees.
-        f(tmpfs_ptr(n).map_or(&ZERO_BLOCK, |p| unsafe { &*p }))
-    } else {
-        buf::with(data_block_offset() + n, f)
-    }
+    buf::with(data_block_offset() + n, f)
 }
 
 fn read_block(n: u32) -> [u8; BLOCK_SIZE] {
@@ -380,7 +273,7 @@ impl Drop for Delayed {
 fn delay_writes_of(n: u32) -> Delayed {
     // SAFETY: as `delay_owner`.
     let previous = unsafe { *core::ptr::addr_of!(DELAY_OWNER) };
-    if !is_tmpfs_inode(n) && read_inode(n).kind == InodeKind::File {
+    if read_inode(n).kind == InodeKind::File {
         unsafe { *core::ptr::addr_of_mut!(DELAY_OWNER) = n };
     }
     Delayed(previous)
@@ -389,12 +282,7 @@ fn delay_writes_of(n: u32) -> Delayed {
 /// Stores block `n`. Inside `delay_writes_of`, it's that file's data: left dirty in the cache.
 /// Otherwise it reaches the disk before the system call returns.
 fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
-    if is_tmpfs_block(n) {
-        // SAFETY: as `with_block`. Only allocated blocks are ever written.
-        if let Some(p) = tmpfs_ptr(n) {
-            unsafe { *p = *data };
-        }
-    } else if let Some(owner) = delay_owner() {
+    if let Some(owner) = delay_owner() {
         buf::store(data_block_offset() + n, data, buf::Kind::Data(owner));
     } else {
         buf::write(data_block_offset() + n, data, buf::Kind::Meta);
@@ -404,12 +292,7 @@ fn write_block(n: u32, data: &[u8; BLOCK_SIZE]) {
 /// `write_block` for an index (indirect) block: delayed as that file's index block, so it can't
 /// reach the disk before the data blocks it points at.
 fn write_index_block(n: u32, data: &[u8; BLOCK_SIZE]) {
-    if is_tmpfs_block(n) {
-        // SAFETY: as `with_block`. Only allocated blocks are ever written.
-        if let Some(p) = tmpfs_ptr(n) {
-            unsafe { *p = *data };
-        }
-    } else if let Some(owner) = delay_owner() {
+    if let Some(owner) = delay_owner() {
         buf::store(data_block_offset() + n, data, buf::Kind::Index(owner));
     } else {
         buf::write(data_block_offset() + n, data, buf::Kind::Meta);
@@ -421,29 +304,10 @@ fn bitmap_position(n: u32) -> (u32, usize) {
     (n / BITS_PER_BITMAP_BLOCK, (n % BITS_PER_BITMAP_BLOCK) as usize)
 }
 
-fn block_used(n: u32) -> bool {
-    if is_tmpfs_block(n) {
-        return tmpfs_ptr(n).is_some();
-    }
-    let (index, bit) = bitmap_position(n);
-    buf::with(BITMAP_START + index, |b| b[bit / 8] & (1 << (bit % 8)) != 0)
-}
 
 /// Marks block `n` used or free: a read-modify-write of its bitmap block through the cache, with
 /// that block's free count kept in step.
 fn set_block_used(n: u32, used: bool) {
-    if is_tmpfs_block(n) {
-        // A tmpfs block is used while it has a page: `alloc_tmpfs_block` takes it, this gives it
-        // back.
-        if !used && let Some(p) = tmpfs_ptr(n) {
-            // SAFETY: see `tmpfs_page_slot`; the page leaves the table before it's freed.
-            unsafe {
-                *tmpfs_page_slot(n) = 0;
-                oxidebsd_page_free(p as u64);
-            }
-        }
-        return;
-    }
     let (index, bit) = bitmap_position(n);
     let mut block = buf::read(BITMAP_START + index);
     let was = block[bit / 8] & (1 << (bit % 8)) != 0;
@@ -458,8 +322,8 @@ fn set_block_used(n: u32, used: bool) {
 
 /// Where inode `n`'s record is: its inode-file block and byte offset. `None` past the table.
 fn inode_location(n: u32) -> Option<(u32, usize)> {
-    let (tmpfs, slot) = table_slot(n);
-    let table = inode_table(tmpfs);
+    let slot = n;
+    let table = inode_table();
     if slot >= table.count {
         return None;
     }
@@ -484,21 +348,17 @@ fn write_inode(n: u32, inode: Inode) {
     let was_free = with_block(block, |b| b[off] == 0);
     let mut data = read_block(block);
     pack_inode(&inode, &mut data[off..off + INODE_STRIDE]);
-    if is_tmpfs_block(block) {
-        write_block(block, &data);
+    // An inode-file block: written after the dirty data and index blocks of the inodes in it (the
+    // cache's ordering, `buf`); left dirty only for the file whose writes are being delayed.
+    let kind = buf::Kind::Inodes(n - n % INODES_PER_BLOCK as u32);
+    let dev = data_block_offset() + block;
+    if delay_owner() == Some(n) {
+        buf::store(dev, &data, kind);
     } else {
-        // An inode-file block: written after the dirty data and index blocks of the inodes in it
-        // (the cache's ordering, `buf`); left dirty only for the file whose writes are being delayed.
-        let kind = buf::Kind::Inodes(n - n % INODES_PER_BLOCK as u32);
-        let dev = data_block_offset() + block;
-        if delay_owner() == Some(n) {
-            buf::store(dev, &data, kind);
-        } else {
-            buf::write(dev, &data, kind);
-        }
+        buf::write(dev, &data, kind);
     }
     let is_free = inode.kind == InodeKind::Free;
-    let table = inode_table(is_tmpfs_inode(n));
+    let table = inode_table();
     match (was_free, is_free) {
         (true, false) => table.free -= 1,
         (false, true) => table.free += 1,
@@ -511,7 +371,7 @@ fn write_inode(n: u32, inode: Inode) {
 /// grew large enough for real big-file writes to actually matter.
 static mut NEXT_FREE_BLOCK: u32 = 0;
 
-/// Finds and claims the first free real (non-tmpfs) block, starting from `NEXT_FREE_BLOCK` rather
+/// Finds and claims the first free block, starting from `NEXT_FREE_BLOCK` rather
 /// than always rescanning from `0` -- this module's blocks are **never freed** in normal operation
 /// (`unlink`/`rmdir` only clear a directory record's `used` byte, matching this module's own
 /// blanket "no deallocation anywhere" stance) -- so once
@@ -561,7 +421,7 @@ fn alloc_indirect_block() -> Option<u32> {
 }
 
 fn alloc_inode() -> Option<u32> {
-    alloc_inode_from(false)
+    alloc_inode_from()
 }
 
 // --- Reclamation -----------------------------------------------------------------------------
@@ -575,17 +435,13 @@ fn alloc_inode() -> Option<u32> {
 
 /// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
 fn free_block(n: u32) {
-    if !is_tmpfs_block(n) {
-        buf::discard(data_block_offset() + n);
-    }
+    buf::discard(data_block_offset() + n);
     set_block_used(n, false);
-    if !is_tmpfs_block(n) {
-        // SAFETY: single-core, syscall-serialized, as `alloc_block`.
-        unsafe {
-            let cursor = &mut *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK);
-            if n < *cursor {
-                *cursor = n;
-            }
+    // SAFETY: single-core, syscall-serialized, as `alloc_block`.
+    unsafe {
+        let cursor = &mut *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK);
+        if n < *cursor {
+            *cursor = n;
         }
     }
 }
@@ -643,7 +499,7 @@ fn release_inode(n: u32, inode: Inode) {
     buf::discard_owned(n);
     write_inode(n, Inode::FREE);
     free_inode_blocks(&inode);
-    trim_inode_table(is_tmpfs_inode(n));
+    trim_inode_table();
     // The number may be handed out again: a vnode left of the old file must not answer for it.
     vfs::inode_freed(n);
 }
@@ -652,7 +508,7 @@ fn release_inode(n: u32, inode: Inode) {
 /// working directory when it went down). Nothing can refer to one yet. Runs once persistence is
 /// on, so the frees and any trimming of the inode file reach the disk.
 fn sweep_unnamed_inodes() {
-    let count = inode_table(false).count;
+    let count = inode_table().count;
     let mut freed: u32 = 0;
     for n in 1..count {
         let inode = read_inode(n);
@@ -715,121 +571,77 @@ fn unmap_last_block(file: &mut Inode, index: usize) {
 /// Gives the table's last blocks back to the pool while they hold only free inodes (the first
 /// block, holding the root, always stays). The disk table's new shape goes to the superblock
 /// before its blocks are freed, so an interruption can only leak them.
-fn trim_inode_table(tmpfs: bool) {
-    let base = if tmpfs { TMPFS_INODE_BASE } else { 0 };
+fn trim_inode_table() {
     let per_block = INODES_PER_BLOCK as u32;
     loop {
-        let table = *inode_table(tmpfs);
+        let table = *inode_table();
         if table.count <= per_block {
             return;
         }
         let first = table.count - per_block;
-        if (first..table.count).any(|slot| read_inode(base + slot).kind != InodeKind::Free) {
+        if (first..table.count).any(|slot| read_inode(slot).kind != InodeKind::Free) {
             return;
         }
         let mut file = table.file;
         file.size = first as u64 * INODE_STRIDE as u64;
         {
-            let t = inode_table(tmpfs);
+            let t = inode_table();
             t.count = first;
             t.free -= per_block;
             t.hint = t.hint.min(first);
             t.file.size = file.size;
         }
-        if !tmpfs && persistence_ready() && block_device_present() {
+        if persistence_ready() && block_device_present() {
             write_superblock();
         }
         unmap_last_block(&mut file, first as usize / INODES_PER_BLOCK);
-        inode_table(tmpfs).file = file;
-        if !tmpfs && persistence_ready() && block_device_present() {
+        inode_table().file = file;
+        if persistence_ready() && block_device_present() {
             write_superblock();
         }
     }
 }
 
-/// A free inode number from the disk (`tmpfs == false`) or tmpfs table, growing the table by a
-/// block when none is free. The caller writes the new inode.
-fn alloc_inode_from(tmpfs: bool) -> Option<u32> {
-    if inode_table(tmpfs).free == 0 {
-        grow_inode_table(tmpfs)?;
+/// A free inode number, growing the table by a block when none is free. The caller writes the new
+/// inode.
+fn alloc_inode_from() -> Option<u32> {
+    if inode_table().free == 0 {
+        grow_inode_table()?;
     }
-    let base = if tmpfs { TMPFS_INODE_BASE } else { 0 };
-    let table = *inode_table(tmpfs);
+    let table = *inode_table();
     let start = table.hint.min(table.count);
     let slot = (start..table.count)
         .chain(0..start)
-        .find(|&slot| read_inode(base + slot).kind == InodeKind::Free)?;
-    inode_table(tmpfs).hint = slot + 1;
-    Some(base + slot)
+        .find(|&slot| read_inode(slot).kind == InodeKind::Free)?;
+    inode_table().hint = slot + 1;
+    Some(slot)
 }
 
-/// Adds a block of free inodes to a table (`None` when its pool is out of blocks or its number
-/// range is used up). The disk table's new shape goes to the superblock.
-fn grow_inode_table(tmpfs: bool) -> Option<()> {
-    let table = *inode_table(tmpfs);
-    let limit = if tmpfs { TMPFS_INODE_LIMIT - TMPFS_INODE_BASE } else { TMPFS_INODE_BASE };
-    if table.count as u64 + INODES_PER_BLOCK as u64 > limit as u64 {
+/// Adds a block of free inodes to the table (`None` when the disk is out of blocks or the number
+/// range is used up). The table's new shape goes to the superblock.
+fn grow_inode_table() -> Option<()> {
+    let table = *inode_table();
+    if table.count as u64 + INODES_PER_BLOCK as u64 > MAX_DISK_INODES as u64 {
         return None;
     }
     let mut file = table.file;
     // A fresh block from `alloc_block` is zeroed: `INODES_PER_BLOCK` free records.
-    ensure_block(&mut file, table.count as usize / INODES_PER_BLOCK, tmpfs)?;
+    ensure_block(&mut file, table.count as usize / INODES_PER_BLOCK)?;
     let count = table.count + INODES_PER_BLOCK as u32;
     file.size = count as u64 * INODE_STRIDE as u64;
-    let t = inode_table(tmpfs);
+    let t = inode_table();
     t.file = file;
     t.count = count;
     t.free += INODES_PER_BLOCK as u32;
-    if !tmpfs && persistence_ready() && block_device_present() {
+    if persistence_ready() && block_device_present() {
         write_superblock();
     }
     Some(())
 }
 
-/// `alloc_block`'s tmpfs-pool counterpart -- same linear scan, over the tmpfs pool
-/// (`TMPFS_BLOCK_BASE`) instead of `0..NUM_BLOCKS`. Only ever called from `inode_ensure_block_at`,
-/// which picks this over `alloc_block` based on which pool `inode_num` falls in -- see that
-/// function's own doc comment for why it's the sole call site that needs to know this pool exists.
-fn alloc_tmpfs_block() -> Option<u32> {
-    let end = TMPFS_BLOCK_BASE + unsafe { *core::ptr::addr_of!(TMPFS_BLOCKS) };
-    let i = (TMPFS_BLOCK_BASE..end).find(|&i| !block_used(i))?;
-    // SAFETY: FFI call to a kernel-exported function; the page is zeroed.
-    let page = unsafe { oxidebsd_page_alloc() };
-    if page == 0 {
-        return None;
-    }
-    // SAFETY: see `tmpfs_page_slot`.
-    unsafe { *tmpfs_page_slot(i) = page };
-    Some(i)
-}
-
-fn alloc_tmpfs_indirect_block() -> Option<u32> {
-    let n = alloc_tmpfs_block()?;
-    write_block(n, &[0xFFu8; BLOCK_SIZE]);
-    Some(n)
-}
-
-/// `alloc_inode`'s tmpfs-pool counterpart -- see `alloc_tmpfs_block`'s own doc comment. Called
-/// directly by the tmpfs-mount-creation path (`mount_tmpfs`, which has no parent directory to
-/// check -- it's creating the mount's own root) and by `alloc_inode_in` below for everything else.
-fn alloc_tmpfs_inode() -> Option<u32> {
-    alloc_inode_from(true)
-}
-
-/// Picks `alloc_inode`/`alloc_tmpfs_inode` based on which pool `parent` (the directory the new
-/// entry is being created in) belongs to -- a new file/dir/symlink created inside a tmpfs-mounted
-/// directory must itself come from the tmpfs pool, or it would silently end up persisted (real
-/// pool inodes are write-through to disk) and report the wrong `st_dev`. The shared chokepoint for
-/// all three "create a new named entry" sites (`oxfs_mkdir`, `oxfs_open`'s `O_CREAT`-via-`oxfs_close`
-/// commit, `oxfs_symlink`) -- found missing via `tests/mount_syscall_smoke.rs`, which caught the
-/// `O_CREAT` case specifically (a file created inside a tmpfs mount reported the real filesystem's
-/// `st_dev` instead of the tmpfs one).
-fn alloc_inode_in(parent: u32) -> Option<u32> {
-    if is_tmpfs_inode(parent) {
-        alloc_tmpfs_inode()
-    } else {
-        alloc_inode()
-    }
+/// A new inode for an entry in `parent`.
+fn alloc_inode_in(_parent: u32) -> Option<u32> {
+    alloc_inode()
 }
 
 /// Reads a real block-number pointer out of index block `ib_num` at slot `slot` -- the same
@@ -877,42 +689,27 @@ fn inode_block_at(inode: &Inode, index: usize) -> Option<u32> {
 /// Takes an inode *number*, not `&mut Inode`: every access to `INODES`/`BLOCKS` in this module
 /// goes through the copy-in/copy-out helpers above, so no reference to either static is ever held
 /// across a nested call (`alloc_block` here) that itself touches them.
-///
-/// **The one place block allocation needs to know about the tmpfs pool** (see `TMPFS_BLOCK_BASE`'s
-/// own doc comment): `dir_insert`'s directory-growth path and every real file write both funnel
-/// through this single function (confirmed by grep -- `alloc_block`/`alloc_indirect_block` have no
-/// other caller), so picking the allocator by whether `inode_num` falls in the tmpfs range here is
-/// sufficient to make a tmpfs file/directory's own growth land in the tmpfs pool, with no other
-/// call site needing to change.
 fn inode_ensure_block_at(inode_num: u32, index: usize) -> Option<u32> {
     let mut inode = read_inode(inode_num);
-    let result = ensure_block(&mut inode, index, is_tmpfs_inode(inode_num));
+    let result = ensure_block(&mut inode, index);
     write_inode(inode_num, inode);
     result
 }
 
 /// `inode_ensure_block_at` on an inode record held by the caller (the inode files' own records
-/// aren't numbered), allocating from the tmpfs pool if `tmpfs`.
-fn ensure_block(inode: &mut Inode, index: usize, tmpfs: bool) -> Option<u32> {
+/// aren't numbered).
+fn ensure_block(inode: &mut Inode, index: usize) -> Option<u32> {
     if index < DIRECT_BLOCKS {
         if inode.direct[index] == NO_BLOCK {
-            inode.direct[index] = if tmpfs {
-                alloc_tmpfs_block()?
-            } else {
-                alloc_block()?
-            };
+            inode.direct[index] = alloc_block()?;
         }
         Some(inode.direct[index])
     } else if index - DIRECT_BLOCKS < PTRS_PER_INDIRECT {
         let indirect_index = index - DIRECT_BLOCKS;
         if inode.indirect == NO_BLOCK {
-            inode.indirect = if tmpfs {
-                alloc_tmpfs_indirect_block()?
-            } else {
-                alloc_indirect_block()?
-            };
+            inode.indirect = alloc_indirect_block()?;
         }
-        ensure_index_slot(inode.indirect, indirect_index, tmpfs)
+        ensure_index_slot(inode.indirect, indirect_index)
     } else {
         // Double-indirect tier -- see `Inode::double_indirect`'s own doc comment. `outer_slot`
         // picks (allocating if needed) the one inner index block covering `inner_slot`'s own
@@ -925,11 +722,7 @@ fn ensure_block(inode: &mut Inode, index: usize, tmpfs: bool) -> Option<u32> {
         let outer_slot = index / PTRS_PER_INDIRECT;
         let inner_slot = index % PTRS_PER_INDIRECT;
         if inode.double_indirect == NO_BLOCK {
-            inode.double_indirect = if tmpfs {
-                alloc_tmpfs_indirect_block()?
-            } else {
-                alloc_indirect_block()?
-            };
+            inode.double_indirect = alloc_indirect_block()?;
         }
         let mut outer = read_block(inode.double_indirect);
         let outer_off = outer_slot * 4;
@@ -937,34 +730,25 @@ fn ensure_block(inode: &mut Inode, index: usize, tmpfs: bool) -> Option<u32> {
             outer[outer_off..outer_off + 4].try_into().unwrap(),
         );
         if inner_block == NO_BLOCK {
-            inner_block = if tmpfs {
-                alloc_tmpfs_indirect_block()?
-            } else {
-                alloc_indirect_block()?
-            };
+            inner_block = alloc_indirect_block()?;
             outer[outer_off..outer_off + 4].copy_from_slice(&inner_block.to_le_bytes());
             write_index_block(inode.double_indirect, &outer);
         }
-        ensure_index_slot(inner_block, inner_slot, tmpfs)
+        ensure_index_slot(inner_block, inner_slot)
     }
 }
 
 /// Shared by `inode_ensure_block_at`'s single-indirect branch and its double-indirect branch's own
-/// inner tier: reads index block `ib_num`'s pointer at `slot`, allocating (from the real or tmpfs
-/// pool, per `tmpfs`) and writing back a fresh real data-block pointer if that slot is still
-/// `NO_BLOCK`.
-fn ensure_index_slot(ib_num: u32, slot: usize, tmpfs: bool) -> Option<u32> {
+/// inner tier: reads index block `ib_num`'s pointer at `slot`, allocating and writing back a fresh
+/// data-block pointer if that slot is still `NO_BLOCK`.
+fn ensure_index_slot(ib_num: u32, slot: usize) -> Option<u32> {
     let mut ib = read_block(ib_num);
     let off = slot * 4;
     let existing = u32::from_le_bytes(ib[off..off + 4].try_into().unwrap());
     if existing != NO_BLOCK {
         return Some(existing);
     }
-    let nb = if tmpfs {
-        alloc_tmpfs_block()?
-    } else {
-        alloc_block()?
-    };
+    let nb = alloc_block()?;
     ib[off..off + 4].copy_from_slice(&nb.to_le_bytes());
     write_index_block(ib_num, &ib);
     Some(nb)
@@ -1257,7 +1041,7 @@ fn inode_stat(inode_num: u32) -> MuslStat {
     };
     let mode = type_bits | inode.mode as u32;
     let size = inode.size as i64;
-    let dev = if is_tmpfs_inode(inode_num) { 2 } else { 1 };
+    let dev = 1;
     let rdev = if inode.kind == InodeKind::Device {
         inode.rdev as u64
     } else {
@@ -1515,38 +1299,9 @@ fn dir_nth_used_record(dir_inode: u32, n: usize) -> Option<(u32, [u8; NAME_MAX],
     None
 }
 
-// --- Mount table -------------------------------------------------------------------------------
-//
-// A real, but deliberately scoped, mount table: `mount --bind`/`mount -t tmpfs` only, no general
-// pluggable-filesystem-type VFS (there is exactly one real block device and one real filesystem in
-// this kernel, and modules can't call each other directly -- nothing else exists to plug in). See
-// CLAUDE.md's own "Mount table" section for the full design and its known limitations.
-
-/// Whether `dir` is devfs's `/dev/shm`, where musl's `shm_open` creates its objects.
-fn is_shm_dir(dir: u32) -> bool {
-    let root = devfs_root();
-    root != u32::MAX && dir_lookup(root, b"shm") == Some(dir)
-}
-
-/// Splits a raw `dev_t` register value into `(major, minor)` the same way musl's own
-/// `major()`/`minor()` macros do (`external/mit/musl/include/sys/sysmacros.h`) for any major <
-/// 4096 / minor < 256 -- musl's full macro folds in extra bits past that range, but every value
-/// this filesystem's own device support actually needs to round-trip (the four devices below, and
-/// anything BusyBox's own `makedevs` default table passes) stays well inside it, so this reduced
-/// form is bit-for-bit identical to the real one there. `Inode::rdev` stores the caller's raw
-/// `dev` argument verbatim (truncated to `u32`, already exactly this packed shape for a realistic
-/// value) -- so encoding back out for `write_stat`'s own `st_rdev` needs no separate step, only
-/// this same split for the `oxfs_open` dispatch below.
-fn dev_major_minor(dev: u32) -> (u32, u32) {
-    ((dev >> 8) & 0xfff, dev & 0xff)
-}
-
 /// Puts regular file `n`'s delayed writes on the disk: its data, its index blocks, then its inode
 /// record (§3.3.5). Nothing to do for anything else, which is never delayed.
 fn sync_file(n: u32) {
-    if is_tmpfs_inode(n) {
-        return;
-    }
     buf::flush_file(n);
 }
 
@@ -1554,20 +1309,6 @@ fn sync_file(n: u32) {
 /// port's roster branches on `f_type`'s specific value, so any fixed constant would do.
 const OXFS_STATFS_MAGIC: u64 = 0x4f584653;
 
-/// Is `dir` the directory `ancestor` itself, or somewhere beneath it? Walks `..` up to the root.
-fn is_same_or_descendant(mut dir: u32, ancestor: u32) -> bool {
-    // Bounded: a corrupted `..` chain must not hang a syscall.
-    for _ in 0..(1u32 << 16) {
-        if dir == ancestor {
-            return true;
-        }
-        match dir_lookup(dir, b"..") {
-            Some(parent) if parent != dir => dir = parent,
-            _ => return false,
-        }
-    }
-    false
-}
 
 /// Copies `src` into a fixed `[u8; MAX_MOUNT_PATH]` for `MountEntry`'s own display-only `path`/
 /// `source` fields, truncating if `src` is longer -- these are never compared against (matching by
@@ -1620,176 +1361,6 @@ fn remount_root(rdonly: bool) -> i64 {
     sweep_unnamed_inodes();
     log("[oxfs] root remounted read-write\n");
     0
-}
-
-// --- devfs (`DEVFS.md` §4) ---------------------------------------------------------------------
-//
-// `/dev` is a tree in the tmpfs pool, mounted at boot and rebuilt every boot: a node for every
-// device in the kernel's registry (kept current by `devfs_sync`, run whenever a lookup enters
-// `/dev` and the registry has changed), and `/dev/shm`. Nodes removed with `rm` stay hidden until
-// reboot; `mknod` of a device is refused there; other files can be made and last until reboot.
-
-/// One registry entry, as `oxidebsd_dev_entry` writes it. Duplicated from `sys/fs/devfs.rs`.
-#[repr(C)]
-struct RawDevEntry {
-    name: [u8; 64],
-    name_len: u32,
-    major: u32,
-    minor: u32,
-    uid: u32,
-    gid: u32,
-    mode: u32,
-}
-
-/// devfs's root, `u32::MAX` until it's mounted.
-static mut DEVFS_ROOT: u32 = u32::MAX;
-/// The registry generation `/dev` was last brought up to.
-static mut DEVFS_GENERATION: u64 = 0;
-/// Device numbers whose nodes were removed (§4.4.1); `(u32::MAX, u32::MAX)` is an empty slot.
-const MAX_DEVFS_HIDDEN: usize = 64;
-static mut DEVFS_HIDDEN: [(u32, u32); MAX_DEVFS_HIDDEN] = [(u32::MAX, u32::MAX); MAX_DEVFS_HIDDEN];
-
-fn devfs_root() -> u32 {
-    // SAFETY: single-core, syscall-serialized, as every pool here.
-    unsafe { *core::ptr::addr_of!(DEVFS_ROOT) }
-}
-
-fn devfs_hidden() -> &'static mut [(u32, u32); MAX_DEVFS_HIDDEN] {
-    // SAFETY: as `devfs_root`.
-    unsafe { &mut *core::ptr::addr_of_mut!(DEVFS_HIDDEN) }
-}
-
-/// Whether directory `dir` is devfs's root or inside it.
-fn in_devfs(dir: u32) -> bool {
-    let root = devfs_root();
-    root != u32::MAX && is_same_or_descendant(dir, root)
-}
-
-/// Remembers that device `rdev`'s node was removed, so `devfs_sync` doesn't bring it back.
-fn devfs_hide(rdev: u32) {
-    let dev = dev_major_minor(rdev);
-    let hidden = devfs_hidden();
-    if !hidden.contains(&dev) {
-        if let Some(slot) = hidden.iter_mut().find(|s| **s == (u32::MAX, u32::MAX)) {
-            *slot = dev;
-        }
-    }
-}
-
-/// A directory named `name` in devfs directory `parent`, made if missing (from the tmpfs pool).
-fn devfs_dir(parent: u32, name: &[u8], mode: u16) -> Option<u32> {
-    if let Some(existing) = dir_lookup(parent, name) {
-        return Some(existing);
-    }
-    let dir = alloc_tmpfs_inode()?;
-    let mut inode = fresh_inode(InodeKind::Dir);
-    inode.mode = mode;
-    write_inode(dir, inode);
-    dir_insert(dir, b".", dir).ok()?;
-    dir_insert(dir, b"..", parent).ok()?;
-    dir_insert(parent, name, dir).ok()?;
-    Some(dir)
-}
-
-/// Makes `/dev` match the registry (§4.3): a node for each registered device that isn't there
-/// (unless hidden), and none for devices no longer registered.
-fn devfs_sync() {
-    let root = devfs_root();
-    if root == u32::MAX {
-        return;
-    }
-    // SAFETY: FFI call to a kernel-exported function.
-    let generation = unsafe { oxidebsd_dev_generation() };
-    // SAFETY: as `devfs_root`.
-    if unsafe { *core::ptr::addr_of!(DEVFS_GENERATION) } == generation {
-        return;
-    }
-    unsafe { *core::ptr::addr_of_mut!(DEVFS_GENERATION) = generation };
-
-    let mut index = 0;
-    loop {
-        let mut e = RawDevEntry { name: [0; 64], name_len: 0, major: 0, minor: 0, uid: 0, gid: 0, mode: 0 };
-        // SAFETY: a buffer for one entry.
-        if unsafe { oxidebsd_dev_entry(index, &mut e) } != 0 {
-            break;
-        }
-        index += 1;
-        if devfs_hidden().contains(&(e.major, e.minor)) {
-            continue;
-        }
-        let name = &e.name[..e.name_len as usize];
-        let (dir_path, leaf) = match name.iter().rposition(|&b| b == b'/') {
-            Some(i) => (&name[..i], &name[i + 1..]),
-            None => (&name[..0], name),
-        };
-        let mut dir = root;
-        for component in dir_path.split(|&b| b == b'/').filter(|c| !c.is_empty()) {
-            match devfs_dir(dir, component, 0o755) {
-                Some(d) => dir = d,
-                None => break,
-            }
-        }
-        if dir_lookup(dir, leaf).is_some() {
-            continue;
-        }
-        let Some(node) = alloc_tmpfs_inode() else { break };
-        let mut inode = fresh_inode(InodeKind::Device);
-        inode.mode = e.mode as u16;
-        inode.uid = e.uid;
-        inode.gid = e.gid;
-        inode.rdev = (e.major << 8) | e.minor;
-        inode.device_char = true;
-        write_inode(node, inode);
-        if dir_insert(dir, leaf, node).is_err() {
-            write_inode(node, Inode::FREE);
-        }
-    }
-    devfs_prune(root, 0);
-}
-
-/// Removes device nodes under `dir` whose device is no longer registered.
-fn devfs_prune(dir: u32, depth: u32) {
-    if depth > 8 {
-        return;
-    }
-    let mut n = 0;
-    while let Some((inode_num, name, name_len)) = dir_nth_used_record(dir, n) {
-        n += 1;
-        let name = &name[..name_len as usize];
-        if name == b"." || name == b".." {
-            continue;
-        }
-        let inode = read_inode(inode_num);
-        match inode.kind {
-            InodeKind::Dir => devfs_prune(inode_num, depth + 1),
-            InodeKind::Device => {
-                let (major, minor) = dev_major_minor(inode.rdev);
-                if !device_registered(major, minor) && dir_remove(dir, name).is_ok() {
-                    let mut gone = inode;
-                    gone.nlink = 0;
-                    write_inode(inode_num, gone);
-                    maybe_release(inode_num);
-                    n -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn device_registered(major: u32, minor: u32) -> bool {
-    let mut index = 0;
-    loop {
-        let mut e = RawDevEntry { name: [0; 64], name_len: 0, major: 0, minor: 0, uid: 0, gid: 0, mode: 0 };
-        // SAFETY: a buffer for one entry.
-        if unsafe { oxidebsd_dev_entry(index, &mut e) } != 0 {
-            return false;
-        }
-        if (e.major, e.minor) == (major, minor) {
-            return true;
-        }
-        index += 1;
-    }
 }
 
 fn log_bytes(bytes: &[u8]) {
@@ -1850,7 +1421,7 @@ impl ByteBuf<'_> {
 
 /// Whether the root file system is mounted read-only (`OxideBSD-doc/RAM_FLOOR.md` §3.4.3): from
 /// boot on the real boot path until `/etc/rc` remounts it read-write (`mount -u`), or after a
-/// remount read-only. Every change to it is refused with `EROFS`; tmpfs and devfs stay writable.
+/// remount read-only. Every change to it is refused with `EROFS`.
 static mut ROOT_RDONLY: bool = false;
 
 fn root_rdonly() -> bool {
@@ -1860,8 +1431,8 @@ fn root_rdonly() -> bool {
 
 /// Whether a change at inode `n` (the file, or the directory a name goes in) is refused: it's on
 /// the root file system, mounted read-only.
-fn read_only_at(n: u32) -> bool {
-    root_rdonly() && !is_tmpfs_inode(n)
+fn read_only_at(_n: u32) -> bool {
+    root_rdonly()
 }
 
 /// Records the root's mode, and tells the kernel (raw writes to the partition are refused while
@@ -1887,7 +1458,7 @@ fn set_clean(clean: bool) {
 static mut LABEL: [u8; SB_LABEL_LEN] = [0; SB_LABEL_LEN];
 
 fn write_superblock() {
-    let table = inode_table(false);
+    let table = inode_table();
     let sb = Superblock {
         data_blocks: disk_blocks(),
         inode_count: table.count,
@@ -1950,9 +1521,9 @@ fn mount_from_disk() -> bool {
     }
 
     let count = sb.inode_count;
-    *inode_table(false) = InodeTable { file: sb.inode_file, count, free: 0, hint: 0 };
+    *inode_table() = InodeTable { file: sb.inode_file, count, free: 0, hint: 0 };
     let free = (0..count).filter(|&n| read_inode(n).kind == InodeKind::Free).count() as u32;
-    inode_table(false).free = free;
+    inode_table().free = free;
 
     let mut msg_buf = [0u8; 192];
     let mut msg = ByteBuf {
@@ -2027,14 +1598,11 @@ pub extern "C" fn module_init() -> i32 {
         return -1;
     }
 
-    // The types this module serves (`vfs`): devfs, tmpfs and nullfs first, so the kernel can mount
-    // devfs on `/dev` as soon as oxfs's type, registered last, has mounted the root. Without a root
-    // there's nothing to boot: fail the load (the kernel then stops).
+    // The types this module serves (`vfs`): nullfs, then oxfs, which mounts the root as it
+    // registers. Without a root there's nothing to boot: fail the load (the kernel then stops).
     // SAFETY: FFI calls to a kernel-exported function, with static tables.
     unsafe {
-        for vfc in [&vfs::DEVFS_VFSCONF, &vfs::NULLFS_VFSCONF] {
-            vfs_if::oxidebsd_vfs_register(vfc);
-        }
+        vfs_if::oxidebsd_vfs_register(&vfs::NULLFS_VFSCONF);
         if vfs_if::oxidebsd_vfs_register(&vfs::OXFS_VFSCONF) != 0 || vfs::root_mount().is_null() {
             return -1;
         }

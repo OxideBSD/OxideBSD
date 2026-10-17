@@ -414,6 +414,7 @@
 ./usr/share/man/man4/pts.4 type=file src=share/man/man4/pts.4
 ./usr/share/man/man4/unix.4 type=file src=share/man/man4/unix.4
 ./usr/share/man/man5 type=dir
+./usr/share/man/man5/devfs.5 type=file src=share/man/man5/devfs.5
 ./usr/share/man/man5/devfs.conf.5 type=file src=share/man/man5/devfs.conf.5
 ./usr/share/man/man5/fsconf.5 type=file src=share/man/man5/fsconf.5
 ./usr/share/man/man5/gettytab.5 type=file src=share/man/man5/gettytab.5

@@ -113,6 +113,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     // The file system modules, as at boot: oxfs mounts the system image, then procfs and tmpfs.
     oxidebsd::kernel_main::load_file_systems(&mut mapper, &mut frame_allocator);
+    // /dev/shm, which /etc/fstab mounts on a real system (shm_open, sem_open).
+    oxidebsd::kernel_main::mount_shm_for_tests();
 
     // Local sockets (/dev/log) and poll(2), syslogd's loop.
     const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));

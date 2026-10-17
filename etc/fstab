@@ -5,6 +5,7 @@
 #
 # Device	Mountpoint	FStype	Options		Dump	Pass#
 /dev/gpt/rootfs	/		oxfs	rw		1	1
+tmpfs		/dev/shm	tmpfs	rw,mode=1777	0	0
 #
 # Examples:
 # tmpfs		/tmp		tmpfs	rw		0	0

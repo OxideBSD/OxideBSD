@@ -165,6 +165,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "devfs"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+ "vfs_if",
+]
+
+[[package]]
 name = "devfs-syscall-smoke"
 version = "0.1.0"
 

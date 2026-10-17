@@ -35,8 +35,8 @@ required -- probe it and keep a fallback.
   `clock`, `sysctl`.
 - A BSD vnode VFS (`OxideBSD-doc/VFS.md`, `sys/kern/vfs_*.rs`): the kernel's `namei`, name cache,
   mounts and path system calls; file systems are modules serving vnode operations. oxfs
-  (`sys/modules/oxfs`): the disk's Unix inode/block file system, plus tmpfs, devfs and nullfs over
-  its inode space until VFS step 3; procfs (`sys/modules/procfs`) on `/proc`.
+  (`sys/modules/oxfs`): the disk's Unix inode/block file system (plus nullfs over its inode space
+  until VFS step 3d); tmpfs, devfs (`/dev`) and procfs (`/proc`) are modules of their own.
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.
@@ -404,8 +404,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - QEMU needs `-accel kvm -accel tcg` or everything runs under TCG.
 - A test using sockets, `poll`, or `socketpair` must load the `socket` module.
 - Every test that loads `native_abi` also loads `vfs` (close, lseek, fstat, ioctl, every path
-  call); file systems load through `kernel_main::load_file_systems` (oxfs, procfs, tmpfs), as at
-  boot, never one by one.
+  call); file systems load through `kernel_main::load_file_systems` (oxfs, procfs, devfs, tmpfs),
+  as at boot, never one by one. `/dev/shm` is a tmpfs from `/etc/fstab`; a test using it calls
+  `kernel_main::mount_shm_for_tests`.
 - TCP is stop-and-wait, fixed MSS.
 
 ## USB (`sys/drivers/usb/`)

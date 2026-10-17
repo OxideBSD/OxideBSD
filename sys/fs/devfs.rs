@@ -1,8 +1,9 @@
 //! The device registry (OxideBSD-doc `DEVFS.md` §3): every character device, with the name,
 //! number, owner, group and mode its `/dev` node gets, and the function that opens it. Drivers in
-//! the kernel register here (`make_dev`), modules through `oxidebsd_make_dev`; oxfs builds devfs,
-//! the file system on `/dev`, from the table (`oxidebsd_dev_entry`, `oxidebsd_dev_generation`),
-//! and opens every device node, in devfs or not, through `oxidebsd_dev_open`. FreeBSD's
+//! the kernel register here (`make_dev`), modules through `oxidebsd_make_dev`; the devfs module
+//! (`sys/modules/devfs`), the file system on `/dev`, builds its views from the table
+//! (`oxidebsd_dev_entry`, `oxidebsd_dev_generation`), and the kernel opens every device node, in
+//! devfs or not, through `oxidebsd_dev_open`. FreeBSD's
 //! `make_dev(9)`, much reduced.
 
 use alloc::string::String;

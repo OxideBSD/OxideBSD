@@ -260,7 +260,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
 
 /// Loads the file system modules (OxideBSD-doc `VFS.md`), in the order they must come: oxfs, whose
 /// type mounts the root as it registers, then the types the kernel mounts on the root's
-/// directories (procfs on `/proc`) and the ones `/etc/fstab` and `mount(8)` name (tmpfs). The data
+/// directories (devfs on `/dev`, procfs on `/proc`) and the ones `/etc/fstab` and `mount(8)` name
+/// (tmpfs). The data
 /// disk must be attached first (`drivers::disk::init`). Test kernels call it too, so each loads
 /// the same set.
 pub fn load_file_systems(
@@ -297,8 +298,22 @@ pub fn load_file_systems(
     crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, mapper, frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
 
+    // devfs (OxideBSD-doc DEVFS.md): mounted on /dev as soon as it registers.
+    const DEVFS_MOD: &[u8] = include_bytes!(env!("DEVFS_MOD_PATH"));
+    const DEVFS_PANIC_SYMBOL: &str = env!("DEVFS_MOD_PANIC_SYMBOL");
+    crate::module::load("devfs", DEVFS_MOD, DEVFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the devfs module: {e:?}"));
+
     const TMPFS_MOD: &[u8] = include_bytes!(env!("TMPFS_MOD_PATH"));
     const TMPFS_PANIC_SYMBOL: &str = env!("TMPFS_MOD_PANIC_SYMBOL");
     crate::module::load("tmpfs", TMPFS_MOD, TMPFS_PANIC_SYMBOL, false, mapper, frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the tmpfs module: {e:?}"));
+}
+
+/// For test kernels, which run no `/etc/rc`: mounts the tmpfs on `/dev/shm` that `/etc/fstab`
+/// mounts on a real system, so `shm_open` and `sem_open` work (`tmpfs(5)`). After
+/// `load_file_systems`.
+pub fn mount_shm_for_tests() {
+    crate::kern::vfs_mount::mount_type_at(b"tmpfs", b"/dev/shm", b"tmpfs", b"mode\x001777\x00")
+        .unwrap_or_else(|e| panic!("mounting a tmpfs on /dev/shm failed: {e}"));
 }

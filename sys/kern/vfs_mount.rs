@@ -242,6 +242,16 @@ fn automount_type(vfc: &'static VfsConf) {
     }
 }
 
+/// Mounts a file system of type `fstype` from `from` on directory `path`, with the type's options
+/// `opts` (`domount`'s), as `nmount(2)` would for root: the kernel's own mounts.
+pub(crate) fn mount_type_at(fstype: &[u8], path: &[u8], from: &[u8], opts: &[u8]) -> Result<(), i32> {
+    let vfc = find_type(fstype).ok_or(19)?; // ENODEV
+    let cred = crate::kern::vfs_subr::current_ucred();
+    let nd = crate::kern::vfs_lookup::NameiData { path, nameiop: LOOKUP, follow: true, startdir: ptr::null_mut(), cred: &cred };
+    let covered = crate::kern::vfs_lookup::namei(&nd)?.into_vp();
+    domount(vfc, covered, 0, path, from, ptr::null_mut(), opts)
+}
+
 /// Mounts `vfc` on directory `covered` (referenced; the mount keeps the reference): `nmount(2)`'s
 /// work once its options are parsed. `onname` is the path as given, `fromname` what it's from,
 /// `opts` the options left for the type (`name\0value\0` pairs, `MountArgs::opts`).
