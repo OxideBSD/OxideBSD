@@ -108,7 +108,19 @@ pub(crate) fn vop_access(vp: *mut Vnode, accmode: u32, cred: &Ucred) -> i32 {
 }
 
 pub(crate) fn vop_setattr(vp: *mut Vnode, vap: &Vattr, cred: &Ucred) -> i32 {
+    if vap.va_size != VNOVAL {
+        contents_changing(vp);
+    }
     vop!(vp, setattr, EBADF, EOPNOTSUPP, |f| f(vp, vap, cred))
+}
+
+/// The page cache forgets the file's pages before its blocks change (`VFS.md` §7.3; FreeBSD's
+/// `vnode_pager_setsize` and friends): processes already mapping the old pages keep them, and
+/// those not yet filled are filled from the old blocks first (`DEMANDPAGE.md` §5.3).
+fn contents_changing(vp: *mut Vnode) {
+    if ops(vp).is_some() {
+        crate::memory::pagecache::changed(crate::kern::vfs_vnops::object_vp(vp) as u64);
+    }
 }
 
 /// Returns the bytes moved.
@@ -118,6 +130,7 @@ pub(crate) fn vop_read(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: &Ucred) -> R
 }
 
 pub(crate) fn vop_write(vp: *mut Vnode, uio: Uio, ioflag: u32, cred: &Ucred) -> Result<usize, i32> {
+    contents_changing(vp);
     let r = vop!(vp, write, -(EBADF as i64), -(EOPNOTSUPP as i64), |f| f(vp, uio, ioflag, cred));
     if r < 0 { Err((-r) as i32) } else { Ok(r as usize) }
 }
@@ -170,12 +183,7 @@ pub(crate) fn vop_bmap(vp: *mut Vnode, lblkno: u64) -> Result<(u64, u64), i32> {
     if e != 0 { Err(e) } else { Ok((bn, run)) }
 }
 
-pub(crate) fn vop_pathconf(vp: *mut Vnode, name: i32) -> Result<i64, i32> {
-    let mut v = 0i64;
-    let e = vop!(vp, pathconf, EBADF, EINVAL, |f| f(vp, name, &mut v));
-    if e != 0 { Err(e) } else { Ok(v) }
-}
-
 pub(crate) fn vop_allocate(vp: *mut Vnode, offset: u64, len: u64) -> i32 {
+    contents_changing(vp);
     vop!(vp, allocate, EBADF, EOPNOTSUPP, |f| f(vp, offset, len))
 }

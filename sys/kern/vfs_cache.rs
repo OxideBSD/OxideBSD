@@ -46,15 +46,6 @@ static CACHE: Mutex<Cache> =
         opened: BTreeMap::new(),
     });
 
-/// `vfs.cache.numentries` and lookup counters (`vfs.cache.hits`, `vfs.cache.misses`).
-static HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static MISSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-pub(crate) fn stats() -> (u64, u64, u64) {
-    use core::sync::atomic::Ordering::Relaxed;
-    (CACHE.lock().entries.len() as u64, HITS.load(Relaxed), MISSES.load(Relaxed))
-}
-
 fn limit() -> usize {
     (crate::kern::vfs_subr::maxvnodes() * 2) as usize
 }
@@ -76,21 +67,11 @@ impl Cache {
 
 /// `cache_lookup`: what the cache knows about `name` in `dvp`.
 pub(crate) fn lookup(dvp: *mut Vnode, name: &[u8]) -> Option<Hit> {
-    use core::sync::atomic::Ordering::Relaxed;
     let cache = CACHE.lock();
     match cache.entries.get(&(dvp as usize, name.to_vec())) {
-        Some(&(0, _)) => {
-            HITS.fetch_add(1, Relaxed);
-            Some(Hit::Missing)
-        }
-        Some(&(vp, _)) => {
-            HITS.fetch_add(1, Relaxed);
-            Some(Hit::Found(vp as *mut Vnode))
-        }
-        None => {
-            MISSES.fetch_add(1, Relaxed);
-            None
-        }
+        Some(&(0, _)) => Some(Hit::Missing),
+        Some(&(vp, _)) => Some(Hit::Found(vp as *mut Vnode)),
+        None => None,
     }
 }
 

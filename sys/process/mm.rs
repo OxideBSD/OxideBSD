@@ -288,7 +288,8 @@ const MAP_ANON: u64 = 0x20;
 const RLIMIT_MEMLOCK: u64 = 8;
 
 /// Real, cross-open shared physical-frame cache for fd-backed `MAP_SHARED` mappings — keyed by
-/// `crate::fs::fd::content_id_of`'s real inode identity, not by `real_fd`/pid. **This is what
+/// `crate::fs::fd::content_id_of`'s identity of the file (the vnode holding it), not by
+/// `real_fd`/pid. **This is what
 /// makes two *separate* `open()` calls on the same underlying file (`shm_open`'s own documented
 /// re-open-by-name pattern, or any two processes independently opening the same path) actually
 /// share live writes with no `msync` needed** — real POSIX `MAP_SHARED` guarantees exactly this,
@@ -328,14 +329,20 @@ fn release_mmap_file_ref(content_id: u64) {
         refs.remove(&content_id);
         drop(refs);
         MMAP_FILE_CACHE.lock().remove(&content_id);
+        // Torn down with locks held (exit, munmap under the process table): deferred.
+        crate::kern::vfs_subr::vrele_deferred(content_id as *mut vfs_if::Vnode);
     }
 }
 
-/// Whether a live mapping refers to `content_id` (an oxfs inode number), for oxfs's
-/// `oxidebsd_inode_in_use`: the inode must outlive it, since unmapping writes back by number.
-/// `None` if the lock is busy (the caller then keeps the inode).
-pub(crate) fn content_mapped(content_id: u64) -> Option<bool> {
-    Some(MMAP_FILE_REFCOUNT.try_lock()?.contains_key(&content_id))
+/// Takes one reference to `content_id`'s cache entry for a new shared region: the first keeps the
+/// file (its vnode) in use until the last region of it goes, so writeback can still reach it.
+fn add_mmap_file_ref(content_id: u64) {
+    let mut refs = MMAP_FILE_REFCOUNT.lock();
+    let count = refs.entry(content_id).or_insert(0);
+    *count += 1;
+    if *count == 1 {
+        crate::kern::vfs_subr::vref(content_id as *mut vfs_if::Vnode);
+    }
 }
 
 /// The memory bookkeeping of one address space, FreeBSD's `vmspace`: it lives in the
@@ -367,6 +374,34 @@ pub struct VmState {
     /// its entry here, and cleanup at exit or exec drops every segment's `nattch` once. A forked
     /// child gets its own copy, each segment's `nattch` raised to match.
     pub shm_attach: Vec<(u64, i32)>,
+    /// The programs this address space runs (the executable and its interpreter): vnodes it holds
+    /// in use and counts in their `v_textcount`, so they can't be opened for writing (`ETXTBSY`)
+    /// and stay while running, even unlinked (FreeBSD's `p_textvp`). Kept by `fork`.
+    pub text: Vec<u64>,
+}
+
+impl VmState {
+    /// Runs `vp` (the vnode holding a program's contents): counts it as text and holds it.
+    pub fn add_text(&mut self, vp: u64) {
+        let v = vp as *mut vfs_if::Vnode;
+        crate::kern::vfs_subr::vref(v);
+        // SAFETY: just referenced.
+        unsafe { (*v).v_textcount += 1 };
+        self.text.push(vp);
+    }
+}
+
+impl Drop for VmState {
+    /// The address space is gone: its programs aren't running here any more (deferred: this runs
+    /// where a file system can't be entered).
+    fn drop(&mut self) {
+        for &vp in &self.text {
+            let v = vp as *mut vfs_if::Vnode;
+            // SAFETY: held since `add_text`.
+            unsafe { (*v).v_textcount -= 1 };
+            crate::kern::vfs_subr::vrele_deferred(v);
+        }
+    }
 }
 
 impl Default for VmState {
@@ -379,6 +414,7 @@ impl Default for VmState {
             locked_bytes: 0,
             wx_allowed: false,
             shm_attach: Vec::new(),
+            text: Vec::new(),
         }
     }
 }
@@ -390,23 +426,23 @@ impl Default for VmState {
 /// (`sysv_shm::inherit_attachments_for_fork`). Private regions are left out: fork gave the child
 /// its own copy-on-write pages, with nothing left to write back. Memory locks are not inherited.
 pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
-    let (brk, wx_allowed, regions) = {
+    let (brk, wx_allowed, regions, text) = {
         let vm = parent.vm();
         let regions: Vec<MmapFileRegion> =
             vm.mmap_file_regions.iter().filter(|r| r.shared).copied().collect();
-        (vm.brk, vm.wx_allowed, regions)
+        (vm.brk, vm.wx_allowed, regions, vm.text.clone())
     };
-    if !regions.is_empty() {
-        let mut refs = MMAP_FILE_REFCOUNT.lock();
-        for r in &regions {
-            *refs.entry(r.content_id).or_insert(0) += 1;
-        }
+    for r in &regions {
+        add_mmap_file_ref(r.content_id);
     }
     {
         let mut vm = child.vm();
         vm.brk = brk;
         vm.wx_allowed = wx_allowed;
         vm.mmap_file_regions = regions;
+        for vp in text {
+            vm.add_text(vp);
+        }
     }
     crate::fs::sysv_shm::inherit_attachments_for_fork(parent, child);
 }
@@ -1179,7 +1215,7 @@ fn do_mmap_file_backed(
     }
 
     if !private {
-        *MMAP_FILE_REFCOUNT.lock().entry(content_id).or_insert(0) += 1;
+        add_mmap_file_ref(content_id);
     }
     me.vm().mmap_file_regions.push(MmapFileRegion {
         va_start: base,

@@ -8,11 +8,9 @@
 //! buffer or an empty queue is `EAGAIN`, the socket layer waits, and every change of state wakes
 //! the waiters (`wake`), as pipes do.
 //!
-//! Path names live in oxfs, which the kernel can't call directly (modules call the kernel, not the
-//! other way round): oxfs hands over two functions at `module_init`
-//! (`oxidebsd_register_socket_nodes`). A socket file's inode number maps to the socket bound to it
-//! in `STATE.nodes`; a file with no entry (its socket closed, or made in an earlier boot) refuses
-//! connections.
+//! Path names are socket files made and found through the VFS (`node_call`: `namei`, a `VSOCK`
+//! node). A bound socket holds its file's vnode, which maps to it in `STATE.nodes`; a file with no
+//! entry (its socket closed, or made in an earlier boot) refuses connections.
 //!
 //! Messages carry control data (`UNIX.md` §§8-9). Descriptors sent with `SCM_RIGHTS` are held by
 //! the message (`fs::fd::hold`) until received, when they're installed in the receiver, or until
@@ -240,7 +238,8 @@ enum LocalCreds {
 struct Unp {
     ty: i64,
     name: Option<Name>,
-    /// The socket file's inode, for a path name: dropped from `State::nodes` on close.
+    /// The socket file's vnode (held), for a path name: dropped from `State::nodes` and released
+    /// on close.
     node: Option<u64>,
     /// The other end of a connection (streams and sequenced packets), or the default destination
     /// (datagrams).
@@ -309,7 +308,7 @@ struct State {
     socks: BTreeMap<u64, Unp>,
     /// Abstract names bound, to their sockets.
     abstract_names: BTreeMap<Vec<u8>, u64>,
-    /// Socket-file inodes, to the sockets bound to them.
+    /// Socket files (their vnodes), to the sockets bound to them.
     nodes: BTreeMap<u64, u64>,
     /// The next autobind name to try (`UNIX.md` §5.3).
     next_autobind: u32,
@@ -319,13 +318,6 @@ struct State {
     /// In flight per sending user, and in all (`UNIX.md` §8.5).
     inflight_by_uid: BTreeMap<u32, u32>,
     inflight_total: u32,
-}
-
-/// Whether a socket is bound to socket-file inode `inode`, for oxfs's `oxidebsd_inode_in_use`:
-/// a reused inode number would connect a new socket file to this socket. `None` if the lock is
-/// busy (a descriptor being closed from inside this module, say); the caller then keeps the inode.
-pub(crate) fn node_bound(inode: u64) -> Option<bool> {
-    Some(STATE.try_lock()?.nodes.contains_key(&inode))
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -618,10 +610,12 @@ fn node_call(create: bool, path: &[u8]) -> Result<u64, i64> {
     if create {
         return match crate::kern::vfs_syscalls::make_node(path, core::ptr::null_mut(), VSOCK, 0o777, 0, &cred) {
             Ok(vp) => {
-                // SAFETY: referenced.
-                let id = unsafe { (*vp).v_fileid };
+                // The bound socket keeps the node's file (the vnode holding it): its key, released
+                // when the socket closes.
+                let id = crate::kern::vfs_vnops::object_vp(vp);
+                crate::kern::vfs_subr::vref(id);
                 crate::kern::vfs_subr::vrele(vp);
-                Ok(id)
+                Ok(id as u64)
             }
             Err(EEXIST) => Err(EADDRINUSE),
             Err(e) => Err(e as i64),
@@ -636,7 +630,7 @@ fn node_call(create: bool, path: &[u8]) -> Result<u64, i64> {
     };
     let vp = crate::kern::vfs_lookup::namei(&nd).map_err(|e| e as i64)?.into_vp();
     // SAFETY: referenced.
-    let (vtype, id) = unsafe { ((*vp).v_type, (*vp).v_fileid) };
+    let (vtype, id) = unsafe { ((*vp).v_type, crate::kern::vfs_vnops::object_vp(vp) as u64) };
     let r = if vtype != VSOCK {
         Err(ENOTSOCK)
     } else if crate::kern::vnode_if::vop_access(vp, VWRITE, &cred) != 0 {
@@ -671,8 +665,8 @@ fn resolve(name: &Name) -> Result<u64, i64> {
     match name {
         Name::Abstract(a) => STATE.lock().abstract_names.get(a).copied().ok_or(ECONNREFUSED),
         Name::Path(p) => {
-            let inode = node_call(false, p)?;
-            STATE.lock().nodes.get(&inode).copied().ok_or(ECONNREFUSED)
+            let node = node_call(false, p)?;
+            STATE.lock().nodes.get(&node).copied().ok_or(ECONNREFUSED)
         }
     }
 }
@@ -832,8 +826,9 @@ impl Protocol for Local {
                 st.abstract_names.remove(a);
             }
             Some(Name::Path(_)) => {
-                if let Some(inode) = u.node {
-                    st.nodes.remove(&inode);
+                if let Some(node) = u.node {
+                    st.nodes.remove(&node);
+                    crate::kern::vfs_subr::vrele_deferred(node as *mut vfs_if::Vnode);
                 }
             }
             None => {}
@@ -902,12 +897,16 @@ impl Protocol for Local {
                 st.socks.get_mut(&so).ok_or(EBADF as i64)?.name = Some(name);
             }
             Name::Path(p) => {
-                let inode = node_call(true, p)?;
+                let node = node_call(true, p)?;
                 let mut st = STATE.lock();
-                st.nodes.insert(inode, so);
-                let u = st.socks.get_mut(&so).ok_or(EBADF as i64)?;
+                st.nodes.insert(node, so);
+                let Some(u) = st.socks.get_mut(&so) else {
+                    st.nodes.remove(&node);
+                    crate::kern::vfs_subr::vrele_deferred(node as *mut vfs_if::Vnode);
+                    return Err(EBADF as i64);
+                };
                 u.name = Some(name);
-                u.node = Some(inode);
+                u.node = Some(node);
             }
         }
         Ok(())

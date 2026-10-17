@@ -158,6 +158,16 @@ echo hi > $V/f
 ln -s "$long" $V/ll
 check "a link's 401-byte target is kept whole" [ "$(readlink $V/ll)" = "$long" ]
 check "and followed" [ "$(cat $V/ll)" = hi ]
+cp /bin/sleep $V/sl
+$V/sl 3 &
+sl=$!
+/bin/sleep 1
+check "a running program can't be opened for writing" not sh -c ": > $V/sl" 2>/dev/null
+kill $sl
+wait $sl 2>/dev/null
+cp /bin/true $V/tr
+check "a program open for writing can't run" not sh -c "exec 3>>$V/tr; $V/tr" 2>/dev/null
+check "and can once it's closed" $V/tr
 
 cd /
 rm -rf $T

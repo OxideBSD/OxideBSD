@@ -40,25 +40,12 @@ use oxfs_format::*;
 unsafe extern "C" {
     fn oxidebsd_log(ptr: *const u8, len: u64);
     fn oxidebsd_alloc_fd() -> u64;
-    /// `fstat(2)` of a file whose table has no `stat` operation (kernel tree:
-    /// `crate::fs::fd::stat_op`): oxfs names FIFOs, terminals and devices by their nodes.
-    fn oxidebsd_register_stat_fallback(stat: extern "C" fn(u64, u64) -> i64);
     /// Makes `real_fd` a file with operations `ops` (a static table: `FileOps`), object `data`,
     /// open flags `oflags` (`open(2)`'s), and gives the caller the lowest free fd for it. The fd,
     /// or `-errno` (kernel tree: `crate::fs::fd::finstall`).
     fn oxidebsd_finstall(real_fd: u64, ops: *const FileOps, data: u64, oflags: u64) -> i64;
     /// `0` if `n` more open files fit under `kern.maxfiles`, else `-ENFILE`.
     fn oxidebsd_fd_check_room(n: u64) -> i64;
-    /// See `crate::fs::fd::ContentRead`/`ContentWrite`/`ContentSize`'s own doc comment (kernel
-    /// tree) for why real fd-backed `MAP_SHARED` mmap needs this instead of the plain per-fd
-    /// read/write callbacks. Called once, from this module's own `module_init`.
-    fn oxidebsd_register_content_accessors(
-        read: extern "C" fn(u64, u64, u64, u64) -> i64,
-        write: extern "C" fn(u64, u64, u64) -> i64,
-        size: extern "C" fn(u64) -> i64,
-        is_shm: extern "C" fn(u64) -> i64,
-        setid: extern "C" fn(u64, *mut u32) -> i64,
-    );
     /// Moves up to `len` bytes between this module's buffer `kbuf` and a read or write transfer
     /// (`uio`, opaque here; kernel tree: `crate::kern::subr_uio`, USERMEM.md §4.4). The count
     /// moved, or `-errno`.
@@ -69,14 +56,6 @@ unsafe extern "C" {
     fn oxidebsd_uio_offset(uio: u64) -> u64;
     /// Moves a transfer to `offset` (`O_APPEND`: the end of the file).
     fn oxidebsd_uio_set_offset(uio: u64, offset: u64);
-    /// Whether the kernel still refers to an inode (a working or root directory, a file mapping,
-    /// a bound socket file): see `maybe_release`.
-    fn oxidebsd_inode_in_use(inode: u64) -> u64;
-    /// Drops the kernel's page cache entry for an inode whose contents change or which is freed
-    /// (`PAGECACHE.md` §2.4): see `content_changed`.
-    fn oxidebsd_content_changed(inode: u64);
-    /// Registers `oxfs_content_block_map` (`DEMANDPAGE.md` §5.1).
-    fn oxidebsd_register_content_block_map(map: extern "C" fn(u64, *mut [u64; 3], u64) -> i64);
     /// The kernel's device registry (`sys/fs/devfs.rs`, `DEVFS.md` §3).
     fn oxidebsd_make_dev(
         name_ptr: u64,
@@ -89,9 +68,6 @@ unsafe extern "C" {
     ) -> i64;
     fn oxidebsd_dev_generation() -> u64;
     fn oxidebsd_dev_entry(index: u64, out: *mut RawDevEntry) -> i64;
-    /// What description `real_fd` is: an `FD_KIND_*` code, its argument stored through `arg`;
-    /// `-1` if there's no such description.
-    fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64;
     fn oxidebsd_random_bytes(ptr: u64, len: u64) -> i64;
     /// Real framebuffer geometry -- see `sys/drivers/fbdev.rs`'s own doc comment (kernel tree).
     /// Writes a `RawFbGeometry` (this module's own local copy of that file's `FbGeometry` --
@@ -675,11 +651,11 @@ fn alloc_inode() -> Option<u32> {
 // --- Reclamation -----------------------------------------------------------------------------
 //
 // An inode is freed, with every block it addresses, once nothing refers to it: no name
-// (`nlink == 0`), no oxfs descriptor, and nothing in the kernel (`oxidebsd_inode_in_use`: a working
-// or root directory, a file mapping that writes back by inode number, a bound socket file). One
-// the kernel still holds becomes an orphan, retried after later closes and unlinks; one left
-// over at a reboot is freed by the sweep after mounting (`sweep_unnamed_inodes`). Until this
-// existed, oxfs freed nothing: every temporary file ever made kept its inode and blocks.
+// (`nlink == 0`) and no vnode of it in use (`vfs::inode_busy`: a descriptor, a working or root
+// directory, a mapping, a running program, a bound socket file -- every kernel holder holds a
+// vnode). Its last vnode going inactive asks again (`vfs::oxfs_vop_inactive`). One left over at a
+// reboot (open when the system stopped) is freed by the sweep after mounting
+// (`sweep_unnamed_inodes`), and its vnode, if any, recycled (`vfs::inode_freed`).
 
 /// Returns block `n` to its pool; the disk pool's allocation cursor steps back so it's reused.
 fn free_block(n: u32) {
@@ -734,34 +710,19 @@ fn free_inode_blocks(inode: &Inode) {
 /// orphan if only the kernel does.
 fn maybe_release(n: u32) {
     let inode = read_inode(n);
-    // A file in use (open, a cwd, mapped, a lookup in progress) keeps its storage until its
-    // vnode goes inactive (`vfs::oxfs_vop_inactive`), which asks again.
+    // A file in use (open, a cwd, mapped, running, a lookup in progress) keeps its storage until
+    // its vnode goes inactive (`vfs::oxfs_vop_inactive`), which asks again: every holder in the
+    // kernel holds a vnode now (VFS.md §11 step 2c).
     if n == ROOT_INODE || inode.kind == InodeKind::Free || inode.nlink > 0 || vfs::inode_busy(n) {
         return;
     }
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    if unsafe { oxidebsd_inode_in_use(n as u64) } != 0 {
-        add_orphan(n);
-        return;
-    }
-    remove_orphan(n);
     release_inode(n, inode);
-}
-
-/// Every change to a file's contents (`write_inode_at`, `write_inode_data`, `resize_inode_data`)
-/// and every freed inode (`release_inode`) goes through here first, so the kernel's page cache
-/// never maps a file's old pages into a new exec or mapping, nor a freed inode's pages into the
-/// file that reuses its number.
-fn content_changed(inode_num: u32) {
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
-    unsafe { oxidebsd_content_changed(inode_num as u64) };
 }
 
 /// Frees inode `n` (whose record is `inode`) and its blocks. The record goes first: interrupted
 /// between the two, the disk leaks blocks rather than keeping an inode that points at blocks
 /// someone else may be given.
 fn release_inode(n: u32, inode: Inode) {
-    content_changed(n);
     // Its unwritten data and index blocks are about to be freed: never write them.
     buf::discard_owned(n);
     write_inode(n, Inode::FREE);
@@ -769,43 +730,6 @@ fn release_inode(n: u32, inode: Inode) {
     trim_inode_table(is_tmpfs_inode(n));
     // The number may be handed out again: a vnode left of the old file must not answer for it.
     vfs::inode_freed(n);
-}
-
-/// Unlinked inodes the kernel still referred to; `u32::MAX` is an empty slot. A full list only
-/// delays freeing until the next boot's sweep.
-const MAX_ORPHANS: usize = 256;
-static mut ORPHANS: [u32; MAX_ORPHANS] = [u32::MAX; MAX_ORPHANS];
-
-fn orphans() -> &'static mut [u32; MAX_ORPHANS] {
-    // SAFETY: single-core, syscall-serialized, as every pool here.
-    unsafe { &mut *core::ptr::addr_of_mut!(ORPHANS) }
-}
-
-fn add_orphan(n: u32) {
-    let list = orphans();
-    if list.contains(&n) {
-        return;
-    }
-    if let Some(slot) = list.iter_mut().find(|s| **s == u32::MAX) {
-        *slot = n;
-    }
-}
-
-fn remove_orphan(n: u32) {
-    for slot in orphans().iter_mut().filter(|s| **s == n) {
-        *slot = u32::MAX;
-    }
-}
-
-/// Tries each orphan again (after a close or unlink: a mapping or working directory may be gone).
-fn retry_orphans() {
-    for i in 0..MAX_ORPHANS {
-        let n = orphans()[i];
-        if n != u32::MAX {
-            orphans()[i] = u32::MAX;
-            maybe_release(n);
-        }
-    }
 }
 
 /// After mounting: frees every inode left without a name by the last boot (open, mapped or a
@@ -1232,7 +1156,6 @@ fn uio_ret(r: Result<usize, i64>) -> i64 {
 /// (`write_inode_uio`); this whole-content-replace shape is right for its one real caller, `oxfs_inode_content_write` (real fd-backed `MAP_SHARED`
 /// mmap writeback, which always supplies a mapping's complete current content).
 fn write_inode_data(inode_num: u32, content: &[u8]) -> bool {
-    content_changed(inode_num);
     let block_count = content.len().div_ceil(BLOCK_SIZE);
     for i in 0..block_count {
         let Some(blk) = inode_ensure_block_at(inode_num, i) else {
@@ -1286,7 +1209,6 @@ fn touch_atime(inode_num: u32) {
 /// kernel-stack floor could ever hold as one local buffer.
 fn resize_inode_data(inode_num: u32, new_size: usize) -> bool {
     let _delayed = delay_writes_of(inode_num);
-    content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if new_size > old_size {
         let mut pos = old_size;
@@ -1332,7 +1254,6 @@ fn write_inode_with(
     mut fill: impl FnMut(&mut [u8]) -> Result<(), i64>,
 ) -> Result<usize, i64> {
     let _delayed = delay_writes_of(inode_num);
-    content_changed(inode_num);
     let old_size = read_inode(inode_num).size as usize;
     if position > old_size && !resize_inode_data(inode_num, position) {
         return Err(-ENOSPC);
@@ -1769,7 +1690,6 @@ struct FileOps {
     stat: Option<extern "C" fn(u64, u64) -> i64>,
     truncate: Option<extern "C" fn(u64, u64) -> i64>,
     sync: Option<extern "C" fn(u64, u64) -> i64>,
-    content_id: Option<extern "C" fn(u64) -> i64>,
     fb_geometry: Option<extern "C" fn(u64, u64) -> i32>,
 }
 
@@ -1785,16 +1705,13 @@ static OXFS_OPS: FileOps = FileOps {
     close: Some(oxfs_close),
     ioctl: None,
     poll: None,
-    stat: Some(oxfs_fo_stat),
+    stat: None,
     truncate: None,
     sync: None,
-    content_id: None,
     fb_geometry: Some(oxfs_fb_geometry),
 };
 
-/// `FileOps::fb_geometry`.
-/// `-1` for every `OpenFile` variant except `Framebuffer`, matching `oxfs_content_id`'s own
-/// "discriminates by variant, harmless default for everything else" shape.
+/// `FileOps::fb_geometry`: `-1` for every `OpenFile` variant except `Framebuffer`.
 extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
     match find_open_file(real_fd) {
         Some(OpenFile::Framebuffer {
@@ -1824,105 +1741,6 @@ extern "C" fn oxfs_fb_geometry(real_fd: u64, out: u64) -> i32 {
     }
 }
 
-/// `read` accessor for `oxidebsd_register_content_accessors` — reads directly from `inode`'s real,
-/// committed block content via `read_inode_at`, bypassing any fd's own `OpenFile` state entirely.
-/// See `crate::fs::fd::ContentRead`'s own doc comment (kernel tree) for why this exists instead of
-/// reusing `oxfs_read`. Also the one real touch point for `mmap/13-1.c`'s own POSIX requirement
-/// (see `Inode::atime`'s own doc comment): `process::mm::do_mmap_file_backed` calls this to
-/// populate a real fd-backed mapping's covered pages, at `mmap()` call time -- a genuine "read
-/// reference," and the spec text explicitly permits marking atime "at any time between the
-/// mmap() call and the corresponding munmap() call," not just on each individual page's own first
-/// touch (which this kernel's eager, non-demand-paged population has no way to distinguish anyway).
-extern "C" fn oxfs_inode_content_read(inode: u64, offset: u64, ptr: u64, len: u64) -> i64 {
-    // SAFETY: same trust boundary as elsewhere -- caller (crate::process::mm, kernel-core) owns
-    // this pointer/length, always a page-aligned kernel staging buffer in practice.
-    let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
-    let n = read_inode_at(inode as u32, offset as usize, out);
-    if n > 0 {
-        touch_atime(inode as u32);
-    }
-    n as i64
-}
-
-/// `write` accessor for `oxidebsd_register_content_accessors` -- replaces `inode`'s complete real
-/// content with exactly `len` bytes via `write_inode_data`, same one-shot whole-content write
-/// primitive every other real write in this module ultimately goes through (see `OpenFile::Write`'s
-/// own doc comment). Reachable from kernel core without going through any fd's own
-/// `OpenFile::Write` buffer/close machinery, which real fd-backed mmap writeback can't use anyway
-/// -- see `crate::process::mm::do_mmap_file_backed`'s own doc comment.
-extern "C" fn oxfs_inode_content_write(inode: u64, ptr: u64, len: u64) -> i64 {
-    // SAFETY: same trust boundary as above.
-    let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    if write_inode_data(inode as u32, data) {
-        len as i64
-    } else {
-        -EIO
-    }
-}
-
-/// The kernel page cache's block map of `inode` (`DEMANDPAGE.md` §5.1): its delayed writes go to
-/// the disk first, then its data blocks are written into `out` (room for `cap`) as runs `[file
-/// page, disk block, length]`, the blocks numbered as oxfs numbers them (4 KiB, from the device's start), holes left
-/// out. The number of runs, or minus the number needed when `cap` is short; `i64::MIN` for a tmpfs
-/// file, which isn't on the disk.
-extern "C" fn oxfs_content_block_map(inode: u64, out: *mut [u64; 3], cap: u64) -> i64 {
-    let n = inode as u32;
-    if is_tmpfs_inode(n) {
-        return i64::MIN;
-    }
-    sync_file(n);
-    let record = read_inode(n);
-    let pages = (record.size as usize).div_ceil(BLOCK_SIZE);
-    let offset = data_block_offset() as u64;
-    let mut runs = 0u64;
-    let mut last: Option<[u64; 3]> = None;
-    let mut emit = |run: [u64; 3], runs: &mut u64| {
-        if *runs < cap {
-            // SAFETY: the caller (the kernel's `fd::content_block_map`) passes room for `cap`.
-            unsafe { *out.add(*runs as usize) = run };
-        }
-        *runs += 1;
-    };
-    for page in 0..pages {
-        let Some(block) = inode_block_at(&record, page) else { continue };
-        if is_tmpfs_block(block) {
-            return i64::MIN;
-        }
-        let block = offset + block as u64;
-        match last.as_mut() {
-            Some(run) if run[0] + run[2] == page as u64 && run[1] + run[2] == block => run[2] += 1,
-            _ => {
-                if let Some(run) = last.take() {
-                    emit(run, &mut runs);
-                }
-                last = Some([page as u64, block, 1]);
-            }
-        }
-    }
-    if let Some(run) = last {
-        emit(run, &mut runs);
-    }
-    if runs <= cap { runs as i64 } else { -(runs as i64) }
-}
-
-/// `size` accessor for `oxidebsd_register_content_accessors` -- `inode`'s real current content
-/// length in bytes.
-extern "C" fn oxfs_inode_content_size(inode: u64) -> i64 {
-    read_inode(inode as u32).size as i64
-}
-
-/// `is_shm` accessor for `oxidebsd_register_content_accessors`: whether `inode` is a POSIX shared
-/// memory object (`Inode::shm`).
-extern "C" fn oxfs_inode_is_shm(inode: u64) -> i64 {
-    read_inode(inode as u32).shm as i64
-}
-
-/// Exec reads a program's set-ID bits from its vnode now (`kern::vfs_vnops::exec_setid`); no
-/// file oxfs opens itself (a device) is a program.
-extern "C" fn oxfs_exec_setid(_real_fd: u64, _out: *mut u32) -> i64 {
-    -1
-}
-
 /// Whether `dir` is devfs's `/dev/shm`, where musl's `shm_open` creates its objects.
 fn is_shm_dir(dir: u32) -> bool {
     let root = devfs_root();
@@ -1940,139 +1758,7 @@ fn find_open_file(fd: u64) -> Option<&'static mut OpenFile> {
 
 // --- terminals and /proc symlinks (TTY.md §6) ------------------------------------------------
 
-const FD_KIND_TTY: i64 = 1;
-const FD_KIND_PIPE: i64 = 2;
-const FD_KIND_SOCKET: i64 = 3;
-const FD_KIND_FIFO: i64 = 4;
-/// A device opened through devfs; the argument is its `st_rdev`.
-const FD_KIND_DEVICE: i64 = 6;
 
-
-
-/// `/dev`'s node for character device `rdev`: its inode and its name relative to `/dev`
-/// (`ttyv0`, or `pts/0` one directory down). Searches devfs, whose root a bare `dir_lookup` of
-/// `/dev` doesn't reach (it's a mount).
-fn dev_node_for(rdev: u32) -> Option<(u32, [u8; NAME_MAX], u8)> {
-    let dev = if devfs_root() != u32::MAX {
-        devfs_sync();
-        devfs_root()
-    } else {
-        dir_lookup(ROOT_INODE, b"dev")?
-    };
-    let mut found = None;
-    let mut subdirs: [(u32, [u8; NAME_MAX], u8); 8] = [(0, [0; NAME_MAX], 0); 8];
-    let mut nsub = 0;
-    for_each_dir_record(dev, |name, child_num| {
-        let child = read_inode(child_num);
-        if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
-            let mut buf = [0u8; NAME_MAX];
-            buf[..name.len()].copy_from_slice(name);
-            found = Some((child_num, buf, name.len() as u8));
-        } else if child.kind == InodeKind::Dir && name != b"." && name != b".." && nsub < subdirs.len() {
-            subdirs[nsub].0 = child_num;
-            subdirs[nsub].1[..name.len()].copy_from_slice(name);
-            subdirs[nsub].2 = name.len() as u8;
-            nsub += 1;
-        }
-        found.is_none()
-    });
-    if found.is_some() {
-        return found;
-    }
-    for (dir, dname, dlen) in subdirs[..nsub].iter() {
-        let prefix = &dname[..*dlen as usize];
-        for_each_dir_record(*dir, |name, child_num| {
-            let child = read_inode(child_num);
-            if child.kind == InodeKind::Device && child.device_char && child.rdev == rdev {
-                let len = prefix.len() + 1 + name.len();
-                if len <= NAME_MAX {
-                    let mut buf = [0u8; NAME_MAX];
-                    buf[..prefix.len()].copy_from_slice(prefix);
-                    buf[prefix.len()] = b'/';
-                    buf[prefix.len() + 1..len].copy_from_slice(name);
-                    found = Some((child_num, buf, len as u8));
-                }
-            }
-            found.is_none()
-        });
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
-}
-
-/// Calls `f(name, inode)` for each record of directory `dir` while it returns true.
-fn for_each_dir_record(dir: u32, mut f: impl FnMut(&[u8], u32) -> bool) {
-    let inode = read_inode(dir);
-    let mut i = 0;
-    while let Some(blk) = inode_block_at(&inode, i) {
-        let block = read_block(blk);
-        for r in 0..RECORDS_PER_BLOCK {
-            if !dir_record_used(&block, r) {
-                continue;
-            }
-            if !f(dir_record_name(&block, r), dir_record_inode(&block, r)) {
-                return;
-            }
-        }
-        i += 1;
-    }
-}
-
-/// `stat_real_fd`'s `struct stat`: an oxfs file's inode; a terminal or device by its node; a FIFO
-/// by the inode naming it; a pipe or socket synthetically.
-fn real_fd_stat(real_fd: u64) -> Result<MuslStat, i64> {
-    let mut arg = 0u64;
-    // SAFETY: FFI call to a kernel-exported function, matching its declared signature.
-    Ok(match unsafe { oxidebsd_real_fd_kind(real_fd, &mut arg) } {
-        FD_KIND_TTY | FD_KIND_DEVICE => match dev_node_for(arg as u32) {
-            Some((inode, _, _)) => inode_stat(inode),
-            None => synthetic_stat(S_IFCHR | 0o600, arg, 0),
-        },
-        FD_KIND_PIPE => synthetic_stat(S_IFIFO | 0o600, 0, arg),
-        FD_KIND_SOCKET => synthetic_stat(S_IFSOCK | 0o777, 0, arg),
-        FD_KIND_FIFO => inode_stat(arg as u32),
-        _ => return Err(-EBADF),
-    })
-}
-
-/// `FileOps::stat` (oxfs's files) and the kernel's stat fallback (every file whose table has no
-/// `stat`: `oxidebsd_register_stat_fallback`): fills the `struct stat` at `out`, a kernel buffer.
-extern "C" fn oxfs_fo_stat(real_fd: u64, out: u64) -> i64 {
-    match real_fd_stat(real_fd) {
-        Ok(stat) => {
-            // SAFETY: `out` is the kernel's own `struct stat` buffer (kernel tree:
-            // `kern::kern_descrip::sys_fstat`), never a user pointer.
-            unsafe { core::ptr::write_unaligned(out as *mut MuslStat, stat) };
-            0
-        }
-        Err(e) => e,
-    }
-}
-
-fn synthetic_stat(mode: u32, rdev: u64, ino: u64) -> MuslStat {
-    MuslStat {
-        st_dev: 0,
-        st_ino: ino,
-        st_nlink: 1,
-        st_mode: mode,
-        st_uid: 0,
-        st_gid: 0,
-        __pad0: 0,
-        st_rdev: rdev,
-        st_size: 0,
-        st_blksize: BLOCK_SIZE as i64,
-        st_blocks: 0,
-        st_atime_sec: 0,
-        st_atime_nsec: 0,
-        st_mtime_sec: 0,
-        st_mtime_nsec: 0,
-        st_ctime_sec: 0,
-        st_ctime_nsec: 0,
-        __unused: [0; 3],
-    }
-}
 
 
 /// Splits a raw `dev_t` register value into `(major, minor)` the same way musl's own
@@ -2723,19 +2409,7 @@ pub extern "C" fn module_init() -> i32 {
         }
     }
 
-    // SAFETY: FFI calls to kernel-exported functions, matching their declared signatures exactly.
-    // The path calls are the kernel's (`kern::vfs_syscalls`, registered by the `vfs` module).
-    unsafe {
-        // fstat of a FIFO, terminal or device asks `oxfs_fo_stat`, which names them by their nodes.
-        oxidebsd_register_stat_fallback(oxfs_fo_stat);
-        oxidebsd_register_content_accessors(
-            oxfs_inode_content_read,
-            oxfs_inode_content_write,
-            oxfs_inode_content_size,
-            oxfs_inode_is_shm,
-            oxfs_exec_setid,
-        );
-        oxidebsd_register_content_block_map(oxfs_content_block_map);
-    }
+    // The path calls are the kernel's (`kern::vfs_syscalls`, registered by the `vfs` module); a
+    // file's contents reach the page cache and exec through its vnode (`vfs.rs`).
     0
 }

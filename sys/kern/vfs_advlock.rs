@@ -15,13 +15,13 @@ const EINVAL: i32 = 22;
 
 pub(crate) const LOCK_SH: u32 = 1;
 pub(crate) const LOCK_EX: u32 = 2;
-pub(crate) const LOCK_NB: u32 = 4;
 pub(crate) const LOCK_UN: u32 = 8;
 
 /// `(vnode, holder handle, exclusive)`.
 static LOCKS: Mutex<Vec<(usize, u64, bool)>> = Mutex::new(Vec::new());
 
-/// `flock(2)` on `vp` for the description `handle`.
+/// `flock(2)` on `vp` for the description `handle` (`LOCK_NB` changes nothing: a conflict never
+/// waits yet).
 pub(crate) fn flock(vp: *mut Vnode, handle: u64, op: u32) -> i32 {
     let vp = vp as usize;
     let mut locks = LOCKS.lock();

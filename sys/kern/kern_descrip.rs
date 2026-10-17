@@ -41,10 +41,16 @@ pub(crate) extern "C" fn oxidebsd_sys_close(fd: u64, _a1: u64, _a2: u64, _a3: u6
     if fd::oxidebsd_close_fd(fd) == 0 { 0 } else { -(EBADF as i64) }
 }
 
-/// A file's `struct stat`, from its `stat` operation (or the fallback), into a kernel buffer.
+/// A file's `struct stat`, from its `stat` operation (or `fd::fallback_stat`), into a kernel
+/// buffer.
 fn stat_of(real_fd: u64, ops: &fd::FileOps) -> Result<[u64; STAT_SIZE / 8], u64> {
-    let stat = fd::stat_op(ops).ok_or(EBADF)?;
     let mut buf = [0u64; STAT_SIZE / 8];
+    let Some(stat) = ops.stat else {
+        let st = fd::fallback_stat(real_fd).ok_or(EBADF)?;
+        // SAFETY: a 144-byte plain-data record into a 144-byte buffer.
+        unsafe { core::ptr::write_unaligned(buf.as_mut_ptr() as *mut crate::kern::vfs_vnops::Stat, st) };
+        return Ok(buf);
+    };
     let r = call(stat as usize, || stat(real_fd, buf.as_mut_ptr() as u64));
     if r < 0 { Err(r.unsigned_abs()) } else { Ok(buf) }
 }

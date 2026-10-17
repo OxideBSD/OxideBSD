@@ -135,6 +135,9 @@ pub(crate) fn getnewvnode(mp: *mut Mount, vtype: VType, fileid: u64, vops: *cons
         v_rdev: 0,
         v_object: 0,
         v_un: 0,
+        v_lower: ptr::null_mut(),
+        v_writecount: 0,
+        v_textcount: 0,
     }));
     NUMVNODES.fetch_add(1, Ordering::Relaxed);
     // SAFETY: `mp` is live (the caller is operating on it).
@@ -201,8 +204,14 @@ pub(crate) fn vrele(vp: *mut Vnode) {
     if v.v_flag & VI_DOOMED == 0 {
         // SAFETY: a live vnode's operations vector is a registered static.
         if let Some(inactive) = unsafe { (*v.v_op).inactive } {
-            let _lock = fslock::Guard::for_call(inactive as usize as u64);
-            inactive(vp);
+            // The file system may free the file now, which recycles this vnode and drops what held
+            // it (the page cache's hold): `VI_ININACT` keeps it for this function to free.
+            v.v_flag |= VI_ININACT;
+            {
+                let _lock = fslock::Guard::for_call(inactive as usize as u64);
+                inactive(vp);
+            }
+            v.v_flag &= !VI_ININACT;
         }
     }
     // `inactive` may have taken (and dropped) references of its own.
@@ -280,7 +289,7 @@ pub(crate) fn vdrop(vp: *mut Vnode) {
     let v = unsafe { &mut *vp };
     assert!(v.v_holdcnt > 0, "vdrop: vnode not held");
     v.v_holdcnt -= 1;
-    if v.v_holdcnt == 0 && v.v_usecount == 0 {
+    if v.v_holdcnt == 0 && v.v_usecount == 0 && v.v_flag & VI_ININACT == 0 {
         if v.v_flag & VI_DOOMED != 0 {
             free_vnode(vp);
         } else {
@@ -318,6 +327,10 @@ pub(crate) fn vgone(vp: *mut Vnode) {
         let _lock = fslock::Guard::for_call(reclaim as usize as u64);
         reclaim(vp);
     }
+    // Its cached pages are of a file that's gone or being forgotten (FreeBSD's
+    // `vnode_destroy_vobject`). Last: dropping the cache's hold may free the vnode, when nothing
+    // else has it.
+    crate::memory::pagecache::vnode_gone(vp as u64);
 }
 
 /// Frees a doomed vnode with no references.
@@ -435,6 +448,14 @@ pub(crate) extern "C" fn oxidebsd_vfs_fileid_busy(mp: *mut Mount, fileid: u64) -
 
 pub(crate) extern "C" fn oxidebsd_vfs_recycle(mp: *mut Mount, fileid: u64) {
     vrecycle(mp, fileid)
+}
+
+pub(crate) extern "C" fn oxidebsd_vhold(vp: *mut Vnode) {
+    vhold(vp)
+}
+
+pub(crate) extern "C" fn oxidebsd_vdrop(vp: *mut Vnode) {
+    vdrop(vp)
 }
 
 pub(crate) extern "C" fn oxidebsd_vref(vp: *mut Vnode) {

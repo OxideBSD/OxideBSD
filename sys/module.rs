@@ -1180,12 +1180,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_pipe2" => Some(crate::syscall::oxidebsd_sys_pipe2 as *const () as u64),
         "oxidebsd_sys_dup2" => Some(crate::syscall::oxidebsd_sys_dup2 as *const () as u64),
         "oxidebsd_alloc_fd" => Some(crate::fs::fd::oxidebsd_alloc_fd as *const () as u64),
-        "oxidebsd_register_content_accessors" => {
-            Some(crate::fs::fd::oxidebsd_register_content_accessors as *const () as u64)
-        }
-        "oxidebsd_register_content_block_map" => {
-            Some(crate::fs::fd::oxidebsd_register_content_block_map as *const () as u64)
-        }
         "oxidebsd_close_fd" => Some(crate::fs::fd::oxidebsd_close_fd as *const () as u64),
         "oxidebsd_set_fd_cloexec" => {
             Some(crate::fs::fd::oxidebsd_set_fd_cloexec as *const () as u64)
@@ -1197,10 +1191,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
             Some(crate::kern::subr_uio::oxidebsd_uio_kernel_new as *const () as u64)
         }
         "oxidebsd_uio_free" => Some(crate::kern::subr_uio::oxidebsd_uio_free as *const () as u64),
-        "oxidebsd_inode_in_use" => Some(crate::process::oxidebsd_inode_in_use as *const () as u64),
-        "oxidebsd_content_changed" => {
-            Some(crate::memory::pagecache::oxidebsd_content_changed as *const () as u64)
-        }
         "oxidebsd_make_dev" => Some(crate::fs::devfs::oxidebsd_make_dev as *const () as u64),
         "oxidebsd_destroy_dev" => Some(crate::fs::devfs::oxidebsd_destroy_dev as *const () as u64),
         "oxidebsd_dev_open" => Some(crate::fs::devfs::oxidebsd_dev_open as *const () as u64),
@@ -1235,9 +1225,6 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_sys_ftruncate" => Some(crate::kern::kern_descrip::oxidebsd_sys_ftruncate as *const () as u64),
         "oxidebsd_sys_fsync" => Some(crate::kern::kern_descrip::oxidebsd_sys_fsync as *const () as u64),
         "oxidebsd_sys_fdatasync" => Some(crate::kern::kern_descrip::oxidebsd_sys_fdatasync as *const () as u64),
-        "oxidebsd_register_stat_fallback" => {
-            Some(crate::fs::fd::oxidebsd_register_stat_fallback as *const () as u64)
-        }
         "oxidebsd_sys_get_keyevent" => {
             Some(crate::syscall::oxidebsd_sys_get_keyevent as *const () as u64)
         }
@@ -1469,6 +1456,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_vfs_hash_insert" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_insert as *const () as u64),
         "oxidebsd_vfs_hash_rehash" => Some(crate::kern::vfs_subr::oxidebsd_vfs_hash_rehash as *const () as u64),
         "oxidebsd_vref" => Some(crate::kern::vfs_subr::oxidebsd_vref as *const () as u64),
+        "oxidebsd_vhold" => Some(crate::kern::vfs_subr::oxidebsd_vhold as *const () as u64),
+        "oxidebsd_vdrop" => Some(crate::kern::vfs_subr::oxidebsd_vdrop as *const () as u64),
         "oxidebsd_vfs_fileid_busy" => Some(crate::kern::vfs_subr::oxidebsd_vfs_fileid_busy as *const () as u64),
         "oxidebsd_vfs_recycle" => Some(crate::kern::vfs_subr::oxidebsd_vfs_recycle as *const () as u64),
         "oxidebsd_vrele" => Some(crate::kern::vfs_subr::oxidebsd_vrele as *const () as u64),

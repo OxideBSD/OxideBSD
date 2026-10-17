@@ -37,6 +37,11 @@ struct OxMount {
     /// The inode the mount's root is.
     root: u32,
     kind: u32,
+    /// A nullfs mount's: the mount it shows a directory of, whose vnodes hold the contents.
+    lower: *mut Mount,
+    /// A nullfs mount's: that directory, in use for as long as it's mounted, so the lower mount
+    /// can't be unmounted from under it (`EBUSY`).
+    lower_root: *mut Vnode,
 }
 
 const KIND_DISK: u32 = 0;
@@ -58,10 +63,10 @@ macro_rules! vfsconf {
     };
 }
 
-vfsconf!(OXFS_VFSCONF, b"oxfs", OXFS_VFSOPS, VFCF_INODE_CONTENT);
-vfsconf!(TMPFS_VFSCONF, b"tmpfs", TMPFS_VFSOPS, VFCF_SYNTHETIC | VFCF_INODE_CONTENT);
-vfsconf!(DEVFS_VFSCONF, b"devfs", DEVFS_VFSOPS, VFCF_SYNTHETIC | VFCF_NOCACHE | VFCF_INODE_CONTENT);
-vfsconf!(NULLFS_VFSCONF, b"nullfs", NULLFS_VFSOPS, VFCF_FROM_VNODE | VFCF_INODE_CONTENT);
+vfsconf!(OXFS_VFSCONF, b"oxfs", OXFS_VFSOPS, 0);
+vfsconf!(TMPFS_VFSCONF, b"tmpfs", TMPFS_VFSOPS, VFCF_SYNTHETIC);
+vfsconf!(DEVFS_VFSCONF, b"devfs", DEVFS_VFSOPS, VFCF_SYNTHETIC | VFCF_NOCACHE);
+vfsconf!(NULLFS_VFSCONF, b"nullfs", NULLFS_VFSOPS, VFCF_FROM_VNODE);
 
 macro_rules! vfsops {
     ($name:ident, $mount:ident) => {
@@ -99,6 +104,8 @@ static OXFS_VOPS: VopVector = VopVector {
     readdir: Some(oxfs_vop_readdir),
     readlink: Some(oxfs_vop_readlink),
     inactive: Some(oxfs_vop_inactive),
+    reclaim: Some(oxfs_vop_reclaim),
+    bmap: Some(oxfs_vop_bmap),
     allocate: Some(oxfs_vop_allocate),
     ..VopVector::DEFAULT
 };
@@ -196,7 +203,7 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
     }
     // SAFETY: before any process runs; nothing else reads it yet.
     unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = mp };
-    *oxmount(mp) = OxMount { root: ROOT_INODE, kind: KIND_DISK };
+    *oxmount(mp) = OxMount { root: ROOT_INODE, kind: KIND_DISK, lower: ptr::null_mut(), lower_root: ptr::null_mut() };
     registered(mp);
     // Mounting leaves PERSISTENCE_READY false through its own reads (see that flag's own doc
     // comment) -- flipped here, once, right before real syscalls become reachable, so every write
@@ -236,7 +243,7 @@ extern "C" fn tmpfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
         return VFS_EINVAL;
     }
     let Some(root) = new_tmpfs_root() else { return VFS_ENOSPC };
-    *oxmount(mp) = OxMount { root, kind: KIND_TMPFS };
+    *oxmount(mp) = OxMount { root, kind: KIND_TMPFS, lower: ptr::null_mut(), lower_root: ptr::null_mut() };
     registered(mp);
     0
 }
@@ -254,7 +261,7 @@ extern "C" fn devfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
     // SAFETY: under the giant lock.
     unsafe { *ptr::addr_of_mut!(DEVFS_ROOT) = root };
     devfs_sync();
-    *oxmount(mp) = OxMount { root, kind: KIND_DEVFS };
+    *oxmount(mp) = OxMount { root, kind: KIND_DEVFS, lower: ptr::null_mut(), lower_root: ptr::null_mut() };
     registered(mp);
     0
 }
@@ -272,7 +279,10 @@ extern "C" fn nullfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     if !ours.iter().any(|&c| ptr::eq(c, from_vfc)) {
         return VFS_EXDEV;
     }
-    *oxmount(mp) = OxMount { root: inode_of(from), kind: KIND_NULLFS };
+    // SAFETY: referenced by the kernel for the call; kept in use until this mount goes.
+    unsafe { oxidebsd_vref(from) };
+    let lower = unsafe { (*from).v_mount };
+    *oxmount(mp) = OxMount { root: inode_of(from), kind: KIND_NULLFS, lower, lower_root: from };
     registered(mp);
     0
 }
@@ -282,6 +292,11 @@ extern "C" fn nullfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
 /// tmpfs's files stay in the pool, as before the VFS).
 extern "C" fn oxfs_vfs_unmount(mp: *mut Mount, _flags: u64) -> i32 {
     our_mounts().retain(|&m| m != mp);
+    let lower_root = oxmount(mp).lower_root;
+    if !lower_root.is_null() {
+        // SAFETY: kernel export; the reference `nullfs_vfs_mount` took.
+        unsafe { oxidebsd_vrele(lower_root) };
+    }
     if oxmount(mp).kind != KIND_DISK || root_rdonly() {
         return 0;
     }
@@ -370,6 +385,18 @@ extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -
         }
         if fileid == oxmount(mp).root as u64 {
             (*vp).v_flag |= VV_ROOT;
+        }
+        // A nullfs vnode's contents are the lower mount's vnode's (VFS.md §13): it holds that one,
+        // or the one that one holds, so the page cache, mappings, FIFOs and sockets see one file.
+        let lower_mp = oxmount(mp).lower;
+        if !lower_mp.is_null() {
+            let mut lower = ptr::null_mut();
+            if oxfs_vfs_vget(lower_mp, fileid, &mut lower) == 0 {
+                let object = if (*lower).v_lower.is_null() { lower } else { (*lower).v_lower };
+                oxidebsd_vhold(object);
+                (*vp).v_lower = object;
+                oxidebsd_vrele(lower);
+            }
         }
         oxidebsd_vfs_hash_insert(vp);
         *vpp = vp;
@@ -516,7 +543,6 @@ extern "C" fn oxfs_vop_remove(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const Compo
     inode.nlink = inode.nlink.saturating_sub(1);
     write_inode(target, inode);
     maybe_release(target);
-    retry_orphans();
     0
 }
 
@@ -532,7 +558,6 @@ extern "C" fn oxfs_vop_rmdir(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const Compon
     dir.nlink = 0;
     write_inode(target, dir);
     maybe_release(target);
-    retry_orphans();
     0
 }
 
@@ -669,7 +694,7 @@ extern "C" fn oxfs_vop_getattr(vp: *mut Vnode, vap: *mut Vattr) -> i32 {
         va_ctime: t(inode.ctime),
         va_birthtime: t(inode.ctime),
         va_gen: 0,
-        va_flags: 0,
+        va_flags: if inode.shm { VF_SHM } else { 0 },
         va_rdev: st.st_rdev,
         va_bytes: st.st_blocks as u64 * 512,
         va_vaflags: 0,
@@ -767,7 +792,6 @@ extern "C" fn oxfs_vop_fsync(vp: *mut Vnode, _waitfor: i32, _data_only: u32) -> 
 /// The last use of the file went: an unlinked file's storage goes now.
 extern "C" fn oxfs_vop_inactive(vp: *mut Vnode) -> i32 {
     maybe_release(inode_of(vp));
-    retry_orphans();
     0
 }
 
@@ -778,4 +802,50 @@ extern "C" fn oxfs_vop_allocate(vp: *mut Vnode, offset: u64, len: u64) -> i32 {
         return 0;
     }
     if resize_inode_data(n, target) { 0 } else { VFS_ENOSPC }
+}
+
+/// File block `lblkno` to its sector on the disk, and how many blocks after it follow contiguously
+/// (`DEMANDPAGE.md` §5.1): the page cache fills mapped pages from the device with it. A tmpfs
+/// file has no device blocks (`EOPNOTSUPP`), nor does a block past the end (a hole).
+extern "C" fn oxfs_vop_bmap(vp: *mut Vnode, lblkno: u64, bnp: *mut u64, runp: *mut u64) -> i32 {
+    const VFS_EOPNOTSUPP: i32 = 95;
+    let n = inode_of(vp);
+    if is_tmpfs_inode(n) {
+        return VFS_EOPNOTSUPP;
+    }
+    let record = read_inode(n);
+    let device = |index: usize| -> Option<u64> {
+        let block = inode_block_at(&record, index)?;
+        (!is_tmpfs_block(block)).then(|| data_block_offset() as u64 + block as u64)
+    };
+    let (bn, run) = match device(lblkno as usize) {
+        Some(first) => {
+            let pages = (record.size as usize).div_ceil(BLOCK_SIZE);
+            let mut run = 0u64;
+            while (lblkno + run + 1) < pages as u64 && device((lblkno + run + 1) as usize) == Some(first + run + 1) {
+                run += 1;
+            }
+            (first * (BLOCK_SIZE as u64 / 512), run)
+        }
+        None => (u64::MAX, 0),
+    };
+    // SAFETY: the kernel's out-parameters.
+    unsafe {
+        *bnp = bn;
+        *runp = run;
+    }
+    0
+}
+
+/// The vnode is going: a nullfs vnode lets go of the lower one it holds (`v_lower`).
+extern "C" fn oxfs_vop_reclaim(vp: *mut Vnode) -> i32 {
+    // SAFETY: the kernel's vnode, being reclaimed.
+    unsafe {
+        let lower = (*vp).v_lower;
+        if !lower.is_null() {
+            (*vp).v_lower = ptr::null_mut();
+            oxidebsd_vdrop(lower);
+        }
+    }
+    0
 }

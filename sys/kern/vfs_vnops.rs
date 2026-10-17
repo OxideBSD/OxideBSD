@@ -15,14 +15,12 @@ use crate::kern::vfs_lookup::{self, Namei, NameiData};
 use crate::kern::vfs_subr::{current_ucred, vrele};
 use crate::kern::vnode_if::*;
 
-pub(crate) const EACCES: i32 = 13;
 pub(crate) const EEXIST: i32 = 17;
 pub(crate) const EISDIR: i32 = 21;
 pub(crate) const ELOOP: i32 = 40;
+pub(crate) const ETXTBSY: i32 = 26;
 pub(crate) const EROFS: i32 = 30;
-pub(crate) const ENXIO: i32 = 6;
 
-pub(crate) const O_ACCMODE: u64 = 0o3;
 pub(crate) const O_CREAT: u64 = 0o100;
 pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
@@ -218,6 +216,12 @@ fn open_checks(vp: *mut Vnode, oflags: u64, fflag: u32, created: bool, cred: &Uc
     if (writing || oflags & O_TRUNC != 0) && matches!(t, VREG | VDIR) && rdonly(vp) {
         return Err(EROFS);
     }
+    // A running program can't be opened for writing (`ETXTBSY`, as on the BSDs).
+    let obj = object_vp(vp);
+    // SAFETY: the caller holds `vp`, and it its lower vnode.
+    if (writing || oflags & O_TRUNC != 0) && t == VREG && unsafe { (*obj).v_textcount } > 0 {
+        return Err(ETXTBSY);
+    }
     if oflags & O_TRUNC != 0 && t == VREG && !created {
         let mut va = Vattr::NULL;
         va.va_size = 0;
@@ -227,7 +231,14 @@ fn open_checks(vp: *mut Vnode, oflags: u64, fflag: u32, created: bool, cred: &Uc
         }
     }
     let e = vop_open(vp, fflag, cred);
-    if e != 0 { Err(e) } else { Ok(()) }
+    if e != 0 {
+        return Err(e);
+    }
+    if writing && t == VREG {
+        // SAFETY: as above; `vn_close` takes it back.
+        unsafe { (*obj).v_writecount += 1 };
+    }
+    Ok(())
 }
 
 // --- The descriptor operations of a vnode file ---------------------------------------------------
@@ -269,6 +280,10 @@ extern "C" fn vn_close(handle: u64) -> i64 {
     let vp = vnode_of(handle);
     let flag = fd::file_of(handle).map_or(0, |(_, f, _, _)| f);
     crate::kern::vfs_advlock::release_all(vp, handle);
+    if flag & FWRITE != 0 && vtype(vp) == VREG {
+        // SAFETY: the open file holds `vp`, and it its lower vnode.
+        unsafe { (*object_vp(vp)).v_writecount -= 1 };
+    }
     vop_close(vp, flag, &current_ucred());
     vrele(vp);
     0
@@ -317,20 +332,9 @@ pub(crate) static VN_OPS: FileOps = FileOps {
     stat: Some(vn_stat_op),
     truncate: Some(vn_truncate),
     sync: Some(vn_sync),
-    content_id: Some(vn_content_id),
     fb_geometry: None,
 };
 
-/// `mmap`'s identity for the file: its file ID, for a type whose file IDs are content IDs
-/// (`VFCF_INODE_CONTENT`, until step 2c keys the page cache by vnode); else not mappable.
-extern "C" fn vn_content_id(handle: u64) -> i64 {
-    let vp = vnode_of(handle);
-    // SAFETY: the open file holds `vp`; its mount and type are live.
-    unsafe {
-        let flags = (*(*(*vp).v_mount).mnt_vfc).flags;
-        if (*vp).v_type == VREG && flags & VFCF_INODE_CONTENT != 0 { (*vp).v_fileid as i64 } else { -1 }
-    }
-}
 
 /// `execve`'s view of the program open on `vp`: mode, owner and group (the set-ID bits cleared on
 /// a `nosuid` mount), and whether its mount is `wxallowed`.
@@ -343,4 +347,85 @@ pub(crate) fn exec_setid(vp: *mut Vnode) -> Option<((u32, u32, u32), bool)> {
         mode &= !0o6000;
     }
     Some(((mode, va.va_uid, va.va_gid), mflag & MNT_WXALLOWED != 0))
+}
+
+// --- A file's contents, for the page cache, mappings and exec --------------------------------------
+//
+// Named by a "content ID": the address of the vnode holding the contents (`object_vp`), which its
+// holders keep referenced or held. They read and write it through the vnode operations, and
+// pages fill from its device blocks (`vop_bmap`) without going through `read`.
+
+/// The vnode holding `vp`'s contents: a nullfs vnode's lower one, else `vp` (`VFS.md` §13).
+pub(crate) fn object_vp(vp: *mut Vnode) -> *mut Vnode {
+    // SAFETY: the caller holds `vp`.
+    let lower = unsafe { (*vp).v_lower };
+    if lower.is_null() { vp } else { lower }
+}
+
+fn content_vp(content_id: u64) -> *mut Vnode {
+    content_id as *mut Vnode
+}
+
+/// The size of a regular file's contents; `-1` for anything else.
+pub(crate) fn content_size(content_id: u64) -> i64 {
+    let vp = content_vp(content_id);
+    match vop_getattr(vp) {
+        Ok(va) if va.va_type == VREG => va.va_size as i64,
+        _ => -1,
+    }
+}
+
+/// Whether the file is a POSIX shared memory object (`VF_SHM`).
+pub(crate) fn content_is_shm(content_id: u64) -> bool {
+    vop_getattr(content_vp(content_id)).is_ok_and(|va| va.va_flags != VNOVAL && va.va_flags & VF_SHM != 0)
+}
+
+fn kernel_uio(ptr: u64, len: u64, rw: crate::kern::subr_uio::UioRw, offset: u64) -> Option<KUio> {
+    use crate::kern::subr_uio::{IoSeg, UioSeg};
+    KUio::new(alloc::vec![IoSeg { base: ptr, len }], rw, UioSeg::Kernel, offset).ok()
+}
+
+/// Reads `len` bytes at `offset` into kernel memory at `ptr`; the bytes read, or `-1`.
+pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> i64 {
+    let Some(mut uio) = kernel_uio(ptr, len, crate::kern::subr_uio::UioRw::Read, offset) else { return -1 };
+    let cred = current_ucred();
+    vop_read(content_vp(content_id), &mut uio as *mut KUio as u64, 0, &cred).map_or(-1, |n| n as i64)
+}
+
+/// Writes `len` bytes from kernel memory at `ptr` at the start of the file (a shared mapping's
+/// writeback, which covers the whole file); the bytes written, or `-1`.
+pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
+    let Some(mut uio) = kernel_uio(ptr, len, crate::kern::subr_uio::UioRw::Write, 0) else { return -1 };
+    let cred = current_ucred();
+    vop_write(content_vp(content_id), &mut uio as *mut KUio as u64, 0, &cred).map_or(-1, |n| n as i64)
+}
+
+/// The file's device blocks, for demand paging (`DEMANDPAGE.md` §5.1): the mount's device and runs
+/// `[file page, device block (4 KiB), length]`, the file's delayed writes put on the device first.
+/// `None` for a file with no device blocks (tmpfs) or a file system without `bmap`.
+pub(crate) fn content_block_map(content_id: u64) -> Option<(u32, alloc::vec::Vec<[u64; 3]>)> {
+    let vp = content_vp(content_id);
+    // SAFETY: the caller holds the vnode; its mount lives while it does.
+    let dev = unsafe { (*(*vp).v_mount).mnt_dev };
+    if dev == NODEV {
+        return None;
+    }
+    let size = vop_getattr(vp).ok()?.va_size;
+    vop_fsync(vp, MNT_WAIT, false);
+    let pages = size.div_ceil(4096);
+    let mut runs: alloc::vec::Vec<[u64; 3]> = alloc::vec::Vec::new();
+    let mut page = 0;
+    while page < pages {
+        let (sector, run) = vop_bmap(vp, page).ok()?;
+        let count = (run + 1).min(pages - page);
+        if sector != u64::MAX {
+            let block = sector / 8;
+            match runs.last_mut() {
+                Some(r) if r[0] + r[2] == page && r[1] + r[2] == block => r[2] += count,
+                _ => runs.push([page, block, count]),
+            }
+        }
+        page += count;
+    }
+    Some((dev as u32, runs))
 }

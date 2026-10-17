@@ -262,7 +262,9 @@ fn open_common(path: &[u8], start: *mut Vnode, flags: u64, mode: u64) -> R {
             return Err(ENXIO);
         }
         VFIFO => {
-            let key = unsafe { (*vp).v_fileid };
+            // Keyed by the vnode holding the file (a nullfs vnode's lower one), which the FIFO's
+            // descriptor holds: the key can't be reused while it's open.
+            let key = vfs_vnops::object_vp(vp) as u64;
             let r = crate::fs::pipe::oxidebsd_fifo_open(key, flags);
             if r < 0 {
                 vrele(vp);
@@ -276,7 +278,12 @@ fn open_common(path: &[u8], start: *mut Vnode, flags: u64, mode: u64) -> R {
             let r = fd::finstall(real_fd, &VN_OPS, vp as u64, fd::open_flag(flags), fd::FdKind::Vnode);
             if r < 0 {
                 let cred = current_ucred();
-                vop_close(vp, fd::open_flag(flags), &cred);
+                let fflag = fd::open_flag(flags);
+                if fflag & FWRITE != 0 && vtype(vp) == VREG {
+                    // SAFETY: held; `vn_open` counted it.
+                    unsafe { (*vfs_vnops::object_vp(vp)).v_writecount -= 1 };
+                }
+                vop_close(vp, fflag, &cred);
                 vrele(vp);
                 return Err((-r) as i32);
             }

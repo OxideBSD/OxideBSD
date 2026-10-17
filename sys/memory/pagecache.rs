@@ -3,23 +3,27 @@
 //! read-only segments) or maps it privately without write access (`mmap`), instead of a fresh
 //! copy each time.
 //!
-//! - An **entry** is a file, by content id (the oxfs inode number), with its size when the
-//!   entry was made and a frame per page, filled on first use.
+//! - An **entry** is a file, by content id (its vnode, `kern::vfs_vnops::object_vp`), with its
+//!   size when the entry was made and a frame per page, filled on first use. The entry holds the
+//!   vnode's memory (`vhold`); while an address space uses it, the file too (`vref`), so a running
+//!   or mapped file stays even unlinked. An entry nobody uses doesn't keep its file: when the
+//!   vnode goes (`vgone`), so does the entry (`vnode_gone`).
 //! - Each `AddressSpace` lists the entries it uses (`AddressSpace::cached`); an entry's `uses` is
 //!   how many address spaces list it. `fork` copies the list, teardown releases it.
 //! - Cached frames are mapped without `WRITABLE`, with `SHARED_LEAF` (teardown leaves them, `fork`
-//!   aliases them) and `CACHED_LEAF` (`mprotect` copies one before making it writable). They're freed when their entry has left the cache (the file changed,
-//!   `oxidebsd_content_changed`, or eviction) and no address space uses it.
+//!   aliases them) and `CACHED_LEAF` (`mprotect` copies one before making it writable). They're
+//!   freed when their entry has left the cache (the file changed, `changed`; its vnode went; or
+//!   eviction) and no address space uses it.
 //! - At most a quarter of memory is held in entries nobody uses; beyond that the least recently
 //!   used go. When the frame allocator runs out, it takes them back too (`reclaim`).
 //!
 //! - **Demand paging** (OxideBSD-doc `DEMANDPAGE.md`): an entry for a file on the disk keeps its
-//!   **block map** (`fd::content_block_map`), and its pages are filled from the disk directly, not
-//!   through oxfs, on a mapping's first touch (`process::mm::try_fill_file_page`), so a fault
+//!   **block map** (`vfs_vnops::content_block_map`, from `vop_bmap`) and its device, and its pages
+//!   are filled from the device directly, not through the file system, on a mapping's first touch (`process::mm::try_fill_file_page`), so a fault
 //!   inside oxfs never re-enters it. A file without one (tmpfs) is filled when mapped, as before.
 //!
 //! **Locking.** `execve` and `mmap` fill entries while holding the frame allocator, so
-//! `oxidebsd_content_changed`, which oxfs calls, never takes it: it only retires the entry, and
+//! `changed`, which the VFS calls before a file's blocks change, never takes it: it only retires the entry, and
 //! frames are queued in `pending_free` and given back by `collect`, where a deallocator is at
 //! hand. The cache lock is dropped while a page is read from the file.
 
@@ -37,9 +41,10 @@ struct Entry {
     content_id: u64,
     size: u64,
     frames: Vec<Option<PhysFrame<Size4KiB>>>,
-    /// The file's disk blocks, as runs `[file page, block, length]` (`DEMANDPAGE.md` §5.1); `None`
-    /// for a file not on the disk, whose pages are read through the filesystem.
-    blocks: Option<Vec<[u64; 3]>>,
+    /// The file's device and its blocks there, as runs `[file page, block, length]`
+    /// (`DEMANDPAGE.md` §5.1); `None` for a file with no device blocks, whose pages are read
+    /// through the file system.
+    blocks: Option<(u32, Vec<[u64; 3]>)>,
     /// Retired while in use with pages never filled, which its old blocks may no longer hold
     /// (§5.3): those pages are never filled now.
     stale: bool,
@@ -92,7 +97,28 @@ fn remove(c: &mut Cache, id: EntryId) -> Option<Entry> {
         c.by_content.remove(&e.content_id);
     }
     c.free_ids.push(id);
+    crate::kern::vfs_subr::vdrop(e.content_id as *mut vfs_if::Vnode);
     Some(e)
+}
+
+/// One more address space uses `e`: the first keeps its file in use.
+fn use_entry(e: &mut Entry) {
+    e.uses += 1;
+    if e.uses == 1 {
+        crate::kern::vfs_subr::vref(e.content_id as *mut vfs_if::Vnode);
+    }
+}
+
+/// One fewer does: the last lets the file go (deferred: this runs as an address space is torn
+/// down, where a file system can't be entered).
+fn unuse_entry(e: &mut Entry) {
+    if e.uses == 0 {
+        return;
+    }
+    e.uses -= 1;
+    if e.uses == 0 {
+        crate::kern::vfs_subr::vrele_deferred(e.content_id as *mut vfs_if::Vnode);
+    }
 }
 
 /// Frames that entries nobody uses may hold: a quarter of memory.
@@ -120,7 +146,7 @@ fn retire(c: &mut Cache, id: EntryId) {
 /// The entry for file `content_id`, made if there isn't one (or the one there is for an older
 /// size of the file). `None` for something that isn't a regular file of some size.
 pub fn entry_for(content_id: u64) -> Option<EntryId> {
-    let size = crate::fs::fd::content_size(content_id);
+    let size = crate::kern::vfs_vnops::content_size(content_id);
     if size <= 0 {
         return None;
     }
@@ -139,7 +165,7 @@ pub fn entry_for(content_id: u64) -> Option<EntryId> {
         return Some(id);
     }
     // Asked of the filesystem with the cache unlocked.
-    let blocks = crate::fs::fd::content_block_map(content_id);
+    let blocks = crate::kern::vfs_vnops::content_block_map(content_id);
     let mut c = CACHE.lock();
     if let Some(id) = current(&mut c) {
         return Some(id);
@@ -157,6 +183,7 @@ pub fn entry_for(content_id: u64) -> Option<EntryId> {
     };
     let pages = size.div_ceil(PAGE) as usize;
     let clock = c.clock;
+    crate::kern::vfs_subr::vhold(content_id as *mut vfs_if::Vnode);
     c.entries.insert(
         id,
         Entry {
@@ -230,7 +257,7 @@ pub fn fill(id: EntryId, page: u64, from: Fill) -> Result<PhysFrame<Size4KiB>, F
         if e.stale {
             return Err(Unavailable);
         }
-        let block = e.blocks.as_ref().map(|runs| block_of(runs, page));
+        let block = e.blocks.as_ref().map(|(dev, runs)| (*dev, block_of(runs, page)));
         c.misses += 1;
         (content_id, size, block)
     };
@@ -260,16 +287,14 @@ pub fn fill(id: EntryId, page: u64, from: Fill) -> Result<PhysFrame<Size4KiB>, F
     let read_whole = match block {
         // Straight from the disk (`DEMANDPAGE.md` §5.2), under the filesystem lock -- which
         // serializes the disk -- but never through oxfs. A hole stays zero.
-        Some(Some(block)) => {
+        Some((dev, Some(block))) => {
             let _poll = (from == Fill::KernelFault).then(crate::fs::fslock::NoSleep::new);
             crate::fs::fslock::enter();
-            // The file's block on the root's device (`kern::vfs_bdev`; a vnode's own device once
-            // files are vnodes, VFS.md §7.2), in its 4 KiB blocks: read around the buffer cache,
-            // which holds metadata only (§7.4).
+            // The file's block on its mount's device (`kern::vfs_bdev`, VFS.md §7.2), in 4 KiB
+            // blocks: read around the buffer cache, which holds metadata only (§7.4).
             // SAFETY: the frame's PAGE bytes, just allocated.
             let page = unsafe { core::slice::from_raw_parts_mut(ptr, PAGE as usize) };
-            let ok = crate::kern::vfs_bdev::root()
-                .is_some_and(|dev| crate::kern::vfs_bdev::read(dev, block * 8, page).is_ok());
+            let ok = crate::kern::vfs_bdev::read(dev, block * 8, page).is_ok();
             if from == Fill::KernelFault {
                 crate::fs::fslock::exit_quiet();
             } else {
@@ -282,8 +307,8 @@ pub fn fill(id: EntryId, page: u64, from: Fill) -> Result<PhysFrame<Size4KiB>, F
             }
             ok
         }
-        Some(None) => true,
-        None => crate::fs::fd::content_read(content_id, off, ptr as u64, len) == len as i64,
+        Some((_, None)) => true,
+        None => crate::kern::vfs_vnops::content_read(content_id, off, ptr as u64, len) == len as i64,
     };
     let mut c = CACHE.lock();
     let slot = c.entries.get_mut(&id).map(|e| e.frames[page as usize]);
@@ -311,7 +336,7 @@ pub fn add_use(uses: &Mutex<BTreeSet<EntryId>>, id: EntryId) {
     if uses.lock().insert(id) {
         let mut c = CACHE.lock();
         if let Some(e) = c.entries.get_mut(&id) {
-            e.uses += 1;
+            use_entry(e);
         }
     }
 }
@@ -322,7 +347,7 @@ pub fn fork_uses(parent: &Mutex<BTreeSet<EntryId>>) -> BTreeSet<EntryId> {
     let mut c = CACHE.lock();
     for id in &set {
         if let Some(e) = c.entries.get_mut(id) {
-            e.uses += 1;
+            use_entry(e);
         }
     }
     set
@@ -335,7 +360,7 @@ pub fn release_all(uses: &Mutex<BTreeSet<EntryId>>, fa: &mut impl FrameDeallocat
         let mut c = CACHE.lock();
         for id in set {
             let Some(e) = c.entries.get_mut(&id) else { continue };
-            e.uses = e.uses.saturating_sub(1);
+            unuse_entry(e);
             if e.uses == 0 && !e.cached {
                 retire(&mut c, id);
             }
@@ -388,13 +413,12 @@ pub fn reclaim(free: &mut dyn FnMut(PhysFrame<Size4KiB>)) -> bool {
     true
 }
 
-/// Called by oxfs when inode `content_id`'s contents change or it is freed, before it rewrites or
-/// frees any of its blocks: later users read it afresh; processes already mapping the old pages
-/// keep them until they exit. An entry still in use, with pages never filled, fills them now from
+/// The VFS's, before file `content_id`'s blocks change (`kern::vnode_if`: a write, a truncate, an
+/// allocation): later users read it afresh; processes already mapping the old pages keep them
+/// until they exit. An entry still in use, with pages never filled, fills them now from
 /// its blocks, while they still hold the old contents (`DEMANDPAGE.md` §5.3); a page it can't fill
 /// is never filled later (`stale`), so nothing reads a block oxfs may give to another file.
-#[unsafe(no_mangle)]
-pub extern "C" fn oxidebsd_content_changed(content_id: u64) {
+pub fn changed(content_id: u64) {
     let unfilled: Vec<u64> = {
         let c = CACHE.lock();
         let Some(e) = c.by_content.get(&content_id).and_then(|id| c.entries.get(id)) else { return };
@@ -408,7 +432,7 @@ pub extern "C" fn oxidebsd_content_changed(content_id: u64) {
     let Some(id) = id else { return };
     let mut complete = true;
     for page in unfilled {
-        // oxfs is the caller, holding the filesystem lock: the fill re-takes it.
+        // The VFS is the caller, holding the giant lock: the fill re-takes it.
         complete &= frame(id, page, Fill::Syscall).is_some();
     }
     let mut c = CACHE.lock();
@@ -417,6 +441,15 @@ pub extern "C" fn oxidebsd_content_changed(content_id: u64) {
         e.blocks = None;
     }
     retire(&mut c, id);
+}
+
+/// Vnode `content_id` is going (`vfs_subr::vgone`): its entry leaves the cache, its pages freed
+/// once nobody maps them.
+pub fn vnode_gone(content_id: u64) {
+    let mut c = CACHE.lock();
+    if let Some(&id) = c.by_content.get(&content_id) {
+        retire(&mut c, id);
+    }
 }
 
 /// `vm.pagecache.*`: entries, frames held, hits, misses and the limit on unused frames.
@@ -440,7 +473,9 @@ pub fn describe() -> Vec<u8> {
     let c = CACHE.lock();
     let mut s = alloc::string::String::new();
     for (id, e) in &c.entries {
-        let _ = writeln!(s, "{id} inode {} size {} held {} uses {} {}", e.content_id, e.size, e.held(), e.uses, if e.cached { "cached" } else { "retired" });
+        // SAFETY: an entry holds its vnode.
+        let fileid = unsafe { (*(e.content_id as *const vfs_if::Vnode)).v_fileid };
+        let _ = writeln!(s, "{id} file {fileid} size {} held {} uses {} {}", e.size, e.held(), e.uses, if e.cached { "cached" } else { "retired" });
     }
     s.into_bytes()
 }

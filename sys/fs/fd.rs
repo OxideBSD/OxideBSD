@@ -67,22 +67,11 @@ use crate::tty::ERESTART;
 pub(crate) type FdReadWrite = extern "C" fn(u64, *mut Uio, u64) -> i64;
 pub(crate) type FdClose = extern "C" fn(u64) -> i64;
 
-/// `content_id`'s shape — real Linux/POSIX has no analogous concept at the syscall boundary, this
-/// is purely internal plumbing for `crate::process::mm::do_mmap`'s fd-backed `MAP_SHARED` support:
-/// a stable identity for "the same underlying file," queried live (not cached at registration
-/// time) so it reflects a fd's *current* state — e.g. `sys/modules/oxfs`'s own `OpenFile::Write`
-/// variant only gets a real backing inode once `ftruncate`/`write`/`close` actually allocates one,
-/// which can happen strictly after `open()` but before `mmap()` in the same real call sequence
-/// (`open(O_CREAT|O_EXCL) -> ftruncate() -> mmap()`, the shape every POSIX conformance test that
-/// needs this uses). Returns `-1` for "not identifiable / not mmap-able as a real file" (every fd
-/// kind except `sys/modules/oxfs`'s own file-backed `OpenFile` variants, via `no_content_id` below).
-pub(crate) type FdContentId = extern "C" fn(u64) -> i64;
-
 /// Real framebuffer geometry query -- see `crate::drivers::fbdev::FbGeometry`'s own doc comment
 /// for the wire shape and `process::mm::do_mmap_fb`'s own doc comment for the one real consumer.
 /// `(real_fd, out_ptr_as_u64) -> i32` (`0` = wrote a real `FbGeometry` through `out_ptr`, `-1` =
 /// not a framebuffer fd) -- same "plain `u64`s at the module FFI boundary, discriminate inside"
-/// shape `FdContentId` already establishes. Optional per kind of file -- only `sys/modules/oxfs`'s
+/// shape the other operations have. Optional per kind of file -- only `sys/modules/oxfs`'s
 /// own `OpenFile::Framebuffer` fds answer it.
 pub(crate) type FdFbGeometry = extern "C" fn(u64, u64) -> i32;
 
@@ -115,7 +104,6 @@ pub(crate) struct FileOps {
     pub truncate: Option<extern "C" fn(u64, u64) -> i64>,
     /// `(handle, data_only) -> 0 | -errno` (`fsync(2)`, `fdatasync(2)`); `EINVAL` when null.
     pub sync: Option<extern "C" fn(u64, u64) -> i64>,
-    pub content_id: Option<FdContentId>,
     pub fb_geometry: Option<FdFbGeometry>,
 }
 
@@ -131,7 +119,6 @@ impl FileOps {
         stat: None,
         truncate: None,
         sync: None,
-        content_id: None,
         fb_geometry: None,
     };
 }
@@ -190,7 +177,7 @@ pub(crate) enum FdKind {
     /// Both ends of one pipe carry its buffer id.
     Pipe(u64),
     Socket(u64),
-    /// A FIFO, by the oxfs inode that names it.
+    /// A FIFO, by the vnode holding its node (`kern::vfs_vnops::object_vp`).
     Fifo(u64),
     Mqueue,
     /// A device opened through devfs (`devfs::oxidebsd_dev_open`), by number: `major << 8 |
@@ -469,17 +456,49 @@ pub(crate) fn set_offset(real_fd: u64, offset: u64) {
     with_description_full(real_fd, |d| d.offset = offset);
 }
 
-/// The `stat` operation for files whose table has none (`FileOps::stat`): oxfs's, which names
-/// FIFOs, terminals and devices by their nodes, and pipes and sockets synthetically.
-static STAT_FALLBACK: Mutex<Option<extern "C" fn(u64, u64) -> i64>> = Mutex::new(None);
-
-pub(crate) extern "C" fn oxidebsd_register_stat_fallback(stat: extern "C" fn(u64, u64) -> i64) {
-    *STAT_FALLBACK.lock() = Some(stat);
-}
-
-/// `real_fd`'s `stat` operation, or the fallback.
-pub(crate) fn stat_op(ops: &FileOps) -> Option<extern "C" fn(u64, u64) -> i64> {
-    ops.stat.or(*STAT_FALLBACK.lock())
+/// `fstat` of a file whose table has no `stat` operation: the node it was opened through (a
+/// FIFO, a device), a terminal's node in `/dev`, or a record made up for a pipe or socket.
+pub(crate) fn fallback_stat(real_fd: u64) -> Option<crate::kern::vfs_vnops::Stat> {
+    use crate::kern::vfs_vnops::{Stat, vn_stat};
+    let synthetic = |mode: u32, rdev: u64, ino: u64| Stat {
+        st_ino: ino,
+        st_nlink: 1,
+        st_mode: mode,
+        st_rdev: rdev,
+        st_blksize: 4096,
+        ..Stat::default()
+    };
+    let _giant = crate::fs::fslock::Giant::enter();
+    if let Some(id) = crate::tty::of_real_fd(real_fd) {
+        // A terminal is its own node in /dev, whatever it was opened through (`/dev/tty`), and
+        // the console, which the kernel opened itself, too.
+        let path = alloc::format!("/dev/{}", crate::tty::name(id));
+        let cred = crate::kern::vfs_subr::current_ucred();
+        let nd = crate::kern::vfs_lookup::NameiData {
+            path: path.as_bytes(),
+            nameiop: vfs_if::LOOKUP,
+            follow: true,
+            startdir: core::ptr::null_mut(),
+            cred: &cred,
+        };
+        if let Ok(ni) = crate::kern::vfs_lookup::namei(&nd) {
+            let vp = ni.into_vp();
+            let st = vn_stat(vp).ok();
+            crate::kern::vfs_subr::vrele(vp);
+            return st;
+        }
+        let (major, minor) = crate::tty::device(id);
+        return Some(synthetic(0o020600, (major as u64) << 8 | minor as u64, 0));
+    }
+    if let Some(vp) = vnode_of(real_fd) {
+        return vn_stat(vp).ok();
+    }
+    match DESCRIPTIONS.lock().get(&real_fd)?.kind {
+        FdKind::Pipe(id) => Some(synthetic(0o010600, 0, id)),
+        FdKind::Socket(id) => Some(synthetic(0o140777, 0, id)),
+        FdKind::Mqueue => Some(synthetic(0o100600, 0, 0)),
+        _ => None,
+    }
 }
 
 fn with_description_full(real_fd: u64, f: impl FnOnce(&mut Description)) {
@@ -941,11 +960,13 @@ pub(crate) fn content_id_of(fd: u64) -> Option<u64> {
 
 /// `content_id_of` by handle.
 pub(crate) fn content_id_of_handle(real_fd: u64) -> Option<u64> {
-    let (ops, ..) = file_of(real_fd)?;
-    let content_id = ops.content_id?;
-    let _lock = crate::fs::fslock::Guard::for_call(content_id as usize as u64);
-    let id = content_id(real_fd);
-    if id < 0 { None } else { Some(id as u64) }
+    let (ops, _, _, data) = file_of(real_fd)?;
+    if !core::ptr::eq(ops, &crate::kern::vfs_vnops::VN_OPS) {
+        return None;
+    }
+    let vp = crate::kern::vfs_vnops::object_vp(data as *mut vfs_if::Vnode);
+    // SAFETY: the open file holds its vnode, and that its lower one.
+    (unsafe { (*vp).v_type } == vfs_if::VREG).then_some(vp as u64)
 }
 
 /// `(readable, writable)`, per `FdAccessMode`'s own doc comment. `(true, true)` for a fd not found
@@ -988,142 +1009,36 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
     if ok == 0 { Some(geom) } else { None }
 }
 
-/// Real fd-backed `MAP_SHARED` mmap (`crate::process::mm`) reads/writes content *directly* by
-/// `content_id` (a real inode number), not through a fd's own read/write callbacks — found live,
-/// not designed in up front: `sys/modules/oxfs`'s `oxfs_read` unconditionally fails (`-EBADF`) for a
-/// fd still in `OpenFile::Write` state, which is exactly the state every real caller's fd is still
-/// in at `mmap()` time (`open(O_CREAT|O_RDWR) -> ftruncate()/fstat() -> mmap()`, never `close()`d
-/// first) — so a population/writeback path built on the generic per-fd `read`/`write` callbacks
-/// could never actually read or write real content for any of them. Content-by-identity sidesteps
-/// this entirely (and, as a bonus, needs no positioned/`pread`-style read either, and gives
-/// writeback a real, queryable object length to clamp against — see `crate::process::mm::
-/// do_mmap_file_backed`'s own doc comment for why that clamp matters). A **global** registration,
-/// not per-fd like `FdOps` — `content_id` is a stable identity independent of which fd (if any) is
-/// currently open against it, so there's nothing to key a per-fd table by. Only `sys/modules/oxfs`
-/// calls this (once, from its own `module_init`); every other fd-registering module is unaffected.
-pub(crate) type ContentRead = extern "C" fn(u64, u64, u64, u64) -> i64;
-pub(crate) type ContentWrite = extern "C" fn(u64, u64, u64) -> i64;
-pub(crate) type ContentSize = extern "C" fn(u64) -> i64;
-/// `content_id -> 1` if it's a POSIX shared memory object (`shm_open`), else `0`.
-pub(crate) type ContentIsShm = extern "C" fn(u64) -> i64;
-/// `(real_fd, out)`: for a file open for reading, stores its mode bits, owner and group in
-/// `out[0..3]` for `execve`'s set-user-ID and set-group-ID handling (set-ID bits cleared under a
-/// `nosuid` mount), and in `out[3]` `1` if it is under a `wxallowed` mount, else `0`; `0`, or negative if `real_fd` isn't such a file. Keyed by descriptor, unlike
-/// the other accessors: whether the file is under a `nosuid` mount depends on how it was opened.
-pub(crate) type ContentSetId = extern "C" fn(u64, *mut u32) -> i64;
-
-type ContentAccessors = (ContentRead, ContentWrite, ContentSize, ContentIsShm, ContentSetId);
-
-static CONTENT_ACCESSORS: Mutex<Option<ContentAccessors>> = Mutex::new(None);
-
-pub(crate) extern "C" fn oxidebsd_register_content_accessors(
-    read: ContentRead,
-    write: ContentWrite,
-    size: ContentSize,
-    is_shm: ContentIsShm,
-    setid: ContentSetId,
-) {
-    *CONTENT_ACCESSORS.lock() = Some((read, write, size, is_shm, setid));
-}
-
-/// `(content_id, out, cap) -> runs`: a file's disk blocks for the page cache's demand paging
-/// (OxideBSD-doc `DEMANDPAGE.md` §5.1), as `[file page, disk block, length]` runs into `out`
-/// (room for `cap`), its delayed writes put on the disk first. The number of runs, or minus the
-/// number needed if `cap` is too small; `i64::MIN` for a file not on the disk (tmpfs).
-pub(crate) type ContentBlockMap = extern "C" fn(u64, *mut [u64; 3], u64) -> i64;
-
-static CONTENT_BLOCK_MAP: Mutex<Option<ContentBlockMap>> = Mutex::new(None);
-
-pub(crate) extern "C" fn oxidebsd_register_content_block_map(map: ContentBlockMap) {
-    *CONTENT_BLOCK_MAP.lock() = Some(map);
-}
-
-/// File `content_id`'s block map (`ContentBlockMap`), `None` if it has none.
-pub(crate) fn content_block_map(content_id: u64) -> Option<alloc::vec::Vec<[u64; 3]>> {
-    let map = (*CONTENT_BLOCK_MAP.lock())?;
-    let _lock = crate::fs::fslock::Guard::for_call(map as usize as u64);
-    let mut runs: alloc::vec::Vec<[u64; 3]> = alloc::vec![[0; 3]; 16];
-    loop {
-        let n = map(content_id, runs.as_mut_ptr(), runs.len() as u64);
-        if n == i64::MIN {
-            return None;
-        }
-        if n >= 0 {
-            runs.truncate(n as usize);
-            return Some(runs);
-        }
-        runs.resize(n.unsigned_abs() as usize, [0; 3]);
-    }
-}
-
-/// The mode bits, owner and group of the program open on `fd`, for `execve`
+/// The mode bits, owner and group of the program open as `real_fd`, for `execve`
 /// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
-/// `exec_setid` by handle.
 pub(crate) fn exec_setid_handle(real_fd: u64) -> Option<((u32, u32, u32), bool)> {
-    if let Some((ops, _, _, data)) = file_of(real_fd)
-        && core::ptr::eq(ops, &crate::kern::vfs_vnops::VN_OPS)
-    {
-        return crate::kern::vfs_vnops::exec_setid(data as *mut vfs_if::Vnode);
+    let (ops, _, _, data) = file_of(real_fd)?;
+    if !core::ptr::eq(ops, &crate::kern::vfs_vnops::VN_OPS) {
+        return None;
     }
-    let setid = (*CONTENT_ACCESSORS.lock())?.4;
-    let _lock = crate::fs::fslock::Guard::for_call(setid as usize as u64);
-    let mut out = [0u32; 4];
-    (setid(real_fd, out.as_mut_ptr()) == 0).then_some(((out[0], out[1], out[2]), out[3] != 0))
+    crate::kern::vfs_vnops::exec_setid(data as *mut vfs_if::Vnode)
 }
 
-/// `(content_id, offset, ptr, len) -> bytes read`, `-1` if no module ever registered content
-/// accessors (never happens once `sys/modules/oxfs` has loaded, which it always has by the time any
-/// real syscall is reachable).
+/// A file's contents by content ID (its vnode: `kern::vfs_vnops`), for `mmap`'s population and
+/// writeback, the page cache and exec. Not through a descriptor's own read and write: the
+/// descriptor `mmap` was given may not be readable, and writeback runs after it's closed.
 pub(crate) fn content_read(content_id: u64, offset: u64, ptr: u64, len: u64) -> i64 {
-    // Copied out before the call: the call can sleep, and the table's lock mustn't be held then.
-    let accessors = *CONTENT_ACCESSORS.lock();
-    match accessors {
-        Some((read, ..)) => {
-            let _lock = crate::fs::fslock::Guard::for_call(read as usize as u64);
-            read(content_id, offset, ptr, len)
-        }
-        None => -1,
-    }
+    crate::kern::vfs_vnops::content_read(content_id, offset, ptr, len)
 }
 
-/// `(content_id, ptr, len) -> bytes written` — always replaces the object's complete content with
-/// exactly `len` bytes, matching `sys/modules/oxfs`'s own one-shot write model (see that module's
-/// `OpenFile::Write` doc comment).
+/// Writes `len` bytes at the start of the file (a shared mapping's writeback).
 pub(crate) fn content_write(content_id: u64, ptr: u64, len: u64) -> i64 {
-    let accessors = *CONTENT_ACCESSORS.lock();
-    match accessors {
-        Some((_, write, ..)) => {
-            let _lock = crate::fs::fslock::Guard::for_call(write as usize as u64);
-            write(content_id, ptr, len)
-        }
-        None => -1,
-    }
+    crate::kern::vfs_vnops::content_write(content_id, ptr, len)
 }
 
-/// Real current content length of `content_id`, in bytes.
+/// The file's size in bytes.
 pub(crate) fn content_size(content_id: u64) -> i64 {
-    let accessors = *CONTENT_ACCESSORS.lock();
-    match accessors {
-        Some((_, _, size, ..)) => {
-            let _lock = crate::fs::fslock::Guard::for_call(size as usize as u64);
-            size(content_id)
-        }
-        None => -1,
-    }
+    crate::kern::vfs_vnops::content_size(content_id)
 }
 
-/// Whether `content_id` is a POSIX shared memory object: `mmap` bounds a mapping of one at the
-/// object's size, where a regular file may be mapped past its end (`crate::process::mm::
-/// do_mmap_file_backed`).
+/// Whether the file is a POSIX shared memory object: `mmap` bounds a mapping of one at its size.
 pub(crate) fn content_is_shm(content_id: u64) -> bool {
-    let accessors = *CONTENT_ACCESSORS.lock();
-    match accessors {
-        Some((_, _, _, is_shm, _)) => {
-            let _lock = crate::fs::fslock::Guard::for_call(is_shm as usize as u64);
-            is_shm(content_id) != 0
-        }
-        None => false,
-    }
+    crate::kern::vfs_vnops::content_is_shm(content_id)
 }
 
 /// FFI wrapper over `real_fd_of` for modules that own their own fd-keyed state (`sys/modules/oxfs`'s

@@ -5,7 +5,6 @@ use crate::syscall::ENAMETOOLONG;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{
@@ -1157,6 +1156,14 @@ struct ExecFile {
     wxallowed: bool,
 }
 
+impl Drop for ExecFile {
+    fn drop(&mut self) {
+        if let Some(vp) = self.content {
+            crate::kern::vfs_subr::vrele_deferred(vp as *mut vfs_if::Vnode);
+        }
+    }
+}
+
 impl ExecFile {
     fn whole(image: Vec<u8>) -> Self {
         ExecFile { size: image.len() as u64, head: image, content: None, setid: None, wxallowed: false }
@@ -1166,6 +1173,9 @@ impl ExecFile {
 /// How much of a program `exec_image` reads up front: the ELF and program headers of anything
 /// our toolchains link fit in the first page, and the `#!` line too.
 const EXEC_HEAD: u64 = 4096;
+
+/// musl's `ETXTBSY`: a program open for writing, or a running program opened for writing.
+const ETXTBSY: u64 = 26;
 
 fn read_exec_head_and_release(handle: u64) -> Result<ExecFile, u64> {
     let result = read_exec_head(handle, false);
@@ -1181,6 +1191,13 @@ fn read_exec_head(handle: u64, pread: bool) -> Result<ExecFile, u64> {
     let (Some(content), Ok(size)) = (content, u64::try_from(size)) else {
         return read_fd_to_end(handle, pread).map(ExecFile::whole);
     };
+    // A program open for writing can't run (`ETXTBSY`, as on the BSDs).
+    // SAFETY: the open file holds the vnode.
+    if unsafe { (*(content as *mut vfs_if::Vnode)).v_writecount } > 0 {
+        return Err(ETXTBSY);
+    }
+    // Held by the `ExecFile` from here: the file is released before the image is mapped.
+    crate::kern::vfs_subr::vref(content as *mut vfs_if::Vnode);
     let read = |len: u64| -> Result<Vec<u8>, u64> {
         let mut head = alloc::vec![0u8; len as usize];
         if crate::fs::fd::content_read(content, 0, head.as_mut_ptr() as u64, len) != len as i64 {
@@ -1209,6 +1226,8 @@ fn read_exec_head(handle: u64, pread: bool) -> Result<ExecFile, u64> {
 
 /// The page cache entry for `file`'s pages, used by `space` from now on (PAGECACHE.md §3.1).
 fn exec_cache_entry(file: &ExecFile, space: &AddressSpace) -> Option<crate::memory::pagecache::EntryId> {
+    // The program runs here from now on (`ETXTBSY` for a writer, kept while running).
+    space.vm().add_text(file.content?);
     let id = crate::memory::pagecache::entry_for(file.content?)?;
     space.use_cached(id);
     Some(id)
@@ -2338,19 +2357,6 @@ pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
         _ => Err(EINVAL),
     }
 }
-/// For oxfs, before it frees an inode nobody names or has open (its `maybe_release`): whether
-/// the kernel still refers to it, as a file mapping's content or a bound local socket's file.
-/// (Working and root directories are vnodes, whose use counts oxfs asks the VFS about.) Every lock
-/// is only tried: a busy one answers "in use", and oxfs keeps the inode as an orphan to retry
-/// later, so this can't deadlock against a caller already holding one (the socket layer closes
-/// passed descriptors under its own lock).
-pub(crate) extern "C" fn oxidebsd_inode_in_use(inode: u64) -> u64 {
-    let busy = || -> Option<bool> {
-        Some(crate::process::mm::content_mapped(inode)? || crate::kern::uipc_usrreq::node_bound(inode)?)
-    };
-    busy().unwrap_or(true) as u64
-}
-
 /// The calling thread group's working directory (`cwd` true) or root directory, a vnode, not
 /// referenced for the caller; null for the system's root (and before any process exists).
 pub(crate) fn current_dir_vnode(cwd: bool) -> *mut vfs_if::Vnode {

@@ -45,10 +45,6 @@ pub const VFCF_SYNTHETIC: u32 = 1;
 pub const VFCF_NOCACHE: u32 = 2;
 /// `from` names a directory the kernel looks up for the mount (`MountArgs::from_vp`): nullfs.
 pub const VFCF_FROM_VNODE: u32 = 4;
-/// Transitional, until the page cache is keyed by vnode (`VFS.md` §11 step 2c): a file ID of this
-/// type is also its content ID for the content accessors its module registered
-/// (`oxidebsd_register_content_accessors`), so `mmap` and exec reach the file through them.
-pub const VFCF_INODE_CONTENT: u32 = 8;
 
 /// Per-type mount operations (FreeBSD's `struct vfsops`). A null entry takes the kernel's
 /// default: `EOPNOTSUPP` for `mount`/`root`/`vget`, success for `unmount`/`sync`, zeros for
@@ -216,6 +212,14 @@ pub struct Vnode {
     /// Kernel-private: the page cache object, the FIFO or socket rendezvous.
     pub v_object: u64,
     pub v_un: u64,
+    /// The vnode below this one holding the same file's contents (a nullfs vnode's lower vnode),
+    /// held (`oxidebsd_vhold`) by the file system that set it; null for a vnode that is its own.
+    /// The page cache, mappings, FIFOs and sockets name a file by this one (`VFS.md` §13).
+    pub v_lower: *mut Vnode,
+    /// Kernel-private: descriptors open for writing, and address spaces running it as a program
+    /// (`ETXTBSY` either way).
+    pub v_writecount: u32,
+    pub v_textcount: u32,
 }
 
 /// The root directory of its mount.
@@ -224,6 +228,8 @@ pub const VV_ROOT: u32 = 0x0001;
 pub const VI_DOOMED: u32 = 0x0001_0000;
 /// Kernel: inactive (use count 0, `vop_inactive` called).
 pub const VI_INACTIVE: u32 = 0x0002_0000;
+/// Kernel: inside `vop_inactive`; whatever happens meanwhile leaves freeing it to `vrele`.
+pub const VI_ININACT: u32 = 0x0004_0000;
 
 /// A timestamp (`struct timespec`).
 #[repr(C)]
@@ -264,6 +270,8 @@ pub struct Vattr {
 }
 
 pub const VNOVAL: u64 = u64::MAX;
+/// `va_flags`: a POSIX shared memory object (`shm_open`), whose mappings `mmap` bounds by its size.
+pub const VF_SHM: u64 = 1 << 32;
 pub const VNOVAL_TIME: Timespec = Timespec { tv_sec: -1, tv_nsec: -1 };
 /// `setattr`: the times are the caller's own "now" (`utimensat` with null times), which a non-owner
 /// with write permission may set.
@@ -445,8 +453,11 @@ pub struct VopVector {
     pub inactive: Option<extern "C" fn(vp: *mut Vnode) -> i32>,
     /// The kernel recycles the vnode: drop everything `v_data` holds. Never fails.
     pub reclaim: Option<extern "C" fn(vp: *mut Vnode) -> i32>,
-    /// File block `lblkno` (of `f_iosize` bytes) to its device sector (`*bnp`, `u64::MAX` for a
-    /// hole), and how many following blocks are contiguous after it (`*runp`).
+    /// File block `lblkno` (of `f_iosize` bytes) to its device sector on the mount's device
+    /// (`*bnp`, `u64::MAX` for a hole), and how many following blocks are contiguous after it
+    /// (`*runp`). The page cache fills mapped pages from the device with it, never through
+    /// `read`; delayed writes of the file are on the device first (the kernel `fsync`s it).
+    /// `EOPNOTSUPP` for a file with no device blocks (tmpfs).
     pub bmap: Option<extern "C" fn(vp: *mut Vnode, lblkno: u64, bnp: *mut u64, runp: *mut u64) -> i32>,
     pub pathconf: Option<extern "C" fn(vp: *mut Vnode, name: i32, retval: *mut i64) -> i32>,
     /// `flock(2)`-style locks: `op` is `LOCK_SH`/`LOCK_EX`/`LOCK_UN` with `LOCK_NB`; `id` names the
@@ -562,6 +573,9 @@ unsafe extern "C" {
     /// File `fileid` of `mp` is gone (its storage freed, the ID free for reuse): any vnode of it
     /// is reclaimed (FreeBSD's `vrecycle`).
     pub fn oxidebsd_vfs_recycle(mp: *mut Mount, fileid: u64);
+    /// Keeps `vp`'s memory without keeping its file in use (`vhold`/`vdrop`): `v_lower`.
+    pub fn oxidebsd_vhold(vp: *mut Vnode);
+    pub fn oxidebsd_vdrop(vp: *mut Vnode);
     pub fn oxidebsd_vref(vp: *mut Vnode);
     pub fn oxidebsd_vrele(vp: *mut Vnode);
     /// FreeBSD's `vaccess`: whether `cred` may `accmode` a file of type `vtype`, mode `mode`,

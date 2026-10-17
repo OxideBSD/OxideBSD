@@ -335,15 +335,18 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 ## oxfs and disks (`sys/modules/oxfs`, `sys/drivers/`)
 
 - Fixed block pool (`NUM_BLOCKS`, `NAME_MAX=255`, ...); inodes live in a growable inode file
-  (`InodeTable`), freed by `maybe_release` once no name, oxfs descriptor or kernel reference
-  (`oxidebsd_inode_in_use`) remains. **A new kernel structure that keeps an oxfs inode number must
-  be added to `oxidebsd_inode_in_use`**, or the inode can be freed and reused under it. Changing
-  anything in the on-disk layout **must bump `SUPERBLOCK_VERSION`** (mount checks, else reformats).
+  (`InodeTable`), freed by `maybe_release` once no name and no vnode of it in use remain.
+  **Kernel code that keeps a file holds its vnode** (`vref`, or `vhold` for memory only; a
+  content ID is the vnode of `vfs_vnops::object_vp`), never an inode number: a file system frees
+  what no vnode uses, and recycles the vnode (`oxidebsd_vfs_recycle`) before an ID is reused.
+  Changing anything in the on-disk layout **must bump `SUPERBLOCK_VERSION`** (mount checks, else
+  reformats).
 - Only `write_block`, `write_inode`, `set_block_used` touch the backing pools (write-through
   persistence). Inodes are serialized by `pack_inode`/`unpack_inode`, never transmuted.
-- **A new path that changes a file's contents or frees an inode must call `content_changed`**, or
-  the kernel's page cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping
-  the old pages into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
+- **A file's contents change only through `vop_write`/`vop_setattr`/`vop_allocate`** (the
+  `kern::vnode_if` wrappers), which retire its page cache entry first (`pagecache::changed`), or
+  the cache (`sys/memory/pagecache.rs`, `OxideBSD-doc/PAGECACHE.md`) keeps mapping the old pages
+  into new execs. Cached pages are `SHARED_LEAF | CACHED_LEAF`, read-only.
 - **RAM rule: never require more than 64 MB**, boot and console install, forever (user, 2026-10-14);
   UEFI is exempt only if OVMF itself needs more. `ram_floor_boot` boots at 64 MB and fails on any
   `[fault]` or failed rc service, not just panics. Under UEFI that takes our Limine fork's
