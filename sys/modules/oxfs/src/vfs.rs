@@ -364,6 +364,13 @@ fn vtype_of(kind: InodeKind, device_char: bool) -> VType {
 }
 
 extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -> i32 {
+    // A nullfs mount whose lower mount was forcibly unmounted: its directory (still held) is
+    // doomed and the mount gone, so nothing below can be reached.
+    let lower_root = oxmount(mp).lower_root;
+    // SAFETY: held by this mount until it's unmounted.
+    if !lower_root.is_null() && unsafe { (*lower_root).v_flag } & VI_DOOMED != 0 {
+        return VFS_EIO;
+    }
     // SAFETY: kernel exports, called as declared.
     unsafe {
         let vp = oxidebsd_vfs_hash_get(mp, fileid);

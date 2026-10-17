@@ -168,6 +168,17 @@ wait $sl 2>/dev/null
 cp /bin/true $V/tr
 check "a program open for writing can't run" not sh -c "exec 3>>$V/tr; $V/tr" 2>/dev/null
 check "and can once it's closed" $V/tr
+mkdir -p $V/tf
+mount -t tmpfs tmpfs $V/tf
+echo kept > $V/tf/f
+(cd $V/tf && exec 3<$V/tf/f && /bin/sleep 3) &
+busy=$!
+/bin/sleep 1
+check "umount of a busy file system is refused" not umount $V/tf 2>/dev/null
+check "umount -f takes it anyway" umount -f $V/tf
+check "and what was under it shows again" not /bin/test -e $V/tf/f
+wait $busy 2>/dev/null
+check "mount lists through getvfsstat" sh -c "mount | grep -q ' on /proc '"
 
 cd /
 rm -rf $T

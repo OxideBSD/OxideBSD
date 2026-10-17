@@ -327,6 +327,17 @@ pub(crate) fn vgone(vp: *mut Vnode) {
         let _lock = fslock::Guard::for_call(reclaim as usize as u64);
         reclaim(vp);
     }
+    // Its file system is done with it: its data goes back now and it leaves the mount, which a
+    // forced unmount may free while the vnode lives on in its holders.
+    let mp = v.v_mount;
+    // SAFETY: the vnode's live mount and its type, before it leaves them.
+    unsafe {
+        dealloc(v.v_data as *mut u8, v_data_layout(vfc_of(mp).v_data_size));
+        (*mp).mnt_nvnodes -= 1;
+    }
+    v.v_data = ptr::null_mut();
+    v.v_mount = dead_mount();
+    v.v_type = VBAD;
     // Its cached pages are of a file that's gone or being forgotten (FreeBSD's
     // `vnode_destroy_vobject`). Last: dropping the cache's hold may free the vnode, when nothing
     // else has it.
@@ -336,15 +347,43 @@ pub(crate) fn vgone(vp: *mut Vnode) {
 /// Frees a doomed vnode with no references.
 fn free_vnode(vp: *mut Vnode) {
     // SAFETY: `vp` came from `Box::into_raw` in `getnewvnode`, is doomed and unreferenced: nothing
-    // else can reach it (the hash and the free list no longer hold it).
-    unsafe {
-        let mp = (*vp).v_mount;
-        let size = vfc_of(mp).v_data_size;
-        dealloc((*vp).v_data as *mut u8, v_data_layout(size));
-        (*mp).mnt_nvnodes -= 1;
-        drop(Box::from_raw(vp));
-    }
+    // else can reach it (the hash and the free list no longer hold it). `vgone` already gave its
+    // file system's data back and left its mount.
+    unsafe { drop(Box::from_raw(vp)) };
     NUMVNODES.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// What a vnode belongs to once `vgone` has disassociated it (FreeBSD's `dead_mount` and deadfs
+/// type): a doomed vnode can outlive its mount (a forced unmount, `revoke(2)` of a file still in
+/// use), so it never points at one again.
+fn dead_mount() -> *mut Mount {
+    static DEAD: Mutex<usize> = Mutex::new(0);
+    static DEAD_VOPS: VopVector = VopVector::DEFAULT;
+    static DEAD_VFSOPS: VfsOps = VfsOps { mount: None, unmount: None, root: None, statfs: None, sync: None, vget: None };
+    static DEAD_VFSCONF: VfsConf = VfsConf {
+        name: b"deadfs".as_ptr(),
+        name_len: 6,
+        ops: &DEAD_VFSOPS,
+        vops: &DEAD_VOPS,
+        mnt_data_size: 0,
+        v_data_size: 0,
+        flags: VFCF_SYNTHETIC | VFCF_NOCACHE,
+    };
+    let mut dead = DEAD.lock();
+    if *dead == 0 {
+        *dead = Box::into_raw(Box::new(Mount {
+            mnt_vfc: &DEAD_VFSCONF,
+            mnt_flag: MNT_RDONLY,
+            mnt_data: ptr::null_mut(),
+            mnt_vnodecovered: ptr::null_mut(),
+            mnt_dev: NODEV,
+            mnt_fsid: 0,
+            mnt_nvnodes: 0,
+            mnt_onname: [0; MNAMELEN],
+            mnt_fromname: [0; MNAMELEN],
+        })) as usize;
+    }
+    *dead as *mut Mount
 }
 
 /// Reclaims every unreferenced vnode of `mp` (unmount's `vflush`). Returns how many vnodes of it
@@ -366,6 +405,16 @@ pub(crate) fn vflush(mp: *mut Mount) -> u64 {
     }
     // SAFETY: `mp` is live.
     unsafe { (*mp).mnt_nvnodes }
+}
+
+/// Retires every vnode of `mp` still in use (a forced unmount, FreeBSD's `vflush(FORCECLOSE)`):
+/// their holders keep doomed vnodes, whose operations reach no file system.
+pub(crate) fn vgone_all(mp: *mut Mount) {
+    let mine: alloc::vec::Vec<VnodeRef> =
+        HASH.lock().iter().filter(|((m, _), _)| *m == mp as usize).map(|(_, &v)| v).collect();
+    for v in mine {
+        vgone(v.get());
+    }
 }
 
 /// FreeBSD's `vaccess`: may `cred` do `accmode` to a file of type `vtype`, permission bits `mode`,

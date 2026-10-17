@@ -1,0 +1,78 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 16, 2026
+.Dt GETVFSSTAT 2
+.Os OxideBSD
+.Sh NAME
+.Nm getvfsstat
+.Nd list the mounted file systems
+.Sh SYNOPSIS
+.In sys/statvfs.h
+.Ft int
+.Fn getvfsstat "struct statvfs *buf" "size_t bufsize" "int flags"
+.Sh DESCRIPTION
+.Fn getvfsstat
+fills
+.Fa buf
+with a
+.Vt struct statvfs
+for each mounted file system, in the order they were mounted, as many as
+.Fa bufsize
+bytes hold.
+With
+.Fa buf
+a null pointer it fills nothing and counts them.
+.Pp
+On OxideBSD, as on
+.Nx ,
+.Vt struct statvfs
+carries, after the members
+.Xr statvfs 3
+describes, the file system's names:
+.Bd -literal -offset indent
+char f_fstypename[VFS_NAMELEN];   /* its type: oxfs, tmpfs, procfs */
+char f_mntonname[VFS_MNAMELEN];   /* where it is mounted */
+char f_mntfromname[VFS_MNAMELEN]; /* what it is mounted from */
+.Ed
+.Pp
+.Xr statvfs 3
+and
+.Xr fstatvfs 3
+fill them too.
+.Pp
+.Fa flags
+is
+.Dv ST_WAIT
+or
+.Dv ST_NOWAIT ;
+every record is fresh either way.
+.Sh RETURN VALUES
+The number of records filled (or, with a null
+.Fa buf ,
+the number of mounted file systems); \-1 on error, with
+.Va errno
+set.
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EFAULT
+.Fa buf
+points outside the address space.
+.It Bq Er EINVAL
+.Fa flags
+is neither
+.Dv ST_WAIT
+nor
+.Dv ST_NOWAIT .
+.El
+.Sh SEE ALSO
+.Xr nmount 2 ,
+.Xr statvfs 3 ,
+.Xr mount 8
+.Sh HISTORY
+.Fn getvfsstat
+first appeared in
+.Nx 3.0 ,
+replacing
+.Fn getfsstat .
+In OxideBSD it is system call 587, part of the VFS (OxideBSD-doc
+.Pa VFS.md
+\(sc4.6).

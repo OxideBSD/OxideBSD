@@ -314,7 +314,17 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
         let c = unsafe { (*m).mnt_vnodecovered };
         !c.is_null() && unsafe { (*c).v_mount } == mp
     });
-    if stacked || crate::kern::vfs_subr::vflush(mp) != 0 {
+    if stacked {
+        return Err(EBUSY);
+    }
+    if flags & MNT_FORCE != 0 {
+        // Everything on it goes dead (FreeBSD's way, VFS.md §4.4): descriptors to deadfs, then
+        // every vnode doomed, its holders (a cwd, a mapping) keeping a vnode that finds nothing.
+        crate::fs::fd::revoke_where(|_, vp| vp.is_some_and(|vp| unsafe { (*vp).v_mount } == mp));
+        crate::kern::vfs_subr::vflush(mp);
+        crate::kern::vfs_subr::vgone_all(mp);
+    }
+    if crate::kern::vfs_subr::vflush(mp) != 0 {
         return Err(EBUSY);
     }
     vfs_sync(mp, MNT_WAIT);
@@ -415,6 +425,17 @@ fn name_bytes(field: &[u8; MNAMELEN]) -> &[u8] {
     &field[..n]
 }
 
+/// A name as `/proc/mounts` writes it: space, tab, newline and backslash as octal escapes, as
+/// fstab(5) and Linux's procfs have them, so a field never splits.
+fn escape_into(out: &mut Vec<u8>, name: &[u8]) {
+    for &b in name {
+        match b {
+            b' ' | b'\t' | b'\n' | b'\\' => out.extend_from_slice(alloc::format!("\\{b:03o}").as_bytes()),
+            _ => out.push(b),
+        }
+    }
+}
+
 /// `/proc/mounts` (Linux's `fstab`-like shape, which `mount(8)` without arguments and scripts
 /// read): `from on type options 0 0` per mount, in mount order. Exported to procfs; the length
 /// written, cut at `cap`.
@@ -424,9 +445,9 @@ pub(crate) extern "C" fn oxidebsd_mounts_render(buf: *mut u8, cap: u64) -> i64 {
         // SAFETY: mounted mounts and their registered types.
         let (vfc, flags, from, on) = unsafe { (&*(*mp).mnt_vfc, (*mp).mnt_flag, &(*mp).mnt_fromname, &(*mp).mnt_onname) };
         let from = name_bytes(from);
-        out.extend_from_slice(if from.is_empty() { name_of(vfc) } else { from });
+        escape_into(&mut out, if from.is_empty() { name_of(vfc) } else { from });
         out.push(b' ');
-        out.extend_from_slice(name_bytes(on));
+        escape_into(&mut out, name_bytes(on));
         out.push(b' ');
         out.extend_from_slice(name_of(vfc));
         out.extend_from_slice(if flags & MNT_RDONLY != 0 { b" ro" } else { b" rw" });

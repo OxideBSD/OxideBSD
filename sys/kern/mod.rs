@@ -14,6 +14,7 @@ pub mod vfs_bdev;
 pub mod vfs_advlock;
 pub mod vfs_bio;
 pub mod vfs_cache;
+pub mod vfs_dead;
 pub mod vfs_lookup;
 pub mod vfs_mount;
 pub mod vfs_subr;

@@ -15,6 +15,7 @@ use vfs_if::*;
 
 use crate::fs::fslock;
 
+pub(crate) const ENOENT: i32 = 2;
 pub(crate) const EBADF: i32 = 9;
 pub(crate) const EINVAL: i32 = 22;
 pub(crate) const ENOTDIR: i32 = 20;
@@ -50,7 +51,8 @@ macro_rules! vop {
 
 pub(crate) fn vop_lookup(dvp: *mut Vnode, cnp: &ComponentName) -> Result<*mut Vnode, i32> {
     let mut vp = ptr::null_mut();
-    let e = vop!(dvp, lookup, EBADF, ENOTDIR, |f| f(dvp, cnp, &mut vp));
+    // A revoked directory (a cwd on a forcibly unmounted file system) has nothing in it.
+    let e = vop!(dvp, lookup, ENOENT, ENOTDIR, |f| f(dvp, cnp, &mut vp));
     if e != 0 { Err(e) } else { Ok(vp) }
 }
 
@@ -99,7 +101,7 @@ pub(crate) fn vop_getattr(vp: *mut Vnode) -> Result<Vattr, i32> {
 
 /// `access`: the type's, else `vaccess` over `getattr` (FreeBSD's `vop_stdaccess`).
 pub(crate) fn vop_access(vp: *mut Vnode, accmode: u32, cred: &Ucred) -> i32 {
-    vop!(vp, access, EBADF, {
+    vop!(vp, access, 0, {
         match vop_getattr(vp) {
             Ok(va) => crate::kern::vfs_subr::vaccess(va.va_type, va.va_mode, va.va_uid, va.va_gid, accmode, cred),
             Err(e) => e,

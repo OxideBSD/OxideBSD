@@ -14,6 +14,9 @@
  * one is ENOTTY, FIONREAD counts a pipe's bytes; on a regular file lseek(SEEK_END) is its size and
  * ftruncate on a read-only descriptor is EINVAL (POSIX).
  *
+ * revoke(2) (VFS.md §4.4, NetBSD's: any file) leaves a descriptor that reads end of file and fails
+ * writes, while a fresh open works; getvfsstat(2) and statvfs(3) give each mount's names (§4.6).
+ *
  * Each CHECK prints PASS/FAIL; the exit status is the failure count (0 = all passed). */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -26,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -297,8 +301,53 @@ static void descriptor_ops(void)
 	CHECK(close(1000) == -1 && errno == EBADF, "close of an fd that isn't open is EBADF");
 }
 
+static void revoked(void)
+{
+	const char *path = "/fd-smoke.revoke";
+	int w = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	CHECK(w >= 0 && write(w, "data", 4) == 4, "make a file to revoke");
+	int r = open(path, O_RDONLY);
+	CHECK(revoke(path) == 0, "revoke a file");
+	char c;
+	CHECK(read(r, &c, 1) == 0, "a revoked descriptor reads end of file");
+	errno = 0;
+	CHECK(write(w, "x", 1) == -1 && errno == EIO, "and fails writes with EIO");
+	struct pollfd p = { .fd = r, .events = POLLIN };
+	CHECK(poll(&p, 1, 0) == 1 && (p.revents & POLLHUP), "and polls hung up");
+	CHECK(close(r) == 0 && close(w) == 0, "and still closes");
+	int again = open(path, O_RDONLY);
+	char buf[4];
+	CHECK(again >= 0 && read(again, buf, 4) == 4 && memcmp(buf, "data", 4) == 0,
+	      "a fresh open reads the file");
+	close(again);
+	errno = 0;
+	CHECK(revoke("/fd-smoke.no-such-file") == -1 && errno == ENOENT, "revoke of a missing file is ENOENT");
+	unlink(path);
+}
+
+static void mount_list(void)
+{
+	int n = getvfsstat(NULL, 0, ST_NOWAIT);
+	CHECK(n >= 3, "getvfsstat counts the mounts (/, /dev, /proc at least)");
+	struct statvfs list[16];
+	int got = getvfsstat(list, sizeof list, ST_NOWAIT);
+	int root = 0, dev = 0, proc = 0;
+	for (int i = 0; i < got; i++) {
+		root |= !strcmp(list[i].f_mntonname, "/") && !strcmp(list[i].f_fstypename, "oxfs");
+		dev |= !strcmp(list[i].f_mntonname, "/dev") && !strcmp(list[i].f_fstypename, "devfs");
+		proc |= !strcmp(list[i].f_mntonname, "/proc") && !strcmp(list[i].f_fstypename, "procfs");
+	}
+	CHECK(got == n && root && dev && proc, "getvfsstat names /, /dev and /proc with their types");
+	CHECK(getvfsstat(list, sizeof list[0], ST_WAIT) == 1, "and fills only what the buffer holds");
+	struct statvfs sv;
+	CHECK(statvfs("/proc/self", &sv) == 0 && !strcmp(sv.f_mntonname, "/proc") && (sv.f_flag & ST_RDONLY),
+	      "statvfs names the mount a path is on (/proc, read-only)");
+}
+
 int main(void)
 {
+	revoked();
+	mount_list();
 	fd_numbering();
 	fifos();
 	directories();

@@ -1363,6 +1363,166 @@ fn statfs_vnode(vp: *mut Vnode, buf_ptr: u64) -> R {
     Ok(0)
 }
 
+/// musl's `struct statvfs` on OxideBSD (`include/sys/statvfs.h`): POSIX's, then NetBSD's names.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Statvfs {
+    f_bsize: u64,
+    f_frsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: u64,
+    f_flag: u64,
+    f_namemax: u64,
+    f_type: u32,
+    __reserved: [i32; 5],
+    f_fstypename: [u8; 32],
+    f_mntonname: [u8; MNAMELEN],
+    f_mntfromname: [u8; MNAMELEN],
+}
+
+const _: () = assert!(core::mem::size_of::<Statvfs>() == 112 + 32 + 2 * 1024);
+
+/// Mount `mp`'s `struct statvfs`.
+fn statvfs_of(mp: *mut Mount) -> Result<Statvfs, i32> {
+    let sb = vfs_mount::vfs_statfs(mp)?;
+    // SAFETY: a mounted mount and its registered type.
+    let (vfc, on, from) = unsafe { (&*(*mp).mnt_vfc, &(*mp).mnt_onname, &(*mp).mnt_fromname) };
+    let mut out = Statvfs {
+        f_bsize: sb.f_bsize,
+        f_frsize: sb.f_bsize,
+        f_blocks: sb.f_blocks,
+        f_bfree: sb.f_bfree,
+        f_bavail: sb.f_bavail,
+        f_files: sb.f_files,
+        f_ffree: sb.f_ffree,
+        f_favail: sb.f_ffree,
+        f_fsid: sb.f_fsid,
+        f_flag: (if sb.f_flags & MNT_RDONLY != 0 { ST_RDONLY } else { 0 })
+            | (if sb.f_flags & MNT_NOSUID != 0 { ST_NOSUID } else { 0 }),
+        f_namemax: sb.f_namemax as u64,
+        f_type: sb.f_magic as u32,
+        __reserved: [0; 5],
+        f_fstypename: [0; 32],
+        f_mntonname: *on,
+        f_mntfromname: *from,
+    };
+    // SAFETY: a registered type's name is a static string.
+    let name = unsafe { core::slice::from_raw_parts(vfc.name, vfc.name_len) };
+    let n = name.len().min(31);
+    out.f_fstypename[..n].copy_from_slice(&name[..n]);
+    if out.f_mntfromname[0] == 0 {
+        out.f_mntfromname[..n].copy_from_slice(&name[..n]);
+    }
+    Ok(out)
+}
+
+/// `statvfs1(2)`, system call 588 (NetBSD's name): `struct statvfs` of the file system `path` is
+/// on, names included.
+pub(crate) extern "C" fn oxidebsd_sys_statvfs1(path_ptr: u64, path_len: u64, buf_ptr: u64, _a3: u64) -> i64 {
+    let _g = enter();
+    ret((|| {
+        let cred = current_ucred();
+        with_vnode(lookup(&copyin_path(path_ptr, path_len)?, ptr::null_mut(), true, &cred)?, |vp| {
+            // SAFETY: held; its mount lives while it does.
+            copyout_val(&statvfs_of(unsafe { (*vp).v_mount })?, buf_ptr)?;
+            Ok(0)
+        })
+    })())
+}
+
+/// `fstatvfs1(2)`, system call 589.
+pub(crate) extern "C" fn oxidebsd_sys_fstatvfs1(fd: u64, buf_ptr: u64, _a2: u64, _a3: u64) -> i64 {
+    let _g = enter();
+    ret((|| {
+        with_vnode(fd_vnode(fd)?, |vp| {
+            // SAFETY: as above.
+            copyout_val(&statvfs_of(unsafe { (*vp).v_mount })?, buf_ptr)?;
+            Ok(0)
+        })
+    })())
+}
+
+/// `getvfsstat(2)`, system call 587 (NetBSD's): every mount, in mount order, as many as `bufsize`
+/// bytes hold; with `buf` null, how many there are. Every answer is fresh, so `ST_WAIT` and
+/// `ST_NOWAIT` read alike.
+pub(crate) extern "C" fn oxidebsd_sys_getvfsstat(buf_ptr: u64, bufsize: u64, flags: u64, _a3: u64) -> i64 {
+    const ST_WAIT: u64 = 1;
+    const ST_NOWAIT: u64 = 2;
+    let _g = enter();
+    ret((|| {
+        if flags != ST_WAIT && flags != ST_NOWAIT && flags != 0 {
+            return Err(EINVAL);
+        }
+        let mounts = vfs_mount::mounts();
+        if buf_ptr == 0 {
+            return Ok(mounts.len() as i64);
+        }
+        let room = (bufsize / core::mem::size_of::<Statvfs>() as u64) as usize;
+        let mut n = 0;
+        for mp in mounts.into_iter().take(room) {
+            let rec = statvfs_of(mp)?;
+            copyout_val(&rec, buf_ptr.wrapping_add((n * core::mem::size_of::<Statvfs>()) as u64))?;
+            n += 1;
+        }
+        Ok(n as i64)
+    })())
+}
+
+/// `revoke(2)`, system call 590 (NetBSD's: any file): every descriptor of the file goes to deadfs
+/// (reads at end of file, the rest failing), for a device every descriptor of the device, its
+/// controlling terminal's sessions included; the vnode is retired, so the next open is afresh.
+/// The file's owner or root only.
+pub(crate) extern "C" fn oxidebsd_sys_revoke(path_ptr: u64, path_len: u64, _a2: u64, _a3: u64) -> i64 {
+    let _g = enter();
+    ret((|| {
+        let cred = current_ucred();
+        let vp = lookup(&copyin_path(path_ptr, path_len)?, ptr::null_mut(), true, &cred)?;
+        let r = (|| {
+            let va = vattr(vp)?;
+            if cred.cr_uid != 0 && cred.cr_uid != va.va_uid {
+                return Err(EPERM);
+            }
+            revoke_vnode(vp);
+            Ok(0)
+        })();
+        vrele(vp);
+        r
+    })())
+}
+
+/// Revokes every descriptor of `vp`'s file (or of its device) and retires the vnode.
+pub(crate) fn revoke_vnode(vp: *mut Vnode) {
+    let obj = vfs_vnops::object_vp(vp);
+    // SAFETY: the caller holds `vp`.
+    let (vtype, rdev) = unsafe { ((*vp).v_type, (*vp).v_rdev) };
+    fd::revoke_where(|handle, file_vp| {
+        if let Some(fvp) = file_vp {
+            if vfs_vnops::object_vp(fvp) == obj {
+                return true;
+            }
+            // SAFETY: an open description holds its vnode.
+            if vtype == VCHR && unsafe { (*fvp).v_type == VCHR && (*fvp).v_rdev == rdev } {
+                return true;
+            }
+        }
+        // A terminal opened without a node (the console, by the kernel), by its device number.
+        vtype == VCHR
+            && crate::tty::of_real_fd(handle).is_some_and(|id| {
+                let (major, minor) = crate::tty::device(id);
+                (major as u64) << 8 | minor as u64 == rdev
+            })
+    });
+    vfs_subr::vgone(vp);
+    if obj != vp {
+        vfs_subr::vgone(obj);
+    }
+}
+
 pub(crate) extern "C" fn oxidebsd_sys_statfs(path_ptr: u64, path_len: u64, buf_ptr: u64, _a3: u64) -> i64 {
     let _g = enter();
     ret((|| {
@@ -1586,7 +1746,8 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     }
 }
 
-/// `unmount(2)` (musl's `umount2`, system call 176): `EBUSY` while anything on it is in use.
+/// `unmount(2)` (musl's `umount2`, system call 176): `EBUSY` while anything on it is in use,
+/// unless forced (`umount -f`), which revokes everything on it (`vfs_mount::dounmount`).
 pub(crate) extern "C" fn oxidebsd_sys_unmount(path_ptr: u64, path_len: u64, flags: u64, _a3: u64) -> i64 {
     let _g = enter();
     ret((|| {
@@ -1602,7 +1763,9 @@ pub(crate) extern "C" fn oxidebsd_sys_unmount(path_ptr: u64, path_len: u64, flag
         if flag & VV_ROOT == 0 {
             return Err(EINVAL);
         }
-        vfs_mount::dounmount(mp, flags).map(|()| 0)
+        // musl's umount2 flags: its MNT_FORCE is 1 (`<sys/mount.h>`, as Linux's).
+        const UMOUNT_FORCE: u64 = 1;
+        vfs_mount::dounmount(mp, if flags & UMOUNT_FORCE != 0 { MNT_FORCE } else { 0 }).map(|()| 0)
     })())
 }
 
@@ -1611,7 +1774,7 @@ pub(crate) extern "C" fn oxidebsd_sys_unmount(path_ptr: u64, path_len: u64, flag
 type Handler = extern "C" fn(u64, u64, u64, u64) -> i64;
 
 /// The calls above with their numbers, for the `vfs` module to register.
-static SYSCALLS: [(u64, Handler); 41] = [
+static SYSCALLS: [(u64, Handler); 45] = [
     (5, oxidebsd_sys_open),
     (12, oxidebsd_sys_chdir),
     (21, oxidebsd_sys_access),
@@ -1653,6 +1816,10 @@ static SYSCALLS: [(u64, Handler); 41] = [
     (572, oxidebsd_sys_utimensat_at),
     (573, oxidebsd_sys_renameat2),
     (584, oxidebsd_sys_nmount),
+    (587, oxidebsd_sys_getvfsstat),
+    (588, oxidebsd_sys_statvfs1),
+    (589, oxidebsd_sys_fstatvfs1),
+    (590, oxidebsd_sys_revoke),
 ];
 
 /// Entry `i` of the path calls: its handler, with its number in `*number`; null past the end.

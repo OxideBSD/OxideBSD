@@ -448,6 +448,14 @@ pub fn changed(content_id: u64) {
 pub fn vnode_gone(content_id: u64) {
     let mut c = CACHE.lock();
     if let Some(&id) = c.by_content.get(&content_id) {
+        // Still mapped (revoked, or its mount forcibly unmounted): what's loaded stays, and a page
+        // never loaded never will be (`SIGBUS`), since its blocks may be another file's soon.
+        if let Some(e) = c.entries.get_mut(&id)
+            && e.uses > 0
+        {
+            e.stale = true;
+            e.blocks = None;
+        }
         retire(&mut c, id);
     }
 }

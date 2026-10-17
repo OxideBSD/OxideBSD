@@ -374,6 +374,43 @@ pub(crate) fn writers_on(mp: *mut vfs_if::Mount) -> bool {
     })
 }
 
+/// Revokes every open description `matches` picks (`revoke(2)`, a forced unmount): its file is
+/// closed under it, as at its last close, and it becomes deadfs's (`kern::vfs_dead`), which every
+/// descriptor and message holding it keeps. `matches` gets the description's handle and the
+/// vnode it's open on or came through (`vnode_of`), if any. Returns how many were revoked.
+pub(crate) fn revoke_where(matches: impl Fn(u64, Option<*mut vfs_if::Vnode>) -> bool) -> usize {
+    use crate::kern::vfs_dead::DEAD_OPS;
+    let handles: alloc::vec::Vec<u64> = DESCRIPTIONS
+        .lock()
+        .iter()
+        .filter(|(_, d)| !core::ptr::eq(d.ops, &DEAD_OPS))
+        .map(|(&h, _)| h)
+        .collect();
+    let mut revoked = 0;
+    for handle in handles {
+        if !matches(handle, vnode_of(handle)) {
+            continue;
+        }
+        let Some((ops, ..)) = file_of(handle) else { continue };
+        if let Some(close) = ops.close {
+            let _lock = crate::fs::fslock::Guard::for_call(close as usize as u64);
+            close(handle);
+        }
+        let mut vnode = 0;
+        with_description_full(handle, |d| {
+            d.ops = &DEAD_OPS;
+            d.data = 0;
+            d.kind = FdKind::Module;
+            vnode = core::mem::take(&mut d.vnode);
+        });
+        if vnode != 0 {
+            crate::kern::vfs_subr::vrele_deferred(vnode as *mut vfs_if::Vnode);
+        }
+        revoked += 1;
+    }
+    revoked
+}
+
 /// Records that `real_fd` was opened through `vp` (giving it the caller's reference); a
 /// description that already has one keeps it, and the reference is dropped.
 pub(crate) fn set_vnode(real_fd: u64, vp: *mut vfs_if::Vnode) {

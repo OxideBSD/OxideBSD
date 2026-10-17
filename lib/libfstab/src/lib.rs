@@ -32,7 +32,7 @@ impl Entry {
 }
 
 fn unescape(field: &str) -> String {
-    field.replace("\\040", " ")
+    field.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 }
 
 /// Parses an fstab: the entries, and for each line that isn't one, its number (from 1) and why.
@@ -100,9 +100,73 @@ pub fn parse_mounted(text: &str) -> Vec<Mounted> {
         .collect()
 }
 
-/// What is mounted now.
+/// What is mounted now: `getvfsstat(2)` on OxideBSD (NetBSD's call, OxideBSD-doc `VFS.md` §4.6),
+/// `/proc/mounts` elsewhere (the host, for tests).
+#[cfg(target_os = "oxidebsd")]
+pub fn mounted() -> Vec<Mounted> {
+    vfs::mounted()
+}
+
+#[cfg(not(target_os = "oxidebsd"))]
 pub fn mounted() -> Vec<Mounted> {
     parse_mounted(&std::fs::read_to_string("/proc/mounts").unwrap_or_default())
+}
+
+#[cfg(target_os = "oxidebsd")]
+mod vfs {
+    use super::Mounted;
+
+    /// musl's `struct statvfs` on OxideBSD (`include/sys/statvfs.h`), duplicated here (this crate
+    /// has no dependencies): change it with the kernel's copy (`kern::vfs_syscalls::Statvfs`).
+    #[repr(C)]
+    struct Statvfs {
+        counts: [u64; 11],
+        f_type: u32,
+        reserved: [i32; 5],
+        f_fstypename: [u8; 32],
+        f_mntonname: [u8; 1024],
+        f_mntfromname: [u8; 1024],
+    }
+
+    const ST_RDONLY: u64 = 1;
+    const ST_NOWAIT: i32 = 2;
+    /// `f_flag`'s place in `counts`.
+    const FLAG: usize = 9;
+
+    unsafe extern "C" {
+        fn getvfsstat(buf: *mut Statvfs, bufsize: usize, flags: i32) -> i32;
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        let n = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..n]).into_owned()
+    }
+
+    pub fn mounted() -> Vec<Mounted> {
+        // SAFETY: a null buffer only counts.
+        let n = unsafe { getvfsstat(core::ptr::null_mut(), 0, ST_NOWAIT) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        // Room for a few mounted meanwhile.
+        let room = n as usize + 4;
+        let mut buf: Vec<Statvfs> = Vec::with_capacity(room);
+        // SAFETY: `room` records of space; the call fills at most that many.
+        let got = unsafe { getvfsstat(buf.as_mut_ptr(), room * size_of::<Statvfs>(), ST_NOWAIT) };
+        if got <= 0 {
+            return Vec::new();
+        }
+        // SAFETY: the call filled `got` records.
+        unsafe { buf.set_len(got as usize) };
+        buf.iter()
+            .map(|s| Mounted {
+                spec: text(&s.f_mntfromname),
+                file: text(&s.f_mntonname),
+                vfstype: text(&s.f_fstypename),
+                rdonly: s.counts[FLAG] & ST_RDONLY != 0,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -381,7 +381,9 @@
 ./usr/share/man/man2 type=dir
 ./usr/share/man/man2/accept.2 type=file src=share/man/man2/accept.2
 ./usr/share/man/man2/nmount.2 type=file src=share/man/man2/nmount.2
+./usr/share/man/man2/getvfsstat.2 type=file src=share/man/man2/getvfsstat.2
 ./usr/share/man/man2/procctl.2 type=file src=share/man/man2/procctl.2
+./usr/share/man/man2/revoke.2 type=file src=share/man/man2/revoke.2
 ./usr/share/man/man2/vfork.2 type=file src=share/man/man2/vfork.2
 ./usr/share/man/man2/accept4.2 type=file hardlink=./usr/share/man/man2/accept.2
 ./usr/share/man/man2/bind.2 type=file src=share/man/man2/bind.2
