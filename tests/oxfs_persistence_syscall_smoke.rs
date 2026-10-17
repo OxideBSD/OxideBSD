@@ -80,26 +80,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
 
-    // Populates SYS_OPEN/SYS_CLOSE and the rest of oxfs's syscalls -- and, with the data disk
-    // ata::init() just probed for above already attached, runs module_init's real format-then-
-    // flush path this test exists to exercise.
-    const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
-    const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
-    oxidebsd::module::load(
-        "oxfs",
-        OXFS_MOD,
-        OXFS_PANIC_SYMBOL,
-        true,
-        &mut mapper,
-        &mut frame_allocator,
-    )
-    .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
-
-    // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
-    const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
-    const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
-    oxidebsd::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
-        .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
+    // The file system modules, as at boot: oxfs mounts the system image, then procfs and tmpfs.
+    oxidebsd::kernel_main::load_file_systems(&mut mapper, &mut frame_allocator);
 
     oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();

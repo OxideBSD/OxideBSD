@@ -664,6 +664,14 @@ name = "tcp-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "tmpfs"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+ "vfs_if",
+]
+
+[[package]]
 name = "touch"
 version = "0.1.0"
 dependencies = [

@@ -1594,8 +1594,9 @@ fn iov_str(v: IoVec) -> Result<Vec<u8>, i32> {
 }
 
 /// `nmount(2)`, system call 584 (FreeBSD's shape): `fstype`, `fspath` and `from` options, plus
-/// `nosuid`, `wxallowed`, `ro`, `rw`; `errmsg` gets a message on failure. `MNT_UPDATE` changes a
-/// mounted file system's read-only state (`/` only for now).
+/// `nosuid`, `noexec`, `wxallowed`, `ro`, `rw`; `errmsg` gets a message on failure. Any other
+/// option is the type's (`MountArgs::opts`), which refuses one it doesn't know (`EINVAL`).
+/// `MNT_UPDATE` changes a mounted file system: its read-only state and its type's options.
 pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
     let _g = enter();
     if niov % 2 != 0 || niov > NMOUNT_MAX_IOV as u64 {
@@ -1610,9 +1611,11 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     }
     let mut errmsg: Option<IoVec> = None;
     let (mut fstype, mut fspath, mut from) = (Vec::new(), Vec::new(), Vec::new());
-    let mut unknown = false;
+    // The type's options, `name\0value\0` pairs.
+    let mut opts: Vec<u8> = Vec::new();
     let mut bad_option: Option<i32> = None;
     let mut nosuid = flags & MNT_NOSUID != 0;
+    let mut noexec = flags & MNT_NOEXEC != 0;
     let mut wxallowed = false;
     let mut rd = flags & MNT_RDONLY != 0;
     for pair in iov.chunks_exact(2) {
@@ -1626,6 +1629,10 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
         let slot = match name.as_slice() {
             b"nosuid" => {
                 nosuid = true;
+                continue;
+            }
+            b"noexec" => {
+                noexec = true;
                 continue;
             }
             b"wxallowed" => {
@@ -1648,7 +1655,17 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
             b"fspath" => &mut fspath,
             b"from" | b"target" => &mut from,
             _ => {
-                unknown = true;
+                match iov_str(pair[1]) {
+                    Ok(v) => {
+                        opts.extend_from_slice(&name);
+                        opts.push(0);
+                        opts.extend_from_slice(&v);
+                        opts.push(0);
+                    }
+                    Err(e) => {
+                        bad_option.get_or_insert(e);
+                    }
+                }
                 continue;
             }
         };
@@ -1677,24 +1694,30 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     if let Some(e) = bad_option {
         return fail(e, b"an option's name or value can't be read, or is too long");
     }
-    if unknown || flags & !(MNT_NOSUID | MNT_RDONLY | MNT_UPDATE) != 0 {
-        return fail(EOPNOTSUPP, b"the only mount options are nosuid, wxallowed, ro and rw");
+    if flags & !(MNT_NOSUID | MNT_NOEXEC | MNT_RDONLY | MNT_UPDATE) != 0 {
+        return fail(EOPNOTSUPP, b"unknown mount flags");
     }
     if fspath.is_empty() {
         return fail(EINVAL, b"no fspath: the directory to mount on");
     }
     if flags & MNT_UPDATE != 0 {
-        if fspath != b"/" {
-            return fail(EOPNOTSUPP, b"only / can be updated (mount -u) for now");
-        }
-        return match vfs_mount::update_root(rd) {
-            Ok(()) => 0,
-            Err(EBUSY) => fail(EBUSY, b"files are open for writing on /"),
-            Err(e) => fail(e, b"can't reread the root file system's superblock"),
+        // The file system mounted on `fspath`: its root, which the lookup crossed to.
+        let vp = match lookup(&fspath, ptr::null_mut(), true, &cred) {
+            Ok(vp) => vp,
+            Err(e) => return fail(e, b""),
         };
-    }
-    if rd {
-        return fail(EOPNOTSUPP, b"read-only mounts are for / only, with mount -u, for now");
+        // SAFETY: referenced.
+        let (is_root, mp) = unsafe { ((*vp).v_flag & VV_ROOT != 0, (*vp).v_mount) };
+        vrele(vp);
+        if !is_root {
+            return fail(EINVAL, b"not a mount point");
+        }
+        return match vfs_mount::update(mp, rd, &opts) {
+            Ok(()) => 0,
+            Err(EBUSY) => fail(EBUSY, b"files are open for writing there, or the new limits are below what's in use"),
+            Err(EINVAL) => fail(EINVAL, b"an option this file system doesn't take, or a bad value"),
+            Err(e) => fail(e, b""),
+        };
     }
     if fstype.is_empty() {
         return fail(EINVAL, b"no fstype");
@@ -1705,7 +1728,10 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     if vfc.flags & VFCF_FROM_VNODE != 0 && from.is_empty() {
         return fail(EINVAL, b"nullfs needs a target: the directory to mount");
     }
-    let mflags = (if nosuid { MNT_NOSUID } else { 0 }) | (if wxallowed { MNT_WXALLOWED } else { 0 });
+    let mflags = (if nosuid { MNT_NOSUID } else { 0 })
+        | (if noexec { MNT_NOEXEC } else { 0 })
+        | (if wxallowed { MNT_WXALLOWED } else { 0 })
+        | (if rd { MNT_RDONLY } else { 0 });
     let r = (|| -> Result<(), i32> {
         let from_vp = if vfc.flags & VFCF_FROM_VNODE != 0 {
             let vp = lookup(&from, ptr::null_mut(), true, &cred)?;
@@ -1734,7 +1760,7 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
             return Err(ENOTDIR);
         }
         let fromname: &[u8] = if from.is_empty() { &fstype } else { &from };
-        let r = vfs_mount::domount(vfc, covered, mflags, &fspath, fromname, from_vp);
+        let r = vfs_mount::domount(vfc, covered, mflags, &fspath, fromname, from_vp, &opts);
         if !from_vp.is_null() {
             vrele(from_vp);
         }
@@ -1742,6 +1768,7 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     })();
     match r {
         Ok(()) => 0,
+        Err(EINVAL) => fail(EINVAL, b"an option this file system doesn't take, or a bad value"),
         Err(e) => fail(e, b""),
     }
 }

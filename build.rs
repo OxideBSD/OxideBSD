@@ -1149,6 +1149,7 @@ fn main() {
     // these build products, by distrib/install.mtree.
     build_module_crate("oxfs", "OXFS", &[]);
     build_module_crate("procfs", "PROCFS", &[]);
+    build_module_crate("tmpfs", "TMPFS", &[]);
     build_sets_and_images(&oxfs_extra_env);
 
     // Multiboot2 boot path (see CLAUDE.md's Multiboot2 section): a genuinely separate final ELF,

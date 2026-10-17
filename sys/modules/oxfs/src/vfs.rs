@@ -1,13 +1,12 @@
-//! oxfs's VFS types (OxideBSD-doc `VFS.md` §4-§5): `oxfs` (the disk), and `tmpfs`, `devfs` and
-//! `nullfs` over the same inode space until step 3 splits them out. A vnode's file ID is the inode
-//! number; the kernel does path lookup and the system calls, and these are the operations it asks
-//! for.
+//! oxfs's VFS types (OxideBSD-doc `VFS.md` §4-§5): `oxfs` (the disk), and `devfs` and `nullfs`
+//! over the same inode space until step 3 splits them out (tmpfs went first, 3b). A vnode's file
+//! ID is the inode number; the kernel does path lookup and the system calls, and these are the
+//! operations it asks for.
 //!
-//! The four types share one module and one inode space: a tmpfs mount is a directory of the tmpfs
-//! pool, devfs is the tree `devfs_sync` keeps in that pool, and a nullfs mount shows another
+//! devfs is the tree `devfs_sync` keeps in the memory pool, and a nullfs mount shows another
 //! mount's directory under a mount of its own (so `..` at its root leaves through the directory it
 //! covers, which the kernel's `namei` handles). Real nullfs, layered over any type's vnodes, is
-//! step 3.
+//! step 3d.
 
 use alloc::vec::Vec;
 use core::ptr;
@@ -45,7 +44,6 @@ struct OxMount {
 }
 
 const KIND_DISK: u32 = 0;
-const KIND_TMPFS: u32 = 1;
 const KIND_DEVFS: u32 = 2;
 const KIND_NULLFS: u32 = 3;
 
@@ -64,7 +62,6 @@ macro_rules! vfsconf {
 }
 
 vfsconf!(OXFS_VFSCONF, b"oxfs", OXFS_VFSOPS, 0);
-vfsconf!(TMPFS_VFSCONF, b"tmpfs", TMPFS_VFSOPS, VFCF_SYNTHETIC);
 vfsconf!(DEVFS_VFSCONF, b"devfs", DEVFS_VFSOPS, VFCF_SYNTHETIC | VFCF_NOCACHE);
 vfsconf!(NULLFS_VFSCONF, b"nullfs", NULLFS_VFSOPS, VFCF_FROM_VNODE);
 
@@ -82,7 +79,6 @@ macro_rules! vfsops {
 }
 
 vfsops!(OXFS_VFSOPS, oxfs_vfs_mount);
-vfsops!(TMPFS_VFSOPS, tmpfs_vfs_mount);
 vfsops!(DEVFS_VFSOPS, devfs_vfs_mount);
 vfsops!(NULLFS_VFSOPS, nullfs_vfs_mount);
 
@@ -179,9 +175,13 @@ fn registered(mp: *mut Mount) {
 /// Mounts the disk's oxfs: the superblock, the layout, the free counts. Only the root for now
 /// (oxfs has one partition's worth of global state). With `MNT_UPDATE`, changes the root between
 /// read-only and read-write (`remount_root`).
-extern "C" fn oxfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
+extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     // SAFETY: the kernel filled the mount's flags.
     let flags = unsafe { (*mp).mnt_flag };
+    // SAFETY: the kernel's arguments.
+    if unsafe { (*args).opts_len } != 0 {
+        return VFS_EINVAL;
+    }
     if flags & MNT_UPDATE != 0 {
         return match remount_root(flags & MNT_RDONLY != 0) {
             0 => 0,
@@ -225,6 +225,17 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
     0
 }
 
+/// For a mount that takes no options of its own: `Some(result)` to return at once for a remount
+/// (`MNT_UPDATE`: only the kernel's flags change) or for options it doesn't know (`EINVAL`).
+fn no_options(mp: *mut Mount, args: *const MountArgs) -> Option<i32> {
+    // SAFETY: the kernel's mount and arguments, live for the call.
+    let (update, has_opts) = unsafe { ((*mp).mnt_flag & MNT_UPDATE != 0, (*args).opts_len != 0) };
+    if has_opts {
+        return Some(VFS_EINVAL);
+    }
+    update.then_some(0)
+}
+
 /// A directory of its own in the tmpfs pool.
 fn new_tmpfs_root() -> Option<u32> {
     let root = alloc_tmpfs_inode()?;
@@ -237,20 +248,12 @@ fn new_tmpfs_root() -> Option<u32> {
     Some(root)
 }
 
-extern "C" fn tmpfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
-    // SAFETY: as above.
-    if unsafe { (*mp).mnt_flag } & MNT_UPDATE != 0 {
-        return VFS_EINVAL;
-    }
-    let Some(root) = new_tmpfs_root() else { return VFS_ENOSPC };
-    *oxmount(mp) = OxMount { root, kind: KIND_TMPFS, lower: ptr::null_mut(), lower_root: ptr::null_mut() };
-    registered(mp);
-    0
-}
-
 /// devfs on `/dev` (`DEVFS.md` §4.1): a tree in the tmpfs pool kept in step with the kernel's
 /// device registry, and `/dev/shm`. One instance.
-extern "C" fn devfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
+extern "C" fn devfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
+    if let Some(e) = no_options(mp, args) {
+        return e;
+    }
     if devfs_root() != u32::MAX {
         return VFS_EBUSY;
     }
@@ -268,6 +271,9 @@ extern "C" fn devfs_vfs_mount(mp: *mut Mount, _args: *const MountArgs) -> i32 {
 
 /// A directory of one of these types shown at another place (`mount -t nullfs`).
 extern "C" fn nullfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
+    if let Some(e) = no_options(mp, args) {
+        return e;
+    }
     // SAFETY: the kernel passes its arguments.
     let from = unsafe { (*args).from_vp };
     if from.is_null() {
@@ -275,7 +281,7 @@ extern "C" fn nullfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     }
     // SAFETY: referenced by the kernel for the call.
     let from_vfc = unsafe { (*(*from).v_mount).mnt_vfc };
-    let ours = [&OXFS_VFSCONF, &TMPFS_VFSCONF, &DEVFS_VFSCONF, &NULLFS_VFSCONF];
+    let ours = [&OXFS_VFSCONF, &DEVFS_VFSCONF, &NULLFS_VFSCONF];
     if !ours.iter().any(|&c| ptr::eq(c, from_vfc)) {
         return VFS_EXDEV;
     }

@@ -237,13 +237,14 @@ fn automount_type(vfc: &'static VfsConf) {
         crate::kern::vfs_subr::vrele(covered);
         return;
     }
-    if let Err(e) = domount(vfc, covered, flags, path, from, ptr::null_mut()) {
+    if let Err(e) = domount(vfc, covered, flags, path, from, ptr::null_mut(), &[]) {
         crate::serial_println!("[vfs] mounting {} failed: {}", core::str::from_utf8(from).unwrap_or("?"), e);
     }
 }
 
 /// Mounts `vfc` on directory `covered` (referenced; the mount keeps the reference): `nmount(2)`'s
-/// work once its options are parsed. `onname` is the path as given, `fromname` what it's from.
+/// work once its options are parsed. `onname` is the path as given, `fromname` what it's from,
+/// `opts` the options left for the type (`name\0value\0` pairs, `MountArgs::opts`).
 pub(crate) fn domount(
     vfc: &'static VfsConf,
     covered: *mut Vnode,
@@ -251,6 +252,7 @@ pub(crate) fn domount(
     onname: &[u8],
     fromname: &[u8],
     from_vp: *mut Vnode,
+    opts: &[u8],
 ) -> Result<(), i32> {
     let Some(mount) = (unsafe { (*vfc.ops).mount }) else {
         crate::kern::vfs_subr::vrele(covered);
@@ -267,15 +269,21 @@ pub(crate) fn domount(
         from: fromname.as_ptr(),
         from_len: fromname.len(),
         dev: NODEV,
-        opts: ptr::null(),
-        opts_len: 0,
+        opts: opts.as_ptr(),
+        opts_len: opts.len(),
         from_vp,
     };
+    // The type may read the directory it covers (tmpfs takes its root's mode from it), as on
+    // FreeBSD, where `mnt_vnodecovered` is set before `VFS_MOUNT`.
+    // SAFETY: `mp` is ours until it's on the list; `covered` is referenced.
+    unsafe { (*mp).mnt_vnodecovered = covered };
     let e = {
         let _giant = fslock::Giant::enter();
         mount(mp, &args)
     };
     if e != 0 {
+        // SAFETY: as above.
+        unsafe { (*mp).mnt_vnodecovered = ptr::null_mut() };
         mount_free(mp);
         crate::kern::vfs_subr::vrele(covered);
         return Err(e);
@@ -324,6 +332,7 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
         crate::kern::vfs_subr::vflush(mp);
         crate::kern::vfs_subr::vgone_all(mp);
     }
+    crate::kern::vfs_subr::release_cached(mp);
     if crate::kern::vfs_subr::vflush(mp) != 0 {
         return Err(EBUSY);
     }
@@ -343,14 +352,9 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
     Ok(())
 }
 
-/// `mount -u /`: the root's read-only state, through its type's `mount` with `MNT_UPDATE`.
-pub(crate) fn update_root(rdonly: bool) -> Result<(), i32> {
-    let root = rootvnode();
-    if root.is_null() {
-        return Err(EOPNOTSUPP);
-    }
-    // SAFETY: the root vnode and its mount live for good.
-    let mp = unsafe { (*root).v_mount };
+/// `mount -u`: a mounted file system's read-only state and its type's options (`opts`, as
+/// `domount`'s), through the type's `mount` with `MNT_UPDATE`. `mp` is a mount on the list.
+pub(crate) fn update(mp: *mut Mount, rdonly: bool, opts: &[u8]) -> Result<(), i32> {
     let Some(mount) = ops(mp).mount else { return Err(EOPNOTSUPP) };
     let old = unsafe { (*mp).mnt_flag };
     if rdonly && old & MNT_RDONLY == 0 && crate::fs::fd::writers_on(mp) {
@@ -363,8 +367,8 @@ pub(crate) fn update_root(rdonly: bool) -> Result<(), i32> {
         from: ptr::null(),
         from_len: 0,
         dev: unsafe { (*mp).mnt_dev },
-        opts: ptr::null(),
-        opts_len: 0,
+        opts: opts.as_ptr(),
+        opts_len: opts.len(),
         from_vp: ptr::null_mut(),
     };
     let e = {

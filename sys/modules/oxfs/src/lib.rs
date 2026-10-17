@@ -2032,7 +2032,7 @@ pub extern "C" fn module_init() -> i32 {
     // there's nothing to boot: fail the load (the kernel then stops).
     // SAFETY: FFI calls to a kernel-exported function, with static tables.
     unsafe {
-        for vfc in [&vfs::DEVFS_VFSCONF, &vfs::TMPFS_VFSCONF, &vfs::NULLFS_VFSCONF] {
+        for vfc in [&vfs::DEVFS_VFSCONF, &vfs::NULLFS_VFSCONF] {
             vfs_if::oxidebsd_vfs_register(vfc);
         }
         if vfs_if::oxidebsd_vfs_register(&vfs::OXFS_VFSCONF) != 0 || vfs::root_mount().is_null() {

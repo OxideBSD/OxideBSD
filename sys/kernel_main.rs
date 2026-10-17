@@ -165,35 +165,7 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // their own pid 1, keep it read-write.
     crate::drivers::disk::set_root_readonly_at_boot();
 
-    // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
-    // since removed (superseded, no longer buildable or loaded).
-    //
-    // `fatal_on_panic = true`: unlike every other module here, a filesystem module's state *is*
-    // the entire in-memory filesystem (plus, now, whatever's mid-flight to its real backing disk
-    // when a data disk is attached -- see src/ata.rs and this module's own on-disk persistence
-    // logic). There's no way to safely resume past a panic in either case: with no disk, "restart
-    // the module and keep going" would silently revert every file to empty; with one attached, a
-    // panic mid-mount or mid-format risks leaving a torn superblock/inode-table write behind,
-    // which is worse to resume past than a purely in-memory panic ever was. So a panic anywhere in
-    // oxfs reboots the whole system instead (see `module_panic_trampoline` in `sys/module.rs`).
-    // The same reasoning will apply to ext4/xfs/... should any real disk filesystem load at boot.
-    const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
-    const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
-    crate::module::load(
-        "oxfs",
-        OXFS_MOD,
-        OXFS_PANIC_SYMBOL,
-        true,
-        &mut mapper,
-        &mut frame_allocator,
-    )
-    .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
-
-    // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
-    const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
-    const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
-    crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
-        .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
+    load_file_systems(&mut mapper, &mut frame_allocator);
     let (transfers, irqs) = crate::drivers::disk::stats();
     serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
 
@@ -284,4 +256,49 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         .unwrap_or_else(|| panic!("no init found: nothing in init_path, nor /bin/sh, could be started"));
 
     crate::process::scheduler::start(pid1)
+}
+
+/// Loads the file system modules (OxideBSD-doc `VFS.md`), in the order they must come: oxfs, whose
+/// type mounts the root as it registers, then the types the kernel mounts on the root's
+/// directories (procfs on `/proc`) and the ones `/etc/fstab` and `mount(8)` name (tmpfs). The data
+/// disk must be attached first (`drivers::disk::init`). Test kernels call it too, so each loads
+/// the same set.
+pub fn load_file_systems(
+    mapper: &mut x86_64::structures::paging::OffsetPageTable<'static>,
+    frame_allocator: &mut crate::memory::BootInfoFrameAllocator,
+) {
+    // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
+    // since removed (superseded, no longer buildable or loaded).
+    //
+    // `fatal_on_panic = true`: unlike every other module here, a filesystem module's state *is*
+    // the entire in-memory filesystem (plus, now, whatever's mid-flight to its real backing disk
+    // when a data disk is attached -- see src/ata.rs and this module's own on-disk persistence
+    // logic). There's no way to safely resume past a panic in either case: with no disk, "restart
+    // the module and keep going" would silently revert every file to empty; with one attached, a
+    // panic mid-mount or mid-format risks leaving a torn superblock/inode-table write behind,
+    // which is worse to resume past than a purely in-memory panic ever was. So a panic anywhere in
+    // oxfs reboots the whole system instead (see `module_panic_trampoline` in `sys/module.rs`).
+    // The same reasoning will apply to ext4/xfs/... should any real disk filesystem load at boot.
+    const OXFS_MOD: &[u8] = include_bytes!(env!("OXFS_MOD_PATH"));
+    const OXFS_PANIC_SYMBOL: &str = env!("OXFS_MOD_PANIC_SYMBOL");
+    crate::module::load(
+        "oxfs",
+        OXFS_MOD,
+        OXFS_PANIC_SYMBOL,
+        true,
+        mapper,
+        frame_allocator,
+    )
+    .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
+
+    // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
+    const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
+    const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
+    crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
+
+    const TMPFS_MOD: &[u8] = include_bytes!(env!("TMPFS_MOD_PATH"));
+    const TMPFS_PANIC_SYMBOL: &str = env!("TMPFS_MOD_PANIC_SYMBOL");
+    crate::module::load("tmpfs", TMPFS_MOD, TMPFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the tmpfs module: {e:?}"));
 }

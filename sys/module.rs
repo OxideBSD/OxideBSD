@@ -736,6 +736,23 @@ pub(crate) extern "C" fn oxidebsd_page_alloc() -> u64 {
     va.as_u64()
 }
 
+/// `vfs.tmpfs.memory_reserved`: the free memory, in bytes, below which no tmpfs takes a page
+/// (`oxidebsd_tmpfs_page_alloc`), FreeBSD's knob and default.
+pub(crate) static TMPFS_MEMORY_RESERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(4 << 20);
+
+/// Kernel API for tmpfs: `oxidebsd_page_alloc`, unless the memory left (free frames, and page
+/// cache frames nothing maps, which the allocator takes back) would drop below
+/// `vfs.tmpfs.memory_reserved`. So no tmpfs, whatever its `size`, runs the system out of memory.
+pub(crate) extern "C" fn oxidebsd_tmpfs_page_alloc() -> u64 {
+    let (total, used) = crate::memory::frame_counts();
+    let available = total.saturating_sub(used) + crate::memory::pagecache::meminfo_pages().1;
+    let reserved = TMPFS_MEMORY_RESERVED.load(core::sync::atomic::Ordering::Relaxed) / PAGE_SIZE;
+    if available <= reserved + 1 {
+        return 0;
+    }
+    oxidebsd_page_alloc()
+}
+
 /// Gives back a page `oxidebsd_page_alloc` returned.
 pub(crate) extern "C" fn oxidebsd_page_free(va: u64) {
     let Some(offset) = phys_mem_offset() else { return };
@@ -1138,6 +1155,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_module_alloc_zeroed" => Some(oxidebsd_module_alloc_zeroed as *const () as u64),
         "oxidebsd_page_alloc" => Some(oxidebsd_page_alloc as *const () as u64),
+        "oxidebsd_tmpfs_page_alloc" => Some(oxidebsd_tmpfs_page_alloc as *const () as u64),
         "oxidebsd_page_free" => Some(oxidebsd_page_free as *const () as u64),
         "oxidebsd_copyin" => Some(crate::memory::usercopy::oxidebsd_copyin as *const () as u64),
         "oxidebsd_copyout" => Some(crate::memory::usercopy::oxidebsd_copyout as *const () as u64),
@@ -1459,6 +1477,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_vfs_recycle" => Some(crate::kern::vfs_subr::oxidebsd_vfs_recycle as *const () as u64),
         "oxidebsd_vrele" => Some(crate::kern::vfs_subr::oxidebsd_vrele as *const () as u64),
         "oxidebsd_vaccess" => Some(crate::kern::vfs_subr::oxidebsd_vaccess as *const () as u64),
+        "oxidebsd_vop_getattr" => Some(crate::kern::vnode_if::oxidebsd_vop_getattr as *const () as u64),
         "oxidebsd_root_readonly_at_boot" => {
             Some(crate::drivers::disk::oxidebsd_root_readonly_at_boot as *const () as u64)
         }

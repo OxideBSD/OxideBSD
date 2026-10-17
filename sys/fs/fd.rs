@@ -1047,8 +1047,9 @@ pub(crate) fn framebuffer_geometry_of(fd: u64) -> Option<crate::drivers::fbdev::
 }
 
 /// The mode bits, owner and group of the program open as `real_fd`, for `execve`
-/// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount.
-pub(crate) fn exec_setid_handle(real_fd: u64) -> Option<((u32, u32, u32), bool)> {
+/// (`process::identity::Cred::exec`), and whether it is under a `wxallowed` mount and under a
+/// `noexec` one.
+pub(crate) fn exec_setid_handle(real_fd: u64) -> Option<((u32, u32, u32), bool, bool)> {
     let (ops, _, _, data) = file_of(real_fd)?;
     if !core::ptr::eq(ops, &crate::kern::vfs_vnops::VN_OPS) {
         return None;

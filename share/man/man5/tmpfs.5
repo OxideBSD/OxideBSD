@@ -1,0 +1,113 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt TMPFS 5
+.Os OxideBSD
+.Sh NAME
+.Nm tmpfs
+.Nd file system in memory
+.Sh SYNOPSIS
+.Nm mount
+.Fl t Cm tmpfs
+.Op Fl o Ar options
+.Cm tmpfs Ar node
+.Nm mount_tmpfs
+.Op Fl o Ar options
+.Cm tmpfs Ar node
+.Sh DESCRIPTION
+A
+.Nm
+file system keeps its files in memory: it starts empty, and everything in it is gone when it is
+unmounted or the system stops.
+Each mount is a file system of its own, with its own device number
+.Pq Fa st_dev ,
+file serial numbers and limits; a file can't be linked or renamed from one mount to another
+.Pq Er EXDEV .
+.Pp
+A regular file's data takes pages of memory as it is written; a part never written is a hole,
+reads as zeros and takes nothing.
+The root directory takes its mode, owner and group from the directory it is mounted on, unless
+the options say otherwise.
+.Pp
+Regular files of the
+.Nm
+mounted on
+.Pa /dev/shm
+are the POSIX shared memory objects of
+.Xr shm_open 3 .
+.Sh OPTIONS
+Besides the options every file system takes
+.Pq see Xr mount 8 ,
+.Nm
+takes:
+.Bl -tag -width "maxfilesize=size"
+.It Cm size= Ns Ar size
+The most memory the file system may hold, in bytes, or with a suffix
+.Cm k , m , g
+or
+.Cm t .
+The default is a sixteenth of the memory, but at least 8 MiB and at most 64 MiB.
+.It Cm nodes= Ns Ar count
+The most files, directories and other nodes it may hold.
+The default is 3 plus one for each KiB of
+.Cm size .
+.It Cm maxfilesize= Ns Ar size
+The largest a regular file may grow
+.Pq Er EFBIG
+past it; by default only
+.Cm size
+limits it.
+.It Cm mode= Ns Ar mode
+The root directory's mode, in octal.
+.It Cm uid= Ns Ar uid
+The root directory's owner.
+.It Cm gid= Ns Ar gid
+The root directory's group.
+.El
+.Pp
+.Nm mount Fl u Fl o Cm size= Ns Ar size
+changes a mounted
+.Nm Ns 's
+size, or
+.Cm nodes= Ns Ar count
+its node limit; neither may go below what is in use
+.Pq Er EBUSY .
+.Pp
+Whatever the sizes, no
+.Nm
+takes a page when that would leave less free memory than the
+.Va vfs.tmpfs.memory_reserved
+.Xr sysctl 8
+says (bytes, 4 MiB by default); a write then fails with
+.Er ENOSPC .
+.Sh FILES
+.Bl -tag -width /dev/shm -compact
+.It Pa /tmp
+a
+.Nm
+when
+.Va tmpmfs
+in
+.Xr rc.conf 5
+says so
+.It Pa /dev/shm
+a
+.Nm ,
+from the default
+.Xr fstab 5
+.El
+.Sh EXAMPLES
+A 64 MiB
+.Nm
+on
+.Pa /mnt :
+.Bd -literal -offset indent
+mount -t tmpfs -o size=64m tmpfs /mnt
+.Ed
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr mount 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+.Nm
+appeared in NetBSD 4.0 and FreeBSD 7.0.
+In OxideBSD it was a part of oxfs until it became a file system type of its own in 0.3.0.

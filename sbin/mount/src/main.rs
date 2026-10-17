@@ -7,13 +7,16 @@
 //! mount [-v] node | special                 as fstab says
 //! mount --bind directory node               the same as -t nullfs
 //! mount_nullfs [-o options] target node     the same as -t nullfs
-//! mount -u [-rw] [-o ro|rw] node            change a mounted file system (only / for now)
+//! mount_tmpfs [-o options] tmpfs node        the same as -t tmpfs
+//! mount -u [-rw] [-o options] node          change a mounted file system
 //! ```
 //!
-//! The types are `tmpfs` and `nullfs` (a directory seen again at another place, Linux's bind
-//! mount). `rw` is accepted and ignored for a new mount; other options are passed to the kernel,
-//! which refuses them for now. `-u` changes the root file system between read-only and read-write
-//! (`-r`/`-o ro`, `-w`/`-o rw`, as in FreeBSD): `/etc/rc` mounts it read-write after checking it.
+//! The types are `tmpfs` (`tmpfs(5)`) and `nullfs` (a directory seen again at another place,
+//! Linux's bind mount). Options are passed to the kernel, which takes `ro`, `rw`, `nosuid`,
+//! `noexec` and `wxallowed` itself and gives the rest to the type (`size=` for tmpfs). `-u` changes
+//! a mounted file system: between read-only and read-write (`-r`/`-o ro`, `-w`/`-o rw`, as in
+//! FreeBSD; `/etc/rc` mounts the root read-write after checking it), and its type's options
+//! (`mount -u -o size=64m /tmp`). Without `-r` or `-w` it stays as it is.
 
 use std::ffi::CString;
 use std::process::ExitCode;
@@ -78,8 +81,8 @@ fn mount_one(
     if vfstype == "nullfs" {
         pairs.push(("target", spec));
     }
-    // fstab options that are for mount itself, not the kernel; rw is the only mode there is.
-    const FOR_MOUNT: [&str; 5] = ["rw", "noauto", "late", "failok", "sw"];
+    // fstab options that are for mount itself, not the kernel.
+    const FOR_MOUNT: [&str; 4] = ["noauto", "late", "failok", "sw"];
     for o in options
         .iter()
         .filter(|o| !o.is_empty() && !FOR_MOUNT.contains(&o.as_str()))
@@ -115,20 +118,28 @@ fn type_selected(list: Option<&str>, vfstype: &str) -> bool {
 fn usage() -> ExitCode {
     eprintln!("usage: mount [-av] [-t type] [-o options] [special | node] ...");
     eprintln!("       mount --bind directory node");
-    eprintln!("       mount -u [-rw] [-o ro|rw] node");
+    eprintln!("       mount -u [-rw] [-o options] node");
     ExitCode::from(1)
 }
 
-/// `mount -u`: makes the file system mounted on `node` (or on the node fstab gives `node` as a
-/// device for) read-only or read-write.
-fn update(node: &str, rdonly: bool, verbose: bool) -> Result<(), String> {
+/// `mount -u`: changes the file system mounted on `node` (or on the node fstab gives `node` as a
+/// device for): read-only or read-write (`rdonly`; `None` keeps what it is), and `options`.
+fn update(node: &str, rdonly: Option<bool>, options: &[String], verbose: bool) -> Result<(), String> {
     let entries = fstab::read().map(|r| r.0).unwrap_or_default();
     let node = entries
         .iter()
         .find(|e| e.spec == node)
         .map_or(node.to_string(), |e| e.file.clone());
+    let rdonly = rdonly.unwrap_or_else(|| fstab::mounted().iter().any(|m| m.file == node && m.rdonly));
     let flags = MNT_UPDATE | if rdonly { MNT_RDONLY } else { 0 };
-    nmount_flags(&[("fspath", &node)], flags).map_err(|why| format!("{node}: {why}"))?;
+    let mut pairs: Vec<(&str, &str)> = vec![("fspath", &node)];
+    for o in options.iter().filter(|o| !o.is_empty()) {
+        match o.split_once('=') {
+            Some((n, v)) => pairs.push((n, v)),
+            None => pairs.push((o.as_str(), "")),
+        }
+    }
+    nmount_flags(&pairs, flags).map_err(|why| format!("{node}: {why}"))?;
     if verbose {
         println!("{node}: now {}", if rdonly { "read-only" } else { "read-write" });
     }
@@ -145,7 +156,13 @@ fn main() -> ExitCode {
     let mut verbose = false;
     let mut updating = false;
     let mut rdonly = false;
-    let mut vfstype: Option<String> = (name == "mount_nullfs").then(|| "nullfs".to_string());
+    let mut vfstype: Option<String> = match name.as_str() {
+        "mount_nullfs" => Some("nullfs".to_string()),
+        "mount_tmpfs" => Some("tmpfs".to_string()),
+        _ => None,
+    };
+    // `-r`/`-w` given, for `-u` (which otherwise keeps the current mode).
+    let mut mode_given = false;
     let mut options: Vec<String> = Vec::new();
     let mut rest: Vec<String> = Vec::new();
     let mut args = argv.into_iter().skip(1);
@@ -171,8 +188,14 @@ fn main() -> ExitCode {
                         'a' => all = true,
                         'v' => verbose = true,
                         'u' => updating = true,
-                        'r' => rdonly = true,
-                        'w' => rdonly = false,
+                        'r' => {
+                            rdonly = true;
+                            mode_given = true;
+                        }
+                        'w' => {
+                            rdonly = false;
+                            mode_given = true;
+                        }
                         't' => match value() {
                             Some(t) => vfstype = Some(t),
                             None => return usage(),
@@ -190,18 +213,22 @@ fn main() -> ExitCode {
     }
 
     if updating {
+        let mut rest_options = Vec::new();
         for o in &options {
             match o.as_str() {
-                "ro" | "rdonly" => rdonly = true,
-                "rw" => rdonly = false,
-                _ => {
-                    eprintln!("mount: -u: only ro and rw can be changed");
-                    return ExitCode::from(1);
+                "ro" | "rdonly" => {
+                    rdonly = true;
+                    mode_given = true;
                 }
+                "rw" => {
+                    rdonly = false;
+                    mode_given = true;
+                }
+                _ => rest_options.push(o.clone()),
             }
         }
         let [node] = rest.as_slice() else { return usage() };
-        return match update(node, rdonly, verbose) {
+        return match update(node, mode_given.then_some(rdonly), &rest_options, verbose) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("mount: {e}");

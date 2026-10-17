@@ -1196,8 +1196,12 @@ fn read_exec_head(handle: u64, pread: bool) -> Result<ExecFile, u64> {
     if unsafe { (*(content as *mut vfs_if::Vnode)).v_writecount } > 0 {
         return Err(ETXTBSY);
     }
-    // Held by the `ExecFile` from here: the file is released before the image is mapped.
-    crate::kern::vfs_subr::vref(content as *mut vfs_if::Vnode);
+    let (setid, wxallowed) = match crate::fs::fd::exec_setid_handle(handle) {
+        // Nothing on a `noexec` mount runs, as on the BSDs.
+        Some((_, _, true)) => return Err(EACCES),
+        Some((setid, wxallowed, false)) => (Some(setid), wxallowed),
+        None => (None, false),
+    };
     let read = |len: u64| -> Result<Vec<u8>, u64> {
         let mut head = alloc::vec![0u8; len as usize];
         if crate::fs::fd::content_read(content, 0, head.as_mut_ptr() as u64, len) != len as i64 {
@@ -1217,10 +1221,9 @@ fn read_exec_head(handle: u64, pread: bool) -> Result<ExecFile, u64> {
             head = read(end)?;
         }
     }
-    let (setid, wxallowed) = match crate::fs::fd::exec_setid_handle(handle) {
-        Some((setid, wxallowed)) => (Some(setid), wxallowed),
-        None => (None, false),
-    };
+    // Held by the `ExecFile` from here: the file is released before the image is mapped. Taken
+    // last, so no early return above leaves it held.
+    crate::kern::vfs_subr::vref(content as *mut vfs_if::Vnode);
     Ok(ExecFile { head, size, content: Some(content), setid, wxallowed })
 }
 

@@ -173,6 +173,7 @@
 ./usr/bin/mktemp type=file src=artifact:OXFS_MKTEMP_ELF_PATH
 ./sbin/mount type=file src=artifact:OXFS_MOUNT_ELF_PATH
 ./sbin/mount_nullfs type=file hardlink=./sbin/mount
+./sbin/mount_tmpfs type=file hardlink=./sbin/mount
 ./usr/bin/nc type=file src=artifact:OXFS_NC_ELF_PATH
 ./usr/sbin/newsyslog type=file src=artifact:OXFS_NEWSYSLOG_ELF_PATH
 ./usr/bin/nice type=file src=artifact:OXFS_NICE_ELF_PATH
@@ -429,6 +430,7 @@
 ./usr/share/man/man5/periodic.conf.5 type=file src=share/man/man5/periodic.conf.5
 ./usr/share/man/man5/tzfile.5 type=file src=external/public-domain/tz/tzfile.5
 ./usr/share/man/man5/ttys.5 type=file src=share/man/man5/ttys.5
+./usr/share/man/man5/tmpfs.5 type=file src=share/man/man5/tmpfs.5
 ./usr/share/man/man7 type=dir
 ./usr/share/man/man7/eqn.7 type=file src=share/man/man7/eqn.7
 ./usr/share/man/man7/hier.7 type=file src=share/man/man7/hier.7
@@ -461,6 +463,7 @@
 ./usr/share/man/man8/cron.8 type=file src=share/man/man8/cron.8
 ./usr/share/man/man8/mount.8 type=file src=share/man/man8/mount.8
 ./usr/share/man/man8/mount_nullfs.8 type=file hardlink=./usr/share/man/man8/mount.8
+./usr/share/man/man8/mount_tmpfs.8 type=file hardlink=./usr/share/man/man8/mount.8
 ./usr/share/man/man8/umount.8 type=file src=share/man/man8/umount.8
 ./usr/share/man/man8/sync.8 type=file src=share/man/man8/sync.8
 ./usr/share/man/man8/periodic.8 type=file src=share/man/man8/periodic.8

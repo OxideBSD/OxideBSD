@@ -102,6 +102,7 @@ members = [
   "sys/modules/procfs",
   "sys/modules/socket",
   "sys/modules/sysctl",
+  "sys/modules/tmpfs",
   "sys/modules/procctl",
   "sys/modules/vfork",
   "sys/modules/alloc_smoke",

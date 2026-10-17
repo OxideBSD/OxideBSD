@@ -407,6 +407,23 @@ pub(crate) fn vflush(mp: *mut Mount) -> u64 {
     unsafe { (*mp).mnt_nvnodes }
 }
 
+/// Lets go of the page cache's idle entries for `mp`'s vnodes nothing uses: such an entry only
+/// holds its vnode (`vhold`), which would keep the vnode off the free list and the mount busy.
+/// Unmount drops them first, as FreeBSD's frees a vnode's cached pages with it.
+pub(crate) fn release_cached(mp: *mut Mount) {
+    let idle: alloc::vec::Vec<VnodeRef> = HASH
+        .lock()
+        .iter()
+        .filter(|((m, _), _)| *m == mp as usize)
+        .map(|(_, &v)| v)
+        // SAFETY: hashed vnodes are live.
+        .filter(|v| unsafe { (*v.get()).v_usecount == 0 && (*v.get()).v_holdcnt > 0 })
+        .collect();
+    for v in idle {
+        crate::memory::pagecache::vnode_gone(v.get() as u64);
+    }
+}
+
 /// Retires every vnode of `mp` still in use (a forced unmount, FreeBSD's `vflush(FORCECLOSE)`):
 /// their holders keep doomed vnodes, whose operations reach no file system.
 pub(crate) fn vgone_all(mp: *mut Mount) {

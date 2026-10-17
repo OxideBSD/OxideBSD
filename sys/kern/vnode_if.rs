@@ -99,6 +99,19 @@ pub(crate) fn vop_getattr(vp: *mut Vnode) -> Result<Vattr, i32> {
     Ok(va)
 }
 
+/// `getattr` for modules: a file system reading another vnode's attributes (tmpfs, the directory
+/// it covers). `0` or the errno.
+pub(crate) extern "C" fn oxidebsd_vop_getattr(vp: *mut Vnode, vap: *mut Vattr) -> i32 {
+    match vop_getattr(vp) {
+        Ok(va) => {
+            // SAFETY: the calling module's record.
+            unsafe { *vap = va };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
 /// `access`: the type's, else `vaccess` over `getattr` (FreeBSD's `vop_stdaccess`).
 pub(crate) fn vop_access(vp: *mut Vnode, accmode: u32, cred: &Ucred) -> i32 {
     vop!(vp, access, 0, {

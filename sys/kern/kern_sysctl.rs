@@ -870,6 +870,27 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
         add_leaf(t, &vfs, Leaf { number: None, name, kind: CTLTYPE_ULONG, fmt: "LU", flags: CTLFLAG_RD, descr, get, set: None });
     }
 
+    // tmpfs's memory reserve (`module::oxidebsd_tmpfs_page_alloc`), FreeBSD's name.
+    let tmpfs = add_node(t, &vfs, None, "tmpfs", "tmpfs file system");
+    add_leaf(
+        t,
+        &tmpfs,
+        Leaf {
+            number: None,
+            name: "memory_reserved",
+            kind: CTLTYPE_ULONG,
+            fmt: "LU",
+            flags: CTLFLAG_RW,
+            descr: "Amount of available memory and swap below which tmpfs growth stops",
+            get: || ulong(crate::module::TMPFS_MEMORY_RESERVED.load(core::sync::atomic::Ordering::Relaxed)),
+            set: Some(|new| {
+                let v = new.try_into().map(u64::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                crate::module::TMPFS_MEMORY_RESERVED.store(v, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+    );
+
     add_node(t, &kern, None, "module", "Loaded kernel modules");
     for (name, id) in crate::module::charged_modules() {
         add_module_leaves(t, name, id);

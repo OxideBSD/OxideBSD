@@ -116,8 +116,12 @@ check "umount by special" umount $T/src
 check "umount -v" [ "$(umount -v $T/m1)" = "$T/m1: unmounted" ]
 check "an unknown type is refused" status_is 1 mount -t nosuchfs x $T/m1
 check "with the kernel's reason" sh -c "mount -t nosuchfs x $T/m1 2>&1 | grep -q 'unknown file system type'"
-check "an unsupported option is refused" sh -c "mount -t tmpfs -o noexec tmpfs $T/m1 2>&1 | grep -q 'the only mount options are nosuid, wxallowed, ro and rw'"
-check "a new read-only mount is refused" sh -c "mount -t tmpfs -o ro tmpfs $T/m1 2>&1 | grep -q 'read-only mounts are for / only'"
+check "an unsupported option is refused" sh -c "mount -t tmpfs -o nosuchopt tmpfs $T/m1 2>&1 | grep -q 'an option this file system doesn'"
+check "a read-only mount" mount -t tmpfs -o ro tmpfs $T/m1
+check "refuses writes (EROFS)" not sh -c ": > $T/m1/f" 2>/dev/null
+check "mount -u -w makes it read-write" mount -u -w $T/m1
+check "and writable" sh -c ": > $T/m1/f"
+check "umount the read-only one" umount $T/m1
 check "nosuid is accepted" mount -t tmpfs -o nosuid tmpfs $T/m1
 check "and shown in /proc/mounts" grep -q "$T/m1 tmpfs rw,nosuid" /proc/mounts
 check "umount the nosuid tmpfs" umount $T/m1
@@ -179,6 +183,51 @@ check "umount -f takes it anyway" umount -f $V/tf
 check "and what was under it shows again" not /bin/test -e $V/tf/f
 wait $busy 2>/dev/null
 check "mount lists through getvfsstat" sh -c "mount | grep -q ' on /proc '"
+
+# tmpfs (tmpfs(5), its own module since VFS step 3b).
+X=$T/tmpx
+mkdir -p $X/a $X/b
+chmod 0750 $X/a
+check "tmpfs: unknown options are refused" not mount -t tmpfs -o bogus=1 tmpfs $X/a 2>/dev/null
+check "tmpfs: mount with a size" mount -t tmpfs -o size=1m tmpfs $X/a
+check "tmpfs: the root takes the covered directory's mode" [ "$(perms $X/a)" = drwxr-x--- ]
+check "tmpfs: mount_tmpfs, with mode=" /sbin/mount_tmpfs -o mode=1777 tmpfs $X/b
+check "tmpfs: mode= sets the root's mode" [ "$(perms $X/b)" = drwxrwxrwt ]
+check "tmpfs: each mount has its own st_dev" [ "$(stat -t $X/a | cut -d" " -f7)" != "$(stat -t $X/b | cut -d" " -f7)" ]
+check "tmpfs: df shows it" sh -c "df $X/a | grep -q '^tmpfs'"
+check "tmpfs: a write past size= fails" not dd if=/dev/zero of=$X/a/big bs=4096 count=512 2>/dev/null
+rm -f $X/a/big
+check "tmpfs: and the space comes back" dd if=/dev/zero of=$X/a/big bs=4096 count=128 2>/dev/null
+rm -f $X/a/big
+check "tmpfs: mount -u -o size= grows it" mount -u -o size=4m $X/a
+check "tmpfs: to the new size" dd if=/dev/zero of=$X/a/big bs=4096 count=512 2>/dev/null
+check "tmpfs: and won't shrink below what's in use" not mount -u -o size=1m $X/a 2>/dev/null
+rm -f $X/a/big
+printf abc > $X/a/sparse
+truncate -s 20000 $X/a/sparse
+check "tmpfs: a hole reads as zeros" [ "$(dd if=$X/a/sparse bs=1 skip=3 count=4 2>/dev/null | tr -d '\000' | wc -c)" -eq 0 ]
+check "tmpfs: and its size is kept" [ "$(wc -c < $X/a/sparse)" -eq 20000 ]
+truncate -s 1 $X/a/sparse
+truncate -s 3 $X/a/sparse
+check "tmpfs: shrinking then growing reads zeros" [ "$(tr -d '\000' < $X/a/sparse)" = a ]
+echo still > $X/a/open
+(exec 3<$X/a/open; rm $X/a/open; /bin/sleep 1; cat <&3 > $X/a/read) 
+check "tmpfs: an unlinked file stays readable while open" [ "$(cat $X/a/read)" = still ]
+mkdir $X/a/d1 $X/a/d1/d2
+check "tmpfs: a directory's link count counts subdirectories" [ "$(stat -t $X/a/d1 | cut -d" " -f9)" = 3 ]
+for i in 1 2 3 4 5 6 7 8 9 10; do : > $X/a/d1/f$i; done
+rm $X/a/d1/f3 $X/a/d1/f7
+check "tmpfs: readdir after removals" [ "$(ls $X/a/d1 | wc -l)" = 9 ]
+check "tmpfs: rmdir of a full directory is refused" not rmdir $X/a/d1 2>/dev/null
+cp /bin/true $X/a/tr
+check "tmpfs: programs run from it" $X/a/tr
+check "tmpfs: noexec stops them" mount -t tmpfs -o noexec tmpfs $X/b
+cp /bin/true $X/b/tr
+check "tmpfs: as on the BSDs" not $X/b/tr 2>/dev/null
+check "tmpfs: unmount the noexec one" umount $X/b
+check "tmpfs: unmount the mode= one" umount $X/b
+check "tmpfs: unmount, after running a program from it" umount $X/a
+check "tmpfs: vfs.tmpfs.memory_reserved" [ "$(/sbin/sysctl -n vfs.tmpfs.memory_reserved)" -gt 0 ]
 
 cd /
 rm -rf $T

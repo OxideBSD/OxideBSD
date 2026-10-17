@@ -338,7 +338,7 @@ pub(crate) static VN_OPS: FileOps = FileOps {
 
 /// `execve`'s view of the program open on `vp`: mode, owner and group (the set-ID bits cleared on
 /// a `nosuid` mount), and whether its mount is `wxallowed`.
-pub(crate) fn exec_setid(vp: *mut Vnode) -> Option<((u32, u32, u32), bool)> {
+pub(crate) fn exec_setid(vp: *mut Vnode) -> Option<((u32, u32, u32), bool, bool)> {
     let va = vop_getattr(vp).ok()?;
     // SAFETY: the caller's open file holds `vp`.
     let mflag = unsafe { (*(*vp).v_mount).mnt_flag };
@@ -346,7 +346,7 @@ pub(crate) fn exec_setid(vp: *mut Vnode) -> Option<((u32, u32, u32), bool)> {
     if mflag & MNT_NOSUID != 0 {
         mode &= !0o6000;
     }
-    Some(((mode, va.va_uid, va.va_gid), mflag & MNT_WXALLOWED != 0))
+    Some(((mode, va.va_uid, va.va_gid), mflag & MNT_WXALLOWED != 0, mflag & MNT_NOEXEC != 0))
 }
 
 // --- A file's contents, for the page cache, mappings and exec --------------------------------------

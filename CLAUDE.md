@@ -404,7 +404,8 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - QEMU needs `-accel kvm -accel tcg` or everything runs under TCG.
 - A test using sockets, `poll`, or `socketpair` must load the `socket` module.
 - Every test that loads `native_abi` also loads `vfs` (close, lseek, fstat, ioctl, every path
-  call); every test that loads oxfs loads `procfs` after it.
+  call); file systems load through `kernel_main::load_file_systems` (oxfs, procfs, tmpfs), as at
+  boot, never one by one.
 - TCP is stop-and-wait, fixed MSS.
 
 ## USB (`sys/drivers/usb/`)
