@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 libc = "0.2"
 fstab = { path = "../../lib/libfstab" }
+# mount_msdosfs -D: code page tables compiled for the kernel.
+msdosfs_format = { path = "../../lib/libmsdosfs" }
 
 # The libc fork OxideBSD's std is built with (target_os = "oxidebsd"); a [patch] only applies
 # from the workspace root, so each binary repeats lib/libsh's.

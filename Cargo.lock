@@ -349,6 +349,23 @@ name = "mq-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "msdosfs"
+version = "0.1.0"
+dependencies = [
+ "kern_mod",
+ "msdosfs_format",
+ "vfs_if",
+]
+
+[[package]]
+name = "msdosfs-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "msdosfs_format"
+version = "0.1.0"
+
+[[package]]
 name = "mtree"
 version = "0.1.0"
 

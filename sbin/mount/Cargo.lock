@@ -17,4 +17,9 @@ version = "0.1.0"
 dependencies = [
  "fstab",
  "libc",
+ "msdosfs_format",
 ]
+
+[[package]]
+name = "msdosfs_format"
+version = "0.1.0"

@@ -8,11 +8,18 @@
 //! mount --bind directory node               the same as -t nullfs
 //! mount_nullfs [-o options] target node     the same as -t nullfs
 //! mount_tmpfs [-o options] tmpfs node        the same as -t tmpfs
+//! mount_msdosfs [-o options] [-u uid] [-g gid] [-m mask] [-M mask] [-sl] [-L locale]
+//!               [-D DOS_codepage] special node   the same as -t msdosfs
 //! mount -u [-rw] [-o options] node          change a mounted file system
 //! ```
 //!
-//! The types are `tmpfs` (`tmpfs(5)`) and `nullfs` (a directory seen again at another place,
-//! Linux's bind mount). Options are passed to the kernel, which takes `ro`, `rw`, `nosuid`,
+//! The types are `tmpfs` (`tmpfs(5)`), `nullfs` (a directory seen again at another place,
+//! Linux's bind mount) and `msdosfs` (FAT, `msdosfs(5)`). `-f` forces: a FAT volume not marked
+//! clean is mounted read-write anyway (FreeBSD's). mount_msdosfs's flags are FreeBSD's, and may be
+//! given in fstab as options (`-m=644,-M=755`), as there: `-u`/`-g` an owner and group (names or
+//! numbers), `-m`/`-M` the file and directory modes, `-s`/`-l` short or long names, `-L` the
+//! locale (its code set must be UTF-8, the only one OxideBSD's msdosfs speaks), `-D` the code page
+//! of short names (`/usr/share/msdosfs/<name>`, compiled here and handed to the kernel). Options are passed to the kernel, which takes `ro`, `rw`, `nosuid`,
 //! `noexec` and `wxallowed` itself and gives the rest to the type (`size=` for tmpfs). `-u` changes
 //! a mounted file system: between read-only and read-write (`-r`/`-o ro`, `-w`/`-o rw`, as in
 //! FreeBSD; `/etc/rc` mounts the root read-write after checking it), and its type's options
@@ -23,16 +30,16 @@ use std::process::ExitCode;
 
 /// `nmount(2)` (`sys/modules/oxfs`).
 const SYS_NMOUNT: libc::c_long = 584;
-/// FreeBSD's `MNT_RDONLY` and `MNT_UPDATE`.
+/// FreeBSD's `MNT_RDONLY`, `MNT_UPDATE` and `MNT_FORCE`.
 const MNT_RDONLY: libc::c_int = 0x1;
 const MNT_UPDATE: libc::c_int = 0x0001_0000;
+const MNT_FORCE: libc::c_int = 0x0008_0000;
+/// Where mount_msdosfs -D finds code pages.
+const CODEPAGES: &str = "/usr/share/msdosfs";
+
 
 /// Mounts with `nmount(2)`: `pairs` are the name/value options. On failure, the kernel's own
 /// explanation when it gave one, else the errno's.
-fn nmount(pairs: &[(&str, &str)]) -> Result<(), String> {
-    nmount_flags(pairs, 0)
-}
-
 fn nmount_flags(pairs: &[(&str, &str)], flags: libc::c_int) -> Result<(), String> {
     let mut strings: Vec<CString> = Vec::new();
     for (n, v) in pairs {
@@ -76,27 +83,96 @@ fn mount_one(
     node: &str,
     options: &[String],
     verbose: bool,
+    force: bool,
 ) -> Result<(), String> {
-    let mut pairs: Vec<(&str, &str)> = vec![("fstype", vfstype), ("fspath", node)];
-    if vfstype == "nullfs" {
-        pairs.push(("target", spec));
-    }
+    let mut owned: Vec<(String, String)> = vec![("fstype".into(), vfstype.into()), ("fspath".into(), node.into())];
+    owned.push((if vfstype == "nullfs" { "target" } else { "from" }.into(), spec.into()));
     // fstab options that are for mount itself, not the kernel.
     const FOR_MOUNT: [&str; 4] = ["noauto", "late", "failok", "sw"];
     for o in options
         .iter()
         .filter(|o| !o.is_empty() && !FOR_MOUNT.contains(&o.as_str()))
     {
-        match o.split_once('=') {
-            Some((n, v)) => pairs.push((n, v)),
-            None => pairs.push((o.as_str(), "")),
+        let (n, v) = o.split_once('=').unwrap_or((o.as_str(), ""));
+        if vfstype == "msdosfs" {
+            owned.push(msdosfs_option(n, v)?);
+        } else {
+            owned.push((n.into(), v.into()));
         }
     }
-    nmount(&pairs)?;
+    let pairs: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+    nmount_flags(&pairs, if force { MNT_FORCE } else { 0 })?;
     if verbose {
         println!("{spec} on {node} ({vfstype}, local)");
     }
     Ok(())
+}
+
+/// An msdosfs option as the kernel takes it, from mount_msdosfs's flag spelling (`-m=644`,
+/// FreeBSD's in fstab) or the kernel's own (`mask=644`).
+fn msdosfs_option(name: &str, value: &str) -> Result<(String, String), String> {
+    let pair = |n: &str, v: String| Ok((n.to_string(), v));
+    match name {
+        "-u" | "uid" => pair("uid", id_of(value, false)?),
+        "-g" | "gid" => pair("gid", id_of(value, true)?),
+        "-m" | "mask" => pair("mask", mode_of(value)?),
+        "-M" | "dirmask" => pair("dirmask", mode_of(value)?),
+        "-s" | "shortnames" => pair("shortnames", String::new()),
+        "-l" | "longnames" => pair("longnames", String::new()),
+        "-L" | "cs_local" => {
+            // The locale's code set: only UTF-8, the one long names are given in.
+            let set = value.rsplit_once('.').map_or(value, |(_, s)| s).split('@').next().unwrap_or("");
+            let utf8 = set.eq_ignore_ascii_case("UTF-8") || set.eq_ignore_ascii_case("utf8") || value == "C" || value == "POSIX";
+            if !utf8 {
+                return Err(format!("{value}: only UTF-8 locales are supported"));
+            }
+            pair("longnames", String::new())
+        }
+        "-D" | "cs_dos" => pair("cs_dos", codepage(value)?),
+        "-9" | "nowin95" => Err("-9 (nowin95) is not supported".into()),
+        "-W" => Err("-W is not supported; use -D".into()),
+        _ => pair(name, value.to_string()),
+    }
+}
+
+/// A user or group name or number, as a number.
+fn id_of(v: &str, group: bool) -> Result<String, String> {
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(v.to_string());
+    }
+    let c = std::ffi::CString::new(v).map_err(|_| format!("{v}: bad name"))?;
+    // SAFETY: getpwnam/getgrnam with a NUL-terminated name; the result is read at once.
+    unsafe {
+        if group {
+            let g = libc::getgrnam(c.as_ptr());
+            if g.is_null() { Err(format!("{v}: no such group")) } else { Ok((*g).gr_gid.to_string()) }
+        } else {
+            let p = libc::getpwnam(c.as_ptr());
+            if p.is_null() { Err(format!("{v}: no such user")) } else { Ok((*p).pw_uid.to_string()) }
+        }
+    }
+}
+
+fn mode_of(v: &str) -> Result<String, String> {
+    match u32::from_str_radix(v, 8) {
+        Ok(m) if m <= 0o777 => Ok(format!("{m:o}")),
+        _ => Err(format!("{v}: not a mode (octal, at most 777)")),
+    }
+}
+
+/// Code page `name`'s table (`/usr/share/msdosfs/<NAME>`), compiled, in hex for the kernel.
+fn codepage(name: &str) -> Result<String, String> {
+    let upper = name.to_ascii_uppercase();
+    if upper.is_empty() || !upper.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(format!("{name}: not a code page name"));
+    }
+    let path = format!("{CODEPAGES}/{upper}");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let (mut pairs, mut leads) = (Vec::new(), Vec::new());
+    msdosfs_format::codepage::parse_text(&text, |c, u| pairs.push((c, u)), |l| leads.push(l)).map_err(|line| format!("{path} line {line}: bad"))?;
+    let mut table = vec![0u8; msdosfs_format::codepage::table_len(pairs.len())];
+    msdosfs_format::codepage::compile(&leads, &mut pairs, &mut table).ok_or(format!("{path}: not a code page"))?;
+    Ok(table.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn list() {
@@ -116,7 +192,7 @@ fn type_selected(list: Option<&str>, vfstype: &str) -> bool {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: mount [-av] [-t type] [-o options] [special | node] ...");
+    eprintln!("usage: mount [-afv] [-t type] [-o options] [special | node] ...");
     eprintln!("       mount --bind directory node");
     eprintln!("       mount -u [-rw] [-o options] node");
     ExitCode::from(1)
@@ -159,8 +235,11 @@ fn main() -> ExitCode {
     let mut vfstype: Option<String> = match name.as_str() {
         "mount_nullfs" => Some("nullfs".to_string()),
         "mount_tmpfs" => Some("tmpfs".to_string()),
+        "mount_msdosfs" => Some("msdosfs".to_string()),
         _ => None,
     };
+    let msdos_flags = name == "mount_msdosfs";
+    let mut force = false;
     // `-r`/`-w` given, for `-u` (which otherwise keeps the current mode).
     let mut mode_given = false;
     let mut options: Vec<String> = Vec::new();
@@ -184,8 +263,19 @@ fn main() -> ExitCode {
                             Some(tail)
                         }
                     };
+                    // mount_msdosfs's own flags, as the options they stand for.
+                    if msdos_flags && "ugmMLD".contains(c) {
+                        let Some(v) = value() else { return usage() };
+                        options.push(format!("-{c}={v}"));
+                        continue;
+                    }
+                    if msdos_flags && (c == 's' || c == 'l') {
+                        options.push(format!("-{c}"));
+                        continue;
+                    }
                     match c {
                         'a' => all = true,
+                        'f' => force = true,
                         'v' => verbose = true,
                         'u' => updating = true,
                         'r' => {
@@ -260,7 +350,7 @@ fn main() -> ExitCode {
             if skip {
                 continue;
             }
-            if let Err(why) = mount_one(&e.vfstype, &e.spec, &e.file, &e.options, verbose) {
+            if let Err(why) = mount_one(&e.vfstype, &e.spec, &e.file, &e.options, verbose, force) {
                 eprintln!("mount: {}: {why}", e.file);
                 failed = true;
             }
@@ -289,6 +379,7 @@ fn main() -> ExitCode {
                         &e.file,
                         &opts,
                         verbose,
+                        force,
                     )
                     .map_err(|why| format!("{}: {why}", e.file))
                 }
@@ -300,7 +391,7 @@ fn main() -> ExitCode {
                 .clone()
                 .or_else(|| (special == "tmpfs").then(|| "tmpfs".to_string()));
             match t {
-                Some(t) => mount_one(&t, special, node, &options, verbose)
+                Some(t) => mount_one(&t, special, node, &options, verbose, force)
                     .map_err(|why| format!("{node}: {why}")),
                 None => Err(format!("{special}: no file system type; give one with -t")),
             }
@@ -327,5 +418,17 @@ mod tests {
         assert!(!type_selected(Some("tmpfs"), "nullfs"));
         assert!(!type_selected(Some("notmpfs"), "tmpfs"));
         assert!(type_selected(Some("notmpfs,devfs"), "nullfs"));
+    }
+
+    #[test]
+    fn msdosfs_options() {
+        assert_eq!(msdosfs_option("-m", "644").unwrap(), ("mask".into(), "644".into()));
+        assert_eq!(msdosfs_option("-M", "0755").unwrap(), ("dirmask".into(), "755".into()));
+        assert_eq!(msdosfs_option("-u", "5").unwrap(), ("uid".into(), "5".into()));
+        assert_eq!(msdosfs_option("-s", "").unwrap(), ("shortnames".into(), String::new()));
+        assert!(msdosfs_option("-m", "999").is_err());
+        assert!(msdosfs_option("-L", "en_US.UTF-8").is_ok());
+        assert!(msdosfs_option("-L", "ru_RU.KOI8-R").is_err());
+        assert_eq!(msdosfs_option("ro", "").unwrap(), ("ro".into(), String::new()));
     }
 }

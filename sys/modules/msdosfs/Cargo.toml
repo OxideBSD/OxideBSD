@@ -1,0 +1,10 @@
+[package]
+name = "msdosfs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+kern_mod = { path = "../../../lib/libkern-mod" }
+vfs_if = { path = "../../../lib/libvfs" }
+msdosfs_format = { path = "../../../lib/libmsdosfs" }

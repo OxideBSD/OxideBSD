@@ -1,0 +1,94 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt MSDOSFS 5
+.Os OxideBSD
+.Sh NAME
+.Nm msdosfs
+.Nd FAT file system
+.Sh SYNOPSIS
+In
+.Xr fstab 5 :
+.Bd -literal -offset indent
+/dev/gpt/efi	/boot/efi	msdosfs	rw	2	2
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+file system reads and writes FAT12, FAT16 and FAT32 volumes, with long file
+names: EFI system partitions, memory cards, USB sticks, and volumes shared with
+other systems.
+It is mounted with
+.Xr mount_msdosfs 8 ,
+or
+.Xr mount 8
+.Fl t Cm msdosfs .
+.Pp
+FAT keeps no owners, permissions or links.
+Every file belongs to the mount's owner and group, with the mount's permissions
+.Pq Xr mount_msdosfs 8 Fl u , Fl g , Fl m , Fl M ,
+by default those of the directory mounted on; a file with FAT's read-only
+attribute shows no write bits, and
+.Xr chmod 2
+sets or clears that attribute by the owner's write bit.
+.Xr chown 2
+to anything but the mount's owner and group,
+.Xr link 2 ,
+.Xr symlink 2
+and
+.Xr mknod 2
+fail.
+Every file shows one link.
+.Pp
+Names are case-insensitive and case-preserving: a name is found in any case,
+under its long name or its short (8.3) alias, and is created as given.
+Long names are UTF-8 on the system side and UTF-16 on the volume.
+Short names are in a DOS code page, CP437 by default
+.Pq Xr mount_msdosfs 8 Fl D .
+A name FAT can't hold
+.Pq a control character, or one of Qo \e * / : < > ? \e| Qc
+is refused with
+.Er EINVAL .
+.Pp
+FAT keeps local time, without a zone: times are converted with the kernel's
+.Va kern.utc_offset ,
+which
+.Xr adjkerntz 8
+sets.
+FAT has no change time; the modification time stands in for it.
+Access times are kept to the day.
+.Pp
+A file's inode number is where its directory entry is on the volume (a
+directory's, where its first cluster is), as on
+.Fx ;
+renaming a file changes it.
+.Pp
+A FAT16 or FAT32 volume is marked unclean while it is mounted read-write, and
+clean again when unmounted.
+One not marked clean when mounted (the system stopped without unmounting it)
+is mounted read-only, with a warning, unless the mount is forced
+.Pq Xr mount 8 Fl f ;
+check it with
+.Xr fsck_msdosfs 8
+first.
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr adjkerntz 8 ,
+.Xr fsck_msdosfs 8 ,
+.Xr makefs 8 ,
+.Xr mount 8 ,
+.Xr mount_msdosfs 8 ,
+.Xr newfs_msdos 8
+.Sh HISTORY
+An
+.Nm
+file system first appeared in
+.Bx 386 0.1
+and
+.Nx 0.8 .
+OxideBSD's is its own, written for it.
+.Sh BUGS
+The FAT's other copies and the volume's data are written as the buffer cache
+evicts them; a crash can leave lost clusters and FAT copies that differ, which
+.Xr fsck_msdosfs 8
+.Fl p
+repairs.

@@ -76,6 +76,10 @@ case "$TEST_NAME" in
         QEMU_PASS_PATTERN="login:"
         QEMU_FAIL_PATTERN="panicked at|PANIC|rc: failed services|\[fault\]"
         ;;
+    msdosfs_syscall_smoke)
+        # FAT12, FAT16 and FAT32 volumes beside the root (scripts/mkmsdostestimg.sh, below).
+        MSDOSFS_TEST=1
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
@@ -169,6 +173,11 @@ if [ "${DISK_BOOT:-0}" = 1 ]; then
     rm -f "$QEMU_DISK_SOURCE"
     scripts/mkbootimg.sh "$ISO_ROOT/boot" "$QEMU_DISK_SOURCE"
     QEMU_NO_ISO=1
+fi
+
+if [ "${MSDOSFS_TEST:-0}" = 1 ]; then
+    QEMU_DISK_SOURCE="target/images/msdosfs-test.img"
+    scripts/mkmsdostestimg.sh "$QEMU_DISK_SOURCE"
 fi
 
 if [ "$IS_TEST" = 1 ]; then

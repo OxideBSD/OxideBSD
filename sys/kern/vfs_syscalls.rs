@@ -27,6 +27,8 @@ use crate::memory::usercopy::{UserPtr, copyin, copyout};
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const ENXIO: i32 = 6;
+const ENOMEM: i32 = 12;
+const ENOTBLK: i32 = 15;
 const EBADF: i32 = 9;
 const EACCES: i32 = 13;
 const EFAULT: i32 = 14;
@@ -1582,6 +1584,28 @@ struct IoVec {
 
 const NMOUNT_MAX_IOV: usize = 64;
 
+/// The most bytes a file system type's option value may have: msdosfs's `cs_dos` carries a
+/// compiled code page table in hex (CP936's is about 260 KiB).
+const NMOUNT_MAX_VALUE: u64 = 512 * 1024;
+
+/// A type's option value: as `iov_str`, up to `NMOUNT_MAX_VALUE` bytes.
+fn iov_value(v: IoVec) -> Result<Vec<u8>, i32> {
+    if v.base == 0 {
+        return Ok(Vec::new());
+    }
+    if v.len > NMOUNT_MAX_VALUE {
+        return Err(ENAMETOOLONG);
+    }
+    let mut s = Vec::new();
+    s.try_reserve_exact(v.len as usize).map_err(|_| ENOMEM)?;
+    s.resize(v.len as usize, 0);
+    copyin(UserPtr::new(v.base), &mut s).map_err(|_| EFAULT)?;
+    if let Some(n) = s.iter().position(|&b| b == 0) {
+        s.truncate(n);
+    }
+    Ok(s)
+}
+
 fn iov_str(v: IoVec) -> Result<Vec<u8>, i32> {
     if v.base == 0 {
         return Ok(Vec::new());
@@ -1597,6 +1621,10 @@ fn iov_str(v: IoVec) -> Result<Vec<u8>, i32> {
 /// `nosuid`, `noexec`, `wxallowed`, `ro`, `rw`; `errmsg` gets a message on failure. Any other
 /// option is the type's (`MountArgs::opts`), which refuses one it doesn't know (`EINVAL`).
 /// `MNT_UPDATE` changes a mounted file system: its read-only state and its type's options.
+/// `MNT_FORCE` is the type's to read (msdosfs mounts a volume not marked clean read-write).
+/// A type with a device (neither `VFCF_SYNTHETIC` nor `VFCF_FROM_VNODE`) is mounted from the disk
+/// device `from` names: `ENOTBLK` for anything else, `EBUSY` if it's mounted already or (for a
+/// read-write mount) overlaps a device mounted read-write.
 pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64, _a3: u64) -> i64 {
     let _g = enter();
     if niov % 2 != 0 || niov > NMOUNT_MAX_IOV as u64 {
@@ -1655,7 +1683,7 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
             b"fspath" => &mut fspath,
             b"from" | b"target" => &mut from,
             _ => {
-                match iov_str(pair[1]) {
+                match iov_value(pair[1]) {
                     Ok(v) => {
                         opts.extend_from_slice(&name);
                         opts.push(0);
@@ -1694,7 +1722,7 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     if let Some(e) = bad_option {
         return fail(e, b"an option's name or value can't be read, or is too long");
     }
-    if flags & !(MNT_NOSUID | MNT_NOEXEC | MNT_RDONLY | MNT_UPDATE) != 0 {
+    if flags & !(MNT_NOSUID | MNT_NOEXEC | MNT_RDONLY | MNT_UPDATE | MNT_FORCE) != 0 {
         return fail(EOPNOTSUPP, b"unknown mount flags");
     }
     if fspath.is_empty() {
@@ -1712,7 +1740,7 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
         if !is_root {
             return fail(EINVAL, b"not a mount point");
         }
-        return match vfs_mount::update(mp, rd, &opts) {
+        return match vfs_mount::update(mp, rd, flags & MNT_FORCE != 0, &opts) {
             Ok(()) => 0,
             Err(EBUSY) => fail(EBUSY, b"files are open for writing there, or the new limits are below what's in use"),
             Err(EINVAL) => fail(EINVAL, b"an option this file system doesn't take, or a bad value"),
@@ -1731,7 +1759,9 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     let mflags = (if nosuid { MNT_NOSUID } else { 0 })
         | (if noexec { MNT_NOEXEC } else { 0 })
         | (if wxallowed { MNT_WXALLOWED } else { 0 })
-        | (if rd { MNT_RDONLY } else { 0 });
+        | (if rd { MNT_RDONLY } else { 0 })
+        | (flags & MNT_FORCE);
+    let wants_dev = vfc.flags & (VFCF_SYNTHETIC | VFCF_FROM_VNODE) == 0;
     let r = (|| -> Result<(), i32> {
         let from_vp = if vfc.flags & VFCF_FROM_VNODE != 0 {
             let vp = lookup(&from, ptr::null_mut(), true, &cred)?;
@@ -1759,8 +1789,19 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
             }
             return Err(ENOTDIR);
         }
+        let dev = if wants_dev {
+            match mount_device(&from, rd, &cred) {
+                Ok(d) => d,
+                Err(e) => {
+                    vrele(covered);
+                    return Err(e);
+                }
+            }
+        } else {
+            NODEV
+        };
         let fromname: &[u8] = if from.is_empty() { &fstype } else { &from };
-        let r = vfs_mount::domount(vfc, covered, mflags, &fspath, fromname, from_vp, &opts);
+        let r = vfs_mount::domount(vfc, covered, mflags, &fspath, fromname, from_vp, dev, &opts);
         if !from_vp.is_null() {
             vrele(from_vp);
         }
@@ -1768,9 +1809,40 @@ pub(crate) extern "C" fn oxidebsd_sys_nmount(iov_ptr: u64, niov: u64, flags: u64
     })();
     match r {
         Ok(()) => 0,
-        Err(EINVAL) => fail(EINVAL, b"an option this file system doesn't take, or a bad value"),
+        Err(EINVAL) => fail(EINVAL, b"an option this file system doesn't take, or a bad value, or no such file system on the device"),
+        Err(ENOTBLK) => fail(ENOTBLK, b"not a disk device"),
+        Err(EBUSY) => fail(EBUSY, b"the device is mounted already, or overlaps one mounted read-write"),
         Err(e) => fail(e, b""),
     }
+}
+
+/// The block device (a handle) a mount `from` a disk device node uses: `ENOTBLK` if `from` isn't
+/// one, `EBUSY` if it's mounted already or, for a read-write mount (`!rd`), overlaps a device
+/// mounted read-write (the root's partition, say).
+fn mount_device(from: &[u8], rd: bool, cred: &Ucred) -> Result<u64, i32> {
+    if from.is_empty() {
+        return Err(EINVAL);
+    }
+    let vp = lookup(from, ptr::null_mut(), true, cred)?;
+    // SAFETY: referenced.
+    let (t, rdev) = (vtype(vp), unsafe { (*vp).v_rdev });
+    vrele(vp);
+    if t != VCHR && t != VBLK {
+        return Err(ENOTBLK);
+    }
+    // musl's `makedev` encoding, as devfs gives it (and `vn_open` reads it).
+    let handle = crate::kern::vfs_bdev::find(((rdev >> 8) & 0xfff) as u32, (rdev & 0xff) as u32).ok_or(ENXIO)?;
+    if vfs_mount::dev_in_use(handle as u64) {
+        return Err(EBUSY);
+    }
+    if !rd {
+        let overlaps = crate::kern::vfs_bdev::extent(handle)
+            .is_some_and(|(first, sectors, memory)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, memory));
+        if overlaps {
+            return Err(EBUSY);
+        }
+    }
+    Ok(handle as u64)
 }
 
 /// `unmount(2)` (musl's `umount2`, system call 176): `EBUSY` while anything on it is in use,

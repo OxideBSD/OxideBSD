@@ -313,6 +313,13 @@ pub fn load_file_systems(
     const NULLFS_PANIC_SYMBOL: &str = env!("NULLFS_MOD_PANIC_SYMBOL");
     crate::module::load("nullfs", NULLFS_MOD, NULLFS_PANIC_SYMBOL, false, mapper, frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the nullfs module: {e:?}"));
+
+    // FAT (VFS.md §9): the EFI system partition, memory cards. Not fatal on panic: a volume
+    // other than the root, which the system runs without.
+    const MSDOSFS_MOD: &[u8] = include_bytes!(env!("MSDOSFS_MOD_PATH"));
+    const MSDOSFS_PANIC_SYMBOL: &str = env!("MSDOSFS_MOD_PANIC_SYMBOL");
+    crate::module::load("msdosfs", MSDOSFS_MOD, MSDOSFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the msdosfs module: {e:?}"));
 }
 
 /// For test kernels, which run no `/etc/rc`: mounts the tmpfs on `/dev/shm` that `/etc/fstab`

@@ -207,7 +207,8 @@ pub struct Vnode {
     pub v_fileid: u64,
     /// A mount covering this directory, or null.
     pub v_mountedhere: *mut Mount,
-    /// The device of a `VCHR`/`VBLK` vnode (major << 32 | minor).
+    /// The device of a `VCHR`/`VBLK` vnode, in musl's `makedev` encoding (`major << 8 | minor` for
+    /// the small numbers OxideBSD's devices have).
     pub v_rdev: u64,
     /// Kernel-private: the page cache object, the FIFO or socket rendezvous.
     pub v_object: u64,

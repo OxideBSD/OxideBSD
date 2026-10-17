@@ -1,0 +1,105 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 17, 2026
+.Dt MOUNT_MSDOSFS 8
+.Os OxideBSD
+.Sh NAME
+.Nm mount_msdosfs
+.Nd mount a FAT file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl ls
+.Op Fl D Ar DOS_codepage
+.Op Fl g Ar gid
+.Op Fl L Ar locale
+.Op Fl M Ar mask
+.Op Fl m Ar mask
+.Op Fl o Ar options
+.Op Fl u Ar uid
+.Ar special node
+.Sh DESCRIPTION
+.Nm
+mounts the FAT12, FAT16 or FAT32 file system on device
+.Ar special
+at directory
+.Ar node
+.Pq Xr msdosfs 5 .
+It is
+.Xr mount 8
+.Fl t Cm msdosfs ,
+and its flags may also be given as
+.Xr fstab 5
+options, as on
+.Fx :
+.Ql -m=644,-M=755 .
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl u Ar uid
+The owner of every file, a user name or number; by default the owner of
+.Ar node .
+.It Fl g Ar gid
+The group of every file, a group name or number; by default the group of
+.Ar node .
+.It Fl m Ar mask
+The permissions of every file, in octal; by default those of
+.Ar node .
+A file with FAT's read-only attribute has its write bits cleared.
+.It Fl M Ar mask
+The permissions of every directory; by default
+.Fl m Ns 's .
+.It Fl s
+Show and make short (8.3) names only, ignoring long names.
+.It Fl l
+Show and make long names (the default).
+.It Fl L Ar locale
+The locale whose character set names are given in.
+OxideBSD's
+.Nm msdosfs
+speaks only UTF-8: a locale with another code set is refused.
+.It Fl D Ar DOS_codepage
+The code page short names are in, CP437 by default: one of the files in
+.Pa /usr/share/msdosfs ,
+such as
+.Cm CP850 ,
+.Cm CP866
+or
+.Cm CP932 .
+.It Fl o Ar options
+Options as
+.Xr mount 8
+takes them; the kernel's names for the flags above are
+.Cm uid ,
+.Cm gid ,
+.Cm mask ,
+.Cm dirmask ,
+.Cm shortnames ,
+.Cm longnames
+and
+.Cm cs_dos .
+.El
+.Sh FILES
+.Bl -tag -width /usr/share/msdosfs -compact
+.It Pa /usr/share/msdosfs
+Code page tables, from the Unicode Consortium's Microsoft mappings.
+.El
+.Sh EXAMPLES
+Mount a USB stick for user
+.Ql user :
+.Dl mount_msdosfs -u user -m 644 -M 755 /dev/da0s1 /mnt
+.Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr msdosfs 5 ,
+.Xr fsck_msdosfs 8 ,
+.Xr mount 8 ,
+.Xr newfs_msdos 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Nx 0.9 .
+.Sh BUGS
+.Fx Ns 's
+.Fl 9
+and
+.Fl W
+are not supported.

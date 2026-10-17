@@ -249,7 +249,7 @@ fn automount_type(vfc: &'static VfsConf) {
         crate::kern::vfs_subr::vrele(covered);
         return;
     }
-    if let Err(e) = domount(vfc, covered, flags, path, from, ptr::null_mut(), &[]) {
+    if let Err(e) = domount(vfc, covered, flags, path, from, ptr::null_mut(), NODEV, &[]) {
         crate::serial_println!("[vfs] mounting {} failed: {}", core::str::from_utf8(from).unwrap_or("?"), e);
     }
 }
@@ -261,12 +261,30 @@ pub(crate) fn mount_type_at(fstype: &[u8], path: &[u8], from: &[u8], opts: &[u8]
     let cred = crate::kern::vfs_subr::current_ucred();
     let nd = crate::kern::vfs_lookup::NameiData { path, nameiop: LOOKUP, follow: true, startdir: ptr::null_mut(), cred: &cred };
     let covered = crate::kern::vfs_lookup::namei(&nd)?.into_vp();
-    domount(vfc, covered, 0, path, from, ptr::null_mut(), opts)
+    domount(vfc, covered, 0, path, from, ptr::null_mut(), NODEV, opts)
+}
+
+/// Whether a mount has block device `dev` (a handle): a device is mounted once at a time.
+pub(crate) fn dev_in_use(dev: u64) -> bool {
+    // SAFETY: mounted mounts.
+    mounts().into_iter().any(|m| unsafe { (*m).mnt_dev } == dev)
+}
+
+/// Records whether mount `mp`'s device (if it has one) is mounted read-write, for the raw device's
+/// write refusal (`drivers::disk`). The root's is oxfs's own business.
+fn note_device(mp: *mut Mount) {
+    // SAFETY: a mount being set up, or mounted.
+    let (dev, flags) = unsafe { ((*mp).mnt_dev, (*mp).mnt_flag) };
+    if dev != NODEV && flags & MNT_ROOTFS == 0 {
+        crate::kern::vfs_bdev::oxidebsd_bdev_set_mounted(dev, (flags & MNT_RDONLY == 0) as u64);
+    }
 }
 
 /// Mounts `vfc` on directory `covered` (referenced; the mount keeps the reference): `nmount(2)`'s
 /// work once its options are parsed. `onname` is the path as given, `fromname` what it's from,
-/// `opts` the options left for the type (`name\0value\0` pairs, `MountArgs::opts`).
+/// `dev` the block device `nmount` opened for it (or `NODEV`), `opts` the options left for the type
+/// (`name\0value\0` pairs, `MountArgs::opts`). `MNT_FORCE` in `flags` reaches the type's `mount`
+/// (msdosfs: read-write even if not clean) and is dropped after.
 pub(crate) fn domount(
     vfc: &'static VfsConf,
     covered: *mut Vnode,
@@ -274,13 +292,14 @@ pub(crate) fn domount(
     onname: &[u8],
     fromname: &[u8],
     from_vp: *mut Vnode,
+    dev: u64,
     opts: &[u8],
 ) -> Result<(), i32> {
     let Some(mount) = (unsafe { (*vfc.ops).mount }) else {
         crate::kern::vfs_subr::vrele(covered);
         return Err(EOPNOTSUPP);
     };
-    let mp = match mount_alloc(vfc, flags, NODEV, onname, fromname) {
+    let mp = match mount_alloc(vfc, flags, dev, onname, fromname) {
         Ok(mp) => mp,
         Err(e) => {
             crate::kern::vfs_subr::vrele(covered);
@@ -290,7 +309,7 @@ pub(crate) fn domount(
     let args = MountArgs {
         from: fromname.as_ptr(),
         from_len: fromname.len(),
-        dev: NODEV,
+        dev,
         opts: opts.as_ptr(),
         opts_len: opts.len(),
         from_vp,
@@ -318,13 +337,16 @@ pub(crate) fn domount(
             return Err(e);
         }
     };
-    // SAFETY: referenced vnodes; `mp` is ours until it's on the list.
+    // SAFETY: referenced vnodes; `mp` is ours until it's on the list. The type may have made the
+    // mount read-only (msdosfs, for a volume not marked clean).
     unsafe {
         (*root).v_flag |= VV_ROOT;
         (*mp).mnt_vnodecovered = covered;
         (*covered).v_mountedhere = mp;
+        (*mp).mnt_flag &= !MNT_FORCE;
     }
     crate::kern::vfs_subr::vrele(root);
+    note_device(mp);
     MOUNTS.lock().push(mp as usize);
     Ok(())
 }
@@ -367,7 +389,12 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
         }
     }
     // SAFETY: as above; nothing else refers to `mp` now.
-    unsafe { (*covered).v_mountedhere = ptr::null_mut() };
+    unsafe {
+        (*covered).v_mountedhere = ptr::null_mut();
+        if (*mp).mnt_dev != NODEV && (*mp).mnt_flag & MNT_ROOTFS == 0 {
+            crate::kern::vfs_bdev::oxidebsd_bdev_set_mounted((*mp).mnt_dev, 0);
+        }
+    }
     crate::kern::vfs_subr::vrele(covered);
     MOUNTS.lock().retain(|&m| m != mp as usize);
     mount_free(mp);
@@ -375,14 +402,24 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
 }
 
 /// `mount -u`: a mounted file system's read-only state and its type's options (`opts`, as
-/// `domount`'s), through the type's `mount` with `MNT_UPDATE`. `mp` is a mount on the list.
-pub(crate) fn update(mp: *mut Mount, rdonly: bool, opts: &[u8]) -> Result<(), i32> {
+/// `domount`'s), through the type's `mount` with `MNT_UPDATE` (and `MNT_FORCE` if `force`). `mp` is
+/// a mount on the list.
+pub(crate) fn update(mp: *mut Mount, rdonly: bool, force: bool, opts: &[u8]) -> Result<(), i32> {
     let Some(mount) = ops(mp).mount else { return Err(EOPNOTSUPP) };
     let old = unsafe { (*mp).mnt_flag };
     if rdonly && old & MNT_RDONLY == 0 && crate::fs::fd::writers_on(mp) {
         return Err(16); // EBUSY
     }
-    let new = (old & !MNT_RDONLY) | MNT_UPDATE | if rdonly { MNT_RDONLY } else { 0 };
+    // A device another file system has mounted read-write can't be written behind its back.
+    let dev = unsafe { (*mp).mnt_dev };
+    if !rdonly && old & MNT_RDONLY != 0 && dev != NODEV && old & MNT_ROOTFS == 0 {
+        let overlaps = crate::kern::vfs_bdev::extent(dev as u32)
+            .is_some_and(|(first, sectors, memory)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, memory));
+        if overlaps {
+            return Err(16); // EBUSY
+        }
+    }
+    let new = (old & !MNT_RDONLY) | MNT_UPDATE | if rdonly { MNT_RDONLY } else { 0 } | if force { MNT_FORCE } else { 0 };
     // SAFETY: as above.
     unsafe { (*mp).mnt_flag = new };
     let args = MountArgs {
@@ -397,9 +434,13 @@ pub(crate) fn update(mp: *mut Mount, rdonly: bool, opts: &[u8]) -> Result<(), i3
         let _giant = fslock::Giant::enter();
         mount(mp, &args)
     };
-    // SAFETY: as above.
-    unsafe { (*mp).mnt_flag = if e == 0 { new & !MNT_UPDATE } else { old } };
-    if e != 0 { Err(e) } else { Ok(()) }
+    // SAFETY: as above. On success the type's flags stand (it may have kept the mount read-only).
+    unsafe { (*mp).mnt_flag = if e == 0 { (*mp).mnt_flag & !(MNT_UPDATE | MNT_FORCE) } else { old } };
+    if e != 0 {
+        return Err(e);
+    }
+    note_device(mp);
+    Ok(())
 }
 
 /// The root directory of the whole system, if the root is mounted.
