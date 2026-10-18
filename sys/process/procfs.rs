@@ -88,10 +88,8 @@ pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
 }
 
 /// Formats a real `/proc/[pid]/stat` line (`pid (comm) state ppid pgrp session ...`, all ~52
-/// space-separated fields real Linux defines) into `buf_ptr`/`buf_cap`. Real values for
-/// `pid`/`comm`/`state`/`ppid`/`pgrp`/`session`/`num_threads`/`blocked`/`start_brk`; `0` for
-/// everything else this kernel doesn't track (`utime`/`vsize`/`rss`/...) -- same "documented fixed
-/// placeholder" precedent as oxfs's own `write_stat` uses for `st_uid`/`st_gid`/timestamps.
+/// space-separated fields real Linux defines) into `buf_ptr`/`buf_cap`; `0` for what this kernel
+/// doesn't track (`vsize`, `rss`, fault counts, ...).
 /// Returns bytes written, or `-1` if `pid` no longer exists (a race between the caller's own
 /// existence check and this call -- the process table isn't locked across both).
 pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
@@ -108,6 +106,11 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     let state = state_char(proc.state);
     let comm = proc.comm.clone();
     let start = proc.start_ticks;
+    let (utime, stime) = (proc.cpu_ticks.saturating_sub(proc.sys_ticks), proc.sys_ticks);
+    let (cutime, cstime) = (proc.child_cpu_ticks.saturating_sub(proc.child_sys_ticks), proc.child_sys_ticks);
+    // proc(5)'s priority: 20 + nice for a time-sharing thread, -1 - rank for a real-time one.
+    let rt = super::sched_4bsd::key(proc) < super::sched_4bsd::REALTIME_KEYS;
+    let (priority, nice) = if rt { (-1 - proc.sched_priority as i64, 0) } else { (20 + proc.nice as i64, proc.nice as i64) };
     // The terminal layer is asked without the process table held.
     drop(table);
 
@@ -132,23 +135,29 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     out.push(state);
 
     // Fields 4 (ppid) through 52 (exit_code) -- see proc(5). Non-zero entries: pgrp/session/
-    // tty_nr (idx 1/2/3), tpgid (idx 4, written separately: it can be -1), priority (idx 14),
-    // num_threads (idx 16), blocked (idx 28), exit_signal (idx 34, SIGCHLD), start_brk (idx 43).
-    let fields: [u64; 49] = [
-        ppid, pgid, sid, tty_nr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 4-13
+    // tty_nr (idx 1/2/3), tpgid (idx 4, written separately: it can be -1), utime..cstime (idx
+    // 10-13, clock ticks), priority and nice (idx 14/15), num_threads (idx 16), blocked (idx 28),
+    // exit_signal (idx 34, SIGCHLD), start_brk (idx 43).
+    let fields: [i64; 49] = [
+        ppid as i64, pgid as i64, sid as i64, tty_nr as i64, 0, 0, 0, 0, 0, 0, // 4-13
+        utime as i64, stime as i64, cutime as i64, cstime as i64,
         // priority (18), nice, num_threads, itrealvalue, starttime (22, in clock ticks since boot:
         // the tick is 100 Hz, sysconf(_SC_CLK_TCK)), ...
-        20, 0, 1, 0, start, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        blocked, 0, 0, 0, 0, 0, // 28-33
+        priority, nice, 1, 0, start as i64, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        blocked as i64, 0, 0, 0, 0, 0, // 28-33
         17, 0, 0, 0, 0, 0, 0, // 34-40 (exit_signal, processor, rt_priority, ...)
-        0, 0, brk, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)
+        0, 0, brk as i64, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)
     ];
     for (i, f) in fields.into_iter().enumerate() {
         out.push(b' ');
         match (i, tpgid) {
             (4, None) => out.extend_from_slice(b"-1"),
             (4, Some(pgrp)) => push_decimal(&mut out, pgrp),
-            _ => push_decimal(&mut out, f),
+            _ if f < 0 => {
+                out.push(b'-');
+                push_decimal(&mut out, f.unsigned_abs());
+            }
+            _ => push_decimal(&mut out, f as u64),
         }
     }
     copy_into(&out, buf_ptr, buf_cap)

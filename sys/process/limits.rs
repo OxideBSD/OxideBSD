@@ -189,36 +189,66 @@ pub fn do_prlimit64(
     Ok(0)
 }
 
-/// `SYS_SETPRIORITY`'s real logic -- only `PRIO_PROCESS` (`0`) is supported (`PRIO_PGRP`/
-/// `PRIO_USER` are `EINVAL`; no target applet in this port's roster uses either). See
-/// `Process::nice`'s own doc comment for why storing it has no real scheduling effect.
-pub fn do_setpriority(caller_pid: Pid, which: u64, who: i64, prio: i32) -> Result<u64, u64> {
-    if which != PRIO_PROCESS {
-        return Err(EINVAL);
-    }
-    let target = resolve_target_pid(caller_pid, who)?;
-    let mut table = PROCESS_TABLE.lock();
-    table
-        .get_mut(&target)
-        .expect("setpriority: target process missing from table")
-        .nice = prio.clamp(-20, 19);
-    Ok(0)
+/// The processes `setpriority`/`getpriority`'s `(which, who)` names: one process
+/// (`PRIO_PROCESS`), a process group (`PRIO_PGRP`) or a real user's processes (`PRIO_USER`);
+/// `who` 0 is the caller's own. Every thread of each, by pid. `EINVAL` for another `which`.
+fn priority_targets(table: &BTreeMap<Pid, Box<Process>>, caller_pid: Pid, which: u64, who: i64) -> Result<Vec<Pid>, u64> {
+    const PRIO_PGRP: u64 = 1;
+    const PRIO_USER: u64 = 2;
+    let me = table.get(&caller_pid).ok_or(ESRCH)?;
+    let groups: Vec<Pid> = match which {
+        PRIO_PROCESS => {
+            let pid = if who == 0 { me.tgid } else { who as Pid };
+            alloc::vec![table.get(&pid).ok_or(ESRCH)?.tgid]
+        }
+        PRIO_PGRP => {
+            let pgrp = if who == 0 { me.pgid } else { who as Pid };
+            table.values().filter(|p| p.pid == p.tgid && p.pgid == pgrp).map(|p| p.tgid).collect()
+        }
+        PRIO_USER => {
+            let uid = if who == 0 { me.shared.lock().cred.ruid } else { who as u32 };
+            table.values().filter(|p| p.pid == p.tgid && p.shared.lock().cred.ruid == uid).map(|p| p.tgid).collect()
+        }
+        _ => return Err(EINVAL),
+    };
+    let pids: Vec<Pid> = table.values().filter(|p| groups.contains(&p.tgid)).map(|p| p.pid).collect();
+    if pids.is_empty() { Err(ESRCH) } else { Ok(pids) }
 }
 
-/// `SYS_GETPRIORITY`'s real logic -- real Linux's own `getpriority(2)` returns `20 - nice`
-/// (never negative, since the real syscall ABI can't otherwise distinguish "nice value `-1`" from
-/// "error"); musl's own `getpriority()` wrapper un-shifts this client-side (`external/mit/musl/
-/// src/misc/getpriority.c`), so the raw value returned here must already be shifted the same way.
-pub fn do_getpriority(caller_pid: Pid, which: u64, who: i64) -> Result<u64, u64> {
-    if which != PRIO_PROCESS {
-        return Err(EINVAL);
+/// `setpriority(2)`: sets the nice value (clamped to `PRIO_MIN..=PRIO_MAX`, -20..=20 on the BSDs)
+/// of every process `which`/`who` names (`priority_targets`). `EPERM` for a process the caller
+/// may not schedule (`Cred::may_schedule`, FreeBSD's `p_cansched`), `EACCES` for lowering one's
+/// nice value without privilege (POSIX); a refused target leaves the others changed, and the
+/// error is the call's, as on FreeBSD.
+pub fn do_setpriority(caller_pid: Pid, which: u64, who: i64, prio: i32) -> Result<u64, u64> {
+    use super::sched_4bsd::{PRIO_MAX, PRIO_MIN};
+    let nice = prio.clamp(PRIO_MIN, PRIO_MAX);
+    let mut table = PROCESS_TABLE.lock();
+    let cred = table.get(&caller_pid).map(|p| p.shared.lock().cred.clone()).ok_or(ESRCH)?;
+    let mut result = Ok(0);
+    for pid in priority_targets(&table, caller_pid, which, who)? {
+        let p = table.get_mut(&pid).unwrap();
+        if !cred.may_schedule(&p.shared.lock().cred) {
+            result = Err(EPERM);
+        } else if nice < p.nice && !cred.privileged() {
+            result = Err(crate::syscall::EACCES);
+        } else {
+            p.nice = nice;
+        }
     }
-    let target = resolve_target_pid(caller_pid, who)?;
+    result
+}
+
+/// `getpriority(2)`: the lowest nice value among the processes `which`/`who` names. Returned as
+/// `20 - nice`, never negative, which musl's wrapper turns back (`getpriority.c`): the system
+/// call can't otherwise tell nice -1 from an error.
+pub fn do_getpriority(caller_pid: Pid, which: u64, who: i64) -> Result<u64, u64> {
     let table = PROCESS_TABLE.lock();
-    let nice = table
-        .get(&target)
-        .expect("getpriority: target process missing from table")
-        .nice;
+    let nice = priority_targets(&table, caller_pid, which, who)?
+        .iter()
+        .filter_map(|pid| table.get(pid).map(|p| p.nice))
+        .min()
+        .unwrap_or(0);
     Ok((20 - nice) as u64)
 }
 
@@ -241,8 +271,8 @@ pub fn do_umask(caller_pid: Pid, new_mask: u32) -> Result<u64, u64> {
 const PRIO_PROCESS: u64 = 0;
 
 const SCHED_OTHER: i32 = 0;
-const SCHED_FIFO: i32 = 1;
-const SCHED_RR: i32 = 2;
+pub(crate) const SCHED_FIFO: i32 = 1;
+pub(crate) const SCHED_RR: i32 = 2;
 /// `Process::sched_policy`'s real spawn-time default -- real POSIX/Linux processes start
 /// `SCHED_OTHER`, not a real-time policy; a prior version of this codebase defaulted every fresh
 /// process to `SCHED_RR` instead (mis-justified as "matching BusyBox `chrt`'s own default policy
@@ -346,12 +376,10 @@ fn is_known_sched_policy(policy: i32) -> bool {
 /// on its own). **Must be called with `PROCESS_TABLE` unlocked** -- it may call
 /// `scheduler::schedule()`, which takes that same lock itself (`spin::Mutex` isn't reentrant).
 fn maybe_yield_for_priority(caller_pid: Pid) {
-    let caller_priority = PROCESS_TABLE
-        .lock()
-        .get(&caller_pid)
-        .map(|p| p.sched_priority)
-        .unwrap_or(0);
-    if crate::process::scheduler::ready_queue_has_higher_priority_than(caller_priority) {
+    // Only a real-time thread outranking the caller makes it yield here (time-sharing keys start
+    // above every real-time one); time-sharing order is the timer's business.
+    let caller_key = PROCESS_TABLE.lock().get(&caller_pid).map_or(u32::MAX, |p| super::sched_4bsd::key(p));
+    if crate::process::scheduler::ready_queue_has_better_than(caller_key.min(super::sched_4bsd::REALTIME_KEYS)) {
         crate::process::scheduler::schedule();
     }
 }

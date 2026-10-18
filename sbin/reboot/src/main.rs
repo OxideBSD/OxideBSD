@@ -87,7 +87,11 @@ fn main() -> ExitCode {
             Action::Halt => libc::RB_HALT_SYSTEM,
             Action::PowerOff => libc::RB_POWER_OFF,
         };
-        unsafe { libc::reboot(how) };
+        // -n: the kernel mustn't synchronize either (`RB_NOSYNC`, which musl's reboot(3) has no
+        // argument for).
+        let flags = if nosync { RB_NOSYNC } else { 0 };
+        // SAFETY: syscall with plain integer arguments.
+        unsafe { libc::syscall(SYS_REBOOT, 0xfee1deadu32 as libc::c_long, 672274793 as libc::c_long, how as libc::c_long, flags) };
         // reboot(2) only returns on failure.
     } else {
         let sig = match action {
@@ -107,6 +111,8 @@ fn main() -> ExitCode {
 /// switch (FreeBSD's `RB_REROOT` value).
 const SYS_REBOOT: libc::c_long = 486;
 const RB_REROOT: libc::c_long = 0x0020_0000;
+/// FreeBSD's `RB_NOSYNC` value, as this ABI takes it: in the fourth argument.
+const RB_NOSYNC: libc::c_long = 0x4;
 
 /// `-r`: the new root's `type:special`, from `special` or fstab, handed to the kernel, which asks
 /// init to shut down and switch.

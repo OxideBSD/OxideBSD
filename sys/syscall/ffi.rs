@@ -1006,13 +1006,9 @@ struct RawTimeval {
     tv_usec: i64,
 }
 
-/// musl's own `struct rusage` on x86_64 (`external/mit/musl/include/sys/resource.h`): two
-/// `timeval`s, then 14 `long` fields, then a 16-`long` reserved tail -- 272 bytes total. Backs both
-/// `SYS_GETRUSAGE` and `SYS_WAIT4`'s own optional 4th `rusage_ptr` argument (see
-/// `write_zeroed_rusage`, below). This kernel tracks no per-process CPU time/memory-usage
-/// accounting at all (`/proc/stat`'s own `cpu` line is already an honest all-zero placeholder for
-/// the identical reason) -- every field here is a real, correctly-shaped, honestly-zeroed
-/// placeholder rather than an invented number.
+/// musl's `struct rusage` on x86_64 (`external/mit/musl/include/sys/resource.h`): two
+/// `timeval`s, 14 `long` counters, a 16-`long` reserved tail -- 272 bytes. For `getrusage` and
+/// `wait4` (`write_rusage`); the counters (`ru_maxrss`, `ru_nvcsw`, ...) aren't kept and stay zero.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct RawRusage {
@@ -1024,29 +1020,49 @@ struct RawRusage {
 
 const _: () = assert!(core::mem::size_of::<RawRusage>() == 272);
 
-/// Writes an all-zero `RawRusage` to `ptr` if it's non-null -- shared by `sys_getrusage` and
-/// `do_wait4`'s own optional `rusage_ptr` argument (`sys/process.rs`), the same "one real helper,
-/// two call sites" shape `write_stat`-style functions elsewhere in this codebase already use.
-pub(crate) fn write_zeroed_rusage(ptr: u64) -> Result<(), u64> {
+/// `ticks` timer ticks as a `timeval`.
+fn ticks_timeval(ticks: u64) -> RawTimeval {
+    let hz = crate::cpu::pit::TIMER_HZ as u64;
+    RawTimeval { tv_sec: (ticks / hz) as i64, tv_usec: ((ticks % hz) * (1_000_000 / hz)) as i64 }
+}
+
+/// Writes a `struct rusage` with CPU time `ticks`, `sys` of them in the kernel, to `ptr` if it
+/// isn't null (`getrusage`, `wait4`). Only the times are kept; the counters stay zero.
+pub(crate) fn write_rusage(ptr: u64, ticks: u64, sys: u64) -> Result<(), u64> {
     if ptr == 0 {
         return Ok(());
     }
-    copyout_val(&RawRusage::default(), UserPtr::new(ptr))
+    let ru = RawRusage {
+        ru_utime: ticks_timeval(ticks.saturating_sub(sys)),
+        ru_stime: ticks_timeval(sys),
+        ..RawRusage::default()
+    };
+    copyout_val(&ru, UserPtr::new(ptr))
 }
 
-/// `SYS_GETRUSAGE` (registered by `sys/modules/posix_compat`, continuing on from `SYS_UMASK = 487`) --
-/// real `getrusage(2)`'s exact `(who, rusage_ptr)` wire format (musl's own `getrusage()`,
-/// `external/mit/musl/src/misc/getrusage.c`, already issues a plain 2-argument raw syscall with a
-/// bare pointer, no length-prefixing involved, so no call-site patch was needed beyond the usual
-/// number remap). `who` (`RUSAGE_SELF`/`RUSAGE_CHILDREN`) makes no difference to the answer -- see
-/// `RawRusage`'s own doc comment for why. **Same latent staleness `sys_times` had until its own
-/// fix** (this call site also predates `Process::cpu_ticks`) -- `ru_utime`/`ru_stime` could be
-/// derived from `cpu_ticks`/`child_cpu_ticks` the same way, but nothing currently depends on it
-/// (unlike `times(2)`, which `fork/8-1.c` needed real values from to avoid a permanent hang) --
-/// left as an honest all-zero placeholder, a known follow-up, not silently forgotten.
+/// The calling process's CPU time and its kernel part: every thread of its group's.
+fn own_ticks(table: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<crate::process::Process>>, pid: u64) -> (u64, u64) {
+    let Some(tgid) = table.get(&pid).map(|p| p.tgid) else { return (0, 0) };
+    table.values().filter(|p| p.tgid == tgid).fold((0, 0), |(t, s), p| (t + p.cpu_ticks, s + p.sys_ticks))
+}
+
+/// `getrusage(2)`: `RUSAGE_SELF` (the whole process), `RUSAGE_CHILDREN` (reaped descendants) or
+/// `RUSAGE_THREAD` (the calling thread); `EINVAL` otherwise.
 pub(crate) fn sys_getrusage(who: u64, rusage_ptr: u64) -> Result<u64, u64> {
-    let _ = who;
-    write_zeroed_rusage(rusage_ptr)?;
+    const RUSAGE_SELF: i64 = 0;
+    const RUSAGE_CHILDREN: i64 = -1;
+    const RUSAGE_THREAD: i64 = 1;
+    let pid = crate::process::scheduler::current_pid();
+    let (ticks, sys) = {
+        let table = crate::process::table().lock();
+        match who as i64 {
+            RUSAGE_SELF => own_ticks(&table, pid),
+            RUSAGE_CHILDREN => table.get(&pid).map_or((0, 0), |p| (p.child_cpu_ticks, p.child_sys_ticks)),
+            RUSAGE_THREAD => table.get(&pid).map_or((0, 0), |p| (p.cpu_ticks, p.sys_ticks)),
+            _ => return Err(crate::syscall::EINVAL),
+        }
+    };
+    write_rusage(rusage_ptr, ticks, sys)?;
     Ok(0)
 }
 
@@ -1073,33 +1089,21 @@ const _: () = assert!(core::mem::size_of::<RawTms>() == 32);
 /// value, just not tied to any particular epoch (matching the standard's own "arbitrary point"
 /// wording).
 ///
-/// **`tms_utime`/`tms_cutime` are real, not fabricated** -- `Process::cpu_ticks`/`child_cpu_ticks`
-/// (see each field's own doc comment), the same real per-process CPU-time counter
-/// `CLOCK_PROCESS_CPUTIME_ID` already reads. **Was previously an unconditional all-zero
-/// placeholder** (this call site predates `cpu_ticks`, added later purely for
-/// `clock_gettime`, and was never revisited) -- a real, permanent hang, found live via
-/// `fork/8-1.c`: its child thread busy-loops forever on `while ((tms_utime + tms_stime) <= 0)`,
-/// which an always-zero `tms_utime` can never satisfy, and its parent separately checks
-/// `tms_cutime`/`tms_cstime` become nonzero after `waitpid` reaps that child. **`tms_stime`/
-/// `tms_cstime` stay honest zero** -- this kernel tracks one undifferentiated per-process tick
-/// counter, not a real user/kernel split (same tier `cpu_ticks`'s own doc comment already
-/// establishes); putting the whole count in the `u`-side buckets (time spent running the
-/// process's own code) is the more accurate choice for what actually gets measured here than
-/// splitting it arbitrarily. `getrusage(2)`'s own `ru_utime`/`ru_stime` have the identical latent
-/// staleness (see `sys_getrusage`'s own doc comment) -- not fixed here, since nothing currently
-/// depends on it the way this hang did.
+/// The four times are the process's own (every thread's) and its reaped descendants', each split
+/// into user and kernel time.
 pub(crate) fn sys_times(tms_ptr: u64) -> Result<u64, u64> {
     if tms_ptr != 0 {
-        let proc = crate::process::table()
-            .lock()
-            .get(&crate::process::scheduler::current_pid())
-            .map(|p| (p.cpu_ticks, p.child_cpu_ticks));
-        let (cpu_ticks, child_cpu_ticks) = proc.unwrap_or((0, 0));
+        let pid = crate::process::scheduler::current_pid();
+        let (own, children) = {
+            let table = crate::process::table().lock();
+            let children = table.get(&pid).map_or((0, 0), |p| (p.child_cpu_ticks, p.child_sys_ticks));
+            (own_ticks(&table, pid), children)
+        };
         copyout_val(&RawTms {
-                tms_utime: cpu_ticks as i64,
-                tms_stime: 0,
-                tms_cutime: child_cpu_ticks as i64,
-                tms_cstime: 0,
+                tms_utime: own.0.saturating_sub(own.1) as i64,
+                tms_stime: own.1 as i64,
+                tms_cutime: children.0.saturating_sub(children.1) as i64,
+                tms_cstime: children.1 as i64,
             }, UserPtr::new(tms_ptr))?;
     }
     Ok(crate::cpu::interrupts::ticks())

@@ -48,6 +48,8 @@ static int child_exit_ok(int (*fn)(void))
 #include "rlimit.c"
 #include "flock.c"
 #include "orphan.c"
+#include "sched.c"
+#include "users.c"
 
 static const struct {
 	const char *name;
@@ -56,6 +58,8 @@ static const struct {
 	{ "rlimit", rlimit_main },
 	{ "flock", flock_main },
 	{ "orphan", orphan_main },
+	{ "sched", sched_main },
+	{ "users", users_main },
 };
 
 int main(int argc, char **argv)

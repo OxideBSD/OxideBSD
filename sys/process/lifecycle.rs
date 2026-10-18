@@ -256,7 +256,7 @@ fn spawn_finish(
         on_altstack: false,
         // Not inherited -- see Process::preempted_resume's own doc comment.
         preempted_resume: None,
-        priority: 0,
+        estcpu: 0,
         pgid,
         sid: pid,
         comm,
@@ -279,7 +279,9 @@ fn spawn_finish(
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: crate::cpu::fpu::clean_state(),
         cpu_ticks: 0,
+        sys_ticks: 0,
         child_cpu_ticks: 0,
+        child_sys_ticks: 0,
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
@@ -678,7 +680,7 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         on_altstack: false,
         // Not inherited -- see Process::preempted_resume's own doc comment.
         preempted_resume: None,
-        priority: 0,
+        estcpu: 0,
         pgid: parent_pgid,
         sid: parent_sid,
         comm: parent_comm,
@@ -711,9 +713,11 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         // Not inherited -- real POSIX: a forked child's own CPU time starts at 0, it hasn't run
         // yet (see this field's own doc comment on Process).
         cpu_ticks: 0,
+        sys_ticks: 0,
         // Not inherited -- a fresh child hasn't reaped any children of its own yet (see this
         // field's own doc comment on Process).
         child_cpu_ticks: 0,
+        child_sys_ticks: 0,
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
@@ -950,7 +954,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         on_altstack: false,
         // Not inherited -- see Process::preempted_resume's own doc comment.
         preempted_resume: None,
-        priority: 0,
+        estcpu: 0,
         pgid: parent_pgid,
         sid: parent_sid,
         comm: parent_comm,
@@ -972,10 +976,12 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: parent_fpu_state,
         cpu_ticks: 0,
+        sys_ticks: 0,
         // A `clone(2)`-created thread never becomes an independent `wait4` target (see
         // `do_clone`'s own doc comment) and never reaps children of its own -- starts at 0, same
         // reasoning as `do_fork_from_current`'s own copy of this field.
         child_cpu_ticks: 0,
+        child_sys_ticks: 0,
         // A fresh process/thread always starts with a full quantum -- see `Process::
         // quantum_ticks_left`'s own doc comment.
         quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
@@ -1779,6 +1785,8 @@ pub fn do_wait4(
         // for why this exact call site -- a reaped process, necessarily not the active `CR3` since
         // it already stopped running back when it originally called `do_exit` -- is safe).
         let mut reaped_address_space: Option<AddressSpace> = None;
+        // The reaped child's own CPU time and the kernel part of it, for `rusage_ptr`.
+        let mut reaped_ticks = (0u64, 0u64);
         let reported = {
             let mut table = PROCESS_TABLE.lock();
 
@@ -1818,8 +1826,11 @@ pub fn do_wait4(
                 // whatever the child itself had already accumulated from its own reaped children,
                 // not just its direct `cpu_ticks`) without any extra recursion needed here.
                 let child_total = removed.cpu_ticks + removed.child_cpu_ticks;
+                let child_sys = removed.sys_ticks + removed.child_sys_ticks;
+                reaped_ticks = (removed.cpu_ticks, removed.sys_ticks);
                 let parent = table.get_mut(&caller_pid).unwrap();
                 parent.child_cpu_ticks += child_total;
+                parent.child_sys_ticks += child_sys;
                 parent.children.retain(|&c| c != child_pid);
                 Some(Reported::Exited(child_pid, code))
             } else if options & WUNTRACED != 0
@@ -1889,10 +1900,7 @@ pub fn do_wait4(
                     crate::memory::usercopy::UserPtr::new(status_ptr),
                 )?;
             }
-            // No per-process CPU-time/memory-usage accounting exists anywhere in this kernel --
-            // see `RawRusage`'s own doc comment (`sys/syscall.rs`) for why an honest all-zero
-            // placeholder is written here rather than an invented number.
-            crate::syscall::write_zeroed_rusage(rusage_ptr)?;
+            crate::syscall::write_rusage(rusage_ptr, reaped_ticks.0, reaped_ticks.1)?;
             return Ok(child_pid);
         }
 
@@ -2399,12 +2407,16 @@ const RB_POWER_OFF: u64 = 0x4321fedc;
 /// The root switch (RAM_FLOOR.md §5.1): FreeBSD's `RB_REROOT` value (Linux has none). Its
 /// argument, the fourth register, is a NUL-terminated `[type:]special`.
 const RB_REROOT: u64 = 0x0020_0000;
+/// With a reboot, halt or power off, in the fourth register: don't write the file systems'
+/// delayed blocks or mark them clean (FreeBSD's `RB_NOSYNC` value; `reboot -q -n`).
+const RB_NOSYNC: u64 = 0x4;
 
 /// `SYS_REBOOT`'s real logic -- matches real Linux's own magic `cmd` values against this kernel's
 /// three real actions (`sys/reboot.rs`). Root only (`EPERM` otherwise, checked before `cmd`, as
 /// Linux does for `CAP_SYS_BOOT`). Every success arm diverges (`-> !`) -- the `Result` return
-/// type exists only for the error cases. Each first runs the modules' shutdown hooks, as BSD
-/// `reboot(2)` syncs the filesystems: oxfs writes its delayed blocks and marks itself clean.
+/// type exists only for the error cases. Each first unmounts everything and runs the modules'
+/// shutdown hooks, as BSD `reboot(2)` syncs the filesystems: oxfs writes its delayed blocks and
+/// marks itself clean -- unless `RB_NOSYNC` is given in the fourth register.
 ///
 /// `RB_REROOT` switches the root file system instead (RAM_FLOOR.md §5.1). From any root process
 /// (`reboot -r`) it takes the new root's `[type:]special`, looks it up (an error comes back to
@@ -2461,11 +2473,13 @@ pub fn do_reboot(cmd: u64, arg: u64) -> Result<u64, u64> {
         super::signals::do_kill(caller, INIT_PID as i64, SIGPWR)?;
         return Ok(0);
     }
-    if !matches!(cmd, RB_AUTOBOOT | RB_HALT_SYSTEM | RB_POWER_OFF) {
+    if !matches!(cmd, RB_AUTOBOOT | RB_HALT_SYSTEM | RB_POWER_OFF) || arg & !RB_NOSYNC != 0 {
         return Err(EINVAL);
     }
-    crate::kern::vfs_mount::unmount_all();
-    crate::module::run_shutdown_hooks();
+    if arg & RB_NOSYNC == 0 {
+        crate::kern::vfs_mount::unmount_all();
+        crate::module::run_shutdown_hooks();
+    }
     match cmd {
         RB_AUTOBOOT => crate::reboot::reboot(),
         RB_HALT_SYSTEM => crate::reboot::halt(),

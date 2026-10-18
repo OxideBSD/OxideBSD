@@ -428,6 +428,13 @@ fn timer_interrupt_handler(frame: &mut TrapFrame) {
             && let Some(proc) = table.get_mut(&current)
         {
             proc.cpu_ticks += 1;
+            if !frame.from_user() {
+                proc.sys_ticks += 1;
+            }
+            crate::process::sched_4bsd::charge_tick(proc);
+        }
+        if now.is_multiple_of(crate::cpu::pit::TIMER_HZ as u64) {
+            crate::process::sched_4bsd::schedcpu(&mut table);
         }
         crate::kern::kern_synch::tick(&table, now);
         // Terminal reads whose VTIME ran out.
@@ -718,33 +725,25 @@ fn timer_interrupt_handler(frame: &mut TrapFrame) {
                     + crate::process::fault_trampoline::STUB_LEN)
                 .contains(&ip));
     if interrupted_ring3 && !mid_fault_trampoline {
-        // Real `SCHED_FIFO`/`SCHED_RR` priority preemption: checked on *every* tick, not gated on
-        // the quantum below -- a higher-`sched_priority` process becoming Ready must preempt within
-        // about one tick, not wait up to a full `PREEMPT_QUANTUM_TICKS` quantum. Every `SCHED_OTHER`
-        // process (this kernel's spawn-time default, see `Process::sched_policy`'s own doc comment)
-        // shares the one priority valid for that policy (`0`), so `higher_priority_ready` is always
-        // `false` for the pre-existing plain-round-robin case -- this whole branch is inert unless
-        // something has actually called `sched_setscheduler`/`sched_setparam` into a real-time
-        // policy. See `scheduler::ready_queue_has_higher_priority_than`'s own doc comment for why a
-        // process-table lookup here is safe (no lock this handler already holds could conflict).
+        // Priority preemption, checked every tick rather than at the end of the quantum: a ready
+        // thread in a better run queue (`sched_4bsd`: real-time first, then time-sharing priority)
+        // takes the CPU within a tick. No lock this handler holds conflicts with the table's.
         //
         // Real per-process quantum (`Process::quantum_ticks_left`'s own doc comment) replacing a
         // purely global-clock-phase check -- decremented here, once per tick this exact process is
         // found actually running, rather than checking whether the *global* tick counter's phase
         // happens to line up. One combined table lookup for both this and the priority check above.
-        let (current_priority, quantum_expired) = {
+        let (current_key, quantum_expired) = {
             let mut table = crate::process::table().lock();
             match table.get_mut(&crate::process::scheduler::current_pid()) {
                 Some(p) => {
-                    let priority = p.sched_priority;
                     p.quantum_ticks_left = p.quantum_ticks_left.saturating_sub(1);
-                    (priority, p.quantum_ticks_left == 0)
+                    (crate::process::sched_4bsd::key(p), p.quantum_ticks_left == 0)
                 }
-                None => (0, false),
+                None => (u32::MAX, false),
             }
         };
-        let higher_priority_ready =
-            crate::process::scheduler::ready_queue_has_higher_priority_than(current_priority);
+        let higher_priority_ready = crate::process::scheduler::ready_queue_has_better_than(current_key);
         let key_signal = KEY_RESCHEDULE.swap(false, Ordering::Relaxed);
         if higher_priority_ready || quantum_expired || key_signal {
             crate::process::scheduler::schedule();

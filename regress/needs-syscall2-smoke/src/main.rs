@@ -17,9 +17,8 @@
 //!    (behaves exactly like `dev_open`'s own magic-path `/dev/null`) -> `unlink`; plus a plain
 //!    `S_IFREG` node (an immediately committed empty regular file).
 //! 3. `getrusage`/`wait4` rusage: a direct `getrusage(RUSAGE_SELF, ...)` call, then a real
-//!    `fork()`+exit()+`wait4(..., &rusage)` round trip -- this kernel tracks no real per-process
-//!    CPU-time accounting, so the check is that both calls succeed and report an honestly
-//!    all-zero `struct rusage`, not that any particular number comes back.
+//!    `fork()`+exit()+`wait4(..., &rusage)` round trip: both succeed with well-formed times (the
+//!    numbers themselves are `kern_syscall_smoke`'s `sched` section's business).
 //! 4. `chroot` root-only enforcement: a forked child `setuid(1)`s (dropping root), then confirms
 //!    `chroot` on that non-root child fails real `EPERM` -- done in its own fork, before the
 //!    parent's own root is ever touched (see part 5).
@@ -476,8 +475,8 @@ fn check_getrusage_wait4() -> bool {
         write_bytes(b"needs-syscall2-smoke: getrusage(RUSAGE_SELF) failed\n");
         return false;
     }
-    if ru.ru_utime != [0, 0] {
-        write_bytes(b"needs-syscall2-smoke: getrusage didn't report an honest zero ru_utime\n");
+    if ru.ru_utime[1] >= 1_000_000 || ru.ru_stime[1] >= 1_000_000 {
+        write_bytes(b"needs-syscall2-smoke: getrusage reported a malformed timeval\n");
         return false;
     }
 

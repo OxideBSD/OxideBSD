@@ -912,9 +912,9 @@ pub struct Process {
     /// "no meaningful in-progress-handler state to carry over" reasoning `on_altstack` above
     /// already establishes.
     pub preempted_resume: Option<(u64, u64, u64)>,
-    /// Unused today; reserved so a future priority scheduler doesn't need a PCB layout change.
-    #[allow(dead_code)]
-    pub priority: u8,
+    /// Recent CPU use, for the time-sharing priority (`sched_4bsd`): one unit per clock tick run,
+    /// decaying once a second. Starts at 0, for spawn and fork alike.
+    pub estcpu: u32,
     /// This process's process-group ID — an ordinary `Pid`, not a distinct namespace (real POSIX
     /// process groups are just pids reinterpreted). Persisted/restored per process on
     /// `fork`/`spawn` exactly like `cwd`/`fs_base`/`brk` already are. A freshly `spawn`ed process
@@ -970,19 +970,16 @@ pub struct Process {
     /// group. Kept by `fork` and `execve`. Enforced: `STACK`, `DATA`, `FSIZE`, `NPROC`, `NOFILE`,
     /// `MEMLOCK` (`limits.rs`); `AS`, `CORE`, `CPU` and `RSS` are stored only (`CLEANUP.md` §3).
     pub rlimits: [(u64, u64); 16],
-    /// `SYS_SETPRIORITY`/`SYS_GETPRIORITY`'s backing store — real `nice` range is `-20..=19`, `0`
-    /// by default. Stored and echoed back honestly; this kernel's cooperative round-robin
-    /// scheduler has no priority concept at all, so it has no real scheduling effect. Copied by
-    /// `fork`; preserved by `execve` (same reasoning as `rlimits` above).
+    /// `setpriority`/`getpriority`'s nice value, `-20..=20` (the BSDs' `PRIO_MIN..=PRIO_MAX`), 0
+    /// by default: part of the time-sharing priority (`sched_4bsd::usrpri`). Copied by `fork`;
+    /// kept by `execve`.
     pub nice: i32,
-    /// `SYS_SCHED_SETSCHEDULER`/`SYS_SCHED_GETSCHEDULER`'s backing store — real Linux
-    /// `SCHED_RR = 2` by default (matching BusyBox `chrt`'s own default when no `-r`/`-f`/`-o`/
-    /// `-b`/`-i` flag is given). No real RT scheduling class exists here — stored and echoed back
-    /// honestly, same tier as `nice` above. Copied by `fork`; preserved by `execve`.
+    /// `sched_setscheduler`'s policy (`SCHED_OTHER` by default). With `sched_priority` above 0,
+    /// `SCHED_FIFO` and `SCHED_RR` run before every time-sharing thread (`sched_4bsd::key`).
+    /// Copied by `fork`; kept by `execve`.
     pub sched_policy: i32,
-    /// `SYS_SCHED_SETSCHEDULER`/`SYS_SCHED_GETPARAM`'s backing store — the `sched_priority` field
-    /// of a real `struct sched_param`, `0` by default. Same "stored, not enforced" tier as
-    /// `sched_policy` above. Copied by `fork`; preserved by `execve`.
+    /// `struct sched_param`'s `sched_priority`, 0 by default: a real-time thread's rank. Copied by
+    /// `fork`; kept by `execve`.
     pub sched_priority: i32,
     /// Set when this process transitions into `ProcState::Stopped` (real `SIGSTOP`/`SIGTSTP`),
     /// cleared once a parent's `wait4(WUNTRACED)` observes it — the real POSIX "report a stop
@@ -1076,6 +1073,9 @@ pub struct Process {
     /// a forked child (real POSIX: a process's own CPU time never carries over from a parent);
     /// preserved by `execve` (the same process, still accumulating, just running a new image).
     pub cpu_ticks: u64,
+    /// The part of `cpu_ticks` spent in the kernel (ticks that interrupted ring 0): `times`'s
+    /// `tms_stime`, `getrusage`'s `ru_stime`; the rest is user time.
+    pub sys_ticks: u64,
     /// Real `times(2)`'s `tms_cutime`/`tms_cstime` backing store -- the accumulated `cpu_ticks`
     /// (own plus already-accumulated grandchildren) of every child this process has ever reaped
     /// via `do_wait4` (`sys/process/lifecycle.rs`), folded in at reap time before the child's own
@@ -1090,6 +1090,8 @@ pub struct Process {
     /// become nonzero after `waitpid` -- both were impossible before `cpu_ticks` (added for
     /// `CLOCK_PROCESS_CPUTIME_ID`, see that field's own doc comment) ever got wired into `times(2)`.
     pub child_cpu_ticks: u64,
+    /// The kernel part of `child_cpu_ticks` (`tms_cstime`).
+    pub child_sys_ticks: u64,
     /// Real per-process round-robin quantum, replacing a purely global-clock-phase preemption
     /// check (`now.is_multiple_of(PREEMPT_QUANTUM_TICKS)` in `interrupts::timer_interrupt_handler`)
     /// that used to let a process's actual remaining time before preemption be pure luck -- 1 to
@@ -1256,5 +1258,6 @@ pub mod context_switch;
 pub mod elf;
 pub mod fault_trampoline;
 pub mod scheduler;
+pub mod sched_4bsd;
 pub mod user_stack;
 pub mod usermode;
