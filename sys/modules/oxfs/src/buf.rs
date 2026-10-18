@@ -21,7 +21,6 @@
 use crate::{BLOCK_SIZE, log};
 
 unsafe extern "C" {
-    fn oxidebsd_bdev_root() -> i64;
     fn oxidebsd_bdev_sectors(dev: u64) -> u64;
     fn oxidebsd_bdev_read(dev: u64, sector: u64, count: u64, buf: *mut u8) -> i64;
     fn oxidebsd_bdev_write(dev: u64, sector: u64, count: u64, buf: *const u8) -> i64;
@@ -81,12 +80,13 @@ fn tag(kind: Kind) -> u64 {
     }
 }
 
-/// The root's block device, and whether `write` reaches the disk (false while formatting).
-static mut DEV: u64 = 0;
+/// The mounted file system's block device (`NODEV` while none is), and whether `write` reaches
+/// the disk (false while formatting).
+static mut DEV: u64 = vfs_if::NODEV;
 static mut WRITE_THROUGH: bool = false;
 
 fn dev() -> u64 {
-    // SAFETY: set once in `init`, inside `module_init`; read-only after.
+    // SAFETY: set by `attach`/`detach` at mount and unmount, single-core and serialized.
     unsafe { DEV }
 }
 
@@ -112,34 +112,40 @@ extern "C" fn pre_write(dev: u64, _blkno: u64, tag: u64) -> i64 {
     }
 }
 
-/// Finds the root's device and gives the cache oxfs's ordering. Must run inside `module_init`.
-pub fn init() -> bool {
-    // SAFETY: FFI call to a kernel-exported function.
-    let root = unsafe { oxidebsd_bdev_root() };
-    if root < 0 {
-        return false;
-    }
-    // SAFETY: inside `module_init`, before any syscall.
+/// Takes block device `dev` (the mount's, `MountArgs::dev`) and gives the cache oxfs's ordering
+/// for it.
+pub fn attach(dev: u64) {
+    // SAFETY: at mount, single-core and serialized; FFI call to a kernel-exported function.
     unsafe {
-        DEV = root as u64;
-        oxidebsd_bio_set_hook(root as u64, pre_write);
+        DEV = dev;
+        oxidebsd_bio_set_hook(dev, pre_write);
     }
-    true
 }
 
-/// Whether the root has a device this boot.
+/// Lets the device go at unmount: its blocks leave the cache (written first, if dirty), so the
+/// next mount of it (or fsck_oxfs, around the cache) reads the disk.
+pub fn detach() {
+    if !present() {
+        return;
+    }
+    flush_all();
+    invalidate_all();
+    // SAFETY: as `attach`.
+    unsafe { DEV = vfs_if::NODEV };
+}
+
+/// Whether a device is attached.
 pub fn present() -> bool {
-    // SAFETY: FFI call to a kernel-exported function.
-    unsafe { oxidebsd_bdev_root() >= 0 }
+    dev() != vfs_if::NODEV
 }
 
 /// The device's size in oxfs blocks.
 pub fn device_blocks() -> u64 {
-    // SAFETY: FFI calls to kernel-exported functions.
-    unsafe {
-        let root = oxidebsd_bdev_root();
-        if root < 0 { 0 } else { oxidebsd_bdev_sectors(root as u64) / SECTORS }
+    if !present() {
+        return 0;
     }
+    // SAFETY: FFI call to a kernel-exported function.
+    unsafe { oxidebsd_bdev_sectors(dev()) / SECTORS }
 }
 
 /// Reads device block `block` straight from the disk, around the cache (the superblock).

@@ -147,9 +147,10 @@ fn registered(mp: *mut Mount) {
 
 // --- vfsops ----------------------------------------------------------------------------------
 
-/// Mounts the disk's oxfs: the superblock, the layout, the free counts. Only the root for now
-/// (oxfs has one partition's worth of global state). With `MNT_UPDATE`, changes the root between
-/// read-only and read-write (`remount_root`).
+/// Mounts the oxfs on the device the kernel hands it (`MountArgs::dev`): the superblock, the
+/// layout, the free counts. One at a time (oxfs has one partition's worth of global state), as the
+/// root; unmounted, another partition may be mounted (the root switch, RAM_FLOOR.md §5.1). With
+/// `MNT_UPDATE`, changes the root between read-only and read-write (`remount_root`).
 extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     // SAFETY: the kernel filled the mount's flags.
     let flags = unsafe { (*mp).mnt_flag };
@@ -168,12 +169,17 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     }
     // The root file system is the disk's oxfs partition, made by newfs_oxfs(8) or installed from
     // a system image; the kernel never formats one (`OxideBSD-doc/RAM_FLOOR.md` §4.2.1).
-    if !block_device_present() {
+    // SAFETY: the kernel's arguments.
+    let dev = unsafe { (*args).dev };
+    if dev == vfs_if::NODEV {
         log("[oxfs] no root file system: no disk (and the memory disk is empty)\n");
         return VFS_ENXIO;
     }
+    buf::attach(dev);
     if !mount_from_disk() {
         log("[oxfs] no root file system: the root partition holds no oxfs of this version (make one with newfs_oxfs(8), or install a system image)\n");
+        buf::detach();
+        forget_mounted();
         return VFS_EINVAL;
     }
     // SAFETY: before any process runs; nothing else reads it yet.
@@ -204,13 +210,17 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
 /// marked clean (§3.4.1). Not called on a panic or a fault.
 extern "C" fn oxfs_vfs_unmount(mp: *mut Mount, _flags: u64) -> i32 {
     our_mounts().retain(|&m| m != mp);
-    if root_rdonly() {
-        return 0;
+    if !root_rdonly() {
+        buf::flush_all();
+        set_clean(true);
+        write_superblock();
+        log("[oxfs] filesystem synced and marked clean\n");
     }
-    buf::flush_all();
-    set_clean(true);
-    write_superblock();
-    log("[oxfs] filesystem synced and marked clean\n");
+    // Everything of it goes: another partition may be mounted next (the root switch).
+    buf::detach();
+    forget_mounted();
+    // SAFETY: single-core, serialized; the kernel has reclaimed every vnode of `mp`.
+    unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = ptr::null_mut() };
     0
 }
 

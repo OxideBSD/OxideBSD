@@ -48,13 +48,6 @@ unsafe extern "C" {
     /// on `oxidebsd_unix_time`. Backs real `st_mtime`/`st_ctime` (`write_inode_data`/
     /// `resize_inode_data`).
     fn oxidebsd_unix_time() -> i64;
-    /// Real, kernel-allocated (not baked into this module's own object file) storage -- see
-    /// `BLOCKS_PTR`'s own doc comment for why. Returns a zeroed, kernel-VA-mapped
-    /// pointer to `size_bytes` of fresh memory, or `0` on failure (only ever called once each,
-    /// from `module_init`, which reboots the whole system on any failure here the same as any
-    /// other `module_init` failure -- see this module's own `fatal_on_panic = true` in
-    /// `sys/kernel_main.rs`, kernel tree).
-    fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64;
     /// Makes every call into this module take the kernel's filesystem lock.
     fn oxidebsd_module_serialize();
     /// Tells the kernel whether the root is mounted read-write (`1`) or read-only.
@@ -116,7 +109,7 @@ fn data_block_offset() -> u32 {
 
 
 fn set_layout(data_blocks: u32, bitmap: u32) {
-    // SAFETY: inside `module_init`, before any syscall.
+    // SAFETY: at mount and unmount, single-core and serialized.
     unsafe {
         *core::ptr::addr_of_mut!(DISK_BLOCKS) = data_blocks;
         *core::ptr::addr_of_mut!(BITMAP_BLOCKS) = bitmap;
@@ -172,9 +165,9 @@ const OXFS_PATH_MAX: usize = 4096;
 /// values, so the optimizer can't treat any write as an unobservable dead store. All-zero initial
 /// values place these in `.bss` (not baked into the merged object's own size).
 /// Free blocks in each bitmap block (`BITS_PER_BITMAP_BLOCK` data blocks), resident so the
-/// allocator and `statfs` never read a full bitmap block to learn it's full. Allocated in
-/// `init_pools` for the largest filesystem the device can hold; counts are set at mount/format.
-static mut FREE_COUNTS: *mut u32 = core::ptr::null_mut();
+/// allocator and `statfs` never read a full bitmap block to learn it's full. Sized and counted at
+/// mount, emptied at unmount.
+static mut FREE_COUNTS: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
 /// A fresh inode of `kind`, stamped with the current time.
 fn fresh_inode(kind: InodeKind) -> Inode {
     Inode::new(kind, unsafe { oxidebsd_unix_time() })
@@ -182,8 +175,9 @@ fn fresh_inode(kind: InodeKind) -> Inode {
 
 /// Bitmap block `index`'s free count.
 fn free_count(index: u32) -> &'static mut u32 {
-    // SAFETY: `index < bitmap_blocks()`, inside the `init_pools` allocation.
-    unsafe { &mut *FREE_COUNTS.add(index as usize) }
+    // SAFETY: `index < bitmap_blocks()`, which `mount_from_disk` sized it for; single-core,
+    // syscall-serialized.
+    unsafe { &mut (&mut *core::ptr::addr_of_mut!(FREE_COUNTS))[index as usize] }
 }
 
 /// The inodes: an inode file whose data blocks hold packed inodes (`INODES_PER_BLOCK` per block,
@@ -213,26 +207,17 @@ fn inode_table() -> &'static mut InodeTable {
     unsafe { &mut *core::ptr::addr_of_mut!(DISK_INODES) }
 }
 
-/// Claims real kernel-allocated storage for the cache and `FREE_COUNTS` -- must run
-/// first, before
-/// `module_init`'s mount-or-format decision (or anything else) ever calls `read_block`/
-/// `write_block`. Returns `false` on failure (kernel out of memory), which
-/// `module_init` treats as a fatal `module_init` failure like any other -- this module's own
-/// `fatal_on_panic = true` (see `sys/kernel_main.rs`, kernel tree) reboots rather than resuming
-/// with a filesystem that has nowhere to actually store a block.
-fn init_pools() -> bool {
-    let device_blocks = buf::device_blocks();
-    if !buf::init() {
-        return false;
+/// Forgets the unmounted file system: what `mount_from_disk` set up, so the next mount (another
+/// partition, after a root switch) starts afresh.
+fn forget_mounted() {
+    // SAFETY: single-core, syscall-serialized; nothing of the old mount is in use any more.
+    unsafe {
+        *core::ptr::addr_of_mut!(FREE_COUNTS) = alloc::vec::Vec::new();
+        *core::ptr::addr_of_mut!(NEXT_FREE_BLOCK) = 0;
+        *core::ptr::addr_of_mut!(DELAY_OWNER) = NO_OWNER;
     }
-    let (_, most_bitmap_blocks) = layout_for(device_blocks);
-    let counts = unsafe { oxidebsd_module_alloc_zeroed(most_bitmap_blocks.max(1) as u64 * 4) };
-    if counts == 0 {
-        return false;
-    }
-    // SAFETY: inside `module_init`, before any syscall.
-    unsafe { FREE_COUNTS = counts as *mut u32 };
-    true
+    *inode_table() = InodeTable::EMPTY;
+    set_layout(0, 0);
 }
 
 /// Runs `f` on block `n` in place, for reads that don't want `read_block`'s 4 KiB copy (index
@@ -1503,6 +1488,14 @@ fn mount_from_disk() -> bool {
         return false;
     }
     set_layout(data_blocks, bitmap);
+    // SAFETY: single-core, syscall-serialized; no file of this mount is open yet.
+    let counts = unsafe { &mut *core::ptr::addr_of_mut!(FREE_COUNTS) };
+    counts.clear();
+    if counts.try_reserve_exact(bitmap as usize).is_err() {
+        log("[oxfs] mount: out of memory for the free counts\n");
+        return false;
+    }
+    counts.resize(bitmap as usize, 0);
     // SAFETY: inside `module_init` or a remount, before anything writes a superblock.
     unsafe { *core::ptr::addr_of_mut!(LABEL) = sb.label };
     if !sb.clean {
@@ -1593,9 +1586,6 @@ pub extern "C" fn module_init() -> i32 {
     // this module takes the kernel's filesystem lock (`OxideBSD-doc/RAM_FLOOR.md` §3.5.2).
     // SAFETY: FFI call to a kernel-exported function, matching its declared signature exactly.
     unsafe { oxidebsd_module_serialize() };
-    if !init_pools() {
-        return -1;
-    }
 
     // The type (`vfs`), which mounts the root as it registers. Without a root there's nothing to
     // boot: fail the load (the kernel then stops).
