@@ -10,7 +10,6 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::memory::with_frame_allocator;
 
 /// What the kernel starts as pid 1, read from the root file system when it's needed (RAM_FLOOR.md
 /// §4.6.3, FreeBSD's `start_init`): nothing userland is embedded in the kernel.
@@ -99,23 +98,47 @@ pub fn boot_emergency() -> Program {
 /// Starts `program` as pid 1 (`restart`: after a death, as `INIT_PID`; else the first process):
 /// the first of its paths that can be read and loaded, else `/bin/sh` on the console if it may
 /// fall back to it. `None` when nothing could be started; each failure is logged.
-fn start(program: &Program, restart: bool) -> Option<Pid> {
-    let spawn = |path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>], console: bool| -> Result<Pid, alloc::string::String> {
+/// The program the unloaded pid 1 (`lifecycle::spawn_unloaded`) is to read and run, whether
+/// this is a restart (`-R`, §9.3), and whether it is the first boot's.
+static PENDING: Mutex<Option<(Program, bool, bool)>> = Mutex::new(None);
+
+/// Starts pid 1 as FreeBSD does (`start_init`): the process is made first, with no program,
+/// and reads its program itself (`start_in_context`), so the read may sleep on the disk whatever
+/// the kernel was doing when it decided to start one (a boot, or the last thread of the old
+/// pid 1 exiting). `None` only when no process could be made at all.
+fn start(program: &Program, restart: bool, boot: bool) -> Option<Pid> {
+    *PENDING.lock() = Some((program.clone(), restart, boot));
+    match lifecycle::spawn_unloaded(INIT_PID, b"init", program.console) {
+        Ok(pid) => Some(pid),
+        Err(e) => {
+            crate::serial_println!("init: could not make pid 1 ({:?})", e);
+            PENDING.lock().take();
+            None
+        }
+    }
+}
+
+/// Runs in the new pid 1 before it first enters user mode (`spawn_trampoline_inner`): reads the
+/// program `start` left, trying each path in order, then `/bin/sh` if the program allows it, and
+/// loads the first that works. Returns where to enter user mode; `None` for any process but the
+/// one `start` made. If nothing can be run, a first boot panics (there is no system), and a
+/// restart leaves the system idle with pid 1 asleep.
+pub(crate) fn start_in_context(pid: Pid) -> Option<(VirtAddr, VirtAddr)> {
+    if pid != INIT_PID {
+        return None;
+    }
+    let (program, restart, boot) = PENDING.lock().take()?;
+    let try_one = |path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>]| -> Result<(VirtAddr, VirtAddr), alloc::string::String> {
         let image = lifecycle::read_program(path).map_err(|e| alloc::format!("errno {e}"))?;
         let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
         let envp: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
-        let started = if restart {
-            lifecycle::spawn_as(INIT_PID, &image, &argv, &envp, console)
-        } else {
-            lifecycle::spawn_boot(&image, None, &argv, &envp, console)
-        };
-        started.map_err(|e| alloc::format!("{e:?}"))
+        lifecycle::load_into_current(&image, &argv, &envp).map_err(|e| alloc::format!("{e:?}"))
     };
     for path in &program.paths {
-        match spawn(path, &program.argv(path, restart), &program.envp(path), program.console) {
-            Ok(pid) => {
+        match try_one(path, &program.argv(path, restart), &program.envp(path)) {
+            Ok(entry) => {
                 crate::serial_println!("[boot] pid 1: {}", core::str::from_utf8(path).unwrap_or("?"));
-                return Some(pid);
+                return Some(entry);
             }
             Err(why) => {
                 crate::serial_println!("[boot] pid 1: {}: {}", core::str::from_utf8(path).unwrap_or("?"), why);
@@ -130,14 +153,23 @@ fn start(program: &Program, restart: bool) -> Option<Pid> {
             lifecycle::DEFAULT_ENVP[2].to_vec(),
             b"HOME=/".to_vec(),
         ];
-        match spawn(b"/bin/sh", &[b"-sh".to_vec()], &env, true) {
-            Ok(pid) => return Some(pid),
+        match try_one(b"/bin/sh", &[b"-sh".to_vec()], &env) {
+            Ok(entry) => return Some(entry),
             Err(why) => {
                 crate::serial_println!("[boot] pid 1: /bin/sh: {}", why);
             }
         }
     }
-    None
+    if boot {
+        panic!("no init found: nothing in init_path, nor /bin/sh, could be started");
+    }
+    crate::serial_println!("init: could not start pid 1; the system is idle");
+    loop {
+        if let Some(me) = PROCESS_TABLE.lock().get_mut(&pid) {
+            me.state = ProcState::Blocked(BlockReason::WaitingForSignal);
+        }
+        scheduler::schedule();
+    }
 }
 
 struct Supervisor {
@@ -154,9 +186,8 @@ static SUPERVISOR: Mutex<Option<Supervisor>> = Mutex::new(None);
 static REROOT: Mutex<Option<(&'static vfs_if::VfsConf, u64, Vec<u8>)>> = Mutex::new(None);
 
 /// A root switch done (`switch_root`): pid 1's coming end is not a death, and init starts fresh
-/// from this image (path and contents), read from the new root while pid 1 could still sleep on
-/// the disk (`pid1_died` runs on the retired pid 1, which may be reaped while it sleeps).
-static REROOTED: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
+/// on the new root.
+static REROOTED: Mutex<bool> = Mutex::new(false);
 
 /// Records the root switch `reboot -r` asked for.
 pub(crate) fn reroot_pending(target: (&'static vfs_if::VfsConf, u64, Vec<u8>)) {
@@ -173,19 +204,7 @@ pub(crate) fn switch_root() {
     if let Err(e) = crate::kern::vfs_mount::reroot(vfc, dev, &from) {
         crate::serial_println!("init: the root switch failed ({}); back on the old root", e);
     }
-    let Some(paths) = SUPERVISOR.lock().as_ref().map(|s| s.init.paths.clone()) else { return };
-    for path in paths {
-        match lifecycle::read_program(&path) {
-            Ok(image) => {
-                *REROOTED.lock() = Some((path, image));
-                return;
-            }
-            Err(e) => {
-                crate::serial_println!("init: {}: errno {}", core::str::from_utf8(&path).unwrap_or("?"), e);
-            }
-        }
-    }
-    crate::serial_println!("init: no init on the new root");
+    *REROOTED.lock() = true;
 }
 
 /// Whether a root switch has been asked for (`reboot -r`) and not yet done.
@@ -239,7 +258,7 @@ pub fn arm(init: Program, emergency: Program) {
 /// Starts the armed init as the first process (`kernel_main`): `None` when no program could be.
 pub fn start_pid1() -> Option<Pid> {
     let init = SUPERVISOR.lock().as_ref().map(|s| s.init.clone())?;
-    start(&init, false)
+    start(&init, false, true)
 }
 
 fn armed() -> bool {
@@ -268,23 +287,12 @@ pub(crate) fn note_fault(pid: Pid, ip: u64, addr: Option<u64>) {
 /// self-exit), so its entry can't be dropped here: the pid-1 entry is moved to a fresh pid and
 /// reaped later like any exited thread, which frees pid 1 for the replacement started here.
 pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
-    let rerooted = REROOTED.lock().take();
-    if let Some((path, image)) = rerooted {
+    if core::mem::take(&mut *REROOTED.lock()) {
         // Not a death: init asked for the switch (`switch_root`), and comes up as at boot.
         let Some(init) = SUPERVISOR.lock().as_ref().map(|s| s.init.clone()) else { return false };
         retire_old_pid1(exiting);
-        let argv = init.argv(&path, false);
-        let envp = init.envp(&path);
-        let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
-        let envp: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
-        match lifecycle::spawn_as(INIT_PID, &image, &argv, &envp, init.console) {
-            Ok(_) => {
-                crate::serial_println!("[boot] pid 1: {}", core::str::from_utf8(&path).unwrap_or("?"));
-                adopt_orphans();
-            }
-            Err(e) => {
-                crate::serial_println!("init: could not start pid 1 ({:?}); the system is idle", e);
-            }
+        if start(&init, false, false).is_some() {
+            adopt_orphans();
         }
         return true;
     }
@@ -305,12 +313,9 @@ pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
         describe(cause),
         if emergency { "it keeps dying; starting /sbin/emergency" } else { "starting it again" }
     );
-    // Read from the root file system now, as FreeBSD's start_init would.
-    match start(&program, true) {
-        Some(_) => adopt_orphans(),
-        None => {
-            crate::serial_println!("init: could not start pid 1; the system is idle");
-        }
+    // The new pid 1 reads its program in its own context (`start_in_context`).
+    if start(&program, true, false).is_some() {
+        adopt_orphans();
     }
     true
 }
@@ -388,27 +393,17 @@ fn retire_old_pid1(exiting: Pid) {
     }
 }
 
-/// §9.2 step 3: the old pid 1's children become the new pid 1's, as adopted orphans (reaped
-/// automatically). Those that had already exited are reaped now.
+/// §9.2 step 3: the old pid 1's children become the new pid 1's, which reaps them like its own,
+/// those that have already exited included.
 fn adopt_orphans() {
-    let current = scheduler::current_pid();
     let mut table = PROCESS_TABLE.lock();
     let orphans: Vec<Pid> =
         table.iter().filter(|(pid, p)| **pid != INIT_PID && p.parent == Some(INIT_PID)).map(|(pid, _)| *pid).collect();
-    let mut dead = Vec::new();
-    for pid in orphans {
-        let p = table.get_mut(&pid).unwrap();
-        p.adopted = true;
-        if matches!(p.state, ProcState::Zombie(_)) && pid != current {
-            dead.push(pid);
-        } else if let Some(init) = table.get_mut(&INIT_PID) {
-            init.children.push(pid);
-        }
-    }
-    for pid in dead {
-        if let Some(address_space) = table.remove(&pid).and_then(|p| p.address_space) {
-            let phys_offset = memory::phys_mem_offset();
-            with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
+    if let Some(init) = table.get_mut(&INIT_PID) {
+        for pid in orphans {
+            if !init.children.contains(&pid) {
+                init.children.push(pid);
+            }
         }
     }
 }

@@ -68,20 +68,65 @@ pub fn spawn_boot(
     spawn_into(address_space, None, elf_bytes, parent, argv, envp, console)
 }
 
-/// Starts a new parentless process with pid `pid` (which must be free) while other processes
-/// run: the kernel's restart of pid 1 (`process::init`). Unlike `spawn_with`, safe from any
-/// process's context.
-pub(crate) fn spawn_as(
-    pid: Pid,
-    elf_bytes: &[u8],
-    argv: &[&[u8]],
-    envp: &[&[u8]],
-    console: bool,
-) -> Result<Pid, SpawnError> {
+/// A process with no program yet, as pid `pid` (FreeBSD's process 1 before `start_init`): its
+/// first switch-in runs `init::start_in_context`, which reads the program from the root file
+/// system in this process's own context -- a live process, so the read may sleep on the disk --
+/// and loads it (`load_into_current`). Until then its address space has only the kernel's half.
+pub(crate) fn spawn_unloaded(pid: Pid, name: &[u8], console: bool) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     let address_space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
         .map_err(|()| SpawnError::OutOfMemory)?;
-    spawn_into(address_space, Some(pid), elf_bytes, None, argv, envp, console)
+    let Ok(kernel_stack) = KernelStack::new() else {
+        with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
+        return Err(SpawnError::OutOfMemory);
+    };
+    let zero = VirtAddr::zero();
+    spawn_finish(address_space, kernel_stack, Some(pid), zero, zero, zero, None, &[name], console)
+}
+
+/// Gives the calling process, started by `spawn_unloaded`, its program: builds the image in a
+/// new address space, switches to it and drops the empty one. Returns where to enter user mode:
+/// the entry point and the initial stack pointer.
+pub(crate) fn load_into_current(
+    elf_bytes: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<(VirtAddr, VirtAddr), SpawnError> {
+    let pid = scheduler::current_pid();
+    let phys_offset = memory::phys_mem_offset();
+    let space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
+        .map_err(|()| SpawnError::OutOfMemory)?;
+    let (brk, entry, initial_rsp) = match load_image(&space, elf_bytes, argv, envp) {
+        Ok(l) => l,
+        Err(e) => {
+            // SAFETY: never activated.
+            with_frame_allocator(|fa| unsafe { space.teardown(phys_offset, fa) });
+            return Err(e);
+        }
+    };
+    {
+        let mut vm = space.vm();
+        vm.brk = brk;
+        vm.brk_base = brk;
+    }
+    let arg0 = argv.first().copied().unwrap_or(b"(init)");
+    let old = {
+        let mut table = PROCESS_TABLE.lock();
+        let me = table.get_mut(&pid).expect("load_into_current: caller missing from the table");
+        me.entry_point = entry;
+        me.user_stack_top = initial_rsp;
+        me.comm = basename(arg0.strip_prefix(b"-").unwrap_or(arg0)).to_vec();
+        me.cmdline = build_cmdline(argv);
+        let old = me.address_space.replace(space);
+        // SAFETY: the new table carries the kernel's half like every address space.
+        unsafe { me.address_space.as_ref().unwrap().activate() };
+        old
+    };
+    if let Some(old) = old {
+        // SAFETY: no longer the current CR3, and nothing else uses an unloaded process's table.
+        with_frame_allocator(|fa| unsafe { old.teardown(phys_offset, fa) });
+    }
+    Ok((entry, initial_rsp))
 }
 
 fn spawn_into(
@@ -162,7 +207,7 @@ fn spawn_finish(
     argv: &[&[u8]],
     console: bool,
 ) -> Result<Pid, SpawnError> {
-    let pid = pid.unwrap_or_else(alloc_pid);
+    let pid = pid.inspect(|&p| reserve_pid(p)).unwrap_or_else(alloc_pid);
     // No parent to inherit a process group from (spawn doesn't inherit anything else from parent
     // either -- cwd/fs_base/brk all start fresh too) -- becomes its own group leader, same
     // convention as a real init/session leader.
@@ -185,8 +230,6 @@ fn spawn_finish(
         // pid 1's own thread group of one -- see Process::tgid's own doc comment.
         tgid: pid,
         parent,
-        // pid 1 has no parent to ever be orphaned from.
-        adopted: false,
         children: Vec::new(),
         state: ProcState::Ready,
         address_space: Some(address_space),
@@ -613,9 +656,6 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         // parent's. See Process::tgid's own doc comment.
         tgid: child_pid,
         parent: Some(caller_pid),
-        // A freshly forked child's real parent is alive right now, by definition -- see
-        // `Process::adopted`'s own doc comment.
-        adopted: false,
         children: Vec::new(),
         state: ProcState::Ready,
         address_space: Some(child_address_space),
@@ -887,9 +927,6 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         pid: child_pid,
         tgid,
         parent: parent_field,
-        // A freshly cloned thread's real parent is alive right now -- see `Process::adopted`'s
-        // own doc comment.
-        adopted: false,
         children: Vec::new(),
         state: ProcState::Ready,
         address_space: Some(child_address_space),
@@ -1999,12 +2036,6 @@ pub(crate) fn terminate_thread_group(target_pid: Pid, code: i32) {
 /// process every real orphan gets reparented to.
 pub(crate) const INIT_PID: Pid = 1;
 
-/// Real orphan reparenting: any still-living child of `pid` gets handed to `INIT_PID` rather than
-/// left permanently parentless -- see `Process::adopted`'s own doc comment for why this exists and
-/// why an adopted orphan's own later exit needs different handling than an ordinary child's.
-/// Real POSIX behavior (a real orphan's own `getppid()` genuinely reads back `1`), not just
-/// internal bookkeeping. No-op if `pid` is `INIT_PID` itself (nothing left to reparent *to* if
-/// init exits) or has no live children.
 /// Whether no live process but `pid` uses `space`: a thread group's threads share one table, and
 /// a vfork child borrows its parent's. The last live user cleans up its `VmState` at exit or
 /// exec (`cleanup_vm`); a zombie still holding a handle doesn't count.
@@ -2032,6 +2063,10 @@ fn cleanup_vm(space: &AddressSpace) {
     mm::cleanup_mmap_phys_regions_for_exit(space);
 }
 
+/// Hands `pid`'s children to `INIT_PID` as it exits (POSIX: their parent process ID becomes 1),
+/// and init reaps them like any child of its own (`waitpid(-1, ...)`, `init(8)`). One that has
+/// already exited is a zombie init hasn't heard of: it gets `SIGCHLD` for it, as on FreeBSD. No-op
+/// for `INIT_PID` itself.
 fn reparent_orphans(pid: Pid) {
     if pid == INIT_PID {
         return;
@@ -2046,14 +2081,26 @@ fn reparent_orphans(pid: Pid) {
     if children.is_empty() {
         return;
     }
+    let mut zombies = Vec::new();
     for &child_pid in &children {
         if let Some(child) = table.get_mut(&child_pid) {
             child.parent = Some(INIT_PID);
-            child.adopted = true;
+            if let ProcState::Zombie(status) = child.state {
+                zombies.push((child_pid, status));
+            }
         }
     }
     if let Some(init) = table.get_mut(&INIT_PID) {
         init.children.extend(children);
+    }
+    for (child_pid, status) in zombies {
+        let (code, value) = if status & 0x7f != 0 {
+            (CLD_KILLED, (status & 0x7f) as u64)
+        } else {
+            (CLD_EXITED, ((status >> 8) & 0xff) as u64)
+        };
+        notify_parent_sigchld(&mut table, child_pid, code, value);
+        wake_parent_if_waiting(&mut table, child_pid);
     }
 }
 
@@ -2223,19 +2270,11 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
     // notify_parent_sigchld calls above, not instead of them. Detaches from the parent's
     // `children` list immediately either way, so a parent with no other children gets a real
     // `ECHILD` on its very next `wait()` call instead of blocking forever.
-    //
-    // Also true for a real adopted orphan (`Process::adopted`, see its own doc comment) exiting --
-    // reuses this exact same immediate-detach-and-reap path, since nothing is ever really going to
-    // `wait4()` it either: pid 1 (`hush`) here only waits on pids its own userspace job control
-    // remembers explicitly forking, never a generic "reap anything adopted" loop a real init has.
-    let auto_reap = table.get(&pid).is_some_and(|me| me.adopted)
-        || table
-            .get(&pid)
-            .and_then(|me| me.parent)
-            .and_then(|parent_pid| table.get(&parent_pid))
-            .is_some_and(|parent| {
-                parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDWAIT != 0
-            });
+    let auto_reap = table
+        .get(&pid)
+        .and_then(|me| me.parent)
+        .and_then(|parent_pid| table.get(&parent_pid))
+        .is_some_and(|parent| parent.shared.lock().sigactions[SIGCHLD as usize].flags & SA_NOCLDWAIT != 0);
     if auto_reap {
         let parent_pid = table.get(&pid).unwrap().parent;
         if let Some(parent_pid) = parent_pid
@@ -2485,6 +2524,10 @@ pub(crate) fn set_current_dir_vnode(cwd: bool, vp: *mut vfs_if::Vnode) {
 #[unsafe(no_mangle)]
 extern "C" fn spawn_trampoline_inner() -> ! {
     let pid = scheduler::current_pid();
+    if let Some((entry, stack_top)) = super::init::start_in_context(pid) {
+        // SAFETY: `load_into_current` activated the program's address space just now.
+        unsafe { crate::process::usermode::jump_to_usermode(entry, stack_top) }
+    }
     let (entry, stack_top) = {
         let table = PROCESS_TABLE.lock();
         let p = table

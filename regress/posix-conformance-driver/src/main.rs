@@ -163,7 +163,15 @@ pub extern "C" fn _start() -> ! {
         }
         Ok(child_pid) => {
             let mut status: i32 = -1;
-            match wait4(child_pid, &mut status) {
+            // Any child: as pid 1 this driver inherits every orphan the corpus leaves, and reaps
+            // them as init would, until `sh` itself is done.
+            let waited = loop {
+                match wait4(u64::MAX, &mut status) {
+                    Ok(p) if p != child_pid => continue,
+                    other => break other,
+                }
+            };
+            match waited {
                 // Real wait(2) encoding: `status == 0` is the only shape meaning "exited
                 // normally, via exit(0)". Anything else -- a nonzero exit code, or the
                 // low-7-bits-nonzero signal-terminated shape (`terminate_process`'s own

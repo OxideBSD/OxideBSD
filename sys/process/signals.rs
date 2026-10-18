@@ -705,7 +705,8 @@ pub(crate) fn wake_if_paused(pid: Pid, proc: &mut Process, sig: u64) {
 /// deliverability right before each re-block, so without this hook nothing would ever notice
 /// early). Found live via the Open POSIX Test Suite pilot's `nanosleep/1-3.c`.
 pub(crate) fn wake_if_sleeping(pid: Pid, proc: &mut Process, sig: u64) {
-    if let ProcState::Blocked(BlockReason::Sleeping(_) | BlockReason::Polling(_)) = proc.state
+    if let ProcState::Blocked(BlockReason::Sleeping(_) | BlockReason::Polling(_) | BlockReason::WaitingForFlock(_)) =
+        proc.state
         && proc.blocked_signals & (1 << (sig - 1)) == 0
     {
         proc.state = ProcState::Ready;

@@ -127,8 +127,13 @@ fn run_and_wait(path: &[u8], argv: &[&[u8]]) -> bool {
         }
         Ok(child) => {
             let mut status: i32 = -1;
-            let waited =
-                unsafe { syscall4(SYS_WAIT4, child, &mut status as *mut i32 as u64, 0, 0) };
+            // Any child: as pid 1 this reaps the orphans what it runs leaves, as init(8) does.
+            let waited = loop {
+                match unsafe { syscall4(SYS_WAIT4, u64::MAX, &mut status as *mut i32 as u64, 0, 0) } {
+                    Ok(p) if p != child => continue,
+                    other => break other,
+                }
+            };
             let ok = waited == Ok(child) && status == 0;
             if !ok {
                 write_bytes(b"syslog-syscall-smoke: wait4 -> ");

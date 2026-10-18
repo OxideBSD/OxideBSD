@@ -119,8 +119,15 @@ fn fork() -> Result<u64, u64> {
     unsafe { syscall(SYS_FORK, 0, 0, 0) }
 }
 
+/// Waits for `pid`, reaping any other child on the way: as pid 1 this inherits the orphans what
+/// it runs leaves, and reaps them as init(8) does.
 fn wait4(pid: u64, status: &mut i32) -> Result<u64, u64> {
-    unsafe { syscall(SYS_WAIT4, pid, status as *mut i32 as u64, 0) }
+    loop {
+        match unsafe { syscall(SYS_WAIT4, u64::MAX, status as *mut i32 as u64, 0) } {
+            Ok(p) if p != pid => continue,
+            other => return other,
+        }
+    }
 }
 
 /// Forks, `execve`s `path`/`argv` in the child (exiting `127` on failure, matching the real shell

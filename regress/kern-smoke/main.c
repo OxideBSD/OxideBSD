@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -45,12 +46,16 @@ static int child_exit_ok(int (*fn)(void))
 }
 
 #include "rlimit.c"
+#include "flock.c"
+#include "orphan.c"
 
 static const struct {
 	const char *name;
 	void (*run)(void);
 } sections[] = {
 	{ "rlimit", rlimit_main },
+	{ "flock", flock_main },
+	{ "orphan", orphan_main },
 };
 
 int main(int argc, char **argv)

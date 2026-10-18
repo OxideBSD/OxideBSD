@@ -201,6 +201,9 @@ pub enum BlockReason {
     /// The read-side counterpart to `WaitingForSysvMsgSend` -- blocked in `do_msgrcv` with no
     /// message matching its own real `msgtyp` selection available yet.
     WaitingForSysvMsgRecv(u64),
+    /// Blocked in `flock(2)` (`kern::vfs_advlock::flock`) for a lock on the vnode at this address,
+    /// woken when a lock on it is released, or by a signal (`signals::wake_if_sleeping`).
+    WaitingForFlock(u64),
     /// Blocked in `crate::fs::sysv_sem`'s `do_semop`/`do_semtimedop` on a real SysV semaphore set
     /// (`semid`, real Linux's own SysV IPC id) -- a whole `sembuf` array is applied atomically, so
     /// exactly one op in it is ever the one that couldn't proceed; `semnum`/`waiting_for_zero`
@@ -789,24 +792,6 @@ pub struct Process {
     /// `sys_set_tid_address`'s existing return value, cached client-side in musl's own TCB.
     pub tgid: Pid,
     pub parent: Option<Pid>,
-    /// `true` only for a real orphan: its original parent exited first and it was reparented to
-    /// pid 1 by `process::lifecycle::reparent_orphans` (real POSIX behavior -- an orphan's `ppid`
-    /// really does become 1). **Not** true for a process pid 1 actually forked itself (`hush`'s
-    /// own real job-control children, which it *does* genuinely `wait4()` for) -- distinguishing
-    /// the two matters because pid 1 here has no generic "reap any adopted orphan" loop the way a
-    /// real init does (`hush` only ever waits on pids its own userspace job-control code
-    /// remembers explicitly forking). Without this flag, an adopted orphan would sit as a
-    /// `ProcState::Zombie` forever once *it* exits too -- nobody left alive to `wait4()` it -- and
-    /// since a zombie's own `kernel_stack`/table entry aren't freed until reaped (unlike its
-    /// address space, freed immediately at exit either way -- see `AddressSpace`'s own doc
-    /// comment above), that's a real, if narrow, heap leak (bounded by however many real orphans a
-    /// given boot ever creates -- not the dominant contributor to the much larger frame-exhaustion
-    /// cascade the POSIX conformance pilot's full corpus surfaced around the same time, which
-    /// turned out to be `do_munmap`'s own discarded-frame bug instead, see that function's own doc
-    /// comment). `terminate_process` treats `adopted` exactly like `SA_NOCLDWAIT` (reuses the
-    /// identical immediate-detach-and-reap code path): an orphan is never left as a wait4-reapable
-    /// zombie at all, since nothing is ever really going to reap it.
-    pub adopted: bool,
     pub children: Vec<Pid>,
     pub state: ProcState,
     /// `None` only for a `ProcState::Zombie` whose frames have already been reclaimed (either at
@@ -1203,6 +1188,11 @@ static PROCESS_TABLE: Mutex<BTreeMap<Pid, Box<Process>>> = Mutex::new(BTreeMap::
 
 fn alloc_pid() -> Pid {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Keeps `alloc_pid` past a pid given out explicitly (pid 1, made by `init`).
+fn reserve_pid(pid: Pid) {
+    NEXT_PID.fetch_max(pid + 1, Ordering::Relaxed);
 }
 
 /// `Box<Process>` (not `Process` by value) is load-bearing, not stylistic: it lets callers pull a
