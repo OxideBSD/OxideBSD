@@ -374,6 +374,11 @@ fn wait_for_ready() -> Pid {
         if let Some(pid) = popped {
             return pid;
         }
+        // Idle: no kernel lock is held, so the network's interrupt work can run here too
+        // (`net::softnet`); if it had any, it may have woken someone.
+        if crate::net::softnet() {
+            continue;
+        }
         // Nothing runnable anywhere. The only thing that can still change that is a hardware
         // interrupt (concretely: the keyboard IRQ waking a process blocked on stdin) -- enable
         // interrupts and halt right up to the point one arrives, rather than either burning a full

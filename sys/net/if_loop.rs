@@ -30,6 +30,11 @@ pub fn output(packet: Vec<u8>) -> Option<()> {
     Some(())
 }
 
+/// Whether a packet is waiting.
+pub fn pending() -> bool {
+    !QUEUE.lock().is_empty()
+}
+
 /// Takes the next queued packet.
 pub fn dequeue() -> Option<Vec<u8>> {
     QUEUE.lock().pop_front()

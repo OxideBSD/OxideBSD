@@ -21,6 +21,7 @@ const EADDRINUSE: i64 = 98;
 const EISCONN: i64 = 106;
 const EHOSTUNREACH: i64 = 113;
 const EADDRNOTAVAIL: i64 = 99;
+const EACCES: i64 = 13;
 
 const HEADER_LEN: usize = 8;
 const EPHEMERAL_PORT_START: u16 = 49152;
@@ -208,6 +209,12 @@ impl Protocol for Udp {
         }
         let local_port = STATE.lock().ensure_bound(so).ok_or(EADDRINUSE)?;
         let bound = STATE.lock().sockets.get(&so).ok_or(EBADF as i64)?.local_addr;
+        // A broadcast needs SO_BROADCAST (BSD's EACCES).
+        if crate::net::ifnet::is_broadcast(dest_ip)
+            && !crate::kern::uipc_socket::options(so).is_some_and(|o| o.broadcast)
+        {
+            return Err(EACCES);
+        }
         let src = crate::net::ifnet::source_for(bound, dest_ip).ok_or(EHOSTUNREACH)?;
 
         let mut packet = Vec::with_capacity(HEADER_LEN + data.len());
@@ -268,9 +275,5 @@ impl Protocol for Udp {
     fn readiness(&self, so: u64) -> Readiness {
         let readable = STATE.lock().sockets.get(&so).is_some_and(|s| !s.recv_queue.is_empty());
         Readiness { readable, writable: true, ..Default::default() }
-    }
-
-    fn pulled(&self) -> bool {
-        true
     }
 }

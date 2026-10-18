@@ -175,6 +175,25 @@ pub(crate) fn string(s: &[u8]) -> Vec<u8> {
     v
 }
 
+/// `a.b.c.d`, each part a decimal 0..=255.
+fn parse_dotted_quad(text: &[u8]) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut parts = text.split(|&b| b == b'.');
+    for slot in &mut out {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 3 || !part.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let v = part.iter().fold(0u32, |v, &d| v * 10 + (d - b'0') as u32);
+        *slot = u8::try_from(v).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+const PF_INET: i32 = 2;
+const IPPROTO_IP: i32 = 0;
+const ENETUNREACH: i64 = 101;
+
 /// A string being set: the bytes up to the first NUL.
 pub(crate) fn new_string(new: &[u8]) -> &[u8] {
     let end = new.iter().position(|&b| b == 0).unwrap_or(new.len());
@@ -303,11 +322,46 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     let kern = add_node(t, &[], Some(CTL_KERN), "kern", "High kernel, proc, limits &c");
     let vm = add_node(t, &[], Some(CTL_VM), "vm", "Virtual memory");
     let vfs = add_node(t, &[], Some(CTL_VFS), "vfs", "File system");
-    add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
+    let net = add_node(t, &[], Some(CTL_NET), "net", "Network, (see socket.h)");
     let debug = add_node(t, &[], Some(CTL_DEBUG), "debug", "Debugging");
     let hw = add_node(t, &[], Some(CTL_HW), "hw", "hardware");
     let machdep = add_node(t, &[], Some(CTL_MACHDEP), "machdep", "machine dependent");
     add_node(t, &[], Some(CTL_USER), "user", "user-level");
+
+    // The default route (`route(8)`, `dhclient(8)`): a dotted quad, or empty for none. Only a
+    // gateway on rl0's subnet: anything else is ENETUNREACH, as route(8) reports it on the BSDs.
+    let inet = add_node(t, &net, Some(PF_INET), "inet", "Internet Family");
+    let ip = add_node(t, &inet, Some(IPPROTO_IP), "ip", "IP");
+    add_leaf(
+        t,
+        &ip,
+        Leaf {
+            number: None,
+            name: "default_gateway",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RW,
+            descr: "The default route's gateway",
+            get: || match crate::net::ifnet::ether().gateway {
+                Some(g) => string(alloc::format!("{}.{}.{}.{}", g[0], g[1], g[2], g[3]).as_bytes()),
+                None => string(b""),
+            },
+            set: Some(|new| {
+                let text = new_string(new);
+                if text.is_empty() {
+                    crate::net::ifnet::set_ether(|e| e.gateway = None);
+                    return Ok(());
+                }
+                let g = parse_dotted_quad(text).ok_or(EINVAL as i64)?;
+                let e = crate::net::ifnet::ether();
+                if e.addr == crate::net::ifnet::ANY || !crate::net::ifnet::in_prefix(g, e.addr, e.prefix_len) {
+                    return Err(ENETUNREACH);
+                }
+                crate::net::ifnet::set_ether(|e| e.gateway = Some(g));
+                Ok(())
+            }),
+        },
+    );
 
     // Kernel page-table isolation (Meltdown), one state under three names (`cpu::pti`): FreeBSD's
     // `vm.pmap.pti`, plus `machdep.kpti` and `hw.meltdown`. Read-only: the state is fixed at boot

@@ -390,28 +390,32 @@ fn send_fin_and_transition(real_fd: u64, next_state: ConnState) {
 }
 
 /// Checks every connection's retransmission deadline, resending or giving up as needed. Called
-/// from `net::poll()` -- the same self-driving mechanism every socket syscall already funnels
-/// through, so this runs whenever anything touches the network, not on a dedicated timer.
+/// from `net::poll()`, which `net::softnet` runs on the timer tick a deadline passes.
 pub fn check_retransmits() {
-    let now = crate::cpu::interrupts::ticks();
-    let due: Vec<u64> = {
-        let state = STATE.lock();
-        state
-            .sockets
-            .iter()
-            .filter_map(|(&fd, sock)| match sock {
-                TcpSocket::Connection(conn)
-                    if conn.retransmit_deadline.is_some_and(|d| now >= d) =>
-                {
-                    Some(fd)
-                }
-                _ => None,
-            })
-            .collect()
-    };
-    for fd in due {
+    for fd in due_retransmits() {
         retransmit_or_give_up(fd);
     }
+}
+
+/// Whether a connection has a retransmission due (`net::softnet`).
+pub fn retransmit_due() -> bool {
+    let now = crate::cpu::interrupts::ticks();
+    STATE.lock().sockets.values().any(|sock| {
+        matches!(sock, TcpSocket::Connection(conn) if conn.retransmit_deadline.is_some_and(|d| now >= d))
+    })
+}
+
+fn due_retransmits() -> Vec<u64> {
+    let now = crate::cpu::interrupts::ticks();
+    STATE
+        .lock()
+        .sockets
+        .iter()
+        .filter_map(|(&fd, sock)| match sock {
+            TcpSocket::Connection(conn) if conn.retransmit_deadline.is_some_and(|d| now >= d) => Some(fd),
+            _ => None,
+        })
+        .collect()
 }
 
 fn retransmit_or_give_up(real_fd: u64) {
@@ -1031,9 +1035,5 @@ impl Protocol for Tcp {
 
     fn readiness(&self, so: u64) -> crate::fs::Readiness {
         readiness_of(so)
-    }
-
-    fn pulled(&self) -> bool {
-        true
     }
 }

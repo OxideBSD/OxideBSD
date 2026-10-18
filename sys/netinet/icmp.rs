@@ -159,10 +159,6 @@ impl Protocol for RawIcmp {
         let readable = RAW_SOCKETS.lock().get(&so).is_some_and(|s| !s.recv_queue.is_empty());
         Readiness { readable, writable: true, ..Default::default() }
     }
-
-    fn pulled(&self) -> bool {
-        true
-    }
 }
 
 fn build_packet(icmp_type: u8, identifier: u16, sequence: u16, data: &[u8]) -> Vec<u8> {

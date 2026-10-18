@@ -63,6 +63,9 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // continues regardless of whether a supported device was found. No protocol stack, no
     // syscalls, no `sys/modules/socket` yet -- just raw Ethernet frame TX/RX, IRQ-driven.
     crate::drivers::rtl8139::init(&mut frame_allocator, physical_memory_offset);
+    // A real system's rl0 has no address until `rc.d/netif` gives it one (`ifconfig_rl0` in
+    // rc.conf, or DHCP); only a test kernel starts with QEMU's.
+    crate::net::ifnet::unconfigure();
 
     // A real xHCI USB host controller + HID boot-protocol keyboard, if either is present -- this
     // kernel's only input path on hardware with no PS/2 controller (a Surface Pro; see

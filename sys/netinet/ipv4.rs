@@ -12,18 +12,19 @@ use crate::net::ifnet::{self, Interface};
 
 pub type Ipv4Addr = [u8; 4];
 
-/// `rl0`'s address, SLIRP's default guest IP under QEMU's `-nic user` backend (`net::ifnet`).
-pub const GUEST_IP: Ipv4Addr = ifnet::ETHER_ADDR;
+/// SLIRP's default guest IP under QEMU's `-nic user` backend: `rl0`'s address in a test kernel
+/// (`net::ifnet`). A real boot's comes from `rc.d/netif`.
+pub const GUEST_IP: Ipv4Addr = ifnet::QEMU_ADDR;
 /// SLIRP's default gateway -- also answers ICMP echo requests directed at itself, which is what
 /// `tests/icmp_smoke.rs` uses to verify this stack against real (if virtualized) network
 /// behavior without needing host-side raw-socket privileges.
-pub const GATEWAY_IP: Ipv4Addr = ifnet::DEFAULT_GATEWAY;
+pub const GATEWAY_IP: Ipv4Addr = ifnet::QEMU_GATEWAY;
 /// SLIRP's built-in DNS relay (forwards to whatever resolver the host itself uses) -- what
 /// `sys/modules/oxfs`'s seeded `/etc/resolv.conf` points musl's real DNS stub resolver
 /// (`external/mit/musl/src/network/`) at. Real UDP, real IPv4, real ICMP-adjacent traffic -- no
 /// DNS protocol logic lives in this kernel at all, matching how `open`/`execve`/`stat` are ported
 /// (make musl's own libc code work over this ABI, don't reimplement it kernel-side).
-pub const DNS_SERVER_IP: Ipv4Addr = [10, 0, 2, 3];
+pub const DNS_SERVER_IP: Ipv4Addr = ifnet::QEMU_DNS;
 
 pub const PROTO_ICMP: u8 = 1;
 
@@ -54,8 +55,11 @@ pub fn checksum(data: &[u8]) -> u16 {
 }
 
 /// Parses one IPv4 packet that arrived on `from` and dispatches it by protocol. It must be for
-/// this host: over loopback any of its addresses; over Ethernet `rl0`'s, and never 127.0.0.0/8
-/// (a "martian", which BSD drops too).
+/// this host: over loopback any of its addresses; over Ethernet `rl0`'s or a broadcast it
+/// receives, and never from 127.0.0.0/8 (a "martian", which BSD drops too). While `rl0` has no
+/// address it also takes UDP to the DHCP client port whatever its destination: a DHCP server may
+/// unicast its offer to the address it's offering (RFC 2131 §4.1), which BPF hands FreeBSD's
+/// client the same way.
 pub fn handle_packet(payload: &[u8], from: Interface) {
     if payload.len() < HEADER_LEN || payload[0] != VERSION_IHL {
         return;
@@ -67,12 +71,22 @@ pub fn handle_packet(payload: &[u8], from: Interface) {
 
     let for_us = match from {
         Interface::Loopback => ifnet::is_local(dst_ip),
-        Interface::Ethernet => dst_ip == GUEST_IP && !ifnet::is_loopback_net(src_ip),
+        Interface::Ethernet => {
+            !ifnet::is_loopback_net(src_ip)
+                && (ifnet::is_local(dst_ip)
+                    || ifnet::is_broadcast(dst_ip)
+                    || (!ifnet::ether_configured() && protocol == udp::PROTO_UDP && is_to_dhcp_client(payload)))
+        }
     };
     if !for_us || total_length < HEADER_LEN || total_length > payload.len() {
         return;
     }
     let ip_payload = &payload[HEADER_LEN..total_length];
+    // Only UDP takes broadcasts: no TCP to one, and no ICMP echo to one (FreeBSD's
+    // `net.inet.icmp.bmcastecho=0`).
+    if from == Interface::Ethernet && ifnet::is_broadcast(dst_ip) && protocol != udp::PROTO_UDP {
+        return;
+    }
 
     match protocol {
         // Unlike udp/tcp::handle_packet, icmp::handle_packet gets the *whole* packet (header
@@ -85,6 +99,11 @@ pub fn handle_packet(payload: &[u8], from: Interface) {
         tcp::PROTO_TCP => tcp::handle_packet(ip_payload, src_ip, dst_ip),
         _ => {}
     }
+}
+
+/// UDP destination port 68 (`bootpc`), on a header-only-20 packet.
+fn is_to_dhcp_client(packet: &[u8]) -> bool {
+    packet.len() >= HEADER_LEN + 4 && u16::from_be_bytes([packet[HEADER_LEN + 2], packet[HEADER_LEN + 3]]) == 68
 }
 
 /// Builds and sends one IPv4 packet from `src` (the sender's bound address, or the route's
@@ -116,7 +135,12 @@ pub fn send_packet(src: Ipv4Addr, dest_ip: Ipv4Addr, protocol: u8, payload: &[u8
     match route.interface {
         Interface::Loopback => crate::net::if_loop::output(packet),
         Interface::Ethernet => {
-            let dest_mac = resolve_with_retry(route.next_hop)?;
+            // A broadcast goes to every station; nothing is resolved for it.
+            let dest_mac = if ifnet::is_broadcast(route.next_hop) {
+                ethernet::BROADCAST_MAC
+            } else {
+                resolve_with_retry(route.next_hop)?
+            };
             ethernet::send_frame(dest_mac, ethernet::ETHERTYPE_IPV4, &packet)
         }
     }
@@ -127,6 +151,11 @@ fn resolve_with_retry(ip: Ipv4Addr) -> Option<[u8; 6]> {
         return Some(mac);
     }
     arp::send_request(ip);
+    // From an interrupt (`net::softnet`) nothing waits: the packet is dropped, as a BSD stack
+    // drops what's queued on an unresolved entry; TCP retransmits it, by then resolved.
+    if crate::net::in_softnet() {
+        return None;
+    }
     // Bounded by `crate::tsc`, not `crate::cpu::interrupts::ticks()`/an arbitrary spin count -- see
     // rtl8139_smoke's own precedent for why a few seconds of budget is generous headroom, not a
     // tight timing assumption.

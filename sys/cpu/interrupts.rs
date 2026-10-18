@@ -76,13 +76,18 @@ pub fn register_irq_handler(irq: u8, handler: fn()) {
 /// IRQ lines 2-15: dispatched through `IRQ_HANDLERS`, doing nothing but the EOI if the line has
 /// no registered handler (a spurious or not-yet-claimed IRQ) -- and always sending the EOI, since
 /// skipping it leaves the line masked at the controller forever, not just for this one interrupt.
-fn irq(line: u8) {
+/// One that came in from ring 3 then runs the network's interrupt work (`net::softnet`): no kernel
+/// lock can be held there.
+fn irq(line: u8, from_user: bool) {
     let handlers = *IRQ_HANDLERS[line as usize].lock();
     for handler in handlers.into_iter().flatten() {
         handler();
     }
     unsafe {
         pic::notify_end_of_interrupt(PIC_1_OFFSET + line);
+    }
+    if from_user {
+        crate::net::softnet();
     }
 }
 
@@ -159,7 +164,7 @@ pub(crate) fn dispatch(frame: &mut TrapFrame) {
         0..32 => exception(frame),
         TIMER => timer_interrupt_handler(frame),
         KEYBOARD => keyboard_interrupt_handler(frame),
-        34..=IRQ_LAST => irq((frame.vector - PIC_1_OFFSET as u64) as u8),
+        34..=IRQ_LAST => irq((frame.vector - PIC_1_OFFSET as u64) as u8, frame.from_user()),
         SPURIOUS_VECTOR => {
             serial_println!("[trap] spurious interrupt at ip {:#x}", frame.rip);
         }
@@ -417,6 +422,12 @@ pub(crate) const PREEMPT_QUANTUM_TICKS: u64 = 4;
 /// `ticks()`-gated wakeup in this file (sleepers, POSIX timers, `SIGALRM`, ...) for good.
 fn timer_interrupt_handler(frame: &mut TrapFrame) {
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // The network's interrupt work, when it came in from ring 3 (`net::softnet`): packets that
+    // arrived while the kernel ran with interrupts off, and TCP's retransmission deadlines.
+    if frame.from_user() {
+        crate::net::softnet();
+    }
 
     // Wake any process blocked in `process::do_nanosleep` (`BlockReason::Sleeping`) whose deadline
     // has now passed -- the same "IRQ handler reaches directly into `process::table()`" shape

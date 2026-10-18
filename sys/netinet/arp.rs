@@ -6,7 +6,8 @@
 use spin::Mutex;
 
 use crate::net::ethernet::{self, BROADCAST_MAC, ETHERTYPE_ARP};
-use super::ipv4::{GUEST_IP, Ipv4Addr};
+use super::ipv4::Ipv4Addr;
+use crate::net::ifnet;
 
 const HTYPE_ETHERNET: u16 = 1;
 const PTYPE_IPV4: u16 = 0x0800;
@@ -38,6 +39,11 @@ fn learn(ip: Ipv4Addr, mac: [u8; 6]) {
     table[0] = Some((ip, mac));
 }
 
+/// Forgets every mapping (`rl0`'s address changed: another network).
+pub fn forget_all() {
+    *TABLE.lock() = [None; TABLE_SIZE];
+}
+
 /// Looks up a previously learned mapping. Never blocks or sends a request itself -- callers that
 /// need a fresh resolution should call `send_request` and retry (see `ipv4::send_packet`'s own
 /// resolve-and-retry loop).
@@ -66,7 +72,8 @@ pub fn handle_packet(payload: &[u8]) {
 
     learn(sender_ip, sender_mac);
 
-    if oper == OPER_REQUEST && target_ip == GUEST_IP {
+    let ours = ifnet::ether().addr;
+    if oper == OPER_REQUEST && ours != ifnet::ANY && target_ip == ours {
         send_reply(sender_mac, sender_ip);
     }
 }
@@ -84,7 +91,7 @@ fn build_packet(
     packet[5] = 4; // PLEN
     packet[6..8].copy_from_slice(&oper.to_be_bytes());
     packet[8..14].copy_from_slice(&our_mac);
-    packet[14..18].copy_from_slice(&GUEST_IP);
+    packet[14..18].copy_from_slice(&ifnet::ether().addr);
     packet[18..24].copy_from_slice(&target_mac);
     packet[24..28].copy_from_slice(&target_ip);
     packet

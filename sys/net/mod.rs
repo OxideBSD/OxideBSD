@@ -10,17 +10,13 @@ use crate::syscall::{EINTR, EINVAL};
 
 pub mod ethernet;
 pub mod if_loop;
+pub mod if_ioctl;
 pub mod ifnet;
 pub mod nic;
 
-/// Drains every frame currently queued in the NIC's RX ring and dispatches each through the
-/// protocol stack. Never blocks.
-///
-/// Not wired into the normal boot path yet -- nothing outside a dedicated test needs live
-/// traffic processing until `sys/modules/socket`'s syscalls exist (a later phase) give userland a
-/// reason to receive something. Callers today (`tests/icmp_smoke.rs`, `ipv4::send_packet`'s own
-/// ARP-resolution wait) call this directly from their own loop, the same pattern
-/// `tests/rtl8139_smoke.rs` established for raw frames.
+/// Drives the network: TCP's retransmissions, then every packet waiting on `lo0`'s queue and in
+/// the NIC's receive ring, through the protocol stack. Never blocks. `softnet` runs it from
+/// interrupts; a socket call runs it too, so what it reads is current.
 pub fn poll() {
     tcp::check_retransmits();
     // Looped packets first. Taking one can queue more (a TCP reply), so a pass takes a bounded
@@ -42,6 +38,34 @@ pub fn poll() {
             None => return,
         }
     }
+}
+
+/// Set while `softnet` runs: a packet it sends (a reply, a retransmission) doesn't wait for ARP
+/// (`ipv4::send_packet`), since interrupts are off.
+static IN_SOFTNET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether `softnet` is running (`ipv4::send_packet` doesn't wait for ARP then).
+pub(crate) fn in_softnet() -> bool {
+    IN_SOFTNET.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The network's interrupt work (BSD's software interrupt `swi_net`): when the NIC has
+/// interrupted, a packet is looped back, or TCP has a retransmission due, runs `poll` and wakes
+/// whoever waits on a socket. Called where nothing in the kernel holds a lock: an interrupt that
+/// came in from ring 3 (the NIC's own, and every timer tick's), and the idle loop. Returns whether
+/// it had work.
+pub fn softnet() -> bool {
+    use core::sync::atomic::Ordering;
+    let due = crate::drivers::rtl8139::irq_fired() | if_loop::pending() | tcp::retransmit_due();
+    if !due || IN_SOFTNET.swap(true, Ordering::Acquire) {
+        return false;
+    }
+    poll();
+    IN_SOFTNET.store(false, Ordering::Release);
+    if let Some(mut table) = crate::process::table().try_lock() {
+        crate::process::wake_pollers(&mut table);
+    }
+    true
 }
 
 const POLLIN: i16 = 0x0001;
@@ -68,11 +92,12 @@ unsafe impl Pod for PollFd {}
 /// How a not-yet-ready fd can become ready, which decides how `poll`/`select` wait for it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
-    /// Changes only when another process runs (pipes, socketpairs) or a key is pressed (the
-    /// console): the waiter can genuinely block (`BlockReason::Polling`) and be woken.
+    /// Changes when another process runs (pipes, socketpairs), a key is pressed (the console) or
+    /// a packet comes in (sockets, `softnet`): the waiter blocks (`BlockReason::Polling`) and is
+    /// woken.
     Wakeable,
-    /// A network socket. Incoming packets are only processed when someone calls `poll()` (the NIC
-    /// is pull-based), so the waiter wakes periodically to do it (`wait_for_change`).
+    /// Changes with nothing to wake a waiter (`/dev/klog`, as the kernel prints): the waiter
+    /// wakes periodically to look again (`wait_for_change`).
     Pulled,
 }
 
@@ -116,8 +141,8 @@ fn poll_revents(r: crate::fs::Readiness, events: i16) -> i16 {
     revents
 }
 
-/// How often a waiter on a network socket wakes to drive the interface itself (`poll`, and
-/// TCP's retransmission timer in it), in timer ticks: 50 ms. A received frame wakes it sooner.
+/// How often a waiter on a pulled file (`POLL_PULLED`) wakes to look at it again, in timer
+/// ticks: 50 ms.
 const PULL_INTERVAL_TICKS: u64 = 5;
 
 /// Shared waiting step of `poll`/`select` and the socket layer once nothing is ready:
@@ -125,11 +150,11 @@ const PULL_INTERVAL_TICKS: u64 = 5;
 /// returns so the caller re-checks. `deadline_tick` is `u64::MAX` for no timeout.
 ///
 /// The wait blocks as `BlockReason::Polling`, woken by pipe and socket activity, a keystroke, a
-/// received frame (`rtl8139`'s interrupt), a signal, or the deadline. Blocking is what lets
-/// interrupts in at all: the syscall itself runs with them masked, so a spinning waiter would see
-/// no keystroke, no frame and no timer (`alarm(2)` included). A wait involving a network socket
-/// (`any_pulled`) also wakes every `PULL_INTERVAL_TICKS`, since the interface is serviced only
-/// by its waiters.
+/// packet the network's interrupt work processed (`softnet`), a signal, or the deadline. Blocking
+/// is what lets interrupts in at all: the syscall itself runs with them masked, so a spinning
+/// waiter would see no keystroke, no packet and no timer (`alarm(2)` included). A wait involving
+/// a file nothing wakes a waiter for (`any_pulled`: `/dev/klog`) also wakes every
+/// `PULL_INTERVAL_TICKS` to look again.
 pub(crate) fn wait_for_change(any_pulled: bool, deadline_tick: u64) -> Result<(), i64> {
     let pid = crate::process::scheduler::current_pid();
     {

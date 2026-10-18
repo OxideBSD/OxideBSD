@@ -1260,8 +1260,4 @@ impl Protocol for Local {
         }
         r
     }
-
-    fn pulled(&self) -> bool {
-        false
-    }
 }

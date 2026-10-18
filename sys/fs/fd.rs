@@ -124,8 +124,7 @@ impl FileOps {
 }
 
 /// `FileOps::poll`'s answer: readiness bits, and whether the file can be waited on by blocking
-/// (`poll` sleeps until woken) or must be looked at again (`POLL_PULLED`: network sockets, whose
-/// packets arrive only when someone polls, and `/dev/klog`).
+/// (`poll` sleeps until woken) or must be looked at again (`POLL_PULLED`: `/dev/klog`).
 pub(crate) const POLL_READABLE: i64 = 1;
 pub(crate) const POLL_WRITABLE: i64 = 2;
 pub(crate) const POLL_HANGUP: i64 = 4;

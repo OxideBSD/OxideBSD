@@ -239,6 +239,23 @@ fn test_routes() {
     assert_eq!(r(GUEST_IP), Route { interface: Interface::Loopback, next_hop: GUEST_IP, src: GUEST_IP });
     assert!(ifnet::route(ifnet::ANY).is_none());
     assert!(ifnet::is_local([127, 9, 9, 9]) && ifnet::is_local(GUEST_IP) && !ifnet::is_local(GATEWAY_IP));
+    // Broadcasts leave by rl0 unresolved: the limited one and the subnet's.
+    assert_eq!(r(ifnet::BROADCAST), Route { interface: Interface::Ethernet, next_hop: ifnet::BROADCAST, src: GUEST_IP });
+    assert!(ifnet::is_broadcast([10, 0, 2, 255]) && !ifnet::is_broadcast([10, 0, 3, 255]));
+
+    // Unconfigured (a real boot before rc.d/netif): only the limited broadcast, from 0.0.0.0.
+    let saved = ifnet::ether();
+    ifnet::unconfigure();
+    assert_eq!(r(ifnet::BROADCAST).src, ifnet::ANY);
+    assert!(ifnet::route([1, 1, 1, 1]).is_none() && ifnet::route(ipv4::DNS_SERVER_IP).is_none());
+    assert!(!ifnet::is_local(GUEST_IP));
+    assert_eq!(r([127, 0, 0, 1]).interface, Interface::Loopback);
+    // Down: nothing leaves by rl0.
+    ifnet::set_ether(|e| *e = saved);
+    ifnet::set_ether(|e| e.up = false);
+    assert!(ifnet::route(ifnet::BROADCAST).is_none() && ifnet::route(GATEWAY_IP).is_none());
+    ifnet::set_ether(|e| *e = saved);
+    assert_eq!(ifnet::ether(), saved);
 }
 
 #[test_case]

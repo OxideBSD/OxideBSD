@@ -204,9 +204,6 @@ pub(crate) trait Protocol: Sync {
         0
     }
     fn readiness(&self, so: u64) -> Readiness;
-    /// Whether the socket's state changes only when a waiter drives the network interface
-    /// (`crate::net::poll`), rather than when another process runs (`UNIX.md` §3.4).
-    fn pulled(&self) -> bool;
 }
 
 /// The `SOL_SOCKET` options kept by the layer. Those the protocols don't act on yet
@@ -221,7 +218,7 @@ pub(crate) struct Options {
     sndtimeo_ms: u64,
     reuseaddr: bool,
     keepalive: bool,
-    broadcast: bool,
+    pub(crate) broadcast: bool,
     linger: Option<i32>,
     nosigpipe: bool,
 }
@@ -365,13 +362,19 @@ static SOCKET_OPS: fd::FileOps = fd::FileOps {
     write: Some(so_write),
     close: Some(so_close),
     poll: Some(so_poll),
+    ioctl: Some(so_ioctl),
     ..fd::FileOps::NONE
 };
 
-/// `FileOps::poll`: the protocol's readiness; a network socket's must be looked at again
-/// (`POLL_PULLED`), since its packets arrive only when someone polls.
+/// `FileOps::ioctl`: the interface requests (`net::if_ioctl`); anything else isn't a socket's.
+extern "C" fn so_ioctl(_so: u64, request: u64, argp: u64) -> i64 {
+    crate::net::if_ioctl::ifioctl(request, argp).unwrap_or(-(crate::syscall::ENOTTY as i64))
+}
+
+/// `FileOps::poll`: the protocol's readiness. A packet that changes it wakes the waiter
+/// (`net::softnet`).
 extern "C" fn so_poll(real_fd: u64, _events: u64) -> i64 {
-    readiness(real_fd).map_or(fd::POLL_READABLE | fd::POLL_WRITABLE, |(r, pulled)| fd::poll_bits(r, pulled))
+    readiness(real_fd).map_or(fd::POLL_READABLE | fd::POLL_WRITABLE, |r| fd::poll_bits(r, false))
 }
 
 /// Gives the calling process a descriptor for the socket `so`, served by `proto`, with
@@ -395,7 +398,7 @@ fn deadline_for(ms: u64) -> Option<u64> {
 
 /// Waits for the socket's state to change. `EAGAIN` once `deadline` passes; for a signal,
 /// `EINTR` if a timeout is set, else `ERESTART` (`UNIX.md` §3.3.3: `SA_RESTART` restarts it).
-fn wait(h: &Handle, deadline: Option<u64>) -> Result<(), i64> {
+fn wait(deadline: Option<u64>) -> Result<(), i64> {
     let deadline_tick = match deadline {
         Some(d) => {
             let now = crate::cpu::tsc::now();
@@ -406,7 +409,7 @@ fn wait(h: &Handle, deadline: Option<u64>) -> Result<(), i64> {
         }
         None => u64::MAX,
     };
-    match crate::net::wait_for_change(h.proto.pulled(), deadline_tick) {
+    match crate::net::wait_for_change(false, deadline_tick) {
         Ok(()) => Ok(()),
         Err(_) if deadline.is_some() => Err(EINTR as i64),
         Err(_) => Err(ERESTART as i64),
@@ -454,7 +457,7 @@ fn send(h: &Handle, data: &[u8], to: Option<&[u8]>, flags: i64, control: &[u8]) 
         if nonblocking(h, flags) {
             return if sent > 0 { Ok(sent) } else { Err(EAGAIN as i64) };
         }
-        if let Err(e) = wait(h, deadline) {
+        if let Err(e) = wait(deadline) {
             return if sent > 0 { Ok(sent) } else { Err(e) };
         }
     }
@@ -522,7 +525,7 @@ fn recv(h: &Handle, buf: &mut [u8], flags: i64, ctl_room: usize) -> Result<(usiz
         if nonblocking(h, flags) {
             return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(EAGAIN as i64) };
         }
-        if let Err(e) = wait(h, deadline) {
+        if let Err(e) = wait(deadline) {
             return if got > 0 { Ok((got, None, ctl_flags, control)) } else { Err(e) };
         }
     }
@@ -593,11 +596,10 @@ pub(crate) fn suppresses_sigpipe(real_fd: u64) -> bool {
     SOCKETS.lock().get(&real_fd).is_some_and(|s| s.opts.nosigpipe)
 }
 
-/// `poll(2)`/`select(2)` state of `real_fd`, and whether its protocol is pulled (§3.4); `None` if
-/// it isn't a socket.
-pub(crate) fn readiness(so: u64) -> Option<(Readiness, bool)> {
+/// `poll(2)`/`select(2)` state of `real_fd`; `None` if it isn't a socket.
+pub(crate) fn readiness(so: u64) -> Option<Readiness> {
     let h = handle_of(so)?;
-    Some((h.proto.readiness(so), h.proto.pulled()))
+    Some(h.proto.readiness(so))
 }
 
 /// `(domain, type, protocol)` of the socket `real_fd`.
@@ -643,7 +645,7 @@ pub extern "C" fn oxidebsd_sys_connect(fd: u64, addr_ptr: u64, len: u64) -> i64 
             }
             // A connection being set up isn't interrupted by `SA_RESTART`-restarting: the
             // restarted call would find it already in progress. `EINTR`, as in the BSDs.
-            if let Err(e) = wait(&h, None) {
+            if let Err(e) = wait(None) {
                 return Err(if e == ERESTART as i64 { EINTR as i64 } else { e });
             }
         }
@@ -685,7 +687,7 @@ fn accept(fd: u64, addr_ptr: u64, len_ptr: u64, flags: i64) -> Result<u64, i64> 
         if fd::is_nonblocking(h.so) {
             return Err(EAGAIN as i64);
         }
-        wait(&h, deadline)?;
+        wait(deadline)?;
     }
 }
 
