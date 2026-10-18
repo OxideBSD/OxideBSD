@@ -254,6 +254,13 @@ fn user_fault(frame: &mut TrapFrame, name: &str, signal: u64, fault_addr: Option
         );
     }
     crate::process::init::note_fault(pid, frame.rip, fault_addr);
+    // For a core (`kern::kern_core`): the registers as the fault found them.
+    let fs_base = x86_64::registers::model_specific::FsBase::read().as_u64();
+    crate::kern::kern_core::note_fault(pid, [
+        frame.r15, frame.r14, frame.r13, frame.r12, frame.rbp, frame.rbx, frame.r11, frame.r10, frame.r9, frame.r8,
+        frame.rax, frame.rcx, frame.rdx, frame.rsi, frame.rdi, u64::MAX, frame.rip, frame.cs, frame.rflags,
+        frame.rsp, frame.ss, fs_base, 0, frame.ss, frame.ss, 0, 0,
+    ]);
     // Force-delivered: see `signals::force_fault_signal`'s own doc comment for why a plain
     // `do_kill` self-signal (which respects the blocked mask, right for an async `kill()`) isn't
     // safe for a signal a fault generated synchronously. Safe from here for the same reason

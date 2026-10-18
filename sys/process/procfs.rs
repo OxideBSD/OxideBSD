@@ -182,8 +182,8 @@ pub(crate) extern "C" fn oxidebsd_proc_map(pid: u64, linux: u64, buf_ptr: *mut u
     // Resident pages: those with a frame in the page tables.
     let phys_offset = crate::memory::phys_mem_offset();
     // SAFETY: only read, under the process table's lock, which every page table change takes.
-    let mut mapper = unsafe { space.mapper(phys_offset) };
-    let mut resident = |start: u64, end: u64| -> u64 {
+    let mapper = unsafe { space.mapper(phys_offset) };
+    let resident = |start: u64, end: u64| -> u64 {
         use x86_64::structures::paging::mapper::{Translate, TranslateResult};
         let mut n = 0;
         let mut va = start;

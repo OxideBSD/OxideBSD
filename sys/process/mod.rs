@@ -363,6 +363,8 @@ pub(crate) const SI_TIMER: i32 = -2;
 /// concept, no `ptrace`) -- kept only so the real numeric set matches musl's header exactly.
 pub(crate) const CLD_EXITED: i32 = 1;
 pub(crate) const CLD_KILLED: i32 = 2;
+/// Killed, and dumped core.
+pub(crate) const CLD_DUMPED: i32 = 3;
 pub(crate) const CLD_STOPPED: i32 = 5;
 pub(crate) const CLD_CONTINUED: i32 = 6;
 
@@ -601,13 +603,15 @@ pub(crate) const SA_NOCLDSTOP: u64 = 1;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DefaultDisposition {
     Terminate,
+    /// Terminate, leaving a core (`kern::kern_core`): POSIX's "A" action.
+    Core,
     Ignore,
     /// Real `SIGSTOP`/`SIGTSTP` job-control stop -- see `ProcState::Stopped`'s own doc comment.
     Stop,
 }
 
 /// Real POSIX default dispositions for the signals this ABI recognizes (`1..=31`) -- this kernel
-/// has no core-dump concept (`Terminate` covers both "term" and "core" defaults identically).
+/// dumps core for POSIX's "A" signals when the process kills itself with one (`Core`).
 /// `SIGSTOP`/`SIGTSTP` now get a real `Stop` outcome (see `ProcState::Stopped`) rather than the
 /// `Ignore` this used to collapse them to before real job control existed; `SIGTTIN`/`SIGTTOU`
 /// stay `Ignore` (no real background-terminal-I/O-stop model here -- only `SIGINT`/`SIGTSTP` are
@@ -624,15 +628,21 @@ fn default_disposition(sig: u64) -> DefaultDisposition {
         // POSIX: the four job-control stop signals (TTY.md §5.3).
         SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => DefaultDisposition::Stop,
         SIGCHLD | SIGCONT | SIGURG | SIGWINCH | SIGIO => DefaultDisposition::Ignore,
+        // POSIX's "A" signals: abnormal termination with a core.
+        SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV | SIGSYS | SIGXCPU | SIGXFSZ => {
+            DefaultDisposition::Core
+        }
         _ => DefaultDisposition::Terminate,
     }
 }
 /// `take_deliverable_signal`'s own result -- what `deliver_pending_signal`
 /// (`sys/syscall.rs`) should actually do about the signal it picked.
 pub(crate) enum SignalDelivery {
-    /// Terminate the process with this exit code (`128 + signum`, the real shell/POSIX
-    /// convention for "died from a signal").
+    /// Terminate the process with this exit code: the signal, as `wait(2)`'s status encodes a
+    /// signal death.
     Terminate(i32),
+    /// Terminate, writing a core first (`kern::kern_core`): the signal.
+    Core(u64),
     /// Real self-targeted `SIGSTOP`/`SIGTSTP` (default disposition) -- payload is the stopping
     /// signal. Only reachable via a self `kill(getpid(), SIGSTOP/SIGTSTP)`; the interactive
     /// Ctrl+Z path (`interrupts::keyboard_interrupt_handler` -> `signal_foreground_group`) always

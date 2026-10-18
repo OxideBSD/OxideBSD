@@ -84,7 +84,7 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
     // A vfork child and its parent are one address space: the memory goes only if both do.
     for &other in partners.iter().filter(|&&other| other != my_tgid) {
         if from_user {
-            super::terminate_thread_group(other, 128 + SIGKILL as i32);
+            super::terminate_thread_group(other, SIGKILL as i32);
         } else {
             super::signals::post_signal(other, SIGKILL);
         }
@@ -109,7 +109,7 @@ pub fn out_of_memory(from_user: bool) -> Outcome {
         return Outcome::Fail;
     }
     // Even one already sent SIGKILL: it may be blocked somewhere a signal doesn't wake.
-    super::terminate_thread_group(pid, 128 + SIGKILL as i32);
+    super::terminate_thread_group(pid, SIGKILL as i32);
     // Its memory is free now -- unless the termination waits for the filesystem lock
     // (`fs::fslock`), when this lets the holder finish first.
     if crate::fs::fslock::busy() {

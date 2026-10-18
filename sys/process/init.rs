@@ -334,7 +334,7 @@ pub(crate) fn kill_for_debug(sig: i32) -> Result<(), i64> {
     }
     let caller = scheduler::current_pid();
     let suicide = PROCESS_TABLE.lock().get(&caller).is_some_and(|p| p.tgid == INIT_PID);
-    lifecycle::terminate_thread_group(INIT_PID, 128 + sig);
+    lifecycle::terminate_thread_group(INIT_PID, sig);
     if suicide {
         // As in do_exit_group: pid 1 killed itself, and a zombie must not return to user mode.
         scheduler::schedule();

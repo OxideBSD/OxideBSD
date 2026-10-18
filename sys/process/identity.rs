@@ -112,6 +112,11 @@ pub struct Cred {
     pub egid: u32,
     pub sgid: u32,
     pub groups: Vec<u32>,
+    /// The credentials changed since the program started, by a set-ID `execve` or a `set*id`/
+    /// `setgroups` call (FreeBSD's `P_SUGID`): its memory may hold what its present user may not
+    /// read, so it dumps no core (`kern::kern_core`, unless `kern.sugid_coredump`). An `execve`
+    /// that isn't set-ID clears it.
+    pub sugid: bool,
 }
 
 /// `security.bsd.see_other_uids` (FreeBSD's): when false, an unprivileged caller sees only the
@@ -187,6 +192,7 @@ impl Cred {
         }
         self.suid = self.euid;
         self.sgid = self.egid;
+        self.sugid = applied;
         applied
     }
 }
@@ -195,7 +201,16 @@ fn with_cred<R>(caller_pid: Pid, f: impl FnOnce(&mut Cred) -> R) -> R {
     let table = PROCESS_TABLE.lock();
     let proc = table.get(&caller_pid).expect("credentials: current process missing from table");
     let mut shared = proc.shared.lock();
-    f(&mut shared.cred)
+    let before = shared.cred.clone();
+    let r = f(&mut shared.cred);
+    // Any change of an ID or the groups marks the process (`Cred::sugid`).
+    let c = &mut shared.cred;
+    if (c.ruid, c.euid, c.suid, c.rgid, c.egid, c.sgid) != (before.ruid, before.euid, before.suid, before.rgid, before.egid, before.sgid)
+        || c.groups != before.groups
+    {
+        c.sugid = true;
+    }
+    r
 }
 
 /// The calling thread group's credentials; root before any process exists (oxfs's boot

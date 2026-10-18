@@ -382,7 +382,7 @@ fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, 
             0 if is_blocked => Action::SetPending,
             0 => match default_disposition(sig) {
                 DefaultDisposition::Ignore => Action::Discard,
-                DefaultDisposition::Terminate => Action::Terminate,
+                DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                 DefaultDisposition::Stop => Action::Stop,
             },
             _ => Action::SetPending,
@@ -395,7 +395,7 @@ fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, 
         // group, not just the one named target thread -- see `terminate_thread_group`'s own doc
         // comment for the real bug this closed (a thread-group leader with live siblings silently
         // treated as a disposable, invisible-to-wait4 CLONE_THREAD sibling).
-        Action::Terminate => terminate_thread_group(target, 128 + sig as i32),
+        Action::Terminate => terminate_thread_group(target, sig as i32),
         Action::Stop => {
             let mut table = PROCESS_TABLE.lock();
             if let Some(proc) = table.get_mut(&target) {
@@ -499,7 +499,7 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                     0 if is_blocked => Action::SetPending,
                     0 => match default_disposition(sig) {
                         DefaultDisposition::Ignore => Action::Discard,
-                        DefaultDisposition::Terminate => Action::Terminate,
+                        DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                         DefaultDisposition::Stop => Action::Stop,
                     },
                     _ => Action::SetPending,
@@ -524,7 +524,7 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
         match action {
             Action::Discard => {}
             // See `terminate_thread_group`'s own doc comment.
-            Action::Terminate => terminate_thread_group(pid, 128 + sig as i32),
+            Action::Terminate => terminate_thread_group(pid, sig as i32),
             Action::Stop => {
                 let mut table = PROCESS_TABLE.lock();
                 if let Some(proc) = table.get_mut(&pid) {
@@ -1263,8 +1263,9 @@ pub(crate) fn take_deliverable_signal(pid: Pid, chained: bool) -> Option<SignalD
             0 => match default_disposition(signum) {
                 DefaultDisposition::Ignore => continue,
                 DefaultDisposition::Terminate => {
-                    return Some(SignalDelivery::Terminate(128 + signum as i32));
+                    return Some(SignalDelivery::Terminate(signum as i32));
                 }
+                DefaultDisposition::Core => return Some(SignalDelivery::Core(signum)),
                 DefaultDisposition::Stop => return Some(SignalDelivery::Stop(signum)),
             },
             handler_addr => {
@@ -1603,7 +1604,7 @@ pub fn do_sigqueue(
             0 if is_blocked => Action::SetPending,
             0 => match default_disposition(sig) {
                 DefaultDisposition::Ignore => Action::Discard,
-                DefaultDisposition::Terminate => Action::Terminate,
+                DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                 DefaultDisposition::Stop => Action::Stop,
             },
             _ => Action::SetPending,
@@ -1616,7 +1617,7 @@ pub fn do_sigqueue(
         // group, not just the one named target thread -- see `terminate_thread_group`'s own doc
         // comment for the real bug this closed (a thread-group leader with live siblings silently
         // treated as a disposable, invisible-to-wait4 CLONE_THREAD sibling).
-        Action::Terminate => terminate_thread_group(target, 128 + sig as i32),
+        Action::Terminate => terminate_thread_group(target, sig as i32),
         Action::Stop => {
             let mut table = PROCESS_TABLE.lock();
             if let Some(proc) = table.get_mut(&target) {

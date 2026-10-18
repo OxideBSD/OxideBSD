@@ -453,6 +453,51 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             }),
         },
         Leaf {
+            number: None,
+            name: "coredump",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Enable/Disable coredumps",
+            get: || int(crate::kern::kern_core::COREDUMP.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                crate::kern::kern_core::COREDUMP.store(v != 0, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+        Leaf {
+            number: None,
+            name: "sugid_coredump",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Allow setuid and setgid processes to dump core",
+            get: || int(crate::kern::kern_core::SUGID_COREDUMP.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                crate::kern::kern_core::SUGID_COREDUMP.store(v != 0, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+        Leaf {
+            number: None,
+            name: "corefile",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RW,
+            descr: "Process corefile name format string",
+            get: || string(&crate::kern::kern_core::corename()),
+            set: Some(|new| {
+                let name = new_string(new);
+                if name.is_empty() || name.len() > 1024 {
+                    return Err(EINVAL as i64);
+                }
+                *crate::kern::kern_core::CORENAME.lock() = name.to_vec();
+                Ok(())
+            }),
+        },
+        Leaf {
             number: Some(KERN_HOSTNAME),
             name: "hostname",
             kind: CTLTYPE_STRING,

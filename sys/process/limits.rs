@@ -43,6 +43,8 @@ pub(crate) const RLIMIT_FSIZE: usize = 1;
 pub(crate) const RLIMIT_DATA: usize = 2;
 /// `RLIMIT_STACK`: how far the main thread's stack may grow (`mm::try_grow_user_stack`).
 pub(crate) const RLIMIT_STACK: usize = 3;
+/// `RLIMIT_CORE`: the largest core file a process may leave (`kern::kern_core`).
+pub(crate) const RLIMIT_CORE: usize = 4;
 /// `RLIMIT_NPROC`: how many processes one real user ID may have.
 pub(crate) const RLIMIT_NPROC: usize = 6;
 /// `RLIMIT_NOFILE`: the most descriptors a process may have open.

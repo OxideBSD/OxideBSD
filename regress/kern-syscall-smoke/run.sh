@@ -9,7 +9,7 @@ export PATH
 D=/usr/tests/kern
 
 fail=0
-for t in rlimit flock orphan sched users vm; do
+for t in rlimit flock orphan sched users vm core; do
 	if $D/kern-smoke $t; then
 		echo "kern: ok: $t"
 	else

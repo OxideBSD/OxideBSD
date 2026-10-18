@@ -14,6 +14,7 @@
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -51,6 +52,7 @@ static int child_exit_ok(int (*fn)(void))
 #include "sched.c"
 #include "users.c"
 #include "vm.c"
+#include "core.c"
 
 static const struct {
 	const char *name;
@@ -62,6 +64,7 @@ static const struct {
 	{ "sched", sched_main },
 	{ "users", users_main },
 	{ "vm", vm_main },
+	{ "core", core_main },
 };
 
 int main(int argc, char **argv)

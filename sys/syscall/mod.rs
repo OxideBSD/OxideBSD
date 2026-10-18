@@ -368,6 +368,20 @@ pub(crate) struct SyscallFrame {
 /// and puts it back when the caller runs again (`set_current_frame`). Without that, an `execve`
 /// that slept reading its program from the disk redirected another process's frame to the new
 /// program's entry point (RAM_FLOOR.md B5: ninja jumping into clang's code).
+impl SyscallFrame {
+    /// The user registers as the frame holds them, in `struct user_regs_struct`'s order (a core's
+    /// `NT_PRSTATUS`): `rcx` and `r11` are what `SYSCALL` left there, the return `rip` and `rflags`.
+    pub(crate) fn user_regs(&self) -> crate::kern::kern_core::UserRegs {
+        use crate::kern::kern_core::{USER_CS, USER_SS};
+        let fs_base = x86_64::registers::model_specific::FsBase::read().as_u64();
+        [
+            self.r15, self.r14, self.r13, self.r12, self.rbp, self.rbx, self.r11, self.r10, self.r9, self.r8,
+            self.rax, self.rcx, self.rdx, self.rsi, self.rdi, self.rax, self.rcx, USER_CS, self.r11,
+            self.user_rsp, USER_SS, fs_base, 0, USER_SS, USER_SS, 0, 0,
+        ]
+    }
+}
+
 static CURRENT_FRAME: AtomicPtr<SyscallFrame> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The currently in-flight syscall's frame — only valid to call from within a syscall handler
@@ -848,8 +862,8 @@ const _: () = assert!(core::mem::size_of::<RawUcontext>() == 936);
 /// syscall's own tail, and the fault trampoline) -- both are genuine "about to resume real
 /// userspace" points; `true` only from `do_sigreturn`'s own chained call below.
 /// The exit status of a process whose signal frame couldn't be written or read back: killed by
-/// `SIGSEGV`, encoded as a signal death (`128 + signum`, as `SignalDelivery::Terminate` carries).
-const FRAME_FAULT_EXIT: i32 = 128 + crate::process::SIGSEGV as i32;
+/// `SIGSEGV`, encoded as a signal death (the signal, as `SignalDelivery::Terminate` carries).
+const FRAME_FAULT_EXIT: i32 = crate::process::SIGSEGV as i32;
 
 fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
     let pid = crate::process::scheduler::current_pid();
@@ -885,6 +899,20 @@ fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
             // safe unconditionally, not just for the multi-threaded case that exposed the bug.
             // Found chasing a flaky crash-or-hang in `pthread_attr_setdetachstate/2-1.c`.
             crate::process::do_exit_group(pid, code);
+        }
+        crate::process::SignalDelivery::Core(signum) => {
+            // Killed with a core (`kern::kern_core`). A signal a fault raised came through the
+            // fault trampoline's system call, so the registers are the fault's, kept for it.
+            let regs = if (crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA..crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA + 0x1000)
+                .contains(&frame.rcx)
+            {
+                crate::kern::kern_core::take_fault(pid).unwrap_or_else(|| frame.user_regs())
+            } else {
+                frame.user_regs()
+            };
+            let dumped = crate::kern::kern_core::coredump(pid, signum, regs);
+            // The wait status's core flag (WCOREDUMP) says whether one was written.
+            crate::process::do_exit_group(pid, signum as i32 | if dumped { 0x80 } else { 0 });
         }
         crate::process::SignalDelivery::Stop(signum) => {
             crate::process::do_stop_self(pid, signum);

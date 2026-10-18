@@ -2114,7 +2114,7 @@ fn reparent_orphans(pid: Pid) {
     }
     for (child_pid, status) in zombies {
         let (code, value) = if status & 0x7f != 0 {
-            (CLD_KILLED, (status & 0x7f) as u64)
+            (if status & 0x80 != 0 { CLD_DUMPED } else { CLD_KILLED }, (status & 0x7f) as u64)
         } else {
             (CLD_EXITED, ((status >> 8) & 0xff) as u64)
         };
@@ -2124,6 +2124,7 @@ fn reparent_orphans(pid: Pid) {
 }
 
 pub(crate) fn terminate_process(pid: Pid, code: i32) {
+    crate::kern::kern_core::forget(pid);
     // A vfork child's exit ends its borrow: its parent may run again.
     vfork_release(pid);
     // Real orphan reparenting -- see `reparent_orphans`'s own doc comment. Runs unconditionally,
@@ -2278,7 +2279,8 @@ pub(crate) fn terminate_process(pid: Pid, code: i32) {
     if code & 0x7f == 0 {
         notify_parent_sigchld(&mut table, pid, CLD_EXITED, ((code >> 8) & 0xff) as u64);
     } else {
-        notify_parent_sigchld(&mut table, pid, CLD_KILLED, (code & 0x7f) as u64);
+        let how = if code & 0x80 != 0 { CLD_DUMPED } else { CLD_KILLED };
+        notify_parent_sigchld(&mut table, pid, how, (code & 0x7f) as u64);
     }
     // Real SA_NOCLDWAIT semantics (`sigaction/21-1.c`): if the parent's own SIGCHLD action has
     // this flag set, a child is never left as a wait4-reapable zombie at all -- real POSIX

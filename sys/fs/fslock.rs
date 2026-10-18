@@ -253,10 +253,10 @@ fn run_deferred() {
     loop {
         let Some((pid, status)) = DEFERRED.lock().pop() else { return };
         let tgid = process::table().lock().get(&pid).map(|p| p.tgid);
-        if tgid == Some(scheduler::current_tgid()) && status > 128 {
+        if tgid == Some(scheduler::current_tgid()) && status & 0x7f != 0 {
             // The process releasing the lock is the one to terminate: not from inside its own
             // system call; the signal is left pending, and delivered as it returns.
-            process::signals::post_signal(pid, (status - 128) as u64);
+            process::signals::post_signal(pid, (status & 0x7f) as u64);
         } else {
             process::terminate_thread_group(pid, status);
         }

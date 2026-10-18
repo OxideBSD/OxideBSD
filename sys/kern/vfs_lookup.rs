@@ -210,6 +210,11 @@ pub(crate) fn namei(nd: &NameiData) -> Result<Namei, i32> {
     if nd.path.len() > PATH_MAX {
         return Err(ENAMETOOLONG);
     }
+    // Nothing mounted (a kernel with no file systems, as some tests run): no name resolves. A core
+    // dump is the one caller that gets here then.
+    if vfs_mount::rootvnode().is_null() {
+        return Err(ENOENT);
+    }
     let root = process_root();
     let result = walk(nd, root);
     vrele(root);
