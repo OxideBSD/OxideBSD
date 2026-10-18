@@ -44,7 +44,7 @@ required -- probe it and keep a fallback.
 - Userland: pid 1 is `/sbin/init` (`init(8)`: `/etc/rc`, then getty/login on the `/etc/ttys`
   terminals; the console is `insecure`: log in as `user`, then `sudo`/`su`, sudo-rs at
   `external/mit/sudo-rs`, `user` in `wheel`); OxideBSD's own `/bin/sh`
-  from `lib/libsh`; 128 standalone BusyBox applets;
+  from `lib/libsh`; 96 BusyBox applets (one multi-call binary, all in `/usr`);
   native PIE utilities over `lib/oxlibc`; on-target Clang/LLVM, bmake, ninja, ncurses, nano, nvi;
   a real `x86_64-unknown-oxidebsd` Rust `std` target. Layout: `hier(7)` (`share/man/man7/hier.7`).
 
@@ -89,8 +89,8 @@ user before large structural commitments.
   `sys/modules/*` are workspace members that `build.rs` cross-builds. To build one directly:
   `--manifest-path <dir>/Cargo.toml --target-dir target/userland` (or `target/modules`) to avoid a
   nested cargo lock deadlock.
-- **Editing `build.rs` forces a large rebuild; editing `build_busybox.rs` forces the ~20-40 min
-  BusyBox rebuild.** Never `touch build.rs` to force rebuilds.
+- **Editing `build.rs` forces a large rebuild** (`build_busybox.rs` only rebuilds BusyBox, under
+  a minute). Never `touch build.rs` to force rebuilds.
 - Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio`, `OXIDEBSD_DISK_IMAGE`,
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
   `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the floor is 64),
@@ -181,11 +181,13 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `.rodata`.
 - **The kernel image must end below `module::MODULE_VA_BASE` (`0xffff_ffff_a000_0000`).** Module
   data pools live at `MODULE_DATA_BASE` (L4 384).
-- **New C programs and fixtures are static PIE** (`build_c_pie`, `musl-gcc -static-pie`; musl is
-  built `-fPIE`). Fixed-address binaries (BusyBox, bmake, vi, nano, ninja, doom, the POSIX corpus)
-  need a load base above the kernel's low reservations and below `0x2000_0000` (the module
-  region); the floor moves as the image grows and fails as `MappingFailed`/`PageAlreadyMapped` at
-  exec: `readelf -l target/x86_64-oxidebsd/debug/oxidebsd`.
+- **New C programs and fixtures are PIEs** (`build_c_pie`, `musl-gcc -static-pie`; musl is built
+  `-fPIE`): static in `/bin`, `/sbin` and the POSIX corpus, dynamic elsewhere (BusyBox, bmake,
+  nano, ninja, doom). The fixed-address ones left (`regress/*` crates' `linker.ld`,
+  `dynlink-smoke`) need a load base above the kernel's low reservations and below `0x2000_0000`;
+  the floor moves as the image grows and fails as `MappingFailed`/`PageAlreadyMapped` at exec.
+- **Port builds don't watch `build.rs`** (only sources and `libc.a`): changing a port's flags
+  needs its `recipe_mtime` tag changed too, or the old binary stays.
 - **One musl build makes `libc.a` and `libc.so`**: `musl-gcc` without `-static`/`-static-pie`
   links dynamically (`PT_INTERP` `/lib/ld-musl-x86_64.so.1`). Every `ET_DYN` main binary gets an
   ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
@@ -380,8 +382,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **musl** (`external/mit/musl`, fork branch `oxidebsd` on tag `v1.2.6`): patched to speak this
   ABI. Update by committing on that branch, pushing, then `git add external/mit/musl`. Known,
   accepted stock-musl bugs (stale-tid UAF in pthread_*, async-cancel deadlock) are not ours.
-- **BusyBox** (`external/gpl2/busybox`, `1_38_0`, no patches): one static binary per applet,
-  `build_busybox_applet` asserts `NUM_APPLETS == 1`. Roster: `OxideBSD-doc/BUSYBOX_APPLETS.md`.
+- **BusyBox** (`external/gpl2/busybox`, `1_38_0`, no patches): one multi-call dynamic PIE,
+  `/usr/libexec/busybox`, hard-linked once per applet (it dispatches on `argv[0]`); `build_busybox`
+  asserts `NUM_APPLETS` equals the roster (`build_busybox.rs`, `OxideBSD-doc/BUSYBOX_APPLETS.md`).
   `/bin/sh` runs autoconf `configure` (bmake's on target, nano/ncurses on the host match dash).
 - **std target** (`external/mit/rust` + libc fork): reuses `sys::pal::unix`. A mysterious
   `ENOTTY`/`ENOSYS` from a std program is usually a hardcoded `target_os` allowlist in std missing

@@ -14,12 +14,12 @@ use std::process::Command;
 /// BusyBox's own ~232-applet fanout (and the POSIX pilot's own up-to-~1700-file fanout) reuse
 /// identical object code across build directories instead of recompiling shared BusyBox-core/
 /// musl-static-lib content from scratch every time. Both already do a real rm-rf-and-rebuild on
-/// any musl core change (see `build_busybox_applet`'s own doc comment) -- correct for staleness,
+/// any musl core change (see `build_busybox`'s doc comment) -- correct for staleness,
 /// but it throws away an enormous amount of otherwise-identical recompilation across applets/test
 /// files that share the vast majority of their own object code. Detected once via `OnceLock`, not
 /// per call site (`Command::new("ccache")` spawning a process per applet/test file at this fanout
 /// would itself add real overhead) -- safe to call from the parallel worker pools both `main()`
-/// and `build_busybox_applet` already use, since `OnceLock::get_or_init` serializes concurrent
+/// and `build_busybox` already use, since `OnceLock::get_or_init` serializes concurrent
 /// first callers. Falls back to the plain compiler, unprefixed, when `ccache` isn't on `PATH` --
 /// this is a pure speed optimization, never load-bearing for correctness. Returns the argv prefix
 /// (`["ccache", "<compiler>"]` or just `["<compiler>"]`) rather than a single string so callers
@@ -112,11 +112,8 @@ fn write_toolchain_bin(musl_sysroot: &Path, llvm_host_build: &Path) {
     symlink_if_missing(&llvm_host_build.join("bin/ld.lld"), &bin.join(format!("{prefix}-ld.lld")));
 }
 
-// `BUSYBOX_APPLETS`/`BUSYBOX_APPLETS_PASS2`/`build_busybox_applet`/`configure_busybox_single_applet`/
-// `resolve_busybox_new_config_options` -- split into their own file specifically so unrelated
-// edits to *this* file don't invalidate every cached BusyBox applet binary. See
-// `build_busybox.rs`'s own module doc comment for the full story (a real ~20-30 minute rebuild
-// cascade, found live).
+// The BusyBox roster and its build, in their own file so that editing this one doesn't rebuild
+// BusyBox (`build_busybox.rs`).
 include!("build_busybox.rs");
 
 // The install step: dist sets and the system's images (RAM_FLOOR.md §4.3-4.4).
@@ -922,49 +919,9 @@ fn main() {
     println!("cargo:rerun-if-changed={}", busybox_dir.display());
     let busybox_source_mtime = latest_mtime(&busybox_dir);
 
-    // Parallel across applets, `-j1` within each one (see `build_busybox_applet`'s own doc
-    // comment) -- a plain work-stealing pool over a shared atomic index, not a thread per applet
-    // (~300 of those would vastly oversubscribe an 8-core host) and not a chunked static split
-    // (uneven applet build times would leave some workers idle while others queue up).
-    let all_applets: Vec<(&str, &str, u64)> = BUSYBOX_APPLETS
-        .iter()
-        .copied()
-        .chain(BUSYBOX_APPLETS_PASS2.iter().copied())
-        .collect();
-    let jobs = build_jobs();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&(applet_symbol, out_name, load_addr)) = all_applets.get(i) else {
-                        break;
-                    };
-                    build_busybox_applet(
-                        applet_symbol,
-                        out_name,
-                        load_addr,
-                        &musl_sysroot,
-                        busybox_source_mtime,
-                    );
-                }
-            });
-        }
-    });
-
-    // Each applet's binary, by `OXFS_<NAME>_ELF_PATH` (`oxfs_env_var_name`), for
-    // `distrib/install.mtree`'s `artifact:` sources -- derived from the roster, so a new applet
-    // needs no edit here.
-    let oxfs_applet_paths: Vec<(String, String)> = all_applets
-        .iter()
-        .map(|&(_, out_name, _)| {
-            (
-                oxfs_env_var_name(out_name),
-                target_dir_busybox_elf(out_name),
-            )
-        })
-        .collect();
+    // One multi-call binary for the whole roster (`build_busybox`), installed as
+    // `/usr/libexec/busybox` with a hard link per applet.
+    let busybox_elf_path = build_busybox(&musl_sysroot, busybox_source_mtime);
     let mut oxfs_extra_env: Vec<(&str, &str)> = vec![
         (
             "OXFS_SMOKE_ELF_PATH",
@@ -1131,11 +1088,7 @@ fn main() {
             pie_aslr_probe_elf_path.to_str().unwrap(),
         ),
     ];
-    oxfs_extra_env.extend(
-        oxfs_applet_paths
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str())),
-    );
+    oxfs_extra_env.push(("OXFS_BUSYBOX_ELF_PATH", busybox_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_CRONTAB_ELF_PATH", crontab_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_MOUNT_ELF_PATH", mount_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_UMOUNT_ELF_PATH", umount_elf_path.to_str().unwrap()));
@@ -1209,24 +1162,26 @@ fn main() {
     }
 }
 
+/// A freshness input for a build whose sources don't change when its recipe does (the flags in
+/// this file): `tag` names the recipe, recorded in `target/recipes/<name>`. A different tag is
+/// recorded now and returns now, so the output is older and is rebuilt; the same one returns
+/// when it was recorded. Change the tag with the recipe.
+fn recipe_mtime(name: &str, tag: &str) -> std::time::SystemTime {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/recipes");
+    let stamp = dir.join(name);
+    if std::fs::read_to_string(&stamp).is_ok_and(|t| t == tag)
+        && let Ok(m) = std::fs::metadata(&stamp).and_then(|m| m.modified())
+    {
+        return m;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&stamp, tag);
+    std::time::SystemTime::now()
+}
+
 fn oxfs_env_var_name(out_name: &str) -> String {
     // `run-parts` -> `OXFS_RUN_PARTS_ELF_PATH`.
     format!("OXFS_{}_ELF_PATH", out_name.to_uppercase().replace('-', "_"))
-}
-
-/// Each `BUSYBOX_APPLETS` entry's own out-of-tree build directory follows a fixed, predictable
-/// shape (`target/busybox-<out_name>/busybox`, `build_busybox_applet`'s own `out_dir.join("busybox")`
-/// return value) -- re-derived here rather than plumbed through as a second return value, since
-/// `busybox_applet_elfs` (built above) only kept the *bytes*, not the path, and oxfs's own
-/// `extra_env` needs a path string, not bytes.
-fn target_dir_busybox_elf(out_name: &str) -> String {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    Path::new(manifest_dir)
-        .join(format!("target/busybox-{out_name}"))
-        .join("busybox")
-        .to_str()
-        .unwrap()
-        .to_string()
 }
 
 /// Configures, builds, and installs the vendored, OxideBSD-patched musl (`external/mit/musl` -- a
@@ -1873,13 +1828,7 @@ fn build_doomgeneric(musl_sysroot: &Path) -> PathBuf {
     let invocation = compiler_invocation(&musl_gcc);
     let mut cmd = Command::new(&invocation[0]);
     cmd.args(&invocation[1..]);
-    cmd.arg("-static")
-        .arg("-no-pie")
-        // 0x13000000 -- next free slot past every currently-claimed userland load address (the
-        // Rust smoke-test family's own highest, keyevent-syscall-smoke's 0x12800000, as of this
-        // crate's own addition) -- re-derive via `readelf -l target/x86_64-oxidebsd/debug/oxidebsd
-        // | grep -A1 LOAD` before trusting this if the kernel image has grown meaningfully since.
-        .arg("-Wl,-Ttext-segment=0x13000000")
+    cmd.arg("-pie")
         .arg("-O2")
         .arg("-DNORMALUNIX")
         .arg("-DLINUX") // Real upstream's own portable-POSIX-behavior guard, not Linux-specific.
@@ -1999,8 +1948,7 @@ fn build_dynlink_pie_smoke(sysroot: &Path) -> PathBuf {
 }
 
 /// Latest mtime across every real source file under `dir`, skipping VCS metadata (any directory
-/// starting with `.`) -- computed once per `cargo build` invocation, not once per applet (see
-/// `build_busybox_applet`'s own doc comment for why that distinction matters at ~300 applets). A
+/// starting with `.`) -- computed once per `cargo build` invocation. A
 /// plain recursive walk rather than a crate dependency: this only runs when build.rs's own
 /// `cargo:rerun-if-changed` gate already decided `external/gpl2/busybox` changed, so it's a rare,
 /// not hot-path, cost -- not worth a `walkdir`-style dependency for.
@@ -2767,11 +2715,9 @@ fn write_libcxx_runtime_manifest(host_build: &Path) -> PathBuf {
 /// `configure`'s own `make` step: `make-bootstrap.sh` (which `configure` emits) needs no working
 /// `make` on the build machine and produces the same binary. `configure` itself is fine
 /// cross-compiling -- `--host=` makes it skip every run-test, which matters since this musl fork's
-/// output can't execute on the build host (native OxideBSD syscall ABI).
-/// `load_addr` (`0x18000000`) must stay clear of every other userland binary's slot; see
-/// `build_busybox_applet`'s own doc comment for the convention.
+/// output can't execute on the build host (native OxideBSD syscall ABI). A dynamic PIE, as
+/// `/usr/bin` programs are.
 fn build_bmake(musl_sysroot: &Path) -> PathBuf {
-    const BMAKE_LOAD_ADDR: u64 = 0x1800_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("usr.bin/make");
     let out_dir = Path::new(manifest_dir).join("target/bmake");
@@ -2786,7 +2732,7 @@ fn build_bmake(musl_sysroot: &Path) -> PathBuf {
         .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(std::time::SystemTime::now());
-    let floor = musl_mtime.max(src_mtime);
+    let floor = musl_mtime.max(src_mtime).max(recipe_mtime("bmake", "dynamic-pie"));
     if std::fs::metadata(&bin)
         .and_then(|m| m.modified())
         .is_ok_and(|m| m >= floor)
@@ -2794,12 +2740,12 @@ fn build_bmake(musl_sysroot: &Path) -> PathBuf {
         return bin;
     }
 
-    // Same reasoning as `build_busybox_applet`: a musl header change isn't tracked by the
+    // Same reasoning as `build_busybox`: a musl header change isn't tracked by the
     // object files' own dependency info, so rebuild from scratch rather than trust incremental.
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir).expect("failed to create target/bmake");
     let cc = musl_sysroot.join("bin/musl-gcc");
-    let ldflags = format!("-static -no-pie -Wl,-Ttext-segment={BMAKE_LOAD_ADDR:#x}");
+    let ldflags = "-pie";
     // MACHINE/MACHINE_ARCH forced: bmake's own probe would otherwise `uname -m` the *build host*.
     let status = Command::new(src.join("configure"))
         .current_dir(&out_dir)
@@ -2916,7 +2862,7 @@ fn write_bmake_mk_manifest() -> PathBuf {
 /// **Library + headers only, deliberately** -- `--without-progs` skips `tic`/`tset`/`tput`/
 /// `clear`/`infocmp`/`toe`/`tabs`/`captoinfo`. Each of those would need its own fixed load
 /// address, same discipline as every other `ET_EXEC` this build produces (see
-/// `build_busybox_applet`'s own doc comment) -- and nothing needs a target-side `tic` yet: the one
+/// `build_busybox`'s doc comment) -- and nothing needs a target-side `tic` yet: the one
 /// terminfo-compile step this build does (`write_ncurses_terminfo_manifest`, below) uses the
 /// *host's* own `tic` against this exact vendored `terminfo.src`, confirmed byte-version-identical
 /// (host `tic -V` reports `ncurses 6.6.20251230`, matching this vendored release exactly, so the
@@ -2924,13 +2870,8 @@ fn write_bmake_mk_manifest() -> PathBuf {
 /// expect). Revisit once on-target self-hosting of ncurses itself is attempted (see CLAUDE.md's
 /// bmake self-hosting section for the shape that took).
 ///
-/// **`-static -no-pie` in `LDFLAGS` is load-bearing, not optional** -- found the same way
-/// `build_musl_sysroot`'s own doc comment describes: this host's `gcc` defaults to PIE, and
-/// musl's own crt objects were deliberately built `-fno-pie -fno-PIC` (see that section), so a
-/// PIE-mode link of `configure`'s own `conftest.c` fails outright (`relocation R_X86_64_32 ...
-/// can not be used when making a PIE object`) before any real ncurses code is even reached.
-/// Confirmed via a real trivial `initscr()`/`printw()`/`endwin()` program linking clean against
-/// the resulting `libncursesw.a` and producing a real `ET_EXEC` with a nonzero entry point.
+/// Position-independent (the host compiler's default `-fPIE`, and `LDFLAGS=-pie` for configure's
+/// test programs): the static library (`--without-shared`) goes into nano and nvi, which are PIEs.
 ///
 /// Auto-detected wide-char (`ncursesw`, UTF-8-capable) support and built it rather than fighting
 /// configure back to narrow `ncurses` -- matches how most modern distros package it today, and
@@ -3040,7 +2981,7 @@ fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
         .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(std::time::SystemTime::now());
-    let floor = musl_mtime.max(src_mtime);
+    let floor = musl_mtime.max(src_mtime).max(recipe_mtime("ncurses", "pie"));
     if std::fs::metadata(&lib)
         .and_then(|m| m.modified())
         .is_ok_and(|m| m >= floor)
@@ -3061,7 +3002,7 @@ fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
         .current_dir(&build_dir)
         .env("CC", &musl_gcc)
         .env("CFLAGS", "-Os")
-        .env("LDFLAGS", "-static -no-pie")
+        .env("LDFLAGS", "-pie")
         .args([
             &format!("--prefix={}", sysroot.display()),
             "--host=x86_64-unknown-linux-musl",
@@ -3110,7 +3051,7 @@ fn build_ncurses(musl_sysroot: &Path) -> PathBuf {
 /// ncurses' `clear`, `tput` and `tset` (`reset` is a link to it), the BSDs' own, for `/usr/bin`:
 /// dynamic PIEs on `/lib/libc.so` like the rest of `/usr`, with ncurses linked in statically. A
 /// second configure of `lib/ncurses` in its own directory, `-fPIE` with the programs on, so
-/// `build_ncurses`'s library (which nano and nvi link, fixed-address) stays as it is. Returns the
+/// `build_ncurses`'s library (which nano and nvi link) is built without them. Returns the
 /// directory holding the three.
 fn build_ncurses_progs(musl_sysroot: &Path) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -3667,7 +3608,6 @@ fn build_openssl_smoke(musl_sysroot: &Path, openssl: &OpensslBuild) -> PathBuf {
 /// `-lncursesw`, not `-lncurses` -- this project's own ncurses build is wide-char-only (see
 /// `build_ncurses`'s own doc comment), and there is no `libncurses.a` to fall back to.
 fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
-    const VI_LOAD_ADDR: u64 = 0x1a00_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("bin/vi");
     let bin = src.join("bin/vi");
@@ -3684,7 +3624,7 @@ fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
         .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(std::time::SystemTime::now());
-    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime);
+    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime).max(recipe_mtime("vi", "static-pie"));
     if std::fs::metadata(&bin)
         .and_then(|m| m.modified())
         .is_ok_and(|m| m >= floor)
@@ -3704,7 +3644,7 @@ fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
         .env(
             "LDFLAGS",
             format!(
-                "-static -no-pie -L{} -Wl,-Ttext-segment={VI_LOAD_ADDR:#x}",
+                "-static-pie -L{}",
                 ncurses_sysroot.join("lib").display()
             ),
         )
@@ -3755,13 +3695,12 @@ fn build_nvi(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
 /// (`CFLAGS` also picks up nano's own warning/optimization flags this way), unlike `LDFLAGS`,
 /// which `configure` never touches again after baking its own copy in.
 /// Cross-builds ninja (`usr.bin/ninja`, the `OxideBSD/ninja-oxidebsd` fork's `oxidebsd` branch)
-/// into a static C++ `ET_EXEC` at `0x1e000000` (the next slot after nano's `0x1c000000`), seeded at
-/// `/usr/bin/ninja`. Driven by the fork's own `Makefile.oxidebsd` -- plain POSIX make, no Python
+/// into a C++ dynamic PIE (libc++ linked in statically: the sysroot has no `libc++.so`), installed
+/// as `/usr/bin/ninja`. Driven by the fork's own `Makefile.oxidebsd` -- plain POSIX make, no Python
 /// (`configure.py --bootstrap`) or CMake -- which is also what the on-target self-hosted build
 /// runs under bmake, so both builds share one source list. The tree is copied into `target/ninja`
 /// first: POSIX suffix rules put each `.o` next to its `.cc`, which would dirty the submodule.
 fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
-    const NINJA_LOAD_ADDR: u64 = 0x1e00_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("usr.bin/ninja");
     let build_dir = Path::new(manifest_dir).join("target/ninja");
@@ -3775,7 +3714,8 @@ fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
     };
     let floor = mtime(&musl_sysroot.join("lib/libc.a"))
         .max(mtime(&host_build.join(format!("lib/{CLANG_TARGET_TRIPLE}/libc++.a"))))
-        .max(latest_mtime(&src));
+        .max(latest_mtime(&src))
+        .max(recipe_mtime("ninja", "dynamic-pie"));
     if std::fs::metadata(&bin)
         .and_then(|m| m.modified())
         .is_ok_and(|m| m >= floor)
@@ -3788,7 +3728,7 @@ fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
     std::fs::copy(src.join("Makefile.oxidebsd"), build_dir.join("Makefile.oxidebsd"))
         .expect("failed to copy usr.bin/ninja/Makefile.oxidebsd");
     let cxx = format!(
-        "{} --target={CLANG_TARGET_TRIPLE} --sysroot={}",
+        "{} --target={CLANG_TARGET_TRIPLE} --sysroot={} -fPIE",
         host_build.join("bin/clang++").display(),
         musl_sysroot.display()
     );
@@ -3797,7 +3737,7 @@ fn build_ninja(host_build: &Path, musl_sysroot: &Path) -> PathBuf {
         .args(["-f", "Makefile.oxidebsd", &format!("-j{}", build_jobs())])
         .arg(format!("CXX={cxx}"))
         .arg(format!(
-            "LDFLAGS=-static -fuse-ld=lld -Wl,--image-base={NINJA_LOAD_ADDR:#x}"
+            "LDFLAGS=-pie -fuse-ld=lld"
         ))
         .status()
         .unwrap_or_else(|e| panic!("failed to run make for ninja: {e}"));
@@ -3846,7 +3786,6 @@ fn write_ninja_src_manifest() -> PathBuf {
 }
 
 fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
-    const NANO_LOAD_ADDR: u64 = 0x1c00_0000;
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src = Path::new(manifest_dir).join("usr.bin/nano");
     let build_dir = Path::new(manifest_dir).join("target/nano");
@@ -3864,7 +3803,7 @@ fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
         .filter_map(|(_, abs)| std::fs::metadata(abs).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(std::time::SystemTime::now());
-    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime);
+    let floor = musl_mtime.max(ncurses_mtime).max(src_mtime).max(recipe_mtime("nano", "dynamic-pie"));
     if std::fs::metadata(&bin)
         .and_then(|m| m.modified())
         .is_ok_and(|m| m >= floor)
@@ -3885,7 +3824,7 @@ fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
         )
         .env(
             "LDFLAGS",
-            format!("-static -no-pie -L{}", ncurses_sysroot.join("lib").display()),
+            format!("-pie -L{}", ncurses_sysroot.join("lib").display()),
         )
         .args(["--host=x86_64-unknown-linux-musl", "--disable-nls"])
         .stdout(std::process::Stdio::null())
@@ -3900,7 +3839,7 @@ fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
             "-j",
             &jobs.to_string(),
             &format!(
-                "LDFLAGS=-static -no-pie -L{} -Wl,-Ttext-segment={NANO_LOAD_ADDR:#x}",
+                "LDFLAGS=-pie -L{}",
                 ncurses_sysroot.join("lib").display()
             ),
         ])
@@ -4771,41 +4710,16 @@ fn discover_posix_test_files(interfaces_dir: &Path) -> Vec<String> {
 /// still real and un-fixed -- worth its own investigation later, tracked separately from this
 /// pilot.)
 ///
-/// Every pilot file shares one fixed load address (`POSIX_TEST_LOAD_BASE`, `0xe800000`, was
-/// `0xa800000` before the whole low-VA family's own `+0x4000000` move -- see
-/// `module::MODULE_VA_BASE`'s own doc comment) -- see this function's own leading comment for why
-/// sharing one address is safe now (grew past the ~704-slot ceiling a per-file-unique-address
-/// scheme could fit in the gap before `module::MODULE_VA_BASE`, once the corpus expanded from a
-/// 488-file curated dedup to the ~1700-file full suite). Before that, each file got its own
-/// `POSIX_TEST_LOAD_BASE + index * POSIX_TEST_LOAD_STEP` slot -- moved down from an original
-/// `0xcf40000`/`0x40000`-step layout (only ~195 slots in the same gap) when the list first grew
-/// past 68 files. `0xe800000` itself sits comfortably past the BusyBox applet range's own ceiling
-/// (`0xe240000`). `t0` (the
+/// Every pilot file is a static PIE, as is `t0` (the
 /// suite's own real timeout-wrapper utility, see
 /// `posix_conformance.sh`'s own doc comment for why a real `alarm()`-based wrapper matters on a
-/// kernel with no preemption) is cross-compiled the same way, at its own fixed base just below the
-/// pilot range. Embeds each compiled ELF's real bytes at `bin/<relative-path-with-.c-extension>`
+/// kernel with no preemption), cross-compiled the same way. Embeds each compiled ELF's real bytes at `bin/<relative-path-with-.c-extension>`
 /// (the `.c` suffix is a real file's real relative identity carried through unchanged from the
 /// source tree, not a claim about its own content -- avoids needing any extension-rewriting logic
 /// in the shell runner, which would need real string manipulation hush may not support cleanly)
 /// and writes out a plain-text `manifest.txt` (one relative path per line) generated from the same
 /// list, so the seeded corpus and the runner script's own iteration list can never drift apart.
 fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> PathBuf {
-    // One single shared load address for every pilot binary, not a unique slot per file: each
-    // runs as its own `fork`+`execve`'d process in a completely fresh `AddressSpace` (see
-    // CLAUDE.md's "User-mode execution" section) and never coexists with another pilot binary in
-    // the same address space (no `PT_INTERP` here, unlike `libc.so`'s own real dynamic-linking
-    // case) -- so, unlike every hand-written `userland/*` crate's own `linker.ld` (which follows a
-    // "give every embedded ELF a distinct base" convention that was never a hard requirement, just
-    // a longstanding habit), there is no real technical reason these need to differ. This stopped
-    // being optional once the corpus grew past the ~704 slots the old
-    // `POSIX_TEST_LOAD_BASE`..`module::MODULE_VA_BASE` gap could fit at a per-file step wide
-    // enough to clear the largest real observed binary (~76 KiB) -- ~1700 files at that same step
-    // would need ~218 MiB of VA space against an ~88 MiB gap.
-    // Both +0x4000000 (was 0xa800000/0xa780000) alongside every other fixed userland/BusyBox/
-    // module address -- see module::MODULE_VA_BASE's own doc comment.
-    const POSIX_TEST_LOAD_BASE: u64 = 0xe800000;
-    const T0_LOAD_BASE: u64 = 0xe780000;
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let out_dir = Path::new(manifest_dir).join("target/generated");
@@ -4826,9 +4740,8 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
 
     let all_files = discover_posix_test_files(&interfaces_dir);
 
-    // Parallel across test files (mirrors `build_busybox_applet`'s own work-stealing pool over a
-    // shared atomic index -- see that call site's comment for why: a plain thread-per-file pool
-    // would vastly oversubscribe an 8-core host at this corpus size). Best-effort per file, not
+    // Parallel across test files, a work-stealing pool over a shared atomic index: a
+    // thread per file would vastly oversubscribe an 8-core host at this corpus size. Best-effort per file, not
     // `panic!` on the first failure: unlike the old hand-curated 488, this is every file the
     // upstream suite ships, including real helper files with no standalone `main()`
     // (`testfrmw.c`/`coverage.c`) and a handful of genuine upstream oddities (see
@@ -4851,9 +4764,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
                     let invocation = compiler_invocation(&musl_gcc);
                     let mut cmd = Command::new(&invocation[0]);
                     cmd.args(&invocation[1..]);
-                    cmd.arg("-static")
-                        .arg("-no-pie")
-                        .arg(format!("-Wl,-Ttext-segment={POSIX_TEST_LOAD_BASE:#x}"))
+                    cmd.arg("-static-pie")
                         .arg("-I")
                         .arg(&include_dir)
                         // Real, found-live upstream-vs-modern-host-GCC frictions, not this
@@ -4946,9 +4857,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     println!("cargo:rerun-if-changed={}", t0_c.display());
     let t0_out = bin_dir.join("t0");
     let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg(format!("-Wl,-Ttext-segment={T0_LOAD_BASE:#x}"))
+        .arg("-static-pie")
         // A real bug in the vendored suite's own t0.c: calls `strcmp` without `#include
         // <string.h>` -- TCC let this slide (an implicit declaration is only a warning there);
         // this host's real GCC treats it as a hard error by default. `-include string.h` forces
@@ -4987,9 +4896,6 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     // script runs from (`/usr/tests/posix`) -- so it has to be seeded at that *exact* path, not
     // under `bin/` like every other pilot binary. Kept in a second, separate generated array
     // (`POSIX_TEST_EXTRA_FILES`), which `sys/modules/oxfs` seeds next to `POSIX_TEST_FILES`.
-    // +0x4000000 (was 0xa7a0000) alongside every other fixed userland/BusyBox/module address --
-    // see module::MODULE_VA_BASE's own doc comment.
-    const SIGALTSTACK_9_BUILDONLY_LOAD_BASE: u64 = 0xe7a0000;
     let sigaltstack_9_buildonly_c = interfaces_dir.join("sigaltstack/9-buildonly.c");
     println!(
         "cargo:rerun-if-changed={}",
@@ -4997,11 +4903,7 @@ fn write_posix_test_manifest(musl_sysroot: &Path, posixtestsuite_dir: &Path) -> 
     );
     let sigaltstack_9_buildonly_out = bin_dir.join("sigaltstack_9-buildonly.test");
     let status = Command::new(&musl_gcc)
-        .arg("-static")
-        .arg("-no-pie")
-        .arg(format!(
-            "-Wl,-Ttext-segment={SIGALTSTACK_9_BUILDONLY_LOAD_BASE:#x}"
-        ))
+        .arg("-static-pie")
         .arg("-I")
         .arg(&include_dir)
         .arg("-o")
