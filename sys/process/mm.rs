@@ -197,6 +197,93 @@ pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
     mapped.flatten()
 }
 
+/// The running address space's `VmState` and its level 4 table, set by `AddressSpace::activate`
+/// (VMMAP.md §5.3): the anonymous-memory fault reads the map through it, since the fault may have
+/// interrupted the kernel holding the process table's lock. The table is checked against `CR3`
+/// before the pointer is used.
+static CURRENT_VM: core::sync::atomic::AtomicPtr<spin::Mutex<VmState>> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static CURRENT_VM_L4: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn set_current_vm(vm: *const spin::Mutex<VmState>, l4_phys: u64) {
+    CURRENT_VM.store(vm.cast_mut(), Ordering::Release);
+    CURRENT_VM_L4.store(l4_phys, Ordering::Release);
+}
+
+/// A not-present fault on a page of private anonymous memory or the heap (`mmap(MAP_ANON)`,
+/// `brk`) that the map allows the access to: maps a zeroed page (VMMAP.md §5.1). `None` when the
+/// fault isn't one; `Some(false)` when there was no frame (the OOM killer's case). From ring 3,
+/// a copy routine, or the kernel filling a range itself (`mlock`). Never waits: the map is taken
+/// with `try_lock`, and a fault finding it locked is a kernel bug, reported and failed.
+pub fn try_fill_anon(fault_addr: u64, write: bool, exec: bool) -> Option<bool> {
+    use super::vm_map::{PROT_EXEC, PROT_READ, PROT_WRITE, VmKind};
+    if scheduler::current_pid() == 0 {
+        return None;
+    }
+    let phys_offset = memory::phys_mem_offset();
+    let (l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let vm = CURRENT_VM.load(Ordering::Acquire);
+    if vm.is_null() || CURRENT_VM_L4.load(Ordering::Acquire) != l4_frame.start_address().as_u64() {
+        return None;
+    }
+    let prot = {
+        // SAFETY: the running address space's state, alive while its table is CR3's.
+        let Some(state) = (unsafe { &*vm }).try_lock() else {
+            crate::serial_println!("[vm] fault with the map locked at {:#x}", fault_addr);
+            return None;
+        };
+        let (_, e) = state.map.lookup(fault_addr)?;
+        if !matches!(e.kind, VmKind::Anon | VmKind::Heap) || e.shared {
+            return None;
+        }
+        let need = if exec { PROT_EXEC } else if write { PROT_WRITE } else { PROT_READ };
+        if e.prot & need == 0 {
+            return None;
+        }
+        e.prot
+    };
+    let l4_ptr = (phys_offset + l4_frame.start_address().as_u64())
+        .as_mut_ptr::<x86_64::structures::paging::PageTable>();
+    // SAFETY: CR3's level-4 table is live and reachable through the physical-memory window, and
+    // nothing else touches page tables while this runs (single core, IF clear).
+    let mut mapper =
+        unsafe { x86_64::structures::paging::OffsetPageTable::new(&mut *l4_ptr, phys_offset) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(fault_addr));
+    // A slot in use (a page, PROT_NONE, a file page) isn't this fault's to fill.
+    if memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address())
+        .is_some_and(|e| !e.is_unused())
+    {
+        return None;
+    }
+    let parent = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let leaf = prot_leaf_flags(prot as u64);
+    let mapped = memory::try_with_frame_allocator(|fa| {
+        let Some(frame) = fa.allocate_frame() else {
+            return Some(false);
+        };
+        let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+        // SAFETY: a freshly allocated, unused frame; anonymous memory starts zeroed.
+        unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+        // SAFETY: `page` is unused (checked above) and inside this process's own mapping.
+        unsafe { mapper.map_to_with_table_flags(page, frame, leaf, parent, fa) }
+            .map(|flush| flush.flush())
+            .ok()
+            .map(|()| true)
+    });
+    mapped.flatten()
+}
+
+/// Fills the anonymous pages of `[addr, end)` the map allows reading (`mlock`, `mlockall`):
+/// `EAGAIN` with no memory for them.
+fn fill_anon_range(addr: u64, end: u64) -> Result<(), u64> {
+    for va in (addr & !0xfff..end).step_by(4096) {
+        if try_fill_anon(va, false, false) == Some(false) {
+            return Err(crate::syscall::EAGAIN);
+        }
+    }
+    Ok(())
+}
+
 /// The window `mmap` and `shmat` take addresses from when the caller names none (`VmMap::
 /// find_space`, from the address space's randomized `mmap_base`).
 pub(crate) const MMAP_REGION_BASE: u64 = 0x_2000_0000_0000;
@@ -713,7 +800,7 @@ pub fn do_mmap(
             addr_hint,
         )
     } else {
-        do_mmap_anon(caller_pid, fixed_base, region_len, prot, addr_hint)
+        do_mmap_anon(caller_pid, fixed_base, region_len, prot, addr_hint, shared || auto_lock)
     };
 
     if auto_lock && result.is_ok() {
@@ -726,38 +813,30 @@ pub fn do_mmap(
     result
 }
 
-/// The anonymous-mapping half of `do_mmap` (`fd < 0`, i.e. `MAP_ANON`) -- split out so `do_mmap`
-/// itself can apply the real `mlockall(MCL_FUTURE)` accounting uniformly across both this and
-/// `do_mmap_file_backed` without duplicating it in each. `fixed_base`, when set, is a real
-/// `MAP_FIXED` address (already alignment/canonical-validated, and already had `do_mmap`'s own
-/// `do_munmap` pre-clear run against it); otherwise a fresh VA is bump-allocated as before.
-///
-/// **Real `PROT_NONE` (neither `PROT_READ` nor `PROT_WRITE`) skips mapping the region at all** --
-/// reusing `do_mmap_file_backed`'s own precedent (see that function's doc comment) rather than
-/// mapping present-but-inaccessible pages. This isn't just consistency: `AddressSpace::teardown`'s
-/// own frame-freeing walk (`free_table_level`) treats a clear `USER_ACCESSIBLE` bit *anywhere* as
-/// an absolute guarantee that nothing user-owned lives beneath it, and skips freeing there
-/// unconditionally (see that function's own doc comment) -- a present-but-`USER_ACCESSIBLE`-clear
-/// leaf would be a real, permanent per-guard-page frame leak on every address-space teardown, not
-/// just formally inconsistent. Leaving the region genuinely unmapped costs nothing here (no
-/// pre-existing content to preserve) and reuses the exact same "unmapped access -> real `SIGSEGV`"
-/// path `do_mmap_file_backed`'s own `PROT_NONE` case already established.
-///
-/// `do_mprotect` is what actually reifies a `PROT_NONE` sub-range later widened to real access --
-/// see that function's own doc comment for the demand-mapping half of this design (musl's own
-/// `pthread_create()` `mmap()`s the whole guard+usable region `PROT_NONE` in one call, then
-/// `mprotect()`s just the usable tail back to `PROT_READ|PROT_WRITE`).
+/// The anonymous-mapping half of `do_mmap` (`fd < 0`, i.e. `MAP_ANON`), split out so `do_mmap`
+/// applies the `mlockall(MCL_FUTURE)` accounting to it and to `do_mmap_file_backed` alike.
+/// `fixed_base`, when set, is a `MAP_FIXED` address (validated, and cleared by `do_mmap`'s
+/// `do_munmap`); otherwise the map finds one. Private memory is only recorded: a page is made
+/// at its first touch, with the map's protection then (`try_fill_anon`, VMMAP.md §5), so a
+/// `PROT_NONE` mapping and a guard region stay empty. `eager` makes the pages now: a shared
+/// mapping, or one `mlockall(MCL_FUTURE)` locks.
 fn do_mmap_anon(
     caller_pid: Pid,
     fixed_base: Option<u64>,
     region_len: u64,
     prot: u64,
     hint: u64,
+    eager: bool,
 ) -> Result<u64, u64> {
     use super::vm_map::{PROT_ALL, VmEntry, VmKind};
     let base = reserve(caller_pid, fixed_base, hint, region_len, |end| {
         VmEntry::new(end, map_prot(prot), PROT_ALL, false, VmKind::Anon)
     })?;
+    // Private memory is made at its first touch (`try_fill_anon`); a shared mapping, or one
+    // `mlockall(MCL_FUTURE)` locks, now.
+    if !eager {
+        return Ok(base);
+    }
     let mapped = map_anon_pages(caller_pid, base, region_len, prot);
     if mapped.is_err() {
         // Frees what did get mapped, and the reservation.
@@ -1705,34 +1784,26 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     }
     // The map decides first, changing nothing on a refusal (POSIX): `ENOMEM` if a page isn't
     // mapped, `EACCES` past a mapping's maximum protection (a shared mapping of a file opened
-    // read-only) or on the kernel's own pages. Pages of anonymous memory not made yet (asked for
-    // `PROT_NONE`) are made when they become accessible; others in a mapping (the stack's
-    // reserve, a file's tail past its end) stay as they are.
-    let pieces = {
+    // read-only) or on the kernel's own pages. Pages not made yet (anonymous memory never touched,
+    // the stack's reserve, a file's tail past its end) stay as they are: the map's protection is
+    // what their first touch gets (`try_fill_anon`).
+    {
         use super::vm_map::MapError;
         let table = PROCESS_TABLE.lock();
         let me = table.get(&caller_pid).expect("mprotect: current process missing from table");
         let page_end = (end_inclusive | 0xfff) + 1;
         match me.vm().map.protect(addr, page_end, map_prot(prot)) {
-            Ok(pieces) => pieces,
+            Ok(_) => {}
             Err(MapError::Unmapped | MapError::Invalid) => return Err(ENOMEM),
             Err(_) => return Err(EACCES),
         }
-    };
-    let anon_at = |va: u64| {
-        pieces
-            .iter()
-            .any(|(s, e)| (*s..e.end).contains(&va) && e.kind == super::vm_map::VmKind::Anon)
-    };
+    }
 
     let writable = prot & PROT_WRITE != 0;
     let accessible = prot_accessible(prot);
     let leaf_flags = prot_leaf_flags(prot);
     // The bits `mprotect` owns on an existing leaf; every other bit (`SHARED_LEAF`, ...) is kept.
     let prot_bits = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
-    // Always fully open -- see do_mmap_anon's identical reasoning.
-    let parent_table_flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
     // Page cache pages not filled yet are filled first, as a touch would, so the new permissions
     // apply to a real page (DEMANDPAGE.md): left as they were, a page made PROT_NONE would fill and
@@ -1857,31 +1928,8 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                             .flush();
                     }
                 }
-                _ if !accessible || !anon_at(va.as_u64()) => {}
-                _ => {
-                    // Not yet backed -- a still-PROT_NONE guard sub-range being widened for the
-                    // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill
-                    // convention for every other anonymous page.
-                    let frame = fa.allocate_frame().ok_or(ENOMEM)?;
-                    let frame_ptr =
-                        (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-                    unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
-                    // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's
-                    // contract); page is confirmed not-Mapped above, and falls inside this
-                    // process's own mmap window.
-                    unsafe {
-                        mapper
-                            .map_to_with_table_flags(
-                                page,
-                                frame,
-                                leaf_flags,
-                                parent_table_flags,
-                                fa,
-                            )
-                            .map_err(|_| ENOMEM)?
-                            .flush();
-                    }
-                }
+                // Not made yet: its first touch gets the new protection from the map.
+                _ => {}
             }
         }
         Ok(())
@@ -1937,13 +1985,15 @@ pub fn do_mlock(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
     if len == 0 {
         return Ok(0);
     }
-    // Locked pages are resident: page cache pages not filled yet are filled now (DEMANDPAGE.md).
+    // Locked pages are resident: page cache pages and anonymous memory not made yet are made now
+    // (DEMANDPAGE.md, VMMAP.md §5.2).
     if let Some(end) = addr.checked_add(len) {
         for va in (addr & !0xfff..end).step_by(4096) {
             if let Some(FileFill::NoMemory) = try_fill_file_page(va, true) {
                 return Err(crate::syscall::EAGAIN);
             }
         }
+        fill_anon_range(addr, end)?;
     }
     if range_fully_mapped(caller_pid, addr, len) {
         Ok(0)
@@ -1988,10 +2038,23 @@ pub fn do_mlockall(caller_pid: Pid, flags: u64) -> Result<u64, u64> {
     if flags & MCL_FUTURE != 0 {
         shared.mlockall_future = true;
     }
+    let mut anon = Vec::new();
     if flags & MCL_CURRENT != 0 {
         for region in shared.mmap_file_regions.iter_mut() {
             region.locked = true;
         }
+        if flags & MCL_ONFAULT == 0 {
+            anon.extend(shared.map.iter().filter_map(|(start, e)| {
+                matches!(e.kind, super::vm_map::VmKind::Anon | super::vm_map::VmKind::Heap).then_some((start, e.end))
+            }));
+        }
+    }
+    drop(shared);
+    drop(table);
+    // Everything mapped now is made resident (VMMAP.md §5.2), with no lock held: the fill takes
+    // the map itself.
+    for (start, end) in anon {
+        fill_anon_range(start, end)?;
     }
     Ok(0)
 }
@@ -2023,7 +2086,6 @@ const PIE_BRK_CEILING: u64 = 0x_4000_0000_0000;
 /// (a previous grow may have stopped mid-page), so the *page containing* the old value is already
 /// mapped and must be skipped, not re-mapped (`Mapper::map_to` fails on an already-present page).
 pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
-    let phys_offset = memory::phys_mem_offset();
     let table = PROCESS_TABLE.lock();
     let me = table
         .get(&caller_pid)
@@ -2067,43 +2129,7 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
         };
         grown.map_err(|_| ENOMEM)?;
     }
-    if new_top > map_start {
-        // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
-        // address space.
-        let mut mapper = unsafe {
-            me.address_space
-                .as_ref()
-                .expect("mm: caller has no address space")
-                .mapper(phys_offset)
-        };
-        let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(map_start));
-        let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(new_top - 1));
-        with_frame_allocator(|fa| -> Result<(), u64> {
-            for page in Page::range_inclusive(start_page, end_page) {
-                let frame = fa.allocate_frame().ok_or(ENOMEM)?;
-                // SAFETY: frame was just allocated; page starts at the first not-yet-mapped page
-                // past the current brk, so it isn't already present.
-                unsafe {
-                    mapper
-                        .map_to(
-                            page,
-                            frame,
-                            PageTableFlags::PRESENT
-                                | PageTableFlags::WRITABLE
-                                | PageTableFlags::USER_ACCESSIBLE
-                                | crate::cpu::nx::no_execute(),
-                            fa,
-                        )
-                        .map_err(|_| ENOMEM)?
-                        .flush();
-                }
-                let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-                unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
-            }
-            Ok(())
-        })?;
-    }
-
+    // The new pages are made at their first touch (`try_fill_anon`, VMMAP.md §5.1).
     shared.brk = VirtAddr::new(new_top);
     Ok(new_top)
 }

@@ -2,7 +2,8 @@
  * kern-smoke vm: the per-process address-space map (OxideBSD-doc VMMAP.md, CLEANUP.md §3 and
  * §7): addresses are the process's own and reused, munmap and mprotect work on part of a
  * mapping, MAP_FIXED over part of a file mapping leaves the rest answering for itself,
- * RLIMIT_AS holds, shmat takes an address, and /proc/<pid>/map(s) list the mappings.
+ * RLIMIT_AS holds, shmat takes an address, /proc/<pid>/map(s) list the mappings, and anonymous
+ * memory and the heap are made at their first touch.
  */
 #include <setjmp.h>
 #include <sys/ipc.h>
@@ -31,6 +32,20 @@ static int touch_signal(volatile char *p)
 		(void)*p;
 	sigaction(SIGSEGV, &old_segv, NULL);
 	sigaction(SIGBUS, &old_bus, NULL);
+	return vm_signal;
+}
+
+/* The signal a write to `p` raises, or 0. */
+static int write_signal(volatile char *p)
+{
+	struct sigaction sa, old_segv;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = vm_catch;
+	sigaction(SIGSEGV, &sa, &old_segv);
+	vm_signal = 0;
+	if (sigsetjmp(vm_jump, 1) == 0)
+		*p = 1;
+	sigaction(SIGSEGV, &old_segv, NULL);
 	return vm_signal;
 }
 
@@ -84,6 +99,27 @@ static int has_line(const char *path, const char *needle)
 	close(fd);
 	buf[total] = 0;
 	return strstr(buf, needle) != NULL;
+}
+
+/* The resident pages /proc/self/map reports for the mapping at m (-1 if it lists none). */
+static long resident(void *m, size_t len)
+{
+	static char buf[65536];
+	char needle[64];
+	int fd = open("/proc/self/map", O_RDONLY);
+	if (fd < 0)
+		return -1;
+	ssize_t n, total = 0;
+	while ((n = read(fd, buf + total, sizeof buf - 1 - total)) > 0)
+		total += n;
+	close(fd);
+	buf[total] = 0;
+	snprintf(needle, sizeof needle, "0x%lx 0x%lx ", (unsigned long)m, (unsigned long)m + len);
+	char *line = strstr(buf, needle);
+	long pages;
+	if (line == NULL || sscanf(line + strlen(needle), "%ld", &pages) != 1)
+		return -1;
+	return pages;
 }
 
 static void vm_main(void)
@@ -159,4 +195,25 @@ static void vm_main(void)
 	check(has_line("/proc/self/map", needle), "/proc/self/map, FreeBSD's format");
 	check(has_line("/proc/self/maps", "[stack]"), "with the stack");
 	munmap(m, pg);
+
+	/* Anonymous memory is made at its first touch (VMMAP.md §5). */
+	size_t gib = (size_t)1 << 30;
+	volatile char *lazy = mmap(NULL, gib, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	check(lazy != MAP_FAILED && resident((void *)lazy, gib) == 0, "a 1 GiB anonymous mapping costs nothing");
+	check(lazy[3 * pg] == 0, "an untouched page reads as zero");
+	lazy[0] = 1;
+	lazy[gib / 2] = 2;
+	check(resident((void *)lazy, gib) == 3, "each page touched costs one");
+	check(lazy[0] == 1 && lazy[gib / 2] == 2, "and keeps what was written");
+	check(mlock((void *)(lazy + 16 * pg), 4 * pg) == 0 && resident((void *)lazy, gib) == 7, "mlock makes its range resident");
+	check(mprotect((void *)(lazy + 32 * pg), pg, PROT_READ) == 0 && write_signal(lazy + 32 * pg) == SIGSEGV,
+	      "an untouched page made read-only refuses a write");
+	check(lazy[32 * pg] == 0, "but reads as zero");
+	munmap((void *)lazy, gib);
+	/* musl's sbrk() refuses to grow the heap (as its brk() does): the system call itself. */
+	char *heap = (char *)syscall(SYS_brk, 0);
+	check((char *)syscall(SYS_brk, heap + 64 * pg) == heap + 64 * pg && heap[10 * pg] == 0,
+	      "the heap grows on demand");
+	heap[63 * pg] = 9;
+	check(heap[63 * pg] == 9, "and keeps what was written");
 }

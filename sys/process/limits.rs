@@ -890,6 +890,14 @@ fn futex_key(pid: Pid, addr: u64, private: bool) -> Result<(Pid, u64), u64> {
             Ok((0, frame.start_address().as_u64() + offset))
         }
         TranslateResult::Mapped { .. } => Ok((proc.tgid, addr)),
+        // Anonymous memory not touched yet is private (a shared mapping's pages are made at
+        // mmap): keyed as such.
+        _ if proc.vm().map.lookup(addr).is_some_and(|(_, e)| {
+            matches!(e.kind, super::vm_map::VmKind::Anon | super::vm_map::VmKind::Heap) && !e.shared
+        }) =>
+        {
+            Ok((proc.tgid, addr))
+        }
         _ => Err(EFAULT),
     }
 }

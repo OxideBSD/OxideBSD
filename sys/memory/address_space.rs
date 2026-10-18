@@ -488,6 +488,8 @@ impl AddressSpace {
             crate::cpu::pti::kernel_cr3(kphys),
             crate::cpu::pti::user_cr3(uphys),
         );
+        // The map the anonymous-memory fault reads (`mm::try_fill_anon`).
+        crate::process::mm::set_current_vm(Arc::as_ptr(&self.vm), kphys);
     }
 
     /// Real reclaim: frees every frame this address space privately owns -- every

@@ -309,12 +309,16 @@ fn page_fault_handler(frame: &mut TrapFrame) {
                 None
             }
         } else {
-            // A page cache page's first touch (DEMANDPAGE.md §4), else stack growth.
+            // A page cache page's first touch (DEMANDPAGE.md §4), else anonymous memory's
+            // (VMMAP.md §5), else stack growth.
+            let write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+            let exec = error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH);
             match crate::process::mm::try_fill_file_page(addr, frame.from_user()) {
                 Some(crate::process::mm::FileFill::Done) => Some(true),
                 Some(crate::process::mm::FileFill::NoMemory) => Some(false),
                 Some(crate::process::mm::FileFill::Failed) => None,
-                None => crate::process::mm::try_grow_user_stack(addr),
+                None => crate::process::mm::try_fill_anon(addr, write, exec)
+                    .or_else(|| crate::process::mm::try_grow_user_stack(addr)),
             }
         };
         match resolved {
