@@ -709,13 +709,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "touch"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
 name = "trap-syscall-smoke"
 version = "0.1.0"
 
