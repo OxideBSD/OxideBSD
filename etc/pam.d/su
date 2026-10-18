@@ -1,9 +1,10 @@
 #
 # /etc/pam.d/su: the policy for su(1); see pam.conf(5). The password asked for is the target
-# user's.
+# user's; root is asked none (pam_rootok).
 #
 
 # auth
+auth		sufficient	pam_rootok.so
 auth		include		system
 
 # account

@@ -8,6 +8,7 @@ use crate::PamHandle;
 mod lastlog;
 mod nologin;
 mod permit;
+mod rootok;
 mod securetty;
 mod unix;
 
@@ -27,7 +28,7 @@ pub struct PamModule {
 unsafe impl Sync for PamModule {}
 
 #[repr(transparent)]
-pub struct Table(pub [*const PamModule; 7]);
+pub struct Table(pub [*const PamModule; 8]);
 
 // SAFETY: as PamModule.
 unsafe impl Sync for Table {}
@@ -40,6 +41,7 @@ pub static openpam_static_modules: Table = Table([
     &lastlog::MODULE,
     &permit::PERMIT,
     &permit::DENY,
+    &rootok::MODULE,
     std::ptr::null(),
 ]);
 
