@@ -197,9 +197,82 @@ pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
     mapped.flatten()
 }
 
-const MMAP_REGION_BASE: u64 = 0x_2000_0000_0000;
-const MMAP_REGION_CEILING: u64 = 0x_3000_0000_0000;
-static NEXT_MMAP_PAGE: Mutex<u64> = Mutex::new(MMAP_REGION_BASE);
+/// The window `mmap` and `shmat` take addresses from when the caller names none (`VmMap::
+/// find_space`, from the address space's randomized `mmap_base`).
+pub(crate) const MMAP_REGION_BASE: u64 = 0x_2000_0000_0000;
+pub(crate) const MMAP_REGION_CEILING: u64 = 0x_3000_0000_0000;
+
+/// Where an exec's mappings start: a random page in the first TiB of the window (ASLR).
+pub(crate) fn pick_mmap_base() -> u64 {
+    let pages = (1u64 << 40) / 4096;
+    MMAP_REGION_BASE + (crate::random::kernel_random_u64() % pages) * 4096
+}
+
+/// A free range of `len` bytes for a mapping, near `hint` when it's in the window
+/// (`find_space`); `ENOMEM` when nothing fits, or when `RLIMIT_AS` would be passed (`as_limit`).
+pub(crate) fn alloc_va(vm: &VmState, len: u64, hint: u64, as_limit: u64) -> Result<u64, u64> {
+    check_as(vm, len, as_limit)?;
+    let hint = if (MMAP_REGION_BASE..MMAP_REGION_CEILING).contains(&hint) { hint & !0xfff } else { 0 };
+    vm.map.find_space(len, hint, vm.mmap_base, MMAP_REGION_BASE, MMAP_REGION_CEILING).ok_or(ENOMEM)
+}
+
+/// `ENOMEM` if `more` bytes of mappings would take the address space past `RLIMIT_AS`.
+pub(crate) fn check_as(vm: &VmState, more: u64, as_limit: u64) -> Result<(), u64> {
+    if vm.map.size().saturating_add(more) > as_limit { Err(ENOMEM) } else { Ok(()) }
+}
+
+/// Records a program's (or its interpreter's) `PT_LOAD` segments, loaded at `bias`, in a fresh
+/// map.
+pub(crate) fn record_segments(vm: &mut VmState, elf: &super::elf::Elf, bias: u64) {
+    use super::vm_map::{PROT_ALL, VmEntry, VmKind};
+    for (start, end, prot) in elf.load_ranges(bias) {
+        let kind = VmKind::Text { content: elf.content(), page: (start - bias) / 4096 };
+        let _ = vm.map.insert(start, VmEntry::new(end, prot, PROT_ALL, false, kind));
+    }
+}
+
+/// Records the rest of a new image's address space: the stack's whole reserve (no mapping may
+/// take it), the fault trampoline's pages, and a fresh mmap base.
+pub(crate) fn record_exec_tail(vm: &mut VmState, exec_stack: bool) {
+    use super::vm_map::{PROT_ALL, PROT_EXEC, PROT_READ, PROT_WRITE, VmEntry, VmKind};
+    let stack_prot = PROT_READ | PROT_WRITE | if exec_stack { PROT_EXEC } else { 0 };
+    let _ = vm.map.insert(
+        USER_STACK_TOP - USER_STACK_RESERVE,
+        VmEntry::new(USER_STACK_TOP, stack_prot, PROT_ALL, false, VmKind::Stack),
+    );
+    let tramp = super::fault_trampoline::FAULT_SCRATCH_VA;
+    let rx = PROT_READ | PROT_EXEC;
+    let _ = vm.map.insert(tramp, VmEntry::new(tramp + 0x2000, rx, rx, false, VmKind::Kernel));
+    vm.mmap_base = pick_mmap_base();
+    vm.map.set_base(vm.mmap_base);
+}
+
+/// Reserves the range a new mapping of `len` bytes goes in, entering it in the caller's map
+/// first, so nothing else can take it while the pages are made: at `fixed` (`MAP_FIXED`, whose
+/// old pages `do_munmap` already took out), else a free range near `hint` (`alloc_va`).
+/// `ENOMEM` past `RLIMIT_AS` or with no room. A caller that then fails unmaps the range (`do_munmap`).
+pub(crate) fn reserve(
+    caller_pid: Pid,
+    fixed: Option<u64>,
+    hint: u64,
+    len: u64,
+    entry: impl FnOnce(u64) -> super::vm_map::VmEntry,
+) -> Result<u64, u64> {
+    let table = PROCESS_TABLE.lock();
+    let me = table.get(&caller_pid).expect("mmap: current process missing from table");
+    let as_limit = me.rlimits[super::limits::RLIMIT_AS].0;
+    let mut vm = me.vm();
+    let base = match fixed {
+        Some(base) => {
+            check_as(&vm, len, as_limit)?;
+            base
+        }
+        None => alloc_va(&vm, len, hint, as_limit)?,
+    };
+    vm.map.insert(base, entry(base + len)).map_err(|_| ENOMEM)?;
+    Ok(base)
+}
+
 
 /// Real per-process cap on the number of live fd-backed mappings — matches real Linux's own
 /// `vm.max_map_count` default (`65530`), which is what actually produces `ENOMEM` in practice for
@@ -231,6 +304,11 @@ const PROT_WRITE: u64 = 0x2;
 /// `PROT_EXEC`: the page is mapped without `NO_EXECUTE` (THREAT_MODEL.md §3.3); every other user
 /// page is not executable. Implies read access, as on all x86 hardware.
 const PROT_EXEC: u64 = 0x4;
+
+/// `prot` as the map keeps it (`vm_map::PROT_*`, the same bits).
+fn map_prot(prot: u64) -> u8 {
+    (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) as u8
+}
 
 /// Whether `prot` grants any access at all (anything but `PROT_NONE`).
 fn prot_accessible(prot: u64) -> bool {
@@ -364,6 +442,11 @@ fn add_mmap_file_ref(content_id: u64) {
 /// inherits (`inherit_vm_for_fork`). The last live process using it cleans it up at exit or exec
 /// (`lifecycle::last_live_user`).
 pub struct VmState {
+    /// The map of the user mappings (OxideBSD-doc `VMMAP.md`): what is mapped where, with what
+    /// protection; `mmap`, `munmap`, `mprotect`, `brk` and `shmat` keep it, exec starts it.
+    pub map: super::vm_map::VmMap,
+    /// Where `mmap` starts looking for free addresses (`alloc_va`), random per exec.
+    pub mmap_base: u64,
     /// The program break (`do_brk`).
     pub brk: VirtAddr,
     /// Where `execve` put the break: `RLIMIT_DATA` bounds how far past it the break may move.
@@ -419,6 +502,8 @@ impl Drop for VmState {
 impl Default for VmState {
     fn default() -> Self {
         Self {
+            map: super::vm_map::VmMap::new(),
+            mmap_base: MMAP_REGION_BASE,
             brk: VirtAddr::zero(),
             brk_base: VirtAddr::zero(),
             mmap_file_regions: Vec::new(),
@@ -439,11 +524,11 @@ impl Default for VmState {
 /// (`sysv_shm::inherit_attachments_for_fork`). Private regions are left out: fork gave the child
 /// its own copy-on-write pages, with nothing left to write back. Memory locks are not inherited.
 pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
-    let (brk, brk_base, wx_allowed, regions, text) = {
+    let (brk, brk_base, wx_allowed, regions, text, map, mmap_base) = {
         let vm = parent.vm();
         let regions: Vec<MmapFileRegion> =
             vm.mmap_file_regions.iter().filter(|r| r.shared).copied().collect();
-        (vm.brk, vm.brk_base, vm.wx_allowed, regions, vm.text.clone())
+        (vm.brk, vm.brk_base, vm.wx_allowed, regions, vm.text.clone(), vm.map.clone(), vm.mmap_base)
     };
     for r in &regions {
         add_mmap_file_ref(r.content_id);
@@ -454,6 +539,8 @@ pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
         vm.brk_base = brk_base;
         vm.wx_allowed = wx_allowed;
         vm.mmap_file_regions = regions;
+        vm.map = map;
+        vm.mmap_base = mmap_base;
         for vp in text {
             vm.add_text(vp);
         }
@@ -478,18 +565,6 @@ pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
 pub struct MmapFileRegion {
     va_start: u64,
     npages: u64,
-    /// How many pages starting at `va_start` are actually backed by real frames -- always
-    /// `<= npages`, computed once at `mmap()` time from the object's own real length rounded up to
-    /// a whole page (`do_mmap_file_backed`'s own doc comment). Frozen at creation, not re-checked
-    /// against the object's current length on every fault -- a documented simplification (real
-    /// Linux dynamically re-checks the current inode size on each fault, letting a later
-    /// `ftruncate()` grow retroactively into what SIGBUSed before; no test in this kernel's own
-    /// conformance pilot exercises that). Pages `[mapped_pages, npages)` are deliberately left
-    /// *unmapped* in the caller's page table -- real POSIX MPR: a reference anywhere in that range
-    /// must raise `SIGBUS`, not silently succeed against a zero-filled page -- see
-    /// `signal_for_user_fault` below, which is what actually turns "unmapped" into a real signal
-    /// instead of the reboot every other unmapped ring-3 reference still gets.
-    mapped_pages: u64,
     /// The object page mapped at `va_start` (the `mmap` offset in pages).
     file_page: u64,
     content_id: u64,
@@ -625,7 +700,7 @@ pub fn do_mmap(
     };
 
     let result = if let Some(geom) = fb_geometry {
-        do_mmap_fb(caller_pid, geom, page_count, fixed_base)
+        do_mmap_fb(caller_pid, geom, page_count, fixed_base, addr_hint)
     } else if effective_fd >= 0 {
         do_mmap_file_backed(
             caller_pid,
@@ -635,9 +710,10 @@ pub fn do_mmap(
             prot,
             private,
             fixed_base,
+            addr_hint,
         )
     } else {
-        do_mmap_anon(caller_pid, fixed_base, region_len, prot)
+        do_mmap_anon(caller_pid, fixed_base, region_len, prot, addr_hint)
     };
 
     if auto_lock && result.is_ok() {
@@ -676,25 +752,26 @@ fn do_mmap_anon(
     fixed_base: Option<u64>,
     region_len: u64,
     prot: u64,
+    hint: u64,
 ) -> Result<u64, u64> {
-    let base = match fixed_base {
-        Some(base) => base,
-        None => {
-            let mut next = NEXT_MMAP_PAGE.lock();
-            let base = *next;
-            let end = base.checked_add(region_len).ok_or(ENOMEM)?;
-            if end > MMAP_REGION_CEILING {
-                return Err(ENOMEM);
-            }
-            *next = end;
-            base
-        }
-    };
+    use super::vm_map::{PROT_ALL, VmEntry, VmKind};
+    let base = reserve(caller_pid, fixed_base, hint, region_len, |end| {
+        VmEntry::new(end, map_prot(prot), PROT_ALL, false, VmKind::Anon)
+    })?;
+    let mapped = map_anon_pages(caller_pid, base, region_len, prot);
+    if mapped.is_err() {
+        // Frees what did get mapped, and the reservation.
+        let _ = do_munmap(caller_pid, base, region_len);
+    }
+    mapped.map(|()| base)
+}
 
+/// Makes the pages of a new anonymous mapping (allocated now, zeroed).
+fn map_anon_pages(caller_pid: Pid, base: u64, region_len: u64, prot: u64) -> Result<(), u64> {
     if !prot_accessible(prot) {
         // Real PROT_NONE: reserve the VA (already done above) but map nothing -- see this
         // function's own doc comment.
-        return Ok(base);
+        return Ok(());
     }
 
     let phys_offset = memory::phys_mem_offset();
@@ -743,7 +820,7 @@ fn do_mmap_anon(
         Ok(())
     })?;
 
-    Ok(base)
+    Ok(())
 }
 
 /// One real, still-live physical (MMIO) mapping in a process's own address space -- currently only
@@ -778,24 +855,14 @@ fn do_mmap_fb(
     geom: crate::drivers::fbdev::FbGeometry,
     requested_pages: u64,
     fixed_base: Option<u64>,
+    hint: u64,
 ) -> Result<u64, u64> {
     let max_pages = (geom.len.max(1)).div_ceil(4096);
     let page_count = requested_pages.min(max_pages);
     let region_len = page_count * 4096;
 
-    let base = match fixed_base {
-        Some(base) => base,
-        None => {
-            let mut next = NEXT_MMAP_PAGE.lock();
-            let base = *next;
-            let end = base.checked_add(region_len).ok_or(ENOMEM)?;
-            if end > MMAP_REGION_CEILING {
-                return Err(ENOMEM);
-            }
-            *next = end;
-            base
-        }
-    };
+    use super::vm_map::{PROT_READ as R, PROT_WRITE as W, VmEntry, VmKind};
+    let base = reserve(caller_pid, fixed_base, hint, region_len, |end| VmEntry::new(end, R | W, R | W, true, VmKind::Phys))?;
 
     let phys_offset = memory::phys_mem_offset();
     let table = PROCESS_TABLE.lock();
@@ -874,6 +941,7 @@ fn do_mmap_file_backed(
     prot: u64,
     private: bool,
     fixed_base: Option<u64>,
+    hint: u64,
 ) -> Result<u64, u64> {
     // Real POSIX `[EOVERFLOW]`: "the value of off plus len exceeds the offset maximum established
     // in the open file description associated with fildes" (`mmap/31-1.c` in the conformance
@@ -1132,18 +1200,12 @@ fn do_mmap_file_backed(
             .collect()
     };
 
-    let base = match fixed_base {
-        Some(base) => base,
-        None => {
-            let mut next = NEXT_MMAP_PAGE.lock();
-            let base = *next;
-            let end = next
-                .checked_add(region_len)
-                .filter(|&e| e <= MMAP_REGION_CEILING)
-                .ok_or(ENOMEM)?;
-            *next = end;
-            base
-        }
+    let base = {
+        use super::vm_map::{PROT_ALL, PROT_EXEC, PROT_READ as R, VmEntry, VmKind};
+        // A shared mapping of a file opened read-only can never be made writable (`mprotect`).
+        let max_prot = if !private && !fd_writable { R | PROT_EXEC } else { PROT_ALL };
+        let kind = VmKind::File { content: content_id, page: file_page, eof_page: file_page + covered_pages };
+        reserve(caller_pid, fixed_base, hint, region_len, |end| VmEntry::new(end, map_prot(prot), max_prot, !private, kind))?
     };
 
     let writable = prot & PROT_WRITE != 0;
@@ -1170,19 +1232,9 @@ fn do_mmap_file_backed(
     // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
     // address space.
     let mut mapper = unsafe { address_space.mapper(phys_offset) };
-    // Real `PROT_NONE` (`mmap/6-2.c`): neither `PROT_READ` nor `PROT_WRITE` set. Skipping the
-    // mapping loop entirely reuses `signal_for_user_fault`'s own existing default with zero new
-    // machinery -- that function already reports `SIGBUS` only for an address in a region's
-    // `[mapped_pages, npages)` reserved-but-unbacked tail, `SIGSEGV` for everything else unmapped.
-    // `mapped_pages` below is still recorded as the real `covered_pages` extent regardless (not
-    // `0`), so a reference anywhere in `[va_start, va_start + covered_pages*4096)` -- real content
-    // that exists but is genuinely off-limits under `PROT_NONE` -- correctly falls into that
-    // "everything else" `SIGSEGV` case rather than being misclassified as the reserved tail.
+    // `PROT_NONE` (`mmap/6-2.c`) maps nothing: a touch is SIGSEGV (`signal_for_user_fault`). Only
+    // the file's pages are mapped; past its end (the entry's `eof_page`) is SIGBUS, POSIX's MPR.
     let accessible = prot_accessible(prot);
-    // Only `[base, base + covered_pages*4096)` is actually mapped -- `[covered_pages, page_count)`
-    // is deliberately left with no page-table entry at all, real POSIX MPR (see MmapFileRegion's
-    // own `mapped_pages` field doc comment); `covered_pages == 0` (the whole reservation is beyond
-    // the object's own real content) skips this loop entirely.
     if covered_pages > 0 && accessible {
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(base));
         let end_page =
@@ -1234,7 +1286,6 @@ fn do_mmap_file_backed(
     me.vm().mmap_file_regions.push(MmapFileRegion {
         va_start: base,
         npages: page_count,
-        mapped_pages: covered_pages,
         file_page,
         content_id,
         writable,
@@ -1245,27 +1296,23 @@ fn do_mmap_file_backed(
     Ok(base)
 }
 
-/// Real POSIX MPR (`mmap/11-2.c`/`11-3.c`): resolves what signal a ring-3 reference to `addr`
-/// should raise, for `interrupts::page_fault_handler`'s own real-fault-to-signal delivery.
-/// `SIGBUS` when `addr` falls inside a live fd-backed mapping's own reserved-but-unbacked tail
-/// (`[mapped_pages, npages)` of one of `caller_pid`'s own `mmap_file_regions` -- see
-/// `MmapFileRegion::mapped_pages`'s own doc comment), `SIGSEGV` for every other unmapped ring-3
-/// reference (a real general fix in its own right -- this kernel used to reboot on any such
-/// reference at all, ring-3 or not, rather than terminate just the one offending process).
+/// The signal for a ring-3 fault at `addr` nothing could resolve: `SIGBUS` past the end of the
+/// file a mapping maps (as it was when mapped: POSIX's MPR, `mmap/11-2.c`), else `SIGSEGV`. Read
+/// from the map, so a mapping cut by `munmap` or `MAP_FIXED` answers for what's left of it.
 pub fn signal_for_user_fault(caller_pid: Pid, addr: u64) -> u64 {
     let table = PROCESS_TABLE.lock();
     let Some(me) = table.get(&caller_pid) else {
         return crate::process::SIGSEGV;
     };
-    let in_reserved_tail = me.vm().mmap_file_regions.iter().any(|r| {
-        let backed_end = r.va_start + r.mapped_pages * 4096;
-        let reserved_end = r.va_start + r.npages * 4096;
-        addr >= backed_end && addr < reserved_end
-    });
-    if in_reserved_tail {
-        crate::process::SIGBUS
-    } else {
-        crate::process::SIGSEGV
+    let vm = me.vm();
+    match vm.map.lookup(addr) {
+        Some((start, e)) => match e.kind {
+            super::vm_map::VmKind::File { page, eof_page, .. } if page + (addr - start) / 4096 >= eof_page => {
+                crate::process::SIGBUS
+            }
+            _ => crate::process::SIGSEGV,
+        },
+        None => crate::process::SIGSEGV,
     }
 }
 
@@ -1371,6 +1418,11 @@ pub fn do_munmap(caller_pid: Pid, addr: u64, len: u64) -> Result<u64, u64> {
     let me = table
         .get(&caller_pid)
         .expect("munmap: current process missing from table");
+    // The map first: everything in the range leaves it (a split at either end if need be), but
+    // not the kernel's own pages (`EINVAL`).
+    if me.vm().map.remove(addr, addr + region_len).is_err() {
+        return Err(EINVAL);
+    }
 
     let file_region_idx = me
         .vm()
@@ -1651,7 +1703,27 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     if addr < crate::memory::usercopy::VM_MINUSER || end_inclusive >= crate::memory::usercopy::VM_MAXUSER {
         return Err(ENOMEM);
     }
-    let in_mmap_window = addr >= MMAP_REGION_BASE && end_inclusive < MMAP_REGION_CEILING;
+    // The map decides first, changing nothing on a refusal (POSIX): `ENOMEM` if a page isn't
+    // mapped, `EACCES` past a mapping's maximum protection (a shared mapping of a file opened
+    // read-only) or on the kernel's own pages. Pages of anonymous memory not made yet (asked for
+    // `PROT_NONE`) are made when they become accessible; others in a mapping (the stack's
+    // reserve, a file's tail past its end) stay as they are.
+    let pieces = {
+        use super::vm_map::MapError;
+        let table = PROCESS_TABLE.lock();
+        let me = table.get(&caller_pid).expect("mprotect: current process missing from table");
+        let page_end = (end_inclusive | 0xfff) + 1;
+        match me.vm().map.protect(addr, page_end, map_prot(prot)) {
+            Ok(pieces) => pieces,
+            Err(MapError::Unmapped | MapError::Invalid) => return Err(ENOMEM),
+            Err(_) => return Err(EACCES),
+        }
+    };
+    let anon_at = |va: u64| {
+        pieces
+            .iter()
+            .any(|(s, e)| (*s..e.end).contains(&va) && e.kind == super::vm_map::VmKind::Anon)
+    };
 
     let writable = prot & PROT_WRITE != 0;
     let accessible = prot_accessible(prot);
@@ -1691,10 +1763,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
     for page in Page::range_inclusive(start_page, end_page) {
         let entry = memory::address_space::leaf_entry(mapper.level_4_table_mut(), phys_offset, page.start_address());
         let Some(entry) = entry.filter(|e| !e.is_unused()) else {
-            if in_mmap_window {
-                continue;
-            }
-            return Err(ENOMEM);
+            continue; // in a mapping (checked above), not made yet
         };
         let flags = entry.flags();
         let user_leaf = memory::address_space::is_prot_none(entry)
@@ -1788,7 +1857,7 @@ pub fn do_mprotect(caller_pid: Pid, addr: u64, len: u64, prot: u64) -> Result<u6
                             .flush();
                     }
                 }
-                _ if !accessible || !in_mmap_window => {}
+                _ if !accessible || !anon_at(va.as_u64()) => {}
                 _ => {
                     // Not yet backed -- a still-PROT_NONE guard sub-range being widened for the
                     // first time. Demand-allocate now, matching do_mmap_anon's own eager-zero-fill
@@ -1983,6 +2052,21 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
     let old_top = shared.brk.as_u64();
     let new_top = addr;
     let map_start = old_top.div_ceil(4096) * 4096;
+    let new_end = new_top.div_ceil(4096) * 4096;
+    if new_end > map_start {
+        // The heap's entry grows over the new pages (made on the first growth past the image),
+        // within RLIMIT_AS and only into free space.
+        check_as(&shared, new_end - map_start, me.rlimits[super::limits::RLIMIT_AS].0)?;
+        let heap_start = shared.brk_base.as_u64().div_ceil(4096) * 4096;
+        let grown = match shared.map.lookup(map_start - 1) {
+            Some((start, e)) if e.kind == super::vm_map::VmKind::Heap => shared.map.set_end(start, new_end),
+            _ => shared.map.insert(
+                map_start.max(heap_start),
+                super::vm_map::VmEntry::new(new_end, super::vm_map::PROT_READ | super::vm_map::PROT_WRITE, super::vm_map::PROT_ALL, false, super::vm_map::VmKind::Heap),
+            ),
+        };
+        grown.map_err(|_| ENOMEM)?;
+    }
     if new_top > map_start {
         // SAFETY: see do_mmap's identical reasoning -- me.address_space is the currently active
         // address space.

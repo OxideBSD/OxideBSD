@@ -11,10 +11,9 @@
 //! allocates a fixed `Vec<PhysFrame>` for the segment up front (same "hand out forward, never
 //! reclaim" policy `crate::process::mm`'s own `do_mmap`/`BootInfoFrameAllocator` already
 //! establish); every `shmat` against that segment -- by any process, related or not -- maps
-//! *those exact same frames* into the caller's own page table at a freshly bump-allocated VA
-//! (`SHM_REGION_BASE = 0x_4000_0000_0000`, a fresh window distinct from `crate::process::mm`'s
-//! own `MMAP_REGION_BASE`), so a write through one process's mapping is genuinely visible through
-//! another's -- real shared memory, not a per-process private copy.
+//! *those exact same frames* into the caller's own page table, at an address its map gives out as
+//! for `mmap` (`process::vm_map`), so a write through one process's mapping is genuinely visible
+//! through another's -- real shared memory, not a per-process private copy.
 //!
 //! **Real inheritance across `fork`.** This kernel's own `fork` is a full eager address-space copy,
 //! not real copy-on-write (see CLAUDE.md's process section) -- but `AddressSpace::fork`'s own
@@ -61,15 +60,11 @@ use crate::syscall::{EACCES, EAGAIN, EEXIST, EIDRM, EINVAL, ENOENT, ENOMEM};
 const IPC_PRIVATE: i32 = 0;
 const IPC_CREAT: u64 = 0o1000;
 const IPC_EXCL: u64 = 0o2000;
-/// Real Linux's own `SHM_RDONLY` -- the only `shmat` flag bit this module honors (omits
-/// `PageTableFlags::WRITABLE` on the caller's own mapping when set). `SHM_RND`/`SHM_REMAP`/
-/// `SHM_EXEC` are accepted (masked off, not rejected) but make no behavioral difference: `shmaddr`
-/// is always ignored (this kernel always picks the address itself, same simplification
-/// `crate::process::mm::do_mmap` already applies to its own `addr_hint`), so `SHM_RND`'s rounding
-/// has nothing to round; `SHM_REMAP` has no prior mapping at a caller-chosen address to replace;
-/// `SHM_EXEC` (Linux-only) is ignored: segments are never executable, as on the BSDs (W^X,
-/// THREAT_MODEL.md §3.3).
+/// `shmat` flags (musl's values): a read-only attach, and rounding `shmaddr` down to `SHMLBA`
+/// (a page). Linux's `SHM_REMAP` and `SHM_EXEC` are ignored: an address in use is `EINVAL`, and
+/// segments are never executable, as on the BSDs (W^X, THREAT_MODEL.md §3.3).
 const SHM_RDONLY: u64 = 0o10000;
+const SHM_RND: u64 = 0o20000;
 
 /// A small, sane per-segment cap -- no privileged-override/`rlimit`-driven `SHMMAX` ceiling exists
 /// here the way real Linux has one; no live caller to size this against, same "small, plausible
@@ -128,18 +123,6 @@ static SEGMENTS: spin::Mutex<BTreeMap<i32, ShmSegment>> = spin::Mutex::new(BTree
 /// KEYS` already establish.
 static KEYS: spin::Mutex<BTreeMap<i32, i32>> = spin::Mutex::new(BTreeMap::new());
 
-/// Fixed VA window for `shmat` mappings -- a fresh region, not reused from `crate::process::mm::
-/// MMAP_REGION_BASE` (that one hands out per-process-private anonymous pages; this one hands out
-/// VA *values* that get mapped to the exact same physical frames across however many processes
-/// attach the same segment). Same "single global bump counter is safe -- it only ever hands out
-/// numeric VA values, mapped separately into whichever process's own table asked for one" reasoning
-/// `MMAP_REGION_BASE`'s own doc comment already establishes.
-const SHM_REGION_BASE: u64 = 0x_4000_0000_0000;
-/// Stops where the main thread's stack reserve begins (`USER_STACK_RESERVE` below
-/// `USER_STACK_TOP`), so the two regions are genuinely disjoint.
-const SHM_REGION_CEILING: u64 =
-    crate::process::USER_STACK_TOP - crate::process::USER_STACK_RESERVE;
-static NEXT_SHM_PAGE: spin::Mutex<u64> = spin::Mutex::new(SHM_REGION_BASE);
 
 /// musl's own `struct shmid_ds` on x86_64 (`external/mit/musl/arch/generic/bits/shm.h`) -- 112
 /// bytes, verified via a direct `musl-gcc`/`sizeof`/`offsetof` probe against that exact field
@@ -274,7 +257,7 @@ pub(crate) fn do_shmget(key: u64, size: u64, shmflg: u64) -> Result<u64, u64> {
 /// is needed here). An invalid/unknown `id` is a real `EINVAL` (real `shmat(2)`'s own documented
 /// errno for this case -- unlike `shmctl`'s own `EIDRM` for the same underlying situation, see that
 /// function's own doc comment for why the two differ).
-pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> {
+pub(crate) fn do_shmat(id: u64, shmaddr: u64, shmflg: u64) -> Result<u64, u64> {
     let shmid = id as i32;
     let uid = process::oxidebsd_current_uid() as u32;
     let gid = process::oxidebsd_current_gid() as u32;
@@ -294,22 +277,48 @@ pub(crate) fn do_shmat(id: u64, _shmaddr: u64, shmflg: u64) -> Result<u64, u64> 
     };
 
     let region_len = frames.len() as u64 * 4096;
-    let base = {
-        let mut next = NEXT_SHM_PAGE.lock();
-        let base = *next;
-        let end = base.checked_add(region_len).ok_or(ENOMEM)?;
-        if end > SHM_REGION_CEILING {
-            return Err(ENOMEM);
-        }
-        *next = end;
-        base
-    };
-
     let phys_offset = memory::phys_mem_offset();
     let mut table = process::table().lock();
     let me = table
         .get_mut(&caller)
         .expect("shmat: current process missing from table");
+    // The address: `shmaddr` (rounded down with SHM_RND, else it must be page-aligned), free in
+    // the caller's map; or one the map picks, as for `mmap`. Within RLIMIT_AS either way.
+    let base = {
+        use crate::process::vm_map::{PROT_READ, PROT_WRITE, VmEntry, VmKind};
+        let as_limit = me.rlimits[crate::process::limits::RLIMIT_AS].0;
+        let mut vm = me.vm();
+        let undo = |segs: &mut BTreeMap<i32, ShmSegment>| {
+            if let Some(seg) = segs.get_mut(&shmid) {
+                seg.nattch -= 1;
+            }
+        };
+        let base = if shmaddr == 0 {
+            crate::process::mm::alloc_va(&vm, region_len, 0, as_limit)
+        } else {
+            let addr = if shmflg & SHM_RND != 0 { shmaddr & !0xfff } else { shmaddr };
+            let end = addr.checked_add(region_len).unwrap_or(u64::MAX);
+            if !addr.is_multiple_of(4096)
+                || addr < crate::memory::usercopy::VM_MINUSER
+                || end > crate::memory::usercopy::VM_MAXUSER
+                || vm.map.overlaps(addr, end)
+            {
+                Err(EINVAL)
+            } else {
+                crate::process::mm::check_as(&vm, region_len, as_limit).map(|()| addr)
+            }
+        };
+        let base = match base {
+            Ok(b) => b,
+            Err(e) => {
+                undo(&mut SEGMENTS.lock());
+                return Err(e);
+            }
+        };
+        let prot = PROT_READ | if want_write { PROT_WRITE } else { 0 };
+        let _ = vm.map.insert(base, VmEntry::new(base + region_len, prot, prot, true, VmKind::Shm { shmid }));
+        base
+    };
     // SAFETY: me.address_space is the currently active address space -- shmat runs synchronously
     // on the caller's own kernel stack mid-syscall, with its own CR3 still live -- sound for the
     // same reason crate::process::mm::do_mmap's own identical comment already establishes.
@@ -389,6 +398,7 @@ pub(crate) fn do_shmdt(shmaddr: u64) -> Result<u64, u64> {
             .expect("mm: caller has no address space")
             .mapper(phys_offset)
     };
+    let _ = me.vm().map.remove(shmaddr, shmaddr + page_count * 4096);
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(shmaddr));
     let end_page =
         Page::<Size4KiB>::containing_address(VirtAddr::new(shmaddr + page_count * 4096 - 1));

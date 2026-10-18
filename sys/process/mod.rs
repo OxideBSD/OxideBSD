@@ -968,7 +968,7 @@ pub struct Process {
     /// `getrlimit`/`setrlimit`'s limits, one `(rlim_cur, rlim_max)` pair per `RLIMIT_*` resource
     /// (`limits::initial_rlimits`). Per process: `prlimit64` sets them on every thread of the
     /// group. Kept by `fork` and `execve`. Enforced: `STACK`, `DATA`, `FSIZE`, `NPROC`, `NOFILE`,
-    /// `MEMLOCK` (`limits.rs`); `AS`, `CORE`, `CPU` and `RSS` are stored only (`CLEANUP.md` §3).
+    /// `MEMLOCK`, `AS` (`limits.rs`, `mm.rs`); `CORE`, `CPU` and `RSS` are stored only (`CLEANUP.md` §3).
     pub rlimits: [(u64, u64); 16],
     /// `setpriority`/`getpriority`'s nice value, `-20..=20` (the BSDs' `PRIO_MIN..=PRIO_MAX`), 0
     /// by default: part of the time-sharing priority (`sched_4bsd::usrpri`). Copied by `fork`;
@@ -1259,5 +1259,6 @@ pub mod elf;
 pub mod fault_trampoline;
 pub mod scheduler;
 pub mod sched_4bsd;
+pub mod vm_map;
 pub mod user_stack;
 pub mod usermode;

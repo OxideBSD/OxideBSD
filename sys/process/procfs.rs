@@ -106,6 +106,7 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     let state = state_char(proc.state);
     let comm = proc.comm.clone();
     let start = proc.start_ticks;
+    let vsize = proc.address_space.as_ref().map_or(0, |space| space.vm().map.size());
     let (utime, stime) = (proc.cpu_ticks.saturating_sub(proc.sys_ticks), proc.sys_ticks);
     let (cutime, cstime) = (proc.child_cpu_ticks.saturating_sub(proc.child_sys_ticks), proc.child_sys_ticks);
     // proc(5)'s priority: 20 + nice for a time-sharing thread, -1 - rank for a real-time one.
@@ -143,7 +144,7 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
         utime as i64, stime as i64, cutime as i64, cstime as i64,
         // priority (18), nice, num_threads, itrealvalue, starttime (22, in clock ticks since boot:
         // the tick is 100 Hz, sysconf(_SC_CLK_TCK)), ...
-        priority, nice, 1, 0, start as i64, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        priority, nice, 1, 0, start as i64, vsize as i64, 0, 0, 0, 0, 0, 0, 0, 0,
         blocked as i64, 0, 0, 0, 0, 0, // 28-33
         17, 0, 0, 0, 0, 0, 0, // 34-40 (exit_signal, processor, rt_priority, ...)
         0, 0, brk as i64, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)
@@ -160,6 +161,102 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
             _ => push_decimal(&mut out, f as u64),
         }
     }
+    copy_into(&out, buf_ptr, buf_cap)
+}
+
+/// `/proc/<pid>/map` in FreeBSD procfs's format or, with `linux`, `/proc/<pid>/maps` in Linux's:
+/// one line per entry of the process's map (`vm_map`), the kernel's own pages left out. Paths of
+/// mapped files aren't known yet (FreeBSD's `-`, Linux's blank). `-1` if `pid` is gone.
+pub(crate) extern "C" fn oxidebsd_proc_map(pid: u64, linux: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    use super::vm_map::{PROT_EXEC, PROT_READ, PROT_WRITE, VmKind};
+    let cred = identity::current_cred();
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+        return -1;
+    };
+    let Some(space) = proc.address_space.as_ref() else {
+        return copy_into(b"", buf_ptr, buf_cap);
+    };
+    let entries: Vec<(u64, super::vm_map::VmEntry)> =
+        space.vm().map.iter().filter(|(_, e)| e.kind != VmKind::Kernel).map(|(s, e)| (s, *e)).collect();
+    // Resident pages: those with a frame in the page tables.
+    let phys_offset = crate::memory::phys_mem_offset();
+    // SAFETY: only read, under the process table's lock, which every page table change takes.
+    let mut mapper = unsafe { space.mapper(phys_offset) };
+    let mut resident = |start: u64, end: u64| -> u64 {
+        use x86_64::structures::paging::mapper::{Translate, TranslateResult};
+        let mut n = 0;
+        let mut va = start;
+        while va < end {
+            if let TranslateResult::Mapped { .. } = mapper.translate(x86_64::VirtAddr::new(va)) {
+                n += 1;
+            }
+            va += 4096;
+        }
+        n
+    };
+    let mut out = Vec::new();
+    let hex = |out: &mut Vec<u8>, v: u64, width: usize| {
+        let digits = b"0123456789abcdef";
+        let mut tmp = [0u8; 16];
+        let mut n = v;
+        let mut i = 16;
+        loop {
+            i -= 1;
+            tmp[i] = digits[(n & 0xf) as usize];
+            n >>= 4;
+            if n == 0 && 16 - i >= width {
+                break;
+            }
+        }
+        out.extend_from_slice(&tmp[i..]);
+    };
+    for (start, e) in entries {
+        let r = |bit, c| if e.prot & bit != 0 { c } else { b'-' };
+        if linux != 0 {
+            // start-end perms offset dev inode path
+            hex(&mut out, start, 8);
+            out.push(b'-');
+            hex(&mut out, e.end, 8);
+            out.extend_from_slice(&[b' ', r(PROT_READ, b'r'), r(PROT_WRITE, b'w'), r(PROT_EXEC, b'x'), if e.shared { b's' } else { b'p' }, b' ']);
+            let offset = match e.kind {
+                VmKind::File { page, .. } | VmKind::Text { page, .. } => page * 4096,
+                _ => 0,
+            };
+            hex(&mut out, offset, 8);
+            out.extend_from_slice(b" 00:00 0");
+            match e.kind {
+                VmKind::Heap => out.extend_from_slice(b"                          [heap]"),
+                VmKind::Stack => out.extend_from_slice(b"                          [stack]"),
+                _ => {}
+            }
+        } else {
+            // start end resident private-resident object prot refcount shadowcount flags cow
+            // needs-copy type path charged uid
+            out.extend_from_slice(b"0x");
+            hex(&mut out, start, 1);
+            out.extend_from_slice(b" 0x");
+            hex(&mut out, e.end, 1);
+            out.push(b' ');
+            let res = resident(start, e.end);
+            push_decimal(&mut out, res);
+            out.push(b' ');
+            push_decimal(&mut out, if e.shared { 0 } else { res });
+            out.extend_from_slice(&[b' ', b'0', b'x', b'0', b' ', r(PROT_READ, b'r'), r(PROT_WRITE, b'w'), r(PROT_EXEC, b'x')]);
+            out.extend_from_slice(b" 1 0 0x0 ");
+            out.extend_from_slice(if e.shared { b"NCOW" } else { b"COW" });
+            out.extend_from_slice(b" NNC ");
+            out.extend_from_slice(match e.kind {
+                VmKind::File { .. } | VmKind::Text { .. } => b"vnode",
+                VmKind::Phys => b"phys",
+                VmKind::Anon | VmKind::Shm { .. } | VmKind::Heap | VmKind::Stack => b"swap",
+                VmKind::Kernel => b"none",
+            });
+            out.extend_from_slice(b" - NCH -1");
+        }
+        out.push(b'\n');
+    }
+    drop(table);
     copy_into(&out, buf_ptr, buf_cap)
 }
 

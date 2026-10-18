@@ -47,6 +47,8 @@ pub(crate) const RLIMIT_STACK: usize = 3;
 pub(crate) const RLIMIT_NPROC: usize = 6;
 /// `RLIMIT_NOFILE`: the most descriptors a process may have open.
 pub(crate) const RLIMIT_NOFILE: usize = 7;
+/// `RLIMIT_AS`: the most address space a process's mappings may take (`vm_map::VmMap::size`).
+pub(crate) const RLIMIT_AS: usize = 9;
 
 /// The soft `RLIMIT_STACK` a process starts with: 8 MiB, FreeBSD's `DFLSSIZ` (and the other BSDs'
 /// and Linux's default). The hard limit is `USER_STACK_RESERVE`, the most it can grow.

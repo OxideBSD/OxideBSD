@@ -225,6 +225,40 @@ impl<'a> Elf<'a> {
     /// The highest virtual address any `PT_LOAD` segment reaches (`p_vaddr + p_memsz`, page-aligned
     /// up) — where a fresh heap should start growing from. `0` if there are no `PT_LOAD` segments
     /// at all (never true in practice for a real `ET_EXEC`, but a harmless base case).
+    /// The pages the `PT_LOAD` segments occupy once loaded at `bias`, as runs of pages with the
+    /// same protection (`vm_map`'s `PROT_*`), in address order. Segments sharing a page share
+    /// its protection (`load` maps the union); a writable segment's run is data, the rest text.
+    pub fn load_ranges(&self, bias: u64) -> Vec<(u64, u64, u8)> {
+        use crate::process::vm_map::{PROT_EXEC, PROT_READ, PROT_WRITE};
+        let mut pages: BTreeMap<u64, u8> = BTreeMap::new();
+        for h in self.program_headers().filter(|h| h.p_type == PT_LOAD && h.p_memsz > 0) {
+            let prot = PROT_READ
+                | if h.p_flags & PF_WRITE != 0 { PROT_WRITE } else { 0 }
+                | if h.p_flags & PF_EXEC != 0 { PROT_EXEC } else { 0 };
+            let (Some(start), Some(end)) = (h.p_vaddr.checked_add(bias), h.p_vaddr.checked_add(bias + h.p_memsz)) else {
+                continue;
+            };
+            let mut page = start / PAGE_SIZE * PAGE_SIZE;
+            while page < end {
+                *pages.entry(page).or_insert(0) |= prot;
+                page += PAGE_SIZE;
+            }
+        }
+        let mut runs: Vec<(u64, u64, u8)> = Vec::new();
+        for (page, prot) in pages {
+            match runs.last_mut() {
+                Some((_, end, p)) if *end == page && *p == prot => *end += PAGE_SIZE,
+                _ => runs.push((page, page + PAGE_SIZE, prot)),
+            }
+        }
+        runs
+    }
+
+    /// The file the image is read from, for the map's `Text` entries (0 when it came from memory).
+    pub fn content(&self) -> u64 {
+        self.content.unwrap_or(0)
+    }
+
     pub fn highest_loaded_address(&self) -> u64 {
         let highest = self
             .program_headers()

@@ -8,7 +8,7 @@
 //!
 //! - `/proc/{meminfo,uptime,stat,modules,mounts,initdeaths}`: the system's.
 //! - `/proc/self`: a link to the caller's pid.
-//! - `/proc/<pid>/{stat,cmdline,status,oom_adj}`, `/proc/<pid>/fd/<n>` (links to what each fd
+//! - `/proc/<pid>/{stat,cmdline,status,oom_adj,map,maps}`, `/proc/<pid>/fd/<n>` (links to what each fd
 //!   names), `/proc/<pid>/task/<pid>/{stat,cmdline,status}` (one task per process).
 #![no_std]
 
@@ -34,6 +34,7 @@ unsafe extern "C" {
     fn oxidebsd_fd_link(pid: u64, fd: u64, buf: *mut u8, cap: u64) -> i64;
     fn oxidebsd_mounts_render(buf: *mut u8, cap: u64) -> i64;
     fn oxidebsd_proc_stat_line(pid: u64, buf: *mut u8, cap: u64) -> i64;
+    fn oxidebsd_proc_map(pid: u64, linux: u64, buf: *mut u8, cap: u64) -> i64;
     fn oxidebsd_proc_cmdline(pid: u64, buf: *mut u8, cap: u64) -> i64;
     fn oxidebsd_proc_oom_adj(pid: u64, buf: *mut u8, cap: u64) -> i64;
     fn oxidebsd_proc_status(pid: u64, buf: *mut u8, cap: u64) -> i64;
@@ -92,10 +93,20 @@ enum Leaf {
     Cmdline,
     Status,
     OomAdj,
+    /// The address-space map, FreeBSD's format.
+    Map,
+    /// The same, Linux's format.
+    Maps,
 }
 
-const PID_LEAVES: [(Leaf, &[u8]); 4] =
-    [(Leaf::Stat, b"stat"), (Leaf::Cmdline, b"cmdline"), (Leaf::Status, b"status"), (Leaf::OomAdj, b"oom_adj")];
+const PID_LEAVES: [(Leaf, &[u8]); 6] = [
+    (Leaf::Stat, b"stat"),
+    (Leaf::Cmdline, b"cmdline"),
+    (Leaf::Status, b"status"),
+    (Leaf::OomAdj, b"oom_adj"),
+    (Leaf::Map, b"map"),
+    (Leaf::Maps, b"maps"),
+];
 
 impl Node {
     fn fileid(self) -> u64 {
@@ -282,6 +293,8 @@ fn contents(node: Node) -> Result<Vec<u8>, i32> {
                     Leaf::Cmdline => oxidebsd_proc_cmdline(pid as u64, buf, cap),
                     Leaf::Status => oxidebsd_proc_status(pid as u64, buf, cap),
                     Leaf::OomAdj => oxidebsd_proc_oom_adj(pid as u64, buf, cap),
+                    Leaf::Map => oxidebsd_proc_map(pid as u64, 0, buf, cap),
+                    Leaf::Maps => oxidebsd_proc_map(pid as u64, 1, buf, cap),
                 }
             };
             if n < 0 { -(ESRCH as i64) } else { n }

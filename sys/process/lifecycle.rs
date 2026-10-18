@@ -181,6 +181,11 @@ fn load_image(
     let mapped_pages =
         map_user_stack(&mut mapper, stack_top, user_stack_pages(), elf.exec_stack()).map_err(|()| SpawnError::OutOfMemory)?;
     crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|()| SpawnError::OutOfMemory)?;
+    {
+        let mut vm = address_space.vm();
+        crate::process::mm::record_segments(&mut vm, &elf, bias);
+        crate::process::mm::record_exec_tail(&mut vm, elf.exec_stack());
+    }
     let initial_rsp = crate::process::user_stack::build(
         &elf,
         argv,
@@ -1551,6 +1556,7 @@ fn exec_image(
             interp_elf.cache = exec_cache_entry(&interp_file, &new_address_space);
             let interp_entry =
                 elf::load(&interp_elf, &mut mapper, phys_offset, INTERP_LOAD_BASE).map_err(|_| ENOEXEC)?;
+            crate::process::mm::record_segments(&mut new_address_space.vm(), &interp_elf, INTERP_LOAD_BASE);
             jump_entry = interp_entry;
             interp_base = Some(INTERP_LOAD_BASE);
         }
@@ -1567,6 +1573,11 @@ fn exec_image(
         let mapped_pages =
             map_user_stack(&mut mapper, stack_top, stack_pages, elf.exec_stack()).map_err(|_| ENOMEM)?;
         crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
+        {
+            let mut vm = new_address_space.vm();
+            crate::process::mm::record_segments(&mut vm, &elf, main_bias);
+            crate::process::mm::record_exec_tail(&mut vm, elf.exec_stack());
+        }
         Ok((main_bias, jump_entry, interp_base, stack_top, stack_pages, mapped_pages))
     })();
     let (main_bias, jump_entry, interp_base, stack_top, stack_pages, mapped_pages) = match built {

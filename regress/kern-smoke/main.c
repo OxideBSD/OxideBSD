@@ -50,6 +50,7 @@ static int child_exit_ok(int (*fn)(void))
 #include "orphan.c"
 #include "sched.c"
 #include "users.c"
+#include "vm.c"
 
 static const struct {
 	const char *name;
@@ -60,6 +61,7 @@ static const struct {
 	{ "orphan", orphan_main },
 	{ "sched", sched_main },
 	{ "users", users_main },
+	{ "vm", vm_main },
 };
 
 int main(int argc, char **argv)
