@@ -113,6 +113,13 @@ Shut down and reboot.
 Shut down and halt.
 .It Dv SIGUSR2
 Shut down and power off.
+.It Dv SIGPWR
+Shut down and switch the root file system to the one
+.Xr reboot 8
+.Fl r
+gave the kernel; the kernel then starts
+.Nm
+on the new root.
 .El
 .Pp
 To shut down,

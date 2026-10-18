@@ -10,6 +10,9 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl lnpq
+.Nm
+.Fl r
+.Op Oo Ar type : Oc Ns Ar special
 .Nm halt
 .Op Fl lnpq
 .Nm poweroff
@@ -36,6 +39,11 @@ to restart,
 to halt, and
 .Dv SIGUSR2
 to power off.
+.Fl r
+gives the kernel the new root
+.Pq Xr reboot 2 Ns 's Dv RB_REROOT ,
+which asks init with
+.Dv SIGPWR .
 .Pp
 The options are as follows:
 .Bl -tag -width indent
@@ -54,6 +62,33 @@ synchronize the file systems and call
 .Xr reboot 2
 at once.
 No services are stopped and no process is warned.
+.It Fl r Op Oo Ar type : Oc Ns Ar special
+Switch the root file system without restarting the kernel: everything is
+shut down as for a restart, then every file system is unmounted, the file
+system of
+.Ar type
+.Pq Cm oxfs No by default
+on device
+.Ar special
+is mounted as the root, read-only as at boot, and
+.Xr init 8
+starts on it, running its
+.Pa /etc/rc .
+Without
+.Ar special ,
+the root
+.Pa /etc/fstab
+names.
+The device is checked before anything stops.
+If the new root can't be mounted, the old one is mounted again and init
+starts on it.
+Nothing survives the switch but the processes' absence: a
+.Xr tmpfs 5
+loses its contents, and
+.Xr devfs 4
+and
+.Pa /proc
+are mounted afresh.
 .El
 .Pp
 Only the superuser may use these utilities.

@@ -1,0 +1,37 @@
+#!/sbin/init_sh
+#
+# /etc/rc of the reroot test's second root (scripts/mkreroottestimg.sh): checks the switch from
+# rootfs went as RAM_FLOOR.md §5.1.3 says, and prints the verdict the QEMU runner waits for.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+fail=0
+check() {
+	_desc=$1
+	shift
+	if "$@"; then
+		echo "reroot-smoke: ok: $_desc"
+	else
+		echo "reroot-smoke: not ok: $_desc"
+		fail=$((fail + 1))
+	fi
+}
+
+echo "reroot-smoke: stage 2: $(mount | head -n 1)"
+check "the root is rootfs2" eval "mount | head -n 1 | grep -q '^/dev/gpt/rootfs2 on / '"
+check "... its marker is there" test -f /REROOT2
+check "... mounted read-only, as at boot" eval "mount | head -n 1 | grep -q read-only"
+check "the old root's tmpfs is gone" test ! -e /tmp/vanish
+check "devfs is on /dev" test -c /dev/null
+check "procfs is on /proc" test -r /proc/mounts
+check "nothing else is mounted" eval "[ \$(mount | wc -l) = 3 ]"
+check "the old root was unmounted clean" fsck_oxfs -n /dev/gpt/rootfs
+check "init is pid 1 again" eval "[ \$(ps -o pid= -p 1 2>/dev/null | tr -d ' ') = 1 ] || [ -d /proc/1 ]"
+check "a missing device is refused before anything stops" eval "! reboot -r /dev/gpt/nosuch 2>/dev/null"
+if [ $fail -eq 0 ]; then
+	echo "reroot-smoke: PASS"
+else
+	echo "reroot-smoke: FAIL ($fail)"
+fi
+exit 0

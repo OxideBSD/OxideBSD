@@ -464,6 +464,10 @@ name = "msdosfs_syscall_smoke"
 harness = false
 
 [[test]]
+name = "reroot_boot"
+harness = false
+
+[[test]]
 name = "openssl_syscall_smoke"
 harness = false
 

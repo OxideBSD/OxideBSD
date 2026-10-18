@@ -1,0 +1,14 @@
+#!/sbin/init_sh
+#
+# /etc/rc of the reroot test's first root (scripts/mkreroottestimg.sh): leaves something in a
+# tmpfs, then switches the root to rootfs2 (RAM_FLOOR.md §5.1), whose /etc/rc is rc.2.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+echo "reroot-smoke: stage 1: $(mount | head -n 1)"
+mount -t tmpfs tmpfs /tmp && echo gone > /tmp/vanish
+if ! reboot -r /dev/gpt/rootfs2; then
+	echo "reroot-smoke: FAIL: reboot -r /dev/gpt/rootfs2"
+fi
+exit 0

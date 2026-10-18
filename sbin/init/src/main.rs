@@ -103,8 +103,8 @@ fn signal_set(sigs: &[libc::c_int]) -> libc::sigset_t {
     }
 }
 
-const HANDLED: [libc::c_int; 7] =
-    [libc::SIGINT, libc::SIGUSR1, libc::SIGUSR2, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCHLD];
+const HANDLED: [libc::c_int; 8] =
+    [libc::SIGINT, libc::SIGUSR1, libc::SIGUSR2, libc::SIGPWR, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCHLD];
 
 /// Installs the handlers and keeps their signals blocked except while waiting, so that one
 /// arriving between a check and the wait can't be missed.
@@ -341,12 +341,21 @@ fn hang_up(leaders: &[libc::pid_t]) {
     reap_all();
 }
 
+/// `reboot(2)`'s root switch (`RB_REROOT`, FreeBSD's value; the kernel's `do_reboot`), whose
+/// argument is the new root's `type:special`.
+const RB_REROOT: libc::c_int = 0x0020_0000;
+/// `reboot(2)`'s number on this ABI (the libc crate's `SYS_reboot` is Linux's).
+const SYS_REBOOT: libc::c_long = 486;
+
 /// §10: `/etc/rc.shutdown`, then every process is terminated, storage synchronized, and
-/// `reboot(2)` called with the action `sig` asked for.
+/// `reboot(2)` called with the action `sig` asked for. `SIGPWR` is a root switch (`reboot -r`,
+/// which gave the kernel the new root): the same shutdown, then `reboot(RB_REROOT)`, and the
+/// kernel mounts the new root and starts init on it.
 fn shutdown(sig: libc::c_int) -> ! {
     let (how, what) = match sig {
         libc::SIGUSR1 => (libc::RB_HALT_SYSTEM, "halt"),
         libc::SIGUSR2 => (libc::RB_POWER_OFF, "power off"),
+        libc::SIGPWR => (RB_REROOT, "switching the root"),
         _ => (libc::RB_AUTOBOOT, "reboot"),
     };
     say(&format!("shutting down ({what})"));
@@ -374,11 +383,20 @@ fn shutdown(sig: libc::c_int) -> ! {
         unsafe { libc::kill(-1, libc::SIGKILL) };
         wait_up_to(-1, Duration::from_secs(1));
     }
-    // SAFETY: sync and reboot take no pointers.
-    unsafe {
-        libc::sync();
-        libc::reboot(how);
+    // SAFETY: sync takes no pointers.
+    unsafe { libc::sync() };
+    if how == RB_REROOT {
+        // musl's reboot(2) passes Linux's two magic numbers first. On success the kernel ends this
+        // process and starts init on the new root: it doesn't return.
+        // SAFETY: syscall with integer arguments only.
+        unsafe { libc::syscall(SYS_REBOOT, 0xfee1deadu32 as libc::c_long, 672274793 as libc::c_long, RB_REROOT as libc::c_long, 0 as libc::c_long) };
+        complain(&format!("switching the root: {}; starting init again", io::Error::last_os_error()));
+        // Everything is stopped: come back up on the old root, as after a boot.
+        let err = Command::new("/sbin/init").exec();
+        complain(&format!("/sbin/init: {err}"));
     }
+    // SAFETY: reboot takes no pointers.
+    unsafe { libc::reboot(if how == RB_REROOT { libc::RB_AUTOBOOT } else { how }) };
     complain(&format!("reboot: {}", io::Error::last_os_error()));
     loop {
         // SAFETY: pause takes no arguments.

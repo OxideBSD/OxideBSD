@@ -76,6 +76,13 @@ case "$TEST_NAME" in
         QEMU_PASS_PATTERN="login:"
         QEMU_FAIL_PATTERN="panicked at|PANIC|rc: failed services|\[fault\]"
         ;;
+    reroot_boot)
+        # The root switch (RAM_FLOOR.md §5.1): two roots (scripts/mkreroottestimg.sh, below); the
+        # second's /etc/rc reports.
+        REROOT_TEST=1
+        QEMU_PASS_PATTERN="reroot-smoke: PASS"
+        QEMU_FAIL_PATTERN="reroot-smoke: FAIL|panicked at|PANIC|\[fault\]"
+        ;;
     msdosfs_syscall_smoke)
         # FAT12, FAT16 and FAT32 volumes beside the root (scripts/mkmsdostestimg.sh, below).
         MSDOSFS_TEST=1
@@ -175,6 +182,10 @@ if [ "${DISK_BOOT:-0}" = 1 ]; then
     QEMU_NO_ISO=1
 fi
 
+if [ "${REROOT_TEST:-0}" = 1 ]; then
+    QEMU_DISK_SOURCE="target/images/reroot-test.img"
+    scripts/mkreroottestimg.sh "$QEMU_DISK_SOURCE"
+fi
 if [ "${MSDOSFS_TEST:-0}" = 1 ]; then
     QEMU_DISK_SOURCE="target/images/msdosfs-test.img"
     scripts/mkmsdostestimg.sh "$QEMU_DISK_SOURCE"
