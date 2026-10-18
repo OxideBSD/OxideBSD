@@ -773,7 +773,11 @@ fn main() -> ExitCode {
             continue;
         }
 
-        if fds[0].revents & libc::POLLIN != 0 {
+        // Signals first, whatever poll said about their pipe: one that came in before a message
+        // may have had its handler run only as poll returned for the message (POSIX lets poll
+        // report the ready descriptor rather than EINTR), and a SIGHUP must take effect before
+        // anything received after it is logged. The pipe is non-blocking.
+        {
             let mut sigs = [0u8; 32];
             // SAFETY: reading into a buffer of the length passed.
             let got = unsafe { libc::read(signal_fd, sigs.as_mut_ptr().cast(), sigs.len()) };
