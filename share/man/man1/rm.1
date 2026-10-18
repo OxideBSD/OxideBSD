@@ -1,0 +1,112 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt RM 1
+.Os OxideBSD
+.Sh NAME
+.Nm rm
+.Nd remove directory entries
+.Sh SYNOPSIS
+.Nm
+.Op Fl f | i
+.Op Fl dIPRrvx
+.Ar file ...
+.Sh DESCRIPTION
+.Nm
+removes each
+.Ar file Ns 's
+name; the file itself goes when no other name or open descriptor keeps it.
+A directory is refused unless
+.Fl d
+or
+.Fl R
+is given.
+Without
+.Fl f ,
+a file that its user may not write, other than a symbolic link, is asked
+about first when the standard input is a terminal.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl d
+Remove empty directories too, as
+.Xr rmdir 1
+does.
+.It Fl f
+Ask nothing, and say nothing about files that don't exist (nor fail for
+them).
+Cancels
+.Fl i .
+.It Fl I
+Ask once, before removing anything, if more than three files, or any
+directory with
+.Fl R ,
+are named.
+.It Fl i
+Ask before removing each file.
+Cancels
+.Fl f .
+.It Fl P
+Accepted and ignored, as on
+.Fx :
+overwriting a file before removing it doesn't reliably destroy its data.
+.It Fl R
+Remove each directory named and everything under it, depth first.
+Symbolic links are removed, never followed.
+A directory that isn't removed (because of an answer or an error) keeps
+its parents.
+.It Fl r
+The same as
+.Fl R .
+.It Fl v
+Write the name of each file removed.
+.It Fl x
+With
+.Fl R ,
+don't enter directories on another file system than the operand's.
+.El
+.Pp
+Questions are written on the standard error and answered with a line on the
+standard input; an answer beginning with
+.Ql y
+or
+.Ql Y
+is yes.
+.Pp
+An operand whose last component is
+.Pa \&.
+or
+.Pa ..
+and one that names the root directory are refused with a diagnostic and left
+alone.
+.Sh EXIT STATUS
+.Ex -std
+With
+.Fl f ,
+files that don't exist don't count.
+.Sh EXAMPLES
+Remove a build tree, saying what goes:
+.Dl rm -rv target
+.Pp
+Remove a file whose name begins with a dash:
+.Dl rm -- -file
+.Sh SEE ALSO
+.Xr rmdir 1 ,
+.Xr unlink 1 ,
+.Xr rmdir 2 ,
+.Xr unlink 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl d ,
+.Fl I ,
+.Fl P ,
+.Fl v
+and
+.Fl x
+are extensions, as on the BSDs.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v1 .

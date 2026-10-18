@@ -86,7 +86,7 @@ fn main() -> ExitCode {
     let mut status = ExitCode::SUCCESS;
     for f in files {
         if let Err(e) = touch(f, &times, create) {
-            eprintln!("touch: {f}: {e}");
+            eprintln!("touch: {f}: {}", strerror(&e));
             status = ExitCode::FAILURE;
         }
     }
@@ -118,7 +118,7 @@ fn touch(path: &str, times: &[libc::timespec; 2], create: bool) -> std::io::Resu
 /// `-r`: the reference file's access and modification times.
 fn reference_times(path: &str) -> Result<[libc::timespec; 2], String> {
     use std::os::unix::fs::MetadataExt;
-    let m = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    let m = std::fs::metadata(path).map_err(|e| format!("{path}: {}", strerror(&e)))?;
     Ok([
         libc::timespec { tv_sec: m.atime(), tv_nsec: m.atime_nsec() },
         libc::timespec { tv_sec: m.mtime(), tv_nsec: m.mtime_nsec() },
@@ -228,4 +228,13 @@ fn parse_d(s: &str) -> Result<libc::timespec, String> {
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
     ExitCode::FAILURE
+}
+
+/// An error as the BSDs print it: `strerror`'s text, without Rust's "(os error N)".
+fn strerror(e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        // SAFETY: strerror returns a static string for any errno.
+        Some(n) => unsafe { std::ffi::CStr::from_ptr(libc::strerror(n)) }.to_string_lossy().into_owned(),
+        None => e.to_string(),
+    }
 }

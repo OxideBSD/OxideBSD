@@ -284,5 +284,10 @@ check "tmpfs: vfs.tmpfs.memory_reserved" [ "$(/sbin/sysctl -n vfs.tmpfs.memory_r
 
 cd /
 rm -rf $T
+
+# The native /bin rewrites' own checks (each prints its lines and a count).
+check "bin1: echo true false pwd mkdir rm ln realpath hostname timeout mknod" sh /usr/tests/bin/bin1.sh
+check "bin2: cat ls cp mv dd df date stty" sh /usr/tests/bin/bin2.sh
+
 echo "bin-smoke: $fail failed"
 [ $fail -eq 0 ]

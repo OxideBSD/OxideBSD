@@ -4,3 +4,7 @@
 
 # user@host:dir$ (or # for root), in color.
 PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+
+# ls(1) in color (FreeBSD's switch: unset it for plain output).
+CLICOLOR=1
+export CLICOLOR

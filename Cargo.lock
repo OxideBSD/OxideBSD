@@ -52,13 +52,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cat"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -115,13 +108,6 @@ checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 [[package]]
 name = "cow-syscall-smoke"
 version = "0.1.0"
-
-[[package]]
-name = "cp"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
 
 [[package]]
 name = "cpufeatures"
@@ -189,20 +175,6 @@ dependencies = [
 [[package]]
 name = "dynlink-syscall-smoke"
 version = "0.1.0"
-
-[[package]]
-name = "echo"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
-name = "false"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
 
 [[package]]
 name = "fb-mmap-syscall-smoke"
@@ -299,13 +271,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b23ac50abb8261cb38c6e2a7192d3302e0836dac1628f6a93b82b4fad185897"
 
 [[package]]
-name = "ln"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -319,26 +284,12 @@ name = "loopback-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
-name = "ls"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
 name = "lsoxmod"
 version = "0.1.0"
 
 [[package]]
 name = "meltdown-poc"
 version = "0.1.0"
-
-[[package]]
-name = "mkdir"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
 
 [[package]]
 name = "mmap-syscall-smoke"
@@ -385,13 +336,6 @@ name = "multiboot2-kernel"
 version = "0.1.0"
 dependencies = [
  "oxidebsd",
-]
-
-[[package]]
-name = "mv"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
 ]
 
 [[package]]
@@ -547,26 +491,12 @@ name = "pthread-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
-name = "pwd"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
-
-[[package]]
 name = "rc-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
 name = "ring3-smoke"
 version = "0.1.0"
-
-[[package]]
-name = "rm"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
 
 [[package]]
 name = "rt-signal-syscall-smoke"
@@ -711,13 +641,6 @@ dependencies = [
 [[package]]
 name = "trap-syscall-smoke"
 version = "0.1.0"
-
-[[package]]
-name = "true"
-version = "0.1.0"
-dependencies = [
- "oxlibc",
-]
 
 [[package]]
 name = "tty-syscall-smoke"

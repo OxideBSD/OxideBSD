@@ -56,6 +56,11 @@ fn main(boot_info: &'static BootInfo) -> ! {
     const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
     oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
+    // poll(2): a std program's start-up polls its standard descriptors (and aborts without it).
+    const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
+    const SOCKET_PANIC_SYMBOL: &str = env!("SOCKET_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load("socket", SOCKET_MOD, SOCKET_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
     // vfork(2) (COW.md §7), as at boot: BusyBox's spawn() and musl's vfork() call it.
     const VFORK_MOD: &[u8] = include_bytes!(env!("VFORK_MOD_PATH"));

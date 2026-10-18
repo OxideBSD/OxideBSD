@@ -1,0 +1,62 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt MKDIR 1
+.Os OxideBSD
+.Sh NAME
+.Nm mkdir
+.Nd make directories
+.Sh SYNOPSIS
+.Nm
+.Op Fl pv
+.Op Fl m Ar mode
+.Ar directory_name ...
+.Sh DESCRIPTION
+.Nm
+makes each
+.Ar directory_name ,
+in the order given, with mode 0777 less the
+.Xr umask 2 .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl m Ar mode
+Give each directory made exactly
+.Ar mode ,
+octal or symbolic as for
+.Xr chmod 1 ;
+a symbolic mode starts from
+.Li a=rwx ,
+so that
+.Li g-w
+means 0757 less the umask's other bits.
+Set-ID and sticky bits are kept.
+.It Fl p
+Make any missing parent directories first, each with the umask's mode plus
+the owner's write and search permission, and don't complain about a
+directory that already exists.
+.Fl m
+applies only to the last component.
+.It Fl v
+Write the name of each directory made, parents too.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Make a tree in one go, private to its owner at the end:
+.Dl mkdir -p -m 700 src/oxidebsd/private
+.Sh SEE ALSO
+.Xr chmod 1 ,
+.Xr rmdir 1 ,
+.Xr mkdir 2 ,
+.Xr umask 2
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl v
+is an extension, as on the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .

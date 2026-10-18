@@ -1,0 +1,333 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt STTY 1
+.Os OxideBSD
+.Sh NAME
+.Nm stty
+.Nd set the options of a terminal
+.Sh SYNOPSIS
+.Nm
+.Op Fl a | e | g
+.Op Fl f Ar file
+.Op Ar operand ...
+.Sh DESCRIPTION
+.Nm
+shows or changes the settings of a terminal: the standard input, or
+.Ar file .
+With no operand it writes the speed, then the flags that differ from their
+defaults, grouped as local
+.Pq Ql lflags ,
+input
+.Pq Ql iflags ,
+output
+.Pq Ql oflags
+and control
+.Pq Ql cflags ,
+and a table of the control characters that differ from theirs.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Write every setting, and the window size, the control characters as
+.Ql name = value; .
+.It Fl e
+Write every setting, and the window size, the control characters as a table.
+.It Fl f Ar file
+Use the terminal
+.Ar file
+rather than the standard input.
+.It Fl g
+Write every setting on one line that, given back to
+.Nm
+as an operand, restores them all:
+.Dl $ saved=$(stty -g); stty raw; ...; stty \&"$saved\&"
+.El
+.Pp
+Operands change settings, all of them at once when they are read.
+A flag is turned on by its name and off by its name after a
+.Ql - .
+.Ss Control flags
+.Bl -tag -width "-crtscts" -compact
+.It Cm cs5 cs6 cs7 cs8
+Character size in bits.
+.It Cm cstopb
+Two stop bits rather than one.
+.It Cm cread
+Enable the receiver.
+.It Cm parenb
+Generate and check parity.
+.It Cm parodd
+Odd parity rather than even.
+.It Cm hupcl
+Hang up when the last process closes the terminal;
+.Cm hup
+is the same.
+.It Cm clocal
+No modem control lines.
+.It Cm crtscts
+RTS/CTS flow control.
+.El
+.Ss Input flags
+.Bl -tag -width "-crtscts" -compact
+.It Cm ignbrk
+Ignore a break.
+.It Cm brkint
+A break interrupts (sends
+.Dv SIGINT ) .
+.It Cm ignpar
+Ignore characters with parity errors.
+.It Cm parmrk
+Mark parity errors.
+.It Cm inpck
+Check input parity.
+.It Cm istrip
+Strip input to seven bits.
+.It Cm inlcr
+Map newline to carriage return.
+.It Cm igncr
+Ignore carriage return.
+.It Cm icrnl
+Map carriage return to newline.
+.It Cm ixon
+Start and stop output with the
+.Cm start
+and
+.Cm stop
+characters.
+.It Cm ixoff
+Send
+.Cm start
+and
+.Cm stop
+when the input queue fills and drains;
+.Cm tandem
+is the same.
+.It Cm ixany
+Any character restarts output;
+.Cm decctlq
+is the opposite.
+.It Cm imaxbel
+Ring the bell when the input queue is full.
+.El
+.Ss Output flags
+.Bl -tag -width "-crtscts" -compact
+.It Cm opost
+Process output.
+.It Cm onlcr
+Map newline to carriage return and newline.
+.It Cm ocrnl
+Map carriage return to newline.
+.It Cm onocr
+Don't write a carriage return at column 0.
+.It Cm onlret
+Newline does a carriage return.
+.It Cm oxtabs
+Expand tabs to spaces;
+.Cm tabs
+is
+.Cm -oxtabs .
+.El
+.Ss Local flags
+.Bl -tag -width "-crtscts" -compact
+.It Cm isig
+Generate signals for
+.Cm intr ,
+.Cm quit
+and
+.Cm susp .
+.It Cm icanon
+Line by line input, with editing.
+.It Cm iexten
+Extended input processing
+.Pq Cm lnext , werase , reprint , discard .
+.It Cm echo
+Echo input.
+.It Cm echoe
+Erase a character on the screen for
+.Cm erase ;
+.Cm crterase
+is the same.
+.It Cm echok
+Echo a newline after
+.Cm kill .
+.It Cm echoke
+Erase the line on the screen for
+.Cm kill ;
+.Cm crtkill
+is the same.
+.It Cm echonl
+Echo newline even without
+.Cm echo .
+.It Cm echoctl
+Echo control characters as
+.Ql ^X ;
+.Cm ctlecho
+is the same.
+.It Cm echoprt
+Echo erased characters between
+.Ql \e
+and
+.Ql / ;
+.Cm prterase
+is the same.
+.It Cm noflsh
+Don't flush the queues on
+.Cm intr ,
+.Cm quit
+or
+.Cm susp .
+.It Cm tostop
+Stop background jobs that write to the terminal.
+.It Cm flusho
+Output is being discarded.
+.It Cm pendin
+Input is to be retyped.
+.El
+.Ss Control characters
+Each takes a value: a character, as itself or as
+.Ql ^X
+.Pq Ql ^?\&
+for DEL), or
+.Cm undef
+or
+.Ql ^-
+to disable it.
+.Bl -tag -width "-crtscts" -compact
+.It Cm discard
+Discard output (also
+.Cm flush ) .
+.It Cm eof
+End of file.
+.It Cm eol , eol2
+Extra end of line characters
+.Pq Cm brk No is Cm eol .
+.It Cm erase
+Erase a character.
+.It Cm intr
+Interrupt.
+.It Cm kill
+Erase the line.
+.It Cm lnext
+Take the next character literally.
+.It Cm quit
+Quit.
+.It Cm reprint
+Retype the line (also
+.Cm rprnt ) .
+.It Cm start , stop
+Restart and stop output.
+.It Cm susp
+Suspend.
+.It Cm werase
+Erase a word.
+.It Cm min , time
+For
+.Cm -icanon :
+the fewest characters a read waits for, as a number, and how long, in tenths
+of a second.
+.El
+.Ss Combinations and others
+.Bl -tag -width "-crtscts" -compact
+.It Ar number
+Set both speeds, in baud.
+.It Cm ispeed Ar n , Cm ospeed Ar n
+Set the input or output speed.
+.It Cm speed
+Write the speed.
+.It Cm rows Ar n , Cm cols Ar n
+Set the window size
+.Cm ( columns
+is
+.Cm cols ) .
+.It Cm size
+Write the window size, rows then columns.
+.It Cm all , everything
+Write the settings as
+.Fl e
+and
+.Fl a
+do.
+.It Cm sane
+Reset the flags to reasonable values, keeping the speed,
+.Cm clocal
+and the echo style.
+.Cm cooked ,
+.Cm -raw
+and
+.Cm -cbreak
+are the same.
+.It Cm raw
+No input or output processing: characters are passed as they come.
+.It Cm cbreak
+Characters as they come, but with signals and output processing.
+.It Cm evenp , parity
+Even parity, seven bits;
+.Cm oddp
+odd parity; with a
+.Ql -
+any of them is no parity, eight bits.
+.It Cm pass8
+Eight bits, no parity;
+.Cm -pass8
+seven bits with parity.
+.It Cm litout
+Eight bits, no parity, no output processing;
+.Cm -litout
+the reverse.
+.It Cm crt , newcrt
+.Cm echoe echoke echoctl ;
+with a
+.Ql -
+.Cm echok
+instead.
+.It Cm dec
+.Cm crt ,
+.Cm -ixany ,
+erase
+.Ql ^? ,
+kill
+.Ql ^U
+and intr
+.Ql ^C .
+.It Cm ek
+Erase and kill back to
+.Ql ^?
+and
+.Ql ^U .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Read a password without echoing it:
+.Bd -literal -offset indent
+stty -echo; read pw; stty echo
+.Ed
+.Pp
+Show the settings of another terminal:
+.Dl # stty -a -f /dev/ttyv1
+.Sh SEE ALSO
+.Xr tcsetattr 3 ,
+.Xr pts 4 ,
+.Xr termios 4
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq),
+less the XSI output delay settings
+.Pq Cm ofill , ofdel , cr0 No ... Cm ff1 .
+.Fl e ,
+.Fl f
+and the combinations not in POSIX are extensions, as in the BSDs.
+The BSDs'
+.Cm altwerase ,
+.Cm dsusp ,
+.Cm erase2 ,
+.Cm status
+and line discipline settings are not provided: OxideBSD's terminals don't
+have them.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v2 .
+This one is written in Rust for OxideBSD.

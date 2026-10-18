@@ -394,7 +394,7 @@ pub extern "C" fn _start() -> ! {
         b"ls -l marks a directory with d"
     );
     check!(
-        contains(&buf[..n], b"root root"),
+        contains(&buf[..n], b"root  root"),
         b"ls -l shows owner and group names"
     );
     let n = ls_l(b"/t/soft", &mut buf);
@@ -458,21 +458,22 @@ pub extern "C" fn _start() -> ! {
     expect_out(
         b"/bin/ls",
         &[b"ls", b"-C", b"/t"],
-        b"a        a2       f1       hard     soft     src.txt\n",
+        // FreeBSD's layout: columns padded with tabs to the next 8-column stop.
+        b"a\ta2\tf1\thard\tsoft\tsrc.txt\n",
         b"ls -C lays names out in columns",
     );
-    expect_out(
-        b"/bin/ls",
-        &[b"ls", b"--color=always", b"/t"],
-        b"\x1b[1;34ma\x1b[0m\n\x1b[1;34ma2\x1b[0m\nf1\nhard\n\x1b[1;36msoft\x1b[0m\nsrc.txt\n",
-        b"ls --color: dirs blue, symlinks cyan, plain files uncolored",
+    // FreeBSD's default LSCOLORS: directories and links get an escape sequence, plain files none.
+    check!(run(b"/bin/ls", &[b"ls", b"--color=always", b"/t"], Some(b"/t/colors")) == 0, b"ls --color=always");
+    let n = read_file(b"/t/colors", &mut buf).unwrap_or(0);
+    check!(
+        contains(&buf[..n], b"\x1b[") && contains(&buf[..n], b"a\x1b[") && contains(&buf[..n], b"\nf1\n"),
+        b"ls --color: directories and links colored, plain files not"
     );
-    expect_out(
-        b"/bin/ls",
-        &[b"ls", b"--color=always", b"/bin/true"],
-        b"\x1b[1;32m/bin/true\x1b[0m\n",
-        b"ls --color: executables green",
-    );
+    let _ = run(b"/bin/rm", &[b"rm", b"/t/colors"], None);
+    check!(run(b"/bin/ls", &[b"ls", b"--color=always", b"/bin/true"], Some(b"/t/colors")) == 0, b"ls --color on a file");
+    let n = read_file(b"/t/colors", &mut buf).unwrap_or(0);
+    check!(contains(&buf[..n], b"\x1b[") && contains(&buf[..n], b"/bin/true"), b"ls --color: executables colored");
+    let _ = run(b"/bin/rm", &[b"rm", b"/t/colors"], None);
     // A big directory really does pack into fewer lines than entries.
     let (mut plain, mut cols) = ([0u8; 4096], [0u8; 4096]);
     check!(

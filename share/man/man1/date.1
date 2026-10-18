@@ -1,0 +1,169 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt DATE 1
+.Os OxideBSD
+.Sh NAME
+.Nm date
+.Nd display or set the date and time
+.Sh SYNOPSIS
+.Nm
+.Op Fl jnRu
+.Op Fl I Ns Op Ar precision
+.Op Fl r Ar seconds | Fl r Ar file
+.Oo Fl v Oo Cm + | Cm - Oc Ns Ar val Ns Oo Cm y | m | w | d | H | M | S Oc Oc ...
+.Op Cm + Ns Ar output_fmt
+.Nm
+.Op Fl jnu
+.Sm off
+.Oo Oo Oo Oo Oo Ar cc Oc Ar yy Oc Ar mm Oc Ar dd Oc Ar HH Oc Ar MM Op Cm \&. Ar SS
+.Sm on
+.Op Cm + Ns Ar output_fmt
+.Nm
+.Op Fl jnRu
+.Fl f Ar input_fmt new_date
+.Op Cm + Ns Ar output_fmt
+.Sh DESCRIPTION
+With no operand,
+.Nm
+writes the current date and time.
+Given
+.Cm + Ns Ar output_fmt ,
+it writes them in that format, as
+.Xr strftime 3
+takes it; otherwise as
+.Ql %a %b %e %H:%M:%S %Z %Y .
+.Pp
+An operand of digits sets the system clock, which only the super-user may do:
+.Bl -tag -width Ds -compact -offset indent
+.It Ar cc
+century, the first two digits of the year
+.It Ar yy
+year in the century; without
+.Ar cc ,
+69 to 99 are 1969 to 1999 and 00 to 68 are 2000 to 2068
+.It Ar mm
+month, 01 to 12
+.It Ar dd
+day of the month
+.It Ar HH
+hour, 00 to 23
+.It Ar MM
+minute
+.It Ar SS
+second
+.El
+Fields left out keep their present values, but seconds become 0.
+Afterwards the new time is written.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl f Ar input_fmt
+Read the operand with
+.Xr strptime 3
+and
+.Ar input_fmt
+instead; fields it doesn't set keep their present values.
+.It Fl I Ns Op Ar precision
+Write the time in ISO 8601 form, to the
+.Cm date
+(the default),
+.Cm hours ,
+.Cm minutes
+or
+.Cm seconds ,
+with the offset from UTC.
+.It Fl j
+Don't set the clock: only write the time the operand names.
+With
+.Fl f ,
+a way to convert dates from one format to another.
+.It Fl n
+Accepted for compatibility; it changes nothing.
+.It Fl R
+Write the time as RFC 2822 has it:
+.Ql %a, %d %b %Y \&%T %z .
+.It Fl r Ar seconds
+Use this time, in seconds since the epoch, instead of now.
+.It Fl r Ar file
+Use the time
+.Ar file
+was last modified.
+.It Fl u
+Work in UTC, not the local time zone.
+.It Fl v Oo Cm + | Cm - Oc Ns Ar val Ns Ar unit
+Adjust the time before writing it.
+Without a sign the field is set to
+.Ar val ,
+with one it is moved forward or back by
+.Ar val .
+The units are
+.Cm y
+(years),
+.Cm m
+(months, 1 to 12),
+.Cm w
+(weeks; without a sign, a day of the week, 0 to 6 from Sunday),
+.Cm d
+(days),
+.Cm H
+(hours),
+.Cm M
+(minutes) and
+.Cm S
+(seconds).
+A month or weekday may be named instead, as
+.Ql -v+fri
+for the next Friday or
+.Ql -v-jan
+for the last January; a named day or month equal to the present one moves
+nothing.
+A day past the end of a month after a change of month is brought back to its
+last day.
+Adjustments in hours or smaller are of elapsed time; larger ones keep the
+time of day across a change of daylight saving time.
+Several
+.Fl v
+options apply in the order given.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width TZ
+.It Ev TZ
+The time zone, for times shown and set.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Seconds since the epoch:
+.Dl $ date +%s
+.Pp
+The last day of this month:
+.Dl $ date -v1d -v+1m -v-1d +%F
+.Pp
+Set the clock to 8:30 this morning:
+.Dl # date 0830
+.Pp
+Convert a date to another form without setting anything:
+.Dl $ date -j -f %Y-%m-%d 2026-12-25 +%A
+.Sh SEE ALSO
+.Xr clock_settime 2 ,
+.Xr strftime 3 ,
+.Xr strptime 3 ,
+.Xr adjkerntz 8
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq)
+but for how a time to set is written: POSIX's
+.Ar mmddhhmm Ns Op Ar [cc]yy
+is the BSDs'
+.Ar [[[[[cc]yy]mm]dd]HH]MM
+here, as in all three of them.
+The options but
+.Fl u
+are extensions, as in the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

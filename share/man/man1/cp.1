@@ -1,0 +1,141 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt CP 1
+.Os OxideBSD
+.Sh NAME
+.Nm cp
+.Nd copy files
+.Sh SYNOPSIS
+.Nm
+.Oo
+.Fl R
+.Op Fl H | L | P
+.Oc
+.Op Fl f | i | n
+.Op Fl alpsvx
+.Ar source_file target_file
+.Nm
+.Oo
+.Fl R
+.Op Fl H | L | P
+.Oc
+.Op Fl f | i | n
+.Op Fl alpsvx
+.Ar source_file ... target_directory
+.Sh DESCRIPTION
+In the first form
+.Nm
+copies
+.Ar source_file
+to
+.Ar target_file .
+In the second, the last operand is an existing directory and each
+.Ar source_file
+is copied into it under its own name.
+.Pp
+An existing target file is overwritten in place, keeping its mode.
+A new one gets the source's mode, less the set-user-ID and set-group-ID bits
+and the umask.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Archive: the same as
+.Fl RpP .
+.It Fl f
+If an existing target can't be opened, remove it and try again.
+.It Fl H
+With
+.Fl R ,
+follow symbolic links named on the command line.
+.It Fl i
+Ask on the standard error before overwriting a file, reading the answer from
+the standard input; anything but an answer beginning with
+.Ql y
+leaves the file as it is.
+.It Fl L
+With
+.Fl R ,
+follow every symbolic link.
+.It Fl l
+Make hard links to the sources instead of copies.
+.It Fl n
+Don't overwrite an existing file.
+.It Fl P
+With
+.Fl R ,
+follow no symbolic link (the default).
+.It Fl p
+Preserve each file's modification and access times, owner and group, and mode.
+If the owner can't be kept, neither are the set-user-ID and set-group-ID bits.
+.It Fl R
+Copy directories and everything in them.
+Symbolic links are copied as links, and FIFOs and devices are made anew rather
+than read from.
+A new directory gets its source's mode less the umask.
+.Fl r
+is taken as
+.Fl R .
+.It Fl s
+Make symbolic links to the sources instead of copies.
+.It Fl v
+Name each file as it is copied.
+.It Fl x
+Don't copy directories on other file systems than the one each operand is on.
+.El
+.Pp
+Of
+.Fl f ,
+.Fl i
+and
+.Fl n ,
+the last given counts, as does the last of
+.Fl H ,
+.Fl L
+and
+.Fl P .
+Without
+.Fl R ,
+symbolic links are followed and what they point to is copied.
+.Pp
+A file is never copied onto itself, nor a directory into a copy of itself.
+.Sh EXIT STATUS
+.Ex -std
+A file left alone by
+.Fl n ,
+or by answering no to
+.Fl i ,
+is not a failure.
+.Sh EXAMPLES
+Copy a tree, keeping times and modes:
+.Dl $ cp -Rp /usr/share/examples/etc ~/etc.orig
+.Pp
+Copy several files into a directory, asking before replacing any:
+.Dl $ cp -i *.conf /etc/
+.Sh SEE ALSO
+.Xr ln 1 ,
+.Xr mv 1 ,
+.Xr symlink 7
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+.Fl a ,
+.Fl l ,
+.Fl n ,
+.Fl s ,
+.Fl v
+and
+.Fl x
+are extensions, as in the BSDs.
+Unlike FreeBSD's,
+.Nm
+gives a source ending in
+.Ql /
+no special meaning: the directory itself is copied.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

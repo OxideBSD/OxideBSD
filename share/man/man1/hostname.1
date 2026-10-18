@@ -1,0 +1,45 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt HOSTNAME 1
+.Os OxideBSD
+.Sh NAME
+.Nm hostname
+.Nd write or set the name of the host
+.Sh SYNOPSIS
+.Nm
+.Op Fl f
+.Op Fl s | d
+.Op Ar name-of-host
+.Sh DESCRIPTION
+.Nm
+writes the name of the host, or, given
+.Ar name-of-host ,
+sets it, which only the superuser may do.
+The name is normally set at boot from
+.Va hostname
+in
+.Xr rc.conf 5 .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl d
+Write only what follows the first dot, the domain (the whole name if it has
+no dot).
+.It Fl f
+Write the fully qualified name, which the name already is: accepted and
+ignored, as on
+.Fx .
+.It Fl s
+Write only what precedes the first dot.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr gethostname 3 ,
+.Xr sethostname 3 ,
+.Xr rc.conf 5
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Bx 4.2 .

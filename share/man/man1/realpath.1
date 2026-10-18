@@ -1,0 +1,49 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt REALPATH 1
+.Os OxideBSD
+.Sh NAME
+.Nm realpath
+.Nd write resolved pathnames
+.Sh SYNOPSIS
+.Nm
+.Op Fl q
+.Op Ar path ...
+.Sh DESCRIPTION
+.Nm
+writes, for each
+.Ar path ,
+the absolute pathname of the file it names, with every symbolic link
+followed and no
+.Pa \&. ,
+.Pa ..
+or extra
+.Ql /
+left, as
+.Xr realpath 3
+makes it.
+With no
+.Ar path ,
+the working directory's.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl q
+Say nothing about a
+.Ar path
+that can't be resolved, such as one that doesn't exist (the exit status
+still says so).
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Dl realpath /usr/../etc/./rc
+.Sh SEE ALSO
+.Xr pwd 1 ,
+.Xr readlink 1 ,
+.Xr realpath 3
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 4.3 .

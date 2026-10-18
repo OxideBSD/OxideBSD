@@ -58,6 +58,8 @@
 ./usr/tests/syslog/run.sh type=file src=regress/syslog-syscall-smoke/run.sh
 ./usr/tests/bin type=dir
 ./usr/tests/bin/run.sh type=file src=regress/bin-syscall-smoke/run.sh
+./usr/tests/bin/bin1.sh type=file src=regress/bin-syscall-smoke/bin1.sh
+./usr/tests/bin/bin2.sh type=file src=regress/bin-syscall-smoke/bin2.sh
 ./usr/tests/cron type=dir
 ./usr/tests/cron/run.sh type=file src=regress/cron-syscall-smoke/run.sh
 ./usr/tests/musl type=file src=artifact:OXFS_MUSL_ELF_PATH
@@ -378,6 +380,25 @@
 ./usr/share/man/man1 type=dir
 ./usr/share/man/oxdoc.db type=file src=artifact:OXFS_MAN_DB_PATH
 ./usr/share/man/man1/apropos.1 type=file src=share/man/man1/apropos.1
+./usr/share/man/man1/cat.1 type=file src=share/man/man1/cat.1
+./usr/share/man/man1/cp.1 type=file src=share/man/man1/cp.1
+./usr/share/man/man1/date.1 type=file src=share/man/man1/date.1
+./usr/share/man/man1/dd.1 type=file src=share/man/man1/dd.1
+./usr/share/man/man1/df.1 type=file src=share/man/man1/df.1
+./usr/share/man/man1/echo.1 type=file src=share/man/man1/echo.1
+./usr/share/man/man1/false.1 type=file src=share/man/man1/false.1
+./usr/share/man/man1/hostname.1 type=file src=share/man/man1/hostname.1
+./usr/share/man/man1/ln.1 type=file src=share/man/man1/ln.1
+./usr/share/man/man1/ls.1 type=file src=share/man/man1/ls.1
+./usr/share/man/man1/mkdir.1 type=file src=share/man/man1/mkdir.1
+./usr/share/man/man1/mv.1 type=file src=share/man/man1/mv.1
+./usr/share/man/man1/pwd.1 type=file src=share/man/man1/pwd.1
+./usr/share/man/man1/realpath.1 type=file src=share/man/man1/realpath.1
+./usr/share/man/man1/rm.1 type=file src=share/man/man1/rm.1
+./usr/share/man/man1/stty.1 type=file src=share/man/man1/stty.1
+./usr/share/man/man1/timeout.1 type=file src=share/man/man1/timeout.1
+./usr/share/man/man1/true.1 type=file src=share/man/man1/true.1
+./usr/share/man/man8/mknod.8 type=file src=share/man/man8/mknod.8
 ./usr/share/man/man1/whatis.1 type=file hardlink=./usr/share/man/man1/apropos.1
 ./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
 ./usr/share/man/man1/zstd.1 type=file src=external/bsd/zstd/programs/zstd.1

@@ -1,0 +1,195 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt DD 1
+.Os OxideBSD
+.Sh NAME
+.Nm dd
+.Nd convert and copy a file
+.Sh SYNOPSIS
+.Nm
+.Op Ar operand ...
+.Sh DESCRIPTION
+.Nm
+copies its input to its output in blocks, converting as asked.
+It reads input blocks of
+.Cm ibs
+bytes, and gathers what it reads into output blocks of
+.Cm obs
+bytes.
+When it is done, or interrupted, it writes a summary on the standard error.
+.Pp
+The operands are:
+.Bl -tag -width "count=n"
+.It Cm if Ns = Ns Ar file
+Read
+.Ar file
+instead of the standard input.
+.It Cm of Ns = Ns Ar file
+Write
+.Ar file
+instead of the standard output.
+It is created if need be, with mode 0666 less the umask, and truncated unless
+.Cm seek
+or
+.Cm conv Ns = Ns Cm notrunc
+is given.
+.It Cm ibs Ns = Ns Ar n
+The input block size (512).
+.It Cm obs Ns = Ns Ar n
+The output block size (512).
+.It Cm bs Ns = Ns Ar n
+Both block sizes.
+If no conversion is asked for but
+.Cm noerror ,
+.Cm notrunc
+and
+.Cm sync ,
+each block read is written as one block, however short.
+.It Cm cbs Ns = Ns Ar n
+The record size for
+.Cm block
+and
+.Cm unblock .
+.It Cm skip Ns = Ns Ar n
+Pass by
+.Ar n
+input blocks before copying: by seeking where the input can, else by reading.
+.Cm iseek
+is the same.
+.It Cm seek Ns = Ns Ar n
+Seek past
+.Ar n
+output blocks before writing; a regular output file is cut there unless
+.Cm conv Ns = Ns Cm notrunc .
+.Cm oseek
+is the same.
+.It Cm count Ns = Ns Ar n
+Copy only
+.Ar n
+input blocks.
+.It Cm conv Ns = Ns Ar value Ns Op , Ns Ar value ...
+Conversions, any of:
+.Bl -tag -width fdatasync
+.It Cm block
+Treat the input as lines; write each as a record of
+.Cm cbs
+bytes, padded with spaces, or cut to fit (counted as truncated).
+.It Cm unblock
+Treat the input as records of
+.Cm cbs
+bytes; write each without its trailing spaces and with a newline.
+.It Cm lcase , ucase
+Map letters to lower or upper case.
+.It Cm swab
+Swap each pair of input bytes.
+.It Cm noerror
+Go on after a read error, writing the summary so far; with
+.Cm sync
+the lost block is written as NULs, without it the block is left out.
+.It Cm notrunc
+Don't truncate the output file.
+.It Cm sync
+Pad each input block to
+.Cm ibs
+bytes: with spaces for
+.Cm block
+and
+.Cm unblock ,
+else with NULs.
+.It Cm sparse
+Seek over output blocks made only of NULs instead of writing them, leaving a
+hole in the file.
+.It Cm fsync , fdatasync
+Flush the output to its device at the end.
+.El
+.It Cm iflag Ns = Ns Cm fullblock
+Fill each input block, reading again after a short read (from a pipe or
+terminal).
+.It Cm oflag Ns = Ns Ar value Ns Op , Ns Ar value ...
+.Cm fsync
+as
+.Cm conv Ns = Ns Cm fsync ;
+.Cm sync
+opens the output for synchronous writes.
+.It Cm status Ns = Ns Ar value
+.Cm noxfer
+leaves out the bytes transferred line,
+.Cm none
+the whole summary;
+.Cm progress
+also shows a running count about once a second.
+.El
+.Pp
+A number may end in
+.Cm b
+(512),
+.Cm k ,
+.Cm m ,
+.Cm g ,
+.Cm t ,
+.Cm p
+or
+.Cm e
+(powers of 1024), or
+.Cm w
+(4), and numbers may be multiplied with
+.Cm x :
+.Ql bs=2x512 .
+.Pp
+The summary reads
+.Bd -literal -offset indent
+f+p records in
+f+p records out
+n bytes transferred in s secs (r bytes/sec)
+.Ed
+.Pp
+where
+.Ar f
+counts full blocks and
+.Ar p
+partial ones, followed by how many blocks
+.Cm swab
+found of odd length and how many records
+.Cm block
+cut short, when there were any.
+.Sh EXIT STATUS
+.Ex -std
+After an interrupt
+.Nm
+writes the summary and dies of the signal.
+.Sh EXAMPLES
+Write an image to a disk:
+.Dl # dd if=oxidebsd.img of=/dev/vtbd1 bs=1m conv=fsync
+.Pp
+Make a 64 MB file that takes no space:
+.Dl $ dd if=/dev/zero of=disk.img bs=1m count=64 conv=sparse
+.Sh SEE ALSO
+.Xr cp 1 ,
+.Xr tr 1
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq),
+less the
+.Cm ascii ,
+.Cm ebcdic
+and
+.Cm ibm
+conversions, which are not provided.
+.Cm iseek ,
+.Cm oseek ,
+.Cm iflag ,
+.Cm oflag ,
+.Cm status
+and the
+.Cm sparse ,
+.Cm fsync
+and
+.Cm fdatasync
+conversions are extensions, as in the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v5 .
+This one is written in Rust for OxideBSD.

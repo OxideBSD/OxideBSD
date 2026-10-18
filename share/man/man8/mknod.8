@@ -1,0 +1,71 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt MKNOD 8
+.Os OxideBSD
+.Sh NAME
+.Nm mknod
+.Nd make device special files
+.Sh SYNOPSIS
+.Nm
+.Ar name
+.Nm
+.Ar name
+.Cm b | c
+.Ar major minor
+.Op Ar owner : Ns Ar group
+.Sh DESCRIPTION
+.Nm
+makes
+.Ar name ,
+a block
+.Pq Cm b
+or character
+.Pq Cm c
+special file for the device numbered
+.Ar major
+and
+.Ar minor ,
+with mode 0666 less the
+.Xr umask 2 .
+The numbers are read as
+.Xr strtoul 3
+reads them: a leading
+.Ql 0x
+means hexadecimal, a leading
+.Ql 0
+octal.
+.Pp
+With
+.Ar owner : Ns Ar group ,
+both given, as names or numbers (a name that is also a number counts as a
+name), the file is given to them.
+.Pp
+With only a
+.Ar name ,
+.Nm
+asks for a character special file of device 0, which in
+.Xr devfs 4
+recreates a node that was removed, where the file system allows it.
+.Pp
+Device nodes normally come from
+.Xr devfs 4 ,
+under
+.Pa /dev ;
+nodes made elsewhere are files that name a device by number.
+FIFOs are made with
+.Xr mkfifo 1 .
+Only the superuser may make device special files.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Dl mknod /tmp/null c 1 3 root:wheel
+.Sh SEE ALSO
+.Xr mkfifo 1 ,
+.Xr mknod 2 ,
+.Xr devfs 4 ,
+.Xr chown 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v6 .

@@ -1,0 +1,121 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt DF 1
+.Os OxideBSD
+.Sh NAME
+.Nm df
+.Nd display free disk space
+.Sh SYNOPSIS
+.Nm
+.Op Fl b | g | H | h | k | m | P
+.Op Fl acilnT
+.Op Fl t Ar type
+.Op Ar file | filesystem ...
+.Sh DESCRIPTION
+.Nm
+shows, for each mounted file system, its size, the space used and the space
+available, how full it is, and where it is mounted.
+Given a
+.Ar file ,
+it shows the file system holding it; given a
+.Ar filesystem ,
+a device, the file system mounted from it.
+.Pp
+Sizes are in 512-byte blocks, or in the unit
+.Ev BLOCKSIZE
+names.
+Capacity is the share of the space ordinary users may fill that is used:
+space kept back for the super-user is left out.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Show all file systems (OxideBSD hides none, so this changes nothing).
+.It Fl b
+Sizes in 512-byte blocks.
+.It Fl c
+Add a line with the totals.
+.It Fl g
+Sizes in gigabytes (1073741824 bytes).
+.It Fl H
+Sizes with a unit suffix (B, K, M, G, T, P, E), in powers of 1000.
+.It Fl h
+Sizes with a unit suffix, in powers of 1024.
+.It Fl i
+Also show the inodes used and free, and the share used.
+.It Fl k
+Sizes in kilobytes (1024 bytes).
+.It Fl l
+Only local file systems.
+.It Fl m
+Sizes in megabytes (1048576 bytes).
+.It Fl n
+Use the counts the kernel has to hand rather than asking each file system,
+which may be out of date but can't block.
+.It Fl P
+POSIX's output: its header, 512-byte blocks (1024-byte ones with
+.Fl k ) ,
+and capacity rounded up.
+.It Fl T
+Also show each file system's type.
+.It Fl t Ar type Ns Op , Ns Ar type ...
+Only file systems of these types.
+A list beginning with
+.Ql no ,
+as in
+.Ql noprocfs,devfs ,
+means all but these.
+.El
+.Pp
+Of
+.Fl b ,
+.Fl g ,
+.Fl H ,
+.Fl h ,
+.Fl k ,
+.Fl m
+and
+.Fl P
+the last given counts, except that
+.Fl k
+and
+.Fl P
+together give POSIX's output in 1024-byte blocks.
+.Sh ENVIRONMENT
+.Bl -tag -width BLOCKSIZE
+.It Ev BLOCKSIZE
+The unit for sizes, such as
+.Ql 1k
+or
+.Ql 1m ,
+when none of the unit options is given.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Free space everywhere, readably:
+.Dl $ df -h
+.Pp
+The file system holding a directory, with its type and inodes:
+.Dl $ df -Ti /var/log
+.Sh SEE ALSO
+.Xr du 1 ,
+.Xr getvfsstat 2 ,
+.Xr statvfs 3 ,
+.Xr fstab 5 ,
+.Xr mount 8
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+The options but
+.Fl k
+and
+.Fl P
+are extensions, as in the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

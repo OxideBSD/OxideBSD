@@ -1,0 +1,53 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt ECHO 1
+.Os OxideBSD
+.Sh NAME
+.Nm echo
+.Nd write arguments to the standard output
+.Sh SYNOPSIS
+.Nm
+.Op Fl n
+.Op Ar string ...
+.Sh DESCRIPTION
+.Nm
+writes each
+.Ar string ,
+separated by single spaces, and then a newline.
+.Pp
+The only option is
+.Fl n ,
+which leaves the newline off; it is recognised only as the first argument,
+exactly, and once.
+Anything else, however it begins, is written as it is.
+A last
+.Ar string
+that ends in
+.Ql \ec
+also leaves the newline off, and those two characters with it.
+No other backslash is special.
+.Pp
+Shells have an
+.Ic echo
+built-in, which may differ; for portable output with escapes, use
+.Xr printf 1 .
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Write a prompt with no newline:
+.Dl echo -n "Continue? "
+.Sh SEE ALSO
+.Xr printf 1 ,
+.Xr sh 1
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ,
+which leaves both
+.Fl n
+and backslashes to the implementation.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v2 .

@@ -616,7 +616,12 @@ fn main() {
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmode/src").display()
     );
-    let std_bin_paths: Vec<(String, String)> = ["sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod", "touch"]
+    let mknod_elf_path = build_static_std_crate("sbin/mknod", "OXFS_MKNOD_ELF_PATH", &musl_sysroot);
+    let std_bin_paths: Vec<(String, String)> = [
+        "sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod", "touch", "echo", "true", "false",
+        "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "realpath", "hostname", "timeout", "dd", "df", "date",
+        "stty",
+    ]
         .iter()
         .map(|name| {
             let env = oxfs_env_var_name(name);
@@ -1116,34 +1121,11 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
-    // Native `bin/<name>` utilities (see `NATIVE_BIN_UTILITIES`) bind to the *same*
-    // `OXFS_<NAME>_ELF_PATH` names their BusyBox predecessors used, so `sys/modules/oxfs`'s existing
-    // `seed_file(bin, b"<name>", include_bytes!(env!(...)))` call sites need no edit at all.
-    // `build_crate_at` only watches each crate's *own* directory -- `lib/oxlibc` is their shared
-    // dependency, so a change there has to retrigger this build script explicitly.
-    println!(
-        "cargo:rerun-if-changed={}",
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/oxlibc").display()
-    );
-    let native_bin_paths: Vec<(String, String)> = NATIVE_BIN_UTILITIES
-        .iter()
-        .map(|&name| {
-            let elf = build_pie_crate_at(
-                &format!("bin/{name}"),
-                &format!("BIN_{}_ELF_PATH", name.to_uppercase()),
-            );
-            (oxfs_env_var_name(name), elf.to_str().unwrap().to_string())
-        })
-        .collect();
-    oxfs_extra_env.extend(
-        native_bin_paths
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str())),
-    );
     oxfs_extra_env.push(("OXFS_CRONTAB_ELF_PATH", crontab_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_MOUNT_ELF_PATH", mount_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_UMOUNT_ELF_PATH", umount_elf_path.to_str().unwrap()));
     oxfs_extra_env.extend(std_bin_paths.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    oxfs_extra_env.push(("OXFS_MKNOD_ELF_PATH", mknod_elf_path.to_str().unwrap()));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [
         "etc",
@@ -1152,6 +1134,8 @@ fn main() {
         "regress/syslog-syscall-smoke/run.sh",
         "regress/cron-syscall-smoke/run.sh",
         "regress/bin-syscall-smoke/run.sh",
+        "regress/bin-syscall-smoke/bin1.sh",
+        "regress/bin-syscall-smoke/bin2.sh",
         "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
         "regress/kern-syscall-smoke/run.sh",
@@ -1203,15 +1187,6 @@ fn main() {
         build_multiboot2_boot_smoke_crate();
     }
 }
-
-/// `/bin` utilities that are native OxideBSD binaries (`bin/<name>`, built by `build_pie_crate_at`
-/// against `lib/oxlibc`) instead of BusyBox applets -- the first batch of the userland replacement.
-/// Their BusyBox tuples are gone from `build_busybox.rs`, as is BusyBox's `vi` (OpenVi replaces
-/// it) -- two producers for one `OXFS_<NAME>_ELF_PATH` once silently seeded the wrong binary.
-
-const NATIVE_BIN_UTILITIES: &[&str] = &[
-    "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln",
-];
 
 fn oxfs_env_var_name(out_name: &str) -> String {
     // `run-parts` -> `OXFS_RUN_PARTS_ELF_PATH`.

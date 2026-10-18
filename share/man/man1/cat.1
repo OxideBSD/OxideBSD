@@ -1,0 +1,81 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt CAT 1
+.Os OxideBSD
+.Sh NAME
+.Nm cat
+.Nd concatenate and print files
+.Sh SYNOPSIS
+.Nm
+.Op Fl benstuv
+.Op Ar file ...
+.Sh DESCRIPTION
+.Nm
+reads each
+.Ar file
+in turn and writes it to the standard output.
+A
+.Ar file
+of
+.Sq Fl ,
+or none at all, means the standard input.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl b
+Number the lines that are not empty; implies
+.Fl n .
+.It Fl e
+Show a
+.Ql $
+at the end of each line; implies
+.Fl v .
+.It Fl n
+Number the output lines, starting at 1.
+The count continues from one file to the next.
+.It Fl s
+Squeeze runs of empty lines into a single empty line.
+.It Fl t
+Show tabs as
+.Ql ^I ;
+implies
+.Fl v .
+.It Fl u
+Accepted for compatibility:
+.Nm
+never holds output back past the read that produced it.
+.It Fl v
+Show non-printing characters visibly: a control character as
+.Ql ^
+and the character 0100 above it
+.Pq Ql ^A ,
+DEL as
+.Ql ^? ,
+and a byte with the high bit set as
+.Ql M-
+followed by the character for its low seven bits.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Number the lines of two files as one:
+.Dl $ cat -n intro.txt body.txt
+.Pp
+Show where a file has trailing blanks and tabs:
+.Dl $ cat -et config
+.Sh SEE ALSO
+.Xr cp 1 ,
+.Xr more 1
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq),
+whose only option is
+.Fl u .
+The others are those of the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

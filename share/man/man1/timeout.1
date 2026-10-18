@@ -1,0 +1,136 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt TIMEOUT 1
+.Os OxideBSD
+.Sh NAME
+.Nm timeout
+.Nd run a command with a time limit
+.Sh SYNOPSIS
+.Nm
+.Op Fl f | -foreground
+.Op Fl k Ar time | Fl -kill-after Ar time
+.Op Fl p | -preserve-status
+.Op Fl s Ar signal | Fl -signal Ar signal
+.Op Fl v | -verbose
+.Ar duration
+.Ar command
+.Op Ar arg ...
+.Sh DESCRIPTION
+.Nm
+runs
+.Ar command
+with its
+.Ar arg Ns s
+and, if it is still running after
+.Ar duration ,
+sends it a signal,
+.Dv SIGTERM
+unless another is given, followed by
+.Dv SIGCONT
+in case it was stopped.
+.Pp
+A
+.Ar duration
+or
+.Ar time
+is a number of seconds, fractions allowed, or of minutes, hours or days with
+the suffix
+.Ql m ,
+.Ql h
+or
+.Ql d
+.Po
+.Ql s
+for seconds may also be written
+.Pc .
+0 means no limit.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl f , Fl -foreground
+Signal only
+.Ar command ,
+not the processes it starts, and leave it in
+.Nm Ns 's
+process group, so that it can read the terminal.
+Otherwise
+.Ar command
+runs in a process group of its own, and the group is signalled.
+.It Fl k Ar time , Fl -kill-after Ar time
+If
+.Ar command
+is still running
+.Ar time
+after the first signal, send it
+.Dv SIGKILL .
+.It Fl p , Fl -preserve-status
+Exit with
+.Ar command Ns 's
+status even when the time ran out.
+.It Fl s Ar signal , Fl -signal Ar signal
+Send
+.Ar signal ,
+a name (with or without
+.Dq SIG ,
+in any case) or number, when the time runs out.
+.It Fl v , Fl -verbose
+Report each signal sent, and why, on the standard error.
+.El
+.Pp
+A signal that would terminate
+.Nm
+itself is passed on to
+.Ar command
+instead, as if the time had run out; other signals are passed on.
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 124
+The time ran out (and
+.Fl p
+wasn't given).
+.It 125
+.Nm
+itself failed, for example on a bad option or duration.
+.It 126
+.Ar command
+was found but couldn't be run.
+.It 127
+.Ar command
+wasn't found.
+.El
+.Pp
+Otherwise, the exit status of
+.Ar command ;
+if it was killed by a signal,
+.Nm
+kills itself with the same signal (without a core dump), so that the shell
+reports the same.
+.Sh EXAMPLES
+Give a build ten minutes, and a minute more to clean up:
+.Dl timeout -k 1m 10m make
+.Sh SEE ALSO
+.Xr kill 1 ,
+.Xr nohup 1 ,
+.Xr signal 3
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024
+.Pq Dq POSIX.1 ;
+.Fl v
+and the long options are extensions.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 10.3 .
+.Sh CAVEATS
+.Fx
+signals all of
+.Ar command Ns 's
+descendants by making
+.Nm
+their reaper; OxideBSD uses a process group instead, so a descendant that
+leaves the group escapes, and without
+.Fl f
+a command that reads the terminal is stopped, as it is in the background.

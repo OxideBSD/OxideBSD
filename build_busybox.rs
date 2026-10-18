@@ -66,10 +66,7 @@
         ("CMP", "cmp", 0xa280000),
         ("COMM", "comm", 0xa2c0000),
         ("CPIO", "cpio", 0xa300000),
-        ("DATE", "date", 0xa440000),
         ("DC", "dc", 0xa480000),
-        ("DD", "dd", 0xa4c0000),
-        ("DF", "df", 0xa600000),
         ("DIFF", "diff", 0xa680000),
         ("DU", "du", 0xa840000),
         ("ED", "ed", 0xa900000),
@@ -91,7 +88,6 @@
         ("INSTALL", "install", 0xb480000),
         ("LOGNAME", "logname", 0xb840000),
         ("MD5SUM", "md5sum", 0xbc40000),
-        ("MKNOD", "mknod", 0xbdc0000),
         ("MKTEMP", "mktemp", 0xbe80000),
         ("NC", "nc", 0xc000000),
         ("NICE", "nice", 0xc0c0000),
@@ -106,7 +102,6 @@
         ("PKILL", "pkill", 0xc540000),
         ("PRINTENV", "printenv", 0xc680000),
         ("READLINK", "readlink", 0xc840000),
-        ("REALPATH", "realpath", 0xc8c0000),
         ("RENICE", "renice", 0xc980000),
         ("REV", "rev", 0xca80000),
         ("SED", "sed", 0xcd40000),
@@ -117,13 +112,11 @@
         ("SSL_CLIENT", "ssl_client", 0xd280000),
         ("STAT", "stat", 0xd300000),
         ("STRINGS", "strings", 0xd340000),
-        ("STTY", "stty", 0xd380000),
         ("SUM", "sum", 0xd440000),
         ("TAR", "tar", 0xd640000),
         ("TEE", "tee", 0xd700000),
         ("TELNET", "telnet", 0xd740000),
         ("TIME", "time", 0xd800000),
-        ("TIMEOUT", "timeout", 0xd840000),
         ("TR", "tr", 0xd8c0000),
         ("TRACEROUTE", "traceroute", 0xd900000),
         ("TRUNCATE", "truncate", 0xd980000),
@@ -153,7 +146,6 @@
         // dnsdomainname, plain `hostname` (no args, or `-s`) only needs safe_gethostname(), which
         // is just uname() under the hood -- no new syscall required now that SYS_UNAME exists;
         // only its `-d`/`-f`/`-i` flags (real DNS resolution) stay NEEDS_NETWORK.
-        ("HOSTNAME", "hostname", 0xe200000),
         // The 2026-10-14 batch (OxideBSD-doc `BUSYBOX_APPLETS.md` §3): BSD base tools nothing else
         // provided (`ipcrm` since went native, with `ipcs`, over the `kern.ipc` sysctls).
         // `who`/`w`/`users`/`wall`/`last` read the utmpx and wtmpx files musl's utmpx(3) and

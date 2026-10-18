@@ -1,0 +1,57 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt PWD 1
+.Os OxideBSD
+.Sh NAME
+.Nm pwd
+.Nd write the working directory's name
+.Sh SYNOPSIS
+.Nm
+.Op Fl L | P
+.Sh DESCRIPTION
+.Nm
+writes the absolute pathname of the working directory.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl L
+The logical name, the default: the value of
+.Ev PWD ,
+if it is an absolute pathname of the working directory with no
+.Pa \&.
+or
+.Pa ..
+component; otherwise as for
+.Fl P .
+.It Fl P
+The physical name, with no symbolic links.
+.El
+.Pp
+The last of the two counts.
+Shells have a
+.Ic pwd
+built-in that keeps
+.Ev PWD
+itself.
+.Sh ENVIRONMENT
+.Bl -tag -width "PWD"
+.It Ev PWD
+The logical working directory, as set by the shell's
+.Ic cd .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr cd 1 ,
+.Xr realpath 1 ,
+.Xr sh 1 ,
+.Xr getcwd 3
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 .
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v5 .

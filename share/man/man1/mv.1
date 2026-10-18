@@ -1,0 +1,106 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt MV 1
+.Os OxideBSD
+.Sh NAME
+.Nm mv
+.Nd move files
+.Sh SYNOPSIS
+.Nm
+.Op Fl f | i | n
+.Op Fl hv
+.Ar source target
+.Nm
+.Op Fl f | i | n
+.Op Fl v
+.Ar source ... directory
+.Sh DESCRIPTION
+In the first form
+.Nm
+renames
+.Ar source
+to
+.Ar target .
+In the second, the last operand is an existing directory and each
+.Ar source
+is moved into it under its own name.
+.Pp
+A
+.Ar target
+that exists is replaced.
+Unless
+.Fl f
+is given,
+.Nm
+first asks, on the standard error, when the target can't be written and the
+standard input is a terminal, showing the target's mode, owner and group;
+an answer beginning with
+.Ql y
+goes ahead.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl f
+Replace targets without asking.
+.It Fl h
+If
+.Ar target
+is a symbolic link to a directory, replace the link rather than moving
+.Ar source
+into the directory.
+.It Fl i
+Ask before replacing any existing target.
+.It Fl n
+Never replace an existing target.
+.It Fl v
+Name each file as it is moved.
+.El
+.Pp
+Of
+.Fl f ,
+.Fl i
+and
+.Fl n ,
+the last given counts.
+.Pp
+A move within a file system is a
+.Xr rename 2 .
+Between file systems,
+.Nm
+copies and then removes: a regular file is copied with its mode, owner,
+group and times, anything else as
+.Ql cp -PRp
+would copy it, after removing any
+.Ar target .
+The source is removed only once all of it was copied.
+A mount point is never moved.
+.Sh EXIT STATUS
+.Ex -std
+A target left alone by
+.Fl n ,
+or by answering no, is not a failure.
+.Sh EXAMPLES
+Rename a file, asking before replacing anything:
+.Dl $ mv -i draft.txt final.txt
+.Pp
+Move several files into a directory, naming each:
+.Dl $ mv -v *.log /var/log/old/
+.Sh SEE ALSO
+.Xr cp 1 ,
+.Xr rename 2 ,
+.Xr symlink 7
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+.Fl h ,
+.Fl n
+and
+.Fl v
+are extensions, as in the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

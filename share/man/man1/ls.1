@@ -1,0 +1,256 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt LS 1
+.Os OxideBSD
+.Sh NAME
+.Nm ls
+.Nd list directory contents
+.Sh SYNOPSIS
+.Nm
+.Op Fl 1AaCcdFfGgHhikLlmnopqRrSsTtUuwx
+.Op Fl -color Ns = Ns Ar when
+.Op Ar file ...
+.Sh DESCRIPTION
+For each
+.Ar file
+that is a directory,
+.Nm
+lists what it contains; any other
+.Ar file
+is listed itself.
+Files are listed first, then directories, each group sorted on its own.
+With no
+.Ar file ,
+the current directory is listed.
+When there is more than one operand, each directory's listing is headed by its
+name and a colon.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl 1
+List one name per line.
+This is the default when the output is not a terminal.
+.It Fl A
+List every entry but
+.Pa \&.
+and
+.Pa .. .
+Always on for the super-user.
+.It Fl a
+List every entry, those whose names begin with a dot included.
+.It Fl C
+List in columns, sorted down each column.
+This is the default on a terminal.
+.It Fl c
+Use the time the file's status last changed, to show and to sort by.
+.It Fl d
+List a directory operand as itself, not its contents.
+.It Fl F
+After each name write
+.Ql /
+for a directory,
+.Ql @
+for a symbolic link,
+.Ql *
+for an executable,
+.Ql =
+for a socket and
+.Ql |
+for a FIFO.
+.It Fl f
+Don't sort; list in the order the directory holds.
+Implies
+.Fl a ,
+and cancels
+.Fl r ,
+.Fl S
+and
+.Fl t .
+.It Fl G
+Colour the names by type, if the output is a terminal (see
+.Sx ENVIRONMENT ) .
+.It Fl g
+As
+.Fl l ,
+but without the owner.
+.It Fl H
+Follow symbolic links named on the command line.
+.It Fl h
+Show sizes with a unit suffix (B, K, M, G, T, P, E), in at most four
+characters.
+.It Fl i
+Write each file's inode number before it.
+.It Fl k
+Count
+.Fl s
+sizes in kilobytes (1024 bytes).
+.It Fl L
+Follow every symbolic link: list what it points to.
+.It Fl l
+Long format: for each file its type and mode, link count, owner, group, size
+in bytes, time and name, and for a symbolic link
+.Ql ->
+and its contents.
+A device's size is its major and minor number.
+The time is shown as month, day, hour and minute if it is within six months
+of now, else as month, day and year.
+A directory's listing begins with
+.Ql total
+and the sum of its files' block counts.
+.It Fl m
+List across the page, separated by commas.
+.It Fl n
+As
+.Fl l ,
+but with owner and group as numbers.
+.It Fl o
+As
+.Fl l ,
+but without the group.
+.It Fl P
+Follow no symbolic link, command line or not.
+.It Fl p
+Write
+.Ql /
+after the name of a directory.
+.It Fl q
+Write each non-printing character as
+.Ql \&? .
+The default on a terminal.
+.It Fl R
+List subdirectories too, as they are met.
+.It Fl r
+Reverse the sort order.
+.It Fl S
+Sort by size, largest first.
+.It Fl s
+Write each file's size in blocks before it, in units of 512 bytes, or
+.Ev BLOCKSIZE ,
+or 1024 with
+.Fl k .
+.It Fl T
+Show times in full: month, day, hour, minute, second and year.
+.It Fl t
+Sort by time, newest first.
+.It Fl U
+Use the time the file was created (the status change time where the file
+system doesn't keep it), to show and to sort by.
+.It Fl u
+Use the time the file was last read, to show and to sort by.
+.It Fl w
+Write names as they are, non-printing characters included.
+The default when the output is not a terminal.
+.It Fl x
+List in columns, sorted across each row.
+.It Fl -color Ns = Ns Ar when
+Colour names
+.Cm always ,
+.Cm never ,
+or, with
+.Cm auto ,
+as
+.Fl G
+does.
+.El
+.Pp
+Of
+.Fl 1 ,
+.Fl C ,
+.Fl l ,
+.Fl m
+and
+.Fl x ,
+the last given counts; so does the last of
+.Fl c ,
+.Fl U
+and
+.Fl u .
+.Fl S
+beats
+.Fl t .
+Names are sorted by their bytes.
+.Pp
+A symbolic link named on the command line is followed unless
+.Fl d ,
+.Fl F
+or
+.Fl l
+is given;
+.Fl H
+and
+.Fl L
+follow it anyway,
+.Fl P
+never.
+.Sh ENVIRONMENT
+.Bl -tag -width CLICOLOR_FORCE
+.It Ev BLOCKSIZE
+The unit for
+.Fl s
+sizes and the
+.Ql total
+line, such as
+.Ql 1k .
+.It Ev CLICOLOR
+If set, colour as
+.Fl G
+does.
+.It Ev CLICOLOR_FORCE
+Colour even when the output is not a terminal.
+.It Ev COLUMNS
+The width to fill, ahead of the terminal's own.
+.It Ev LSCOLORS
+The colours, as FreeBSD's: eleven pairs of foreground and background for
+directory, symbolic link, socket, FIFO, executable, block device, character
+device, set-user-ID executable, set-group-ID executable, directory writable by
+others with the sticky bit, and without it.
+Each is
+.Cm a
+to
+.Cm h
+(black, red, green, brown, blue, magenta, cyan, grey), the same in
+capitals for bold, or
+.Cm x
+for the default.
+The default is
+.Ql exfxcxdxbxegedabagacad .
+.It Ev TZ
+The time zone for times.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+The newest files first, with sizes people read:
+.Dl $ ls -lht
+.Pp
+Everything under a directory, with types marked:
+.Dl $ ls -RF /etc
+.Sh SEE ALSO
+.Xr chmod 1 ,
+.Xr stat 1 ,
+.Xr hier 7
+.Sh STANDARDS
+.Nm
+conforms to
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+.Fl G ,
+.Fl h ,
+.Fl P ,
+.Fl T ,
+.Fl U ,
+.Fl w
+and
+.Fl -color
+are extensions, as in the BSDs.
+.Fl g
+and
+.Fl o
+are POSIX's (FreeBSD's
+.Fl o
+shows file flags instead).
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

@@ -1,0 +1,136 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt LN 1
+.Os OxideBSD
+.Sh NAME
+.Nm ln
+.Nd make links
+.Sh SYNOPSIS
+.Nm
+.Op Fl s Oo Fl F Oc | Fl L | Fl P
+.Op Fl f | i
+.Op Fl hnvw
+.Ar source_file
+.Op Ar target_file
+.Nm
+.Op Fl s Oo Fl F Oc | Fl L | Fl P
+.Op Fl f | i
+.Op Fl hnvw
+.Ar source_file ...
+.Ar target_dir
+.Sh DESCRIPTION
+.Nm
+makes a new name for a file: a hard link, another directory entry for the
+same file, or with
+.Fl s
+a symbolic link, a small file holding
+.Ar source_file
+as text, which is followed when the link is used and need not exist.
+.Pp
+In the first form the link is
+.Ar target_file ,
+or, when that is a directory, a link in it named after
+.Ar source_file Ns 's
+last component; with no
+.Ar target_file ,
+such a link in the working directory.
+In the second form each
+.Ar source_file
+gets such a link in
+.Ar target_dir .
+A target that exists is an error unless
+.Fl f
+or
+.Fl i
+says otherwise.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl F
+With
+.Fl s ,
+replace a target that is an empty directory, instead of linking into it;
+implies
+.Fl f
+unless
+.Fl i
+is given.
+.It Fl f
+Remove a target that exists first.
+Cancels
+.Fl i
+and an earlier
+.Fl w .
+.It Fl h
+Don't follow a target that is a symbolic link (to a directory): link in its
+place, rather than inside it.
+With
+.Fl f
+this replaces the link.
+.It Fl i
+Ask, on the standard error, before replacing a target that exists; an answer
+beginning with
+.Ql y
+or
+.Ql Y
+is yes.
+Cancels
+.Fl f .
+.It Fl L
+Hard link what a symbolic link
+.Ar source_file
+points to, the default.
+.It Fl n
+The same as
+.Fl h .
+.It Fl P
+Hard link a symbolic link
+.Ar source_file
+itself.
+.It Fl s
+Make symbolic links.
+.It Fl v
+Write each link made, as
+.Dq Ar target No => Ar source
+.Po
+.Dq ->
+for a symbolic link
+.Pc .
+.It Fl w
+Warn when a symbolic link's source doesn't exist (relative to the link's
+directory).
+.El
+.Pp
+Hard links can't name directories, nor cross file systems.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Point a link at a new version, replacing the old link:
+.Dl ln -sfh libfoo.so.2 libfoo.so
+.Pp
+Link three files into
+.Pa bin :
+.Dl ln a b c bin
+.Sh SEE ALSO
+.Xr link 1 ,
+.Xr rm 1 ,
+.Xr link 2 ,
+.Xr readlink 2 ,
+.Xr symlink 2 ,
+.Xr symlink 7
+.Sh STANDARDS
+.Nm
+conforms to
+.St -p1003.1-2008 ;
+.Fl F ,
+.Fl h ,
+.Fl i ,
+.Fl n ,
+.Fl v ,
+.Fl w
+and the one-operand form are extensions, as on the BSDs.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v1 .

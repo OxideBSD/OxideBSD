@@ -56,7 +56,7 @@ impl Run<'_> {
     fn complain(&mut self, path: &Path, e: std::io::Error) {
         self.failed = true;
         if !self.opts.force {
-            eprintln!("chmod: {}: {e}", path.display());
+            eprintln!("chmod: {}: {}", path.display(), strerror(&e));
         }
     }
 
@@ -185,5 +185,14 @@ fn main() -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// An error as the BSDs print it: `strerror`'s text, without Rust's "(os error N)".
+fn strerror(e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        // SAFETY: strerror returns a static string for any errno.
+        Some(n) => unsafe { std::ffi::CStr::from_ptr(libc::strerror(n)) }.to_string_lossy().into_owned(),
+        None => e.to_string(),
     }
 }
