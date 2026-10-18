@@ -1,0 +1,14 @@
+[package]
+name = "grp"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+pwd = { path = "../libpwd" }
+
+# Groups (group(5)) and what changing the account database needs beyond libpwd: name checks,
+# ID allocation, installing into another directory. Used by pw(8) and vipw(8). Its own
+# workspace, testable on the host (.cargo/config.toml).
+[workspace]

@@ -1,0 +1,95 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt ADDUSER 8
+.Os OxideBSD
+.Sh NAME
+.Nm adduser
+.Nd add users interactively
+.Sh SYNOPSIS
+.Nm
+.Op Fl f Ar file
+.Op Fl G Ar groups
+.Op Fl g Ar group
+.Op Fl k Ar skel
+.Op Fl L Ar class
+.Op Fl s Ar shell
+.Op Fl w Cm no | none | random | yes
+.Sh DESCRIPTION
+The
+.Nm
+script adds users by asking for each account's details: the login
+name, full name, user ID (by default the one
+.Ql pw usernext
+gives), login group, other groups, login class, shell (one named in
+.Pa /etc/shells ,
+or
+.Cm nologin ) ,
+home directory and password.
+It shows a summary to confirm, then creates the account and its home
+directory with
+.Xr pw 8 .
+It is a simplified
+.Fx
+.Nm .
+It must be run by the superuser.
+.Pp
+A password typed at the prompts is passed to
+.Xr pw 8
+on its standard input, never on a command line.
+.Pp
+The options set the defaults the prompts offer:
+.Bl -tag -width "-w method"
+.It Fl f Ar file
+Add the accounts in
+.Ar file
+without asking, one per line:
+.Bd -literal -offset indent
+name:uid:gid:class:change:expire:gecos:home:shell:password
+.Ed
+.Pp
+Empty fields take the defaults; the password is in clear text.
+Lines starting with
+.Ql #
+are skipped.
+.It Fl G Ar groups
+Other groups for each user, separated by commas.
+.It Fl g Ar group
+The login group; by default a new group named like the user.
+.It Fl k Ar skel
+The skeleton directory for new homes.
+.It Fl L Ar class
+The login class.
+.It Fl s Ar shell
+The shell; by default
+.Cm sh .
+.It Fl w Ar method
+How passwords are set:
+.Cm yes
+(ask; the default),
+.Cm no
+(none usable),
+.Cm none
+(empty) or
+.Cm random
+(generated and shown).
+In a
+.Fl f
+file, an empty password field follows this method,
+.Cm yes
+then meaning none usable.
+.El
+.Sh EXIT STATUS
+0 on success; 1 if an account could not be added, 64 for a bad
+command line, 77 when not run by the superuser.
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr usermgmt.conf 5 ,
+.Xr pw 8 ,
+.Xr rmuser 8 ,
+.Xr useradd 8
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.Fx 2.0 .
+This implementation was written for OxideBSD.

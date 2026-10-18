@@ -1,0 +1,72 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt USERMOD 8
+.Os OxideBSD
+.Sh NAME
+.Nm usermod
+.Nd change a user
+.Sh SYNOPSIS
+.Nm
+.Op Fl mov
+.Op Fl c Ar comment
+.Op Fl d Ar home-dir
+.Op Fl e Ar expiry
+.Op Fl G Ar group Ns Op , Ns Ar group ...
+.Op Fl g Ar gid | name
+.Op Fl L Ar class
+.Op Fl l Ar new-login
+.Op Fl p Ar password
+.Op Fl s Ar shell
+.Op Fl u Ar uid
+.Ar user
+.Sh DESCRIPTION
+The
+.Nm
+utility changes
+.Ar user Ns 's
+entry in the account database, in the shape of the
+.Nx
+and
+.Ox
+command.
+It is
+.Xr pw 8
+under another name.
+Only what is given changes.
+It must be run by the superuser.
+.Pp
+The options are as in
+.Xr useradd 8 ,
+and:
+.Bl -tag -width "-l new-login"
+.It Fl G Ar group Ns Op , Ns Ar group ...
+The supplementary groups: the user is made a member of exactly these,
+and removed from any others.
+.It Fl l Ar new-login
+The new login name.
+Group memberships follow it; the user's own group keeps its name.
+.It Fl m
+Move the home directory to the one
+.Fl d
+gives.
+.It Fl o
+Allow a user ID already in use.
+.It Fl u Ar uid
+The new user ID.
+Files the user owns are not changed.
+.El
+.Sh EXIT STATUS
+As
+.Xr pw 8 .
+.Sh SEE ALSO
+.Xr pw 8 ,
+.Xr useradd 8 ,
+.Xr userdel 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Nx 1.5
+and
+.Ox 2.7 .
+This implementation was written for OxideBSD.

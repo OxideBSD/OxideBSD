@@ -1,0 +1,55 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt GROUPADD 8
+.Os OxideBSD
+.Sh NAME
+.Nm groupadd
+.Nd add a group
+.Sh SYNOPSIS
+.Nm
+.Op Fl ov
+.Op Fl g Ar gid
+.Ar group
+.Sh DESCRIPTION
+The
+.Nm
+utility adds
+.Ar group
+to
+.Pa /etc/group ,
+in the shape of the
+.Nx
+and
+.Ox
+command.
+It is
+.Xr pw 8
+under another name.
+It must be run by the superuser.
+.Pp
+The options are as follows:
+.Bl -tag -width "-g gid"
+.It Fl g Ar gid
+The group ID; by default the lowest free one in the range of
+.Xr usermgmt.conf 5 .
+.It Fl o
+Allow a group ID already in use.
+.It Fl v
+Say what was done.
+.El
+.Sh EXIT STATUS
+As
+.Xr pw 8 .
+.Sh SEE ALSO
+.Xr group 5 ,
+.Xr groupdel 8 ,
+.Xr groupmod 8 ,
+.Xr pw 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Nx 1.5
+and
+.Ox 2.7 .
+This implementation was written for OxideBSD.

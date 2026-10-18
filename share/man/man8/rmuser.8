@@ -1,0 +1,58 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt RMUSER 8
+.Os OxideBSD
+.Sh NAME
+.Nm rmuser
+.Nd remove users interactively
+.Sh SYNOPSIS
+.Nm
+.Op Fl y
+.Op Fl f Ar file
+.Op Ar user ...
+.Sh DESCRIPTION
+The
+.Nm
+script removes each
+.Ar user ,
+or those named in
+.Ar file
+(whitespace-separated,
+.Ql #
+starting a comment), or those it asks for if none are named.
+For each it shows the account's
+.Xr passwd 5
+line and asks to confirm, asks whether to remove the home directory,
+kills the user's processes, and removes the account with
+.Ql pw userdel ,
+which also removes its group memberships, its own group, its crontab
+and, with the home directory, its mail.
+The superuser account
+.Ql root
+cannot be removed.
+It is a simplified
+.Fx
+.Nm .
+It must be run by the superuser.
+.Pp
+The options are as follows:
+.Bl -tag -width "-f file"
+.It Fl f Ar file
+Remove the users named in
+.Ar file .
+.It Fl y
+Answer yes to every question.
+.El
+.Sh EXIT STATUS
+0 on success; 1 if a user could not be removed, 64 for a bad command
+line, 77 when not run by the superuser.
+.Sh SEE ALSO
+.Xr adduser 8 ,
+.Xr pw 8 ,
+.Xr userdel 8
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.Fx 2.2 .
+This implementation was written for OxideBSD.

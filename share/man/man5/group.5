@@ -1,0 +1,60 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt GROUP 5
+.Os OxideBSD
+.Sh NAME
+.Nm group
+.Nd the group database
+.Sh DESCRIPTION
+The file
+.Pa /etc/group ,
+readable by everyone, holds one line per group with four fields
+separated by colons:
+.Bd -literal -offset indent
+name:password:gid:member,member,...
+.Ed
+.Bl -tag -width password
+.It Ar name
+The group name.
+.It Ar password
+A
+.Xr crypt 3
+hash, almost always
+.Ql * :
+group passwords are a relic.
+.It Ar gid
+The group ID.
+.It Ar member
+The users with this as a supplementary group, separated by commas.
+A user's primary group, the
+.Ar gid
+of its
+.Xr passwd 5
+entry, is usually not listed.
+.El
+.Pp
+Blank lines and lines starting with
+.Ql #
+are ignored, but the tools that rewrite the file do not keep them.
+Change the file with
+.Xr pw 8 ,
+.Xr groupadd 8 ,
+.Xr groupmod 8
+and
+.Xr groupdel 8 ,
+which take the account database's lock and check the result.
+.Sh FILES
+.Bl -tag -width /etc/group -compact
+.It Pa /etc/group
+.El
+.Sh SEE ALSO
+.Xr groups 1 ,
+.Xr id 1 ,
+.Xr passwd 5 ,
+.Xr groupadd 8 ,
+.Xr pw 8
+.Sh HISTORY
+A
+.Nm
+file format appeared in
+.At v6 .

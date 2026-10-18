@@ -709,6 +709,8 @@ fn main() {
         build_std_oxidebsd_userland_crate("usr.bin/crontab", "NATIVE_CRONTAB_ELF_PATH", &musl_sysroot);
     let pwd_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/pwd_mkdb", "OXFS_PWD_MKDB_ELF_PATH", &musl_sysroot);
+    let pw_elf_path = build_std_oxidebsd_userland_crate("usr.sbin/pw", "OXFS_PW_ELF_PATH", &musl_sysroot);
+    let vipw_elf_path = build_std_oxidebsd_userland_crate("usr.sbin/vipw", "OXFS_VIPW_ELF_PATH", &musl_sysroot);
     let fsconf_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/fsconf_mkdb", "OXFS_FSCONF_MKDB_ELF_PATH", &musl_sysroot);
     build_boot_fsconf();
@@ -992,6 +994,8 @@ fn main() {
         ("OXFS_SUDO_RS_SU_ELF_PATH", sudo_rs[1].to_str().unwrap()),
         ("OXFS_VISUDO_ELF_PATH", sudo_rs[2].to_str().unwrap()),
         ("OXFS_PWD_MKDB_ELF_PATH", pwd_mkdb_elf_path.to_str().unwrap()),
+        ("OXFS_PW_ELF_PATH", pw_elf_path.to_str().unwrap()),
+        ("OXFS_VIPW_ELF_PATH", vipw_elf_path.to_str().unwrap()),
         ("OXFS_FSCONF_MKDB_ELF_PATH", fsconf_mkdb_elf_path.to_str().unwrap()),
         ("OXFS_MAKEFS_ELF_PATH", makefs_elf_path.to_str().unwrap()),
         ("OXFS_MKIMG_ELF_PATH", mkimg_elf_path.to_str().unwrap()),

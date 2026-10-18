@@ -1,0 +1,169 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt USERADD 8
+.Os OxideBSD
+.Sh NAME
+.Nm useradd
+.Nd add a user
+.Sh SYNOPSIS
+.Nm
+.Fl D
+.Op Fl b Ar base-dir
+.Op Fl e Ar expiry
+.Op Fl g Ar gid | name | Li =uid
+.Op Fl k Ar skel-dir
+.Op Fl L Ar class
+.Op Fl M Ar homeperm
+.Op Fl r Ar low..high
+.Op Fl s Ar shell
+.Nm
+.Op Fl mov
+.Op Fl b Ar base-dir
+.Op Fl c Ar comment
+.Op Fl d Ar home-dir
+.Op Fl e Ar expiry
+.Op Fl G Ar group Ns Op , Ns Ar group ...
+.Op Fl g Ar gid | name | Li =uid
+.Op Fl k Ar skel-dir
+.Op Fl L Ar class
+.Op Fl M Ar homeperm
+.Op Fl p Ar password
+.Op Fl r Ar low..high
+.Op Fl s Ar shell
+.Op Fl u Ar uid
+.Ar user
+.Sh DESCRIPTION
+The
+.Nm
+utility adds
+.Ar user
+to the account database, in the shape of the
+.Nx
+and
+.Ox
+command.
+It is
+.Xr pw 8
+under another name, and changes the database the same way: under its
+lock, checked, and installed as
+.Xr pwd_mkdb 8
+would.
+It must be run by the superuser.
+.Pp
+Options not given take their defaults from
+.Xr usermgmt.conf 5 .
+.Pp
+The options are as follows:
+.Bl -tag -width "-g gid|name|=uid"
+.It Fl b Ar base-dir
+The directory the home is made in, as
+.Ar base-dir Ns / Ns Ar user ,
+when
+.Fl d
+is not given.
+.It Fl c Ar comment
+The comment (GECOS) field, usually the full name.
+.It Fl D
+Without other options, print the defaults.
+With them, change the defaults in
+.Xr usermgmt.conf 5
+and print the result.
+.It Fl d Ar home-dir
+The home directory.
+.It Fl e Ar expiry
+When the account expires: seconds since the Epoch, a date as
+.Ar YYYY-MM-DD ,
+.Ar dd mmm yyyy
+or
+.Ar mmm dd yyyy ,
+or
+.No + Ns Ar n Ns Op Cm hdwmy
+from now.
+0 means never.
+.It Fl G Ar group Ns Op , Ns Ar group ...
+Supplementary groups, by name or ID.
+The option may be repeated.
+.It Fl g Ar gid | name | Li =uid
+The primary group.
+.Li =uid ,
+the default, makes a new group named like the user, with the user ID
+as its group ID when that is free; the user ID is then chosen free as
+both.
+.It Fl k Ar skel-dir
+The skeleton directory copied into a new home.
+A file named
+.Pa dot.foo
+there becomes
+.Pa .foo .
+.It Fl L Ar class
+The
+.Xr login.conf 5
+class.
+.It Fl M Ar homeperm
+The mode of the new home directory, in octal.
+.It Fl m
+Create the home directory, owned by the user, from the skeleton.
+An existing directory is kept and only skeleton files it lacks are
+added.
+.It Fl o
+Allow a user ID already in use.
+.It Fl p Ar password
+The password, already hashed by
+.Xr crypt 3 .
+Without it the account has no usable password
+.Pq Ql *
+until
+.Xr passwd 1
+sets one.
+.It Fl r Ar low..high
+The range new user and group IDs are taken from.
+.It Fl s Ar shell
+The login shell.
+.It Fl u Ar uid
+The user ID; the lowest free one in the range by default.
+.It Fl v
+Say what was done.
+.El
+.Sh FILES
+.Bl -tag -width /etc/usermgmt.conf -compact
+.It Pa /etc/master.passwd
+the account database
+.It Pa /etc/group
+the groups
+.It Pa /etc/usermgmt.conf
+the defaults
+.It Pa /etc/skel
+the default skeleton
+.El
+.Sh EXIT STATUS
+As
+.Xr pw 8 :
+0 on success, a
+.Xr sysexits 3
+value on failure.
+.Sh EXAMPLES
+Add a user with a home directory, also in the
+.Ql wheel
+group:
+.Dl # useradd -m -G wheel -c \(dqAlice Liddell\(dq alice
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr group 5 ,
+.Xr passwd 5 ,
+.Xr usermgmt.conf 5 ,
+.Xr adduser 8 ,
+.Xr groupadd 8 ,
+.Xr pw 8 ,
+.Xr userdel 8 ,
+.Xr usermod 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Nx 1.5
+and
+.Ox 2.7 .
+This implementation was written for OxideBSD.
+OxideBSD keeps no inactive time, so
+.Fl f
+is not offered.

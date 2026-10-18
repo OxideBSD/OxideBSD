@@ -1,0 +1,61 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt USERDEL 8
+.Os OxideBSD
+.Sh NAME
+.Nm userdel
+.Nd remove a user
+.Sh SYNOPSIS
+.Nm
+.Op Fl prv
+.Ar user
+.Sh DESCRIPTION
+The
+.Nm
+utility removes
+.Ar user
+from the account database, in the shape of the
+.Nx
+and
+.Ox
+command.
+It is
+.Xr pw 8
+under another name.
+The user is also removed from every group's member list, its crontab
+is removed, and so is its own group (named like it) if no other user
+has that group as its primary group.
+The superuser account
+.Ql root
+cannot be removed.
+It must be run by the superuser.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl p
+Preserve the account but make it unusable: the password is locked and
+the shell set to
+.Pa /sbin/nologin .
+.It Fl r
+Also remove the home directory and the mail spool.
+A home directory is only removed if it is a directory the user owns
+that no other account uses.
+.It Fl v
+Say what was done.
+.El
+.Sh EXIT STATUS
+As
+.Xr pw 8 .
+.Sh SEE ALSO
+.Xr pw 8 ,
+.Xr rmuser 8 ,
+.Xr useradd 8 ,
+.Xr usermod 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Nx 1.5
+and
+.Ox 2.7 .
+This implementation was written for OxideBSD.

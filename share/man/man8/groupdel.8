@@ -1,0 +1,53 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt GROUPDEL 8
+.Os OxideBSD
+.Sh NAME
+.Nm groupdel
+.Nd remove a group
+.Sh SYNOPSIS
+.Nm
+.Op Fl v
+.Ar group
+.Sh DESCRIPTION
+The
+.Nm
+utility removes
+.Ar group
+from
+.Pa /etc/group ,
+in the shape of the
+.Nx
+and
+.Ox
+command.
+It is
+.Xr pw 8
+under another name.
+As on
+.Ox ,
+a group that is some user's primary group is not removed: that user
+would be left with a group ID that names nothing.
+It must be run by the superuser.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl v
+Say what was done.
+.El
+.Sh EXIT STATUS
+As
+.Xr pw 8 .
+.Sh SEE ALSO
+.Xr group 5 ,
+.Xr groupadd 8 ,
+.Xr groupmod 8 ,
+.Xr pw 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Nx 1.5
+and
+.Ox 2.7 .
+This implementation was written for OxideBSD.

@@ -1,0 +1,70 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt VIPW 8
+.Os OxideBSD
+.Sh NAME
+.Nm vipw
+.Nd edit the account database
+.Sh SYNOPSIS
+.Nm
+.Op Fl d Ar directory
+.Sh DESCRIPTION
+The
+.Nm
+utility edits
+.Pa /etc/master.passwd
+by hand, safely.
+It takes the database lock (the one
+.Xr pw 8
+takes), copies the file to
+.Pa /etc/ptmp
+with mode 0600, and runs an editor on the copy.
+If the copy changed, it is checked as
+.Xr pwd_mkdb 8
+checks it and installed with
+.Pa /etc/passwd
+generated from it, as
+.Ql pwd_mkdb -p
+does.
+If it does not check out, the problem is shown and
+.Nm
+asks whether to edit it again; otherwise nothing is installed.
+Comment lines are not kept.
+.Pp
+The options are as follows:
+.Bl -tag -width "-d directory"
+.It Fl d Ar directory
+Edit and install the database in
+.Ar directory
+instead of
+.Pa /etc .
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width EDITOR
+.It Ev EDITOR
+The editor, with any arguments it needs; by default
+.Pa /bin/vi .
+.El
+.Sh FILES
+.Bl -tag -width /etc/master.passwd -compact
+.It Pa /etc/master.passwd
+the account database
+.It Pa /etc/passwd
+its public form
+.It Pa /etc/ptmp
+the copy being edited
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr vi 1 ,
+.Xr passwd 5 ,
+.Xr pw 8 ,
+.Xr pwd_mkdb 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Bx 4.0 .
+This implementation was written for OxideBSD.

@@ -1,0 +1,106 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt USERMGMT.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm usermgmt.conf
+.Nd defaults for new accounts
+.Sh DESCRIPTION
+The file
+.Pa /etc/usermgmt.conf
+holds the defaults
+.Xr useradd 8 ,
+.Xr groupadd 8
+and
+.Xr pw 8
+use for what a command line leaves out.
+It is the
+.Nx
+and
+.Ox
+file;
+.Xr pw 8
+reads it in place of
+.Fx Ns 's
+.Pa pw.conf .
+If it is missing, every default below holds.
+.Pp
+Each line is a key and a value separated by white space;
+.Ql #
+starts a comment.
+An unknown key or bad value is warned about and ignored.
+.Bl -tag -width "skel_dir"
+.It Cm base_dir
+The directory new homes are made in.
+Default
+.Pa /home .
+.It Cm class
+The
+.Xr login.conf 5
+class.
+Default empty, meaning
+.Ql default .
+.It Cm expire
+When new accounts expire, in any form
+.Xr useradd 8 Ns 's
+.Fl e
+takes.
+Default empty: never.
+.It Cm group
+The primary group: a name, a group ID, or
+.Ql =uid
+for a new group named like the user.
+Default
+.Ql =uid .
+.It Cm homeperm
+The mode of new home directories, in octal.
+Default 0755.
+.It Cm inactive
+Accepted and kept, but unused: OxideBSD records no inactive time.
+.It Cm password
+The
+.Xr crypt 3
+hash new accounts get.
+Default
+.Ql * ,
+no usable password.
+.It Cm preserve
+Accepted for
+.Nx
+files; ignored.
+.It Cm range
+The range new user and group IDs are taken from, as
+.Ar low Ns .. Ns Ar high .
+Default 1000..60000.
+.It Cm shell
+The login shell.
+Default
+.Pa /bin/sh .
+.It Cm skel_dir
+The skeleton directory copied into new homes.
+Default
+.Pa /etc/skel .
+.El
+.Pp
+.Ql useradd -D
+prints the defaults, and with options rewrites this file.
+.Sh FILES
+.Bl -tag -width /etc/usermgmt.conf -compact
+.It Pa /etc/usermgmt.conf
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+base_dir	/home
+shell		/bin/sh
+group		=uid
+range		1000..60000
+.Ed
+.Sh SEE ALSO
+.Xr groupadd 8 ,
+.Xr pw 8 ,
+.Xr useradd 8
+.Sh HISTORY
+The
+.Nm
+file appeared in
+.Nx 1.5 .

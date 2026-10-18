@@ -1,0 +1,436 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt PW 8
+.Os OxideBSD
+.Sh NAME
+.Nm pw
+.Nd create, remove, modify and display users and groups
+.Sh SYNOPSIS
+.Nm
+.Op Fl V Ar etcdir
+.Cm useradd
+.Op Ar name
+.Op Fl Nmoq
+.Op Fl b Ar base-dir
+.Op Fl C Ar config
+.Op Fl c Ar comment
+.Op Fl d Ar home
+.Op Fl e Ar date
+.Op Fl G Ar grouplist
+.Op Fl g Ar group
+.Op Fl H Ar fd | Fl h Ar fd | Fl w Ar method
+.Op Fl k Ar skel
+.Op Fl L Ar class
+.Op Fl M Ar mode
+.Op Fl n Ar name
+.Op Fl p Ar date
+.Op Fl s Ar shell
+.Op Fl u Ar uid
+.Nm
+.Op Fl V Ar etcdir
+.Cm usermod
+.Op Ar name | uid
+.Op Fl Nmoq
+.Op Fl c Ar comment
+.Op Fl d Ar home
+.Op Fl e Ar date
+.Op Fl G Ar grouplist
+.Op Fl g Ar group
+.Op Fl H Ar fd | Fl h Ar fd | Fl w Ar method
+.Op Fl k Ar skel
+.Op Fl L Ar class
+.Op Fl l Ar newname
+.Op Fl M Ar mode
+.Op Fl n Ar name
+.Op Fl p Ar date
+.Op Fl s Ar shell
+.Op Fl u Ar uid
+.Nm
+.Op Fl V Ar etcdir
+.Cm userdel
+.Op Ar name | uid
+.Op Fl qr
+.Op Fl n Ar name
+.Op Fl u Ar uid
+.Nm
+.Op Fl V Ar etcdir
+.Cm usershow
+.Op Ar name | uid
+.Op Fl 7Paq
+.Op Fl n Ar name
+.Op Fl u Ar uid
+.Nm
+.Op Fl V Ar etcdir
+.Cm usernext
+.Op Fl q
+.Op Fl C Ar config
+.Nm
+.Op Fl V Ar etcdir
+.Cm lock | unlock
+.Op Ar name | uid
+.Op Fl q
+.Op Fl n Ar name
+.Op Fl u Ar uid
+.Nm
+.Op Fl V Ar etcdir
+.Cm groupadd
+.Op Ar group
+.Op Fl Noq
+.Op Fl g Ar gid
+.Op Fl M Ar members
+.Op Fl n Ar group
+.Nm
+.Op Fl V Ar etcdir
+.Cm groupmod
+.Op Ar group | gid
+.Op Fl Noq
+.Op Fl d Ar members
+.Op Fl g Ar gid
+.Op Fl l Ar newname
+.Op Fl M Ar members
+.Op Fl m Ar members
+.Op Fl n Ar group
+.Nm
+.Op Fl V Ar etcdir
+.Cm groupdel
+.Op Ar group | gid
+.Op Fl q
+.Op Fl g Ar gid
+.Op Fl n Ar group
+.Nm
+.Op Fl V Ar etcdir
+.Cm groupshow
+.Op Ar group | gid
+.Op Fl Paq
+.Op Fl g Ar gid
+.Op Fl n Ar group
+.Nm
+.Op Fl V Ar etcdir
+.Cm groupnext
+.Op Fl q
+.Op Fl C Ar config
+.Sh DESCRIPTION
+The
+.Nm
+utility is the front end to the account database in the shape of
+.Fx Ns 's :
+one program with a command for each operation.
+The same program, run as
+.Xr useradd 8 ,
+.Xr userdel 8 ,
+.Xr usermod 8 ,
+.Xr groupadd 8 ,
+.Xr groupdel 8
+or
+.Xr groupmod 8 ,
+offers the
+.Nx
+and
+.Ox
+commands instead, over the same code.
+.Pp
+Each command may also be written as two words:
+.Cm user add ,
+.Cm group show ,
+and so on.
+The user or group is named by the first operand or by
+.Fl n ;
+a name that is all digits and names no account is taken as a user or
+group ID.
+Options may follow the name.
+.Pp
+Every change is made under the database lock, an exclusive
+.Xr flock 2
+on
+.Pa master.passwd
+also taken by
+.Xr vipw 8 ;
+if another program holds it,
+.Nm
+fails at once rather than wait.
+The new files are checked as
+.Xr pwd_mkdb 8
+checks them and installed the same way:
+.Pa group ,
+then
+.Pa master.passwd
+(mode 0600) and the public
+.Pa passwd
+(mode 0644).
+Changes need the superuser.
+.Pp
+Defaults for new accounts come from
+.Xr usermgmt.conf 5 .
+.Ss Options for every command
+.Bl -tag -width "-V etcdir"
+.It Fl V Ar etcdir
+Work on the database in
+.Ar etcdir
+instead of
+.Pa /etc ,
+reading
+.Pa usermgmt.conf
+from there too.
+.It Fl C Ar config
+Read defaults from
+.Ar config
+instead of
+.Pa usermgmt.conf .
+.It Fl q
+Print no error messages; the exit status still reports failure.
+.It Fl Y
+Accepted for compatibility; there is no NIS.
+.El
+.Ss User commands
+.Bl -tag -width "usernext"
+.It Cm useradd
+Add a user.
+Unless
+.Fl g
+says otherwise, the user gets a group of its own, named like it, and
+its user ID is chosen free as both a user and a group ID so the two
+match.
+New accounts have no usable password
+.Pq Ql *
+until one is given.
+.It Cm usermod
+Change a user.
+Without a name,
+.Fl u
+names the user; with one, it is the new user ID.
+.It Cm userdel
+Remove a user, its memberships and its crontab, and its own group if no
+other user has that group as its primary group.
+The superuser account
+.Ql root
+cannot be removed.
+.It Cm usershow
+Print the user's
+.Pa master.passwd
+line.
+.It Cm usernext
+Print the user and group IDs the next
+.Cm useradd
+would choose, as
+.Ar uid : Ns Ar gid .
+.It Cm lock , Cm unlock
+Disable or re-enable password logins by adding or removing a
+.Ql *LOCKED*
+prefix on the password hash.
+.El
+.Pp
+The options for
+.Cm useradd
+and
+.Cm usermod :
+.Bl -tag -width "-G grouplist"
+.It Fl b Ar base-dir
+The directory new homes are made in
+.Pq Cm useradd .
+.It Fl c Ar comment
+The comment
+.Pq GECOS
+field: usually the full name.
+.It Fl d Ar home
+The home directory.
+.It Fl e Ar date
+When the account expires: seconds since the Epoch, a date as
+.Ar YYYY-MM-DD
+or
+.Ar dd-mmm-yy Ns Op Ar yy ,
+or
+.No + Ns Ar n Ns Op Cm hdwmy
+for hours, days (the default), weeks, months or years from now.
+0 means never.
+.It Fl G Ar grouplist
+The supplementary groups, separated by commas; the user is made a
+member of exactly these.
+.It Fl g Ar group
+The primary group, by name or ID.
+.It Fl H Ar fd
+Read an already hashed password from descriptor
+.Ar fd .
+.It Fl h Ar fd
+Read a password from descriptor
+.Ar fd
+(prompting with echo off if it is a terminal) and store its
+SHA-512
+.Xr crypt 3
+hash.
+.Fl h Cm -
+gives no usable password.
+.It Fl k Ar skel
+The skeleton directory a new home is filled from.
+A file named
+.Pa dot.foo
+is copied as
+.Pa .foo .
+.It Fl L Ar class
+The
+.Xr login.conf 5
+class.
+.It Fl l Ar newname
+The new login name
+.Pq Cm usermod ;
+group memberships follow it.
+.It Fl M Ar mode
+The mode of a new home directory, in octal.
+.It Fl m
+Create the home directory from the skeleton if it does not exist.
+.It Fl N
+Print the new entry instead of installing it.
+.It Fl o
+Allow a user ID already in use.
+.It Fl p Ar date
+When the password must be changed, in the forms of
+.Fl e .
+.It Fl s Ar shell
+The login shell: a path, or a name looked up in
+.Pa /etc/shells
+and then
+.Pa /bin ,
+.Pa /usr/bin
+and
+.Pa /usr/local/bin .
+.It Fl u Ar uid
+The user ID.
+.It Fl w Ar method
+Set the password by method:
+.Cm no
+(none usable),
+.Cm none
+(empty: no password needed) or
+.Cm random
+(generated and printed).
+.El
+.Pp
+.Cm userdel Fl r
+also removes the home directory and the mail spool, but only a
+directory the user owns that no other account uses.
+.Pp
+.Cm usershow
+prints every user with
+.Fl a ,
+the public seven-field
+.Pa passwd
+line with
+.Fl 7 ,
+and a readable summary with
+.Fl P .
+.Ss Group commands
+.Bl -tag -width "groupnext"
+.It Cm groupadd
+Add a group, with the next free group ID unless
+.Fl g
+gives one.
+.It Cm groupmod
+Change a group.
+Without a name,
+.Fl g
+names the group; with one, it is the new group ID.
+.It Cm groupdel
+Remove a group.
+A group that is a user's primary group is not removed.
+.It Cm groupshow
+Print the group's line;
+.Fl a
+for every group,
+.Fl P
+for a readable summary.
+.It Cm groupnext
+Print the next free group ID.
+.El
+.Pp
+The options for
+.Cm groupadd
+and
+.Cm groupmod :
+.Bl -tag -width "-M members"
+.It Fl d Ar members
+Remove these users from the group
+.Pq Cm groupmod .
+.It Fl g Ar gid
+The group ID.
+.It Fl l Ar newname
+The new group name
+.Pq Cm groupmod .
+.It Fl M Ar members
+The members, replacing any there are.
+.It Fl m Ar members
+Add these users
+.Pq Cm groupmod .
+.It Fl N
+Print the new entry instead of installing it.
+.It Fl o
+Allow a group ID already in use.
+.El
+.Pp
+Members are separated by commas and must be existing users.
+.Sh FILES
+.Bl -tag -width /etc/usermgmt.conf -compact
+.It Pa /etc/master.passwd
+the account database
+.It Pa /etc/passwd
+its public form
+.It Pa /etc/group
+the groups
+.It Pa /etc/usermgmt.conf
+defaults for new accounts
+.It Pa /etc/skel
+the default skeleton
+.It Pa /etc/shells
+the login shells
+.El
+.Sh EXIT STATUS
+The exit status is one of
+.Xr sysexits 3 Ns 's :
+0 on success,
+.Er EX_USAGE
+for a bad command line,
+.Er EX_DATAERR
+for a bad value, a name or ID in use, or a refused change,
+.Er EX_NOUSER
+for a user or group that does not exist,
+.Er EX_OSFILE
+for a missing or unreadable database file,
+.Er EX_CANTCREAT
+when a file or home directory cannot be written,
+.Er EX_TEMPFAIL
+when the database is locked, and
+.Er EX_NOPERM
+when not run by the superuser.
+.Sh EXAMPLES
+Add a user with a home directory and ask for a password:
+.Dl # pw useradd alice -c \(dqAlice Liddell\(dq -G wheel -m -h 0
+.Pp
+Add a user from a script, its password on standard input:
+.Dl # echo \(dq$password\(dq | pw useradd bob -m -h 0
+.Pp
+Add a user to a group:
+.Dl # pw groupmod staff -m alice
+.Sh SEE ALSO
+.Xr passwd 1 ,
+.Xr group 5 ,
+.Xr passwd 5 ,
+.Xr usermgmt.conf 5 ,
+.Xr adduser 8 ,
+.Xr groupadd 8 ,
+.Xr pwd_mkdb 8 ,
+.Xr rmuser 8 ,
+.Xr useradd 8 ,
+.Xr vipw 8
+.Sh HISTORY
+A
+.Nm
+utility appeared in
+.Fx 2.2 .
+This implementation was written for OxideBSD; it reads
+.Xr usermgmt.conf 5
+in place of
+.Fx Ns 's
+.Pa pw.conf ,
+and has no
+.Fl D ,
+.Fl R
+or
+.Fl w Cm yes .
