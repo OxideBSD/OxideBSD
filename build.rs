@@ -617,10 +617,16 @@ fn main() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmode/src").display()
     );
     let mknod_elf_path = build_static_std_crate("sbin/mknod", "OXFS_MKNOD_ELF_PATH", &musl_sysroot);
+    let ping_elf_path = build_static_std_crate("sbin/ping", "OXFS_PING_ELF_PATH", &musl_sysroot);
+    // The text and archive tools' own libraries (POSIX regular expressions, DEFLATE), which the
+    // helper doesn't watch itself.
+    for lib in ["lib/libregex/src", "lib/libz/src"] {
+        println!("cargo:rerun-if-changed={}", Path::new(env!("CARGO_MANIFEST_DIR")).join(lib).display());
+    }
     let std_bin_paths: Vec<(String, String)> = [
         "sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod", "touch", "echo", "true", "false",
         "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "realpath", "hostname", "timeout", "dd", "df", "date",
-        "stty",
+        "stty", "grep", "sed", "ed", "expr", "gzip", "tar", "ps", "pgrep",
     ]
         .iter()
         .map(|name| {
@@ -1126,6 +1132,7 @@ fn main() {
     oxfs_extra_env.push(("OXFS_UMOUNT_ELF_PATH", umount_elf_path.to_str().unwrap()));
     oxfs_extra_env.extend(std_bin_paths.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     oxfs_extra_env.push(("OXFS_MKNOD_ELF_PATH", mknod_elf_path.to_str().unwrap()));
+    oxfs_extra_env.push(("OXFS_PING_ELF_PATH", ping_elf_path.to_str().unwrap()));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [
         "etc",
@@ -1136,6 +1143,9 @@ fn main() {
         "regress/bin-syscall-smoke/run.sh",
         "regress/bin-syscall-smoke/bin1.sh",
         "regress/bin-syscall-smoke/bin2.sh",
+        "regress/bin-syscall-smoke/bin3.sh",
+        "regress/bin-syscall-smoke/bin4.sh",
+        "regress/bin-syscall-smoke/bin5.sh",
         "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
         "regress/kern-syscall-smoke/run.sh",

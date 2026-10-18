@@ -1,0 +1,291 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt ED 1
+.Os OxideBSD
+.Sh NAME
+.Nm ed
+.Nd text editor
+.Sh SYNOPSIS
+.Nm
+.Op Fl
+.Op Fl s
+.Op Fl p Ar string
+.Op Ar file
+.Sh DESCRIPTION
+.Nm
+is a line-oriented text editor.
+It keeps a copy of a file in a buffer, changes it by commands read from the
+standard input, and writes it back with
+.Ic w .
+With
+.Ar file ,
+it starts as though by
+.Ic e Ar file .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl p Ar string
+Prompt with
+.Ar string
+before each command.
+.It Fl s , Fl
+Write no byte counts and no
+.Ql \&!
+after a shell command: for scripts.
+.El
+.Pp
+A command is zero, one or two addresses, a letter, and arguments.
+Most commands may be followed by
+.Ic p ,
+.Ic l
+or
+.Ic n ,
+printing the current line afterwards in that form.
+Commands
+.Ic a ,
+.Ic c
+and
+.Ic i
+enter
+.Em input mode :
+lines are added to the buffer until one holding only a
+.Ql \&. .
+.Ss Addresses
+The current line, usually the last one a command touched, is the default for
+most commands.
+An address is:
+.Bl -tag -width Ds -compact
+.It Li \&.
+the current line
+.It Li $
+the last line
+.It Ar n
+line
+.Ar n
+.It Li ' Ns Ar x
+the line marked
+.Ar x
+by
+.Ic k
+.It Li / Ns Ar re Ns Li /
+the next line
+.Ar re
+matches, searching forward and wrapping around
+.It Li \&? Ns Ar re Ns Li \&?
+the previous one, searching backward
+.It Li + Ns Ar n , Li - Ns Ar n , Li ^ Ns Ar n
+an offset from the address before it, or from the current line; without
+.Ar n ,
+1
+.El
+.Pp
+Two addresses separated by
+.Ql \&,
+are a range;
+.Ql \&;
+also makes the first one current before the second is evaluated.
+.Ql \&,
+or
+.Ql %
+alone is
+.Li 1,$ ,
+and
+.Ql \&;
+alone
+.Li .,$ .
+The empty regular expression
+.Li //
+is the last one used.
+Regular expressions are basic; see
+.Xr re_format 7 .
+.Ss Commands
+Default addresses are shown in parentheses.
+.Bl -tag -width Ds
+.It Pq Li \&. Ns Ic a
+Append text after the line (0 for the start).
+.It Pq Li \&.,.\& Ns Ic c
+Change the lines to the text entered.
+.It Pq Li \&.,.\& Ns Ic d
+Delete the lines; the line after them becomes current.
+.It Ic e Op Ar file
+Edit
+.Ar file ,
+or the current file; warns once if the buffer has unsaved changes.
+.It Ic E Op Ar file
+As
+.Ic e ,
+without the warning.
+.It Ic f Op Ar file
+Set the current file name, and print it.
+.It Pq Li 1,$ Ns Ic g Ns Li / Ns Ar re Ns Li / Ns Ar commands
+Mark every line
+.Ar re
+matches, then run
+.Ar commands
+with each marked line current in turn.
+Each line of
+.Ar commands
+but the last ends with a backslash; none means
+.Ic p .
+.It Pq Li 1,$ Ns Ic G Ns Li / Ns Ar re Ns Li /
+Interactively: print each marked line and read a command to run on it; an empty
+line does nothing,
+.Ql &
+repeats the last command.
+.It Ic h
+Explain the last error.
+.It Ic H
+Toggle explaining errors as they happen.
+.It Pq Li \&. Ns Ic i
+Insert text before the line.
+.It Pq Li \&.,.+1\& Ns Ic j
+Join the lines into one.
+.It Pq Li \&. Ns Ic k Ns Ar x
+Mark the line with the lower-case letter
+.Ar x .
+.It Pq Li \&.,.\& Ns Ic l
+Print the lines unambiguously, as
+.Xr sed 1 Ns 's
+.Ic l .
+.It Pq Li \&.,.\& Ns Ic m Ns Ar addr
+Move the lines after
+.Ar addr
+(0 for the start).
+.It Pq Li \&.,.\& Ns Ic n
+Print the lines with their numbers.
+.It Pq Li \&.,.\& Ns Ic p
+Print the lines.
+.It Ic P
+Toggle the prompt
+.Pq Ql * No unless set by Fl p .
+.It Ic q
+Quit; warns once if the buffer has unsaved changes.
+.It Ic Q
+Quit without the warning.
+.It Pq Li $ Ns Ic r Op Ar file
+Read
+.Ar file
+in after the line.
+.It Pq Li \&.,.\& Ns Ic s Ns Li / Ns Ar re Ns Li / Ns Ar replacement Ns Li / Ns Ar flags
+Substitute, as in
+.Xr sed 1 :
+.Ql &
+and
+.Li \e1
+to
+.Li \e9
+in
+.Ar replacement ,
+a backslash before a newline splitting the line, and
+.Ar replacement
+.Ql %
+alone the last one used.
+The flags are
+.Cm g ,
+a count
+.Ar N ,
+and the print suffixes.
+.Ic s
+followed only by flags repeats the last substitution
+.Cm ( g
+toggling global replacement).
+It is an error if no line changes.
+.It Pq Li \&.,.\& Ns Ic t Ns Ar addr
+Copy the lines after
+.Ar addr .
+.It Ic u
+Undo the last command that changed the buffer (a
+.Ic g
+as a whole); another
+.Ic u
+redoes it.
+.It Pq Li 1,$ Ns Ic v Ns Li / Ns Ar re Ns Li / Ns Ar commands
+As
+.Ic g ,
+on the lines
+.Ar re
+does not match.
+.It Pq Li 1,$ Ns Ic V Ns Li / Ns Ar re Ns Li /
+As
+.Ic G ,
+likewise.
+.It Pq Li 1,$ Ns Ic w Op Ar file
+Write the lines to
+.Ar file
+or the current file.
+.Ic wq
+then quits.
+.It Pq Li 1,$ Ns Ic W Op Ar file
+Append the lines to the file.
+.It Pq Li .+1 Ns Ic z Ns Op Ar n
+Print
+.Ar n
+lines (22 by default) from the line.
+.It Pq Li $ Ns Ic =
+Print the line's number.
+.It Ic \&! Ns Ar command
+Run
+.Ar command
+with
+.Xr sh 1 ;
+.Ql %
+in it is the current file name and a leading
+.Ql \&!
+the last command.
+.It Pq Li .+1
+An address alone prints that line.
+.El
+.Pp
+.Ic e ,
+.Ic r
+and
+.Ic w
+take
+.Ic \&! Ns Ar command
+in place of a file, reading its output or writing to its input.
+.Sh EXIT STATUS
+0 on success.
+When the standard input is not a terminal, an error ends
+.Nm
+at once with status 2; so does a
+.Ar file
+operand that can't be read.
+.Sh EXAMPLES
+Change every
+.Ql foo
+in a file to
+.Ql bar
+from a script:
+.Bd -literal -offset indent
+$ printf '%s\en' ',s/foo/bar/g' w q | ed -s file
+.Ed
+.Pp
+Delete the comment lines:
+.Dl g/^#/d
+.Sh DIAGNOSTICS
+On an error
+.Nm
+writes
+.Ql \&?
+to the standard error, followed by an explanation after
+.Ic H
+(and, off a terminal, the script's line number).
+.Sh SEE ALSO
+.Xr grep 1 ,
+.Xr sed 1 ,
+.Xr sh 1 ,
+.Xr re_format 7
+.Sh STANDARDS
+.Nm
+conforms to IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+.Ic wq ,
+.Ic z
+and the
+.Fl
+option are those of the BSDs.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v1 .
+This one is written in Rust for OxideBSD.

@@ -1,0 +1,103 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt EXPR 1
+.Os OxideBSD
+.Sh NAME
+.Nm expr
+.Nd evaluate an expression
+.Sh SYNOPSIS
+.Nm
+.Ar expression
+.Sh DESCRIPTION
+.Nm
+evaluates
+.Ar expression
+and writes the result to the standard output.
+Each operator and operand must be a separate argument, and characters special to
+the shell must be quoted.
+.Pp
+An integer is an optional
+.Ql -
+followed by one or more decimal digits; arithmetic is done on 64-bit signed
+values.
+The operators, from the lowest precedence to the highest, are:
+.Bl -tag -width Ds
+.It Ar expr1 Li \&| Ar expr2
+.Ar expr1
+if it is neither the null string nor zero; otherwise
+.Ar expr2
+if it is neither; otherwise 0.
+.It Ar expr1 Li \&& Ar expr2
+.Ar expr1
+if neither expression is null or zero; otherwise 0.
+.It Ar expr1 Bro Li = , > , >= , < , <= , != Brc Ar expr2
+1 if the relation holds, 0 if not.
+When both operands are integers they are compared as numbers; otherwise as
+strings, byte by byte.
+.It Ar expr1 Bro Li + , - Brc Ar expr2
+Addition and subtraction.
+.It Ar expr1 Bro Li * , / , % Brc Ar expr2
+Multiplication, division (truncating toward zero) and remainder.
+.It Ar expr1 Li \&: Ar expr2
+Matches
+.Ar expr1
+against the basic regular expression
+.Ar expr2 ,
+anchored at the start of
+.Ar expr1 .
+If the expression contains a subexpression
+.Li \e( Ns ... Ns Li \e) ,
+the result is the text the first one matched, or the null string; otherwise it
+is the number of bytes matched.
+.It Li \&( Ar expr Li \&)
+Grouping.
+.El
+.Pp
+A leading
+.Ql --
+argument is skipped.
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+The result is neither null nor zero.
+.It 1
+The result is null or zero.
+.It 2
+The expression is invalid: a syntax error, an operand of arithmetic that is not
+an integer, division by zero, overflow, or a bad regular expression.
+.It 3
+The result could not be written.
+.El
+.Sh EXAMPLES
+Increment a shell variable:
+.Dl $ i=$(expr $i + 1)
+.Pp
+The last component of a path name:
+.Dl $ expr //usr/lib/libc.a : '.*/\e(.*\e)'
+.Pp
+Whether a string is all digits (prints its length if so):
+.Dl $ expr "$s" : '[0-9]*$'
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr test 1 ,
+.Xr re_format 7
+.Sh STANDARDS
+.Nm
+conforms to IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq).
+Overflow, which POSIX leaves undefined, is an error, as in the BSDs.
+.Sh HISTORY
+An
+.Nm
+command appeared in
+.At v7 .
+This one is written in Rust for OxideBSD.
+.Sh CAVEATS
+An operand that looks like an operator is taken as one where an operator can
+stand:
+.Dl $ expr "$a" = "$b"
+fails when
+.Va a
+is
+.Ql \&( .
+Prefixing both operands with a character avoids it:
+.Dl $ expr "x$a" = "x$b"

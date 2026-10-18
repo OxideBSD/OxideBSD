@@ -1,0 +1,178 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt GZIP 1
+.Os OxideBSD
+.Sh NAME
+.Nm gzip ,
+.Nm gunzip ,
+.Nm zcat
+.Nd compression and decompression tool using Lempel-Ziv coding (LZ77)
+.Sh SYNOPSIS
+.Nm
+.Op Fl cdfhklNnqrtVv123456789
+.Op Fl S Ar suffix
+.Op Ar file ...
+.Nm gunzip
+.Op Fl cfhklNnqrtVv
+.Op Fl S Ar suffix
+.Op Ar file ...
+.Nm zcat
+.Op Fl fhV
+.Op Ar file ...
+.Sh DESCRIPTION
+.Nm
+compresses each
+.Ar file
+and replaces it with one of the same name and the suffix
+.Ql .gz ,
+which keeps the original's mode, owner and access and modification times.
+With
+.Fl d ,
+or run as
+.Nm gunzip ,
+it does the reverse: a file whose name ends in
+.Ql .gz ,
+.Ql -gz ,
+.Ql .z ,
+.Ql -z ,
+.Ql _z
+or the
+.Fl S
+suffix is replaced by the expanded file without it, and one ending in
+.Ql .tgz
+or
+.Ql .taz
+by a file ending in
+.Ql .tar .
+.Nm zcat
+expands each
+.Ar file
+to the standard output, as
+.Nm
+.Fl dc
+does.
+.Pp
+A compressed file may hold several gzip members one after another; they expand to the
+concatenation of their data.
+Data after the last member is ignored with a warning.
+.Pp
+With no
+.Ar file ,
+or one of
+.Sq Fl ,
+the standard input is compressed or expanded to the standard output.
+.Nm
+will not write compressed data to a terminal, nor read it from one, without
+.Fl f .
+.Pp
+The options are:
+.Bl -tag -width "-S suffix"
+.It Fl 1 , Fl 2 , ... , Fl 9 , Fl -fast , Fl -best
+The compression level, from the fastest
+.Pq Fl 1 , Fl -fast
+to the smallest output
+.Pq Fl 9 , Fl -best .
+The default is 6.
+.It Fl c , Fl -stdout , Fl -to-stdout
+Write to the standard output and keep the input files.
+.It Fl d , Fl -decompress , Fl -uncompress
+Expand instead of compress.
+.It Fl f , Fl -force
+Overwrite existing output files without asking, compress files with other links and
+files that already have the suffix, and read or write a terminal.
+With
+.Fl d
+and
+.Fl c ,
+input that is not in gzip format is copied to the standard output as it is.
+.It Fl h , Fl -help
+Show a summary of the options.
+.It Fl k , Fl -keep
+Keep the input files.
+.It Fl l , Fl -list
+For each compressed
+.Ar file ,
+list its compressed and expanded sizes, the compression ratio and the name it expands to;
+with
+.Fl v ,
+also the method, the CRC and the stored time.
+A total line follows when there is more than one.
+.It Fl N , Fl -name
+When compressing, store the file's name and modification time in the header (the default).
+When expanding, name the output after the stored name and give it the stored time.
+Only the last component of a stored name is used, and the output is always made in the
+directory of the input.
+.It Fl n , Fl -no-name
+When compressing, store neither the name nor the time.
+When expanding, ignore them (the default).
+.It Fl q , Fl -quiet
+Do not print warnings.
+.It Fl r , Fl -recursive
+Descend into each
+.Ar file
+that is a directory, compressing or expanding the regular files in it.
+Symbolic links found in a directory are left alone.
+.It Fl S Ar suffix , Fl -suffix Ar suffix
+Use
+.Ar suffix
+instead of
+.Ql .gz .
+.It Fl t , Fl -test
+Check the integrity of each compressed
+.Ar file
+without writing anything.
+.It Fl V , Fl -version
+Print the version.
+.It Fl v , Fl -verbose
+Report on each file processed: its name and the compression ratio.
+.El
+.Pp
+Options are also taken from the
+.Ev GZIP
+environment variable, before those on the command line.
+.Sh ENVIRONMENT
+.Bl -tag -width GZIP
+.It Ev GZIP
+Default options, separated by blanks.
+.El
+.Sh EXIT STATUS
+The
+.Nm
+utility exits 0 on success,
+1 if an error occurred or a file was skipped,
+and 2 if trailing data after compressed data was ignored and nothing worse happened.
+.Sh EXAMPLES
+Compress every file under a directory, at the highest level:
+.Dl $ gzip -9r logs
+.Pp
+Look into a compressed file without expanding it on disk:
+.Dl $ zcat notes.gz | more
+.Pp
+Read files whether or not they are compressed:
+.Dl $ zcat -f a.txt b.txt.gz
+.Sh SEE ALSO
+.Xr tar 1 ,
+.Xr zstd 1
+.Rs
+.%A P. Deutsch
+.%T GZIP file format specification version 4.3
+.%O RFC 1952
+.Re
+.Sh HISTORY
+The
+.Nm
+program was written by Jean-loup Gailly for the GNU project in 1992;
+the BSDs replaced it with Matthew R. Green's version, which appeared in
+.Nx 2.0
+and
+.Fx 7.0 .
+This one, with its DEFLATE implementation, is written in Rust for OxideBSD.
+.Sh CAVEATS
+The
+.Fl a ,
+.Fl L
+and
+.Fl Z
+options of the BSDs' gzip are not provided, nor the expansion of
+.Xr compress 1 ,
+bzip2, xz and pack data.

@@ -1,0 +1,278 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt GREP 1
+.Os OxideBSD
+.Sh NAME
+.Nm grep ,
+.Nm egrep ,
+.Nm fgrep
+.Nd print lines that match patterns
+.Sh SYNOPSIS
+.Nm grep
+.Op Fl abcEFGHhIiLlnOopqRrSsUvwxy
+.Op Fl A Ar num
+.Op Fl B Ar num
+.Op Fl C Ar num
+.Op Fl d Ar action
+.Op Fl e Ar pattern
+.Op Fl f Ar file
+.Op Fl m Ar num
+.Op Fl - Ns Cm color Ns Op = Ns Ar when
+.Op Fl - Ns Cm exclude Ns = Ns Ar glob
+.Op Fl - Ns Cm exclude-dir Ns = Ns Ar glob
+.Op Fl - Ns Cm include Ns = Ns Ar glob
+.Op Fl - Ns Cm line-buffered
+.Op Fl - Ns Cm null
+.Op Ar pattern
+.Op Ar
+.Sh DESCRIPTION
+.Nm
+searches each
+.Ar file
+for lines that match any of the patterns, and writes them to the standard
+output.
+A
+.Ar file
+of
+.Sq Fl ,
+or none at all, means the standard input
+.Pq or, with Fl r , the working directory .
+.Pp
+The patterns are those given with
+.Fl e
+and
+.Fl f ,
+or else the first operand.
+A pattern containing newlines is one pattern per line.
+The null pattern matches every line.
+Patterns are basic regular expressions unless
+.Fl E
+or
+.Fl F
+is given; see
+.Xr re_format 7 .
+.Nm
+works on bytes: a line is everything up to a newline, and the last line of a
+file needs none.
+.Pp
+.Nm egrep
+is
+.Nm grep Fl E
+and
+.Nm fgrep
+is
+.Nm grep Fl F ;
+they are links to the same program.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl A Ar num
+Print
+.Ar num
+lines of context after each selected line.
+.It Fl a
+Treat binary files as text.
+.It Fl B Ar num
+Print
+.Ar num
+lines of context before each selected line.
+.It Fl b
+Precede each line (or, with
+.Fl o ,
+each match) with its byte offset in the file.
+.It Fl C Ar num , Fl Ar num
+Print
+.Ar num
+lines of context before and after each selected line.
+Groups of lines that are not adjacent are separated by a line of
+.Ql -- .
+.It Fl c
+Write only the number of selected lines in each file.
+.It Fl d Ar action
+What to do with a directory operand:
+.Cm read
+(the default; it fails, as reading a directory does),
+.Cm skip ,
+or
+.Cm recurse
+(the same as
+.Fl r ) .
+.It Fl E
+Patterns are extended regular expressions.
+.It Fl e Ar pattern
+Use
+.Ar pattern .
+Can be given more than once.
+.It Fl F
+Patterns are fixed strings.
+.It Fl f Ar file
+Read patterns from
+.Ar file ,
+one per line.
+An empty
+.Ar file
+gives no patterns, matching nothing.
+.It Fl G
+Patterns are basic regular expressions (the default).
+.It Fl H
+Always precede lines with the file name.
+.It Fl h
+Never precede lines with the file name.
+.It Fl I
+Treat binary files as not matching.
+.It Fl i , Fl y
+Ignore the case of letters.
+.It Fl L
+Write only the names of files with no selected line.
+.It Fl l
+Write only the names of files with a selected line.
+.It Fl m Ar num
+Stop reading a file after
+.Ar num
+selected lines.
+.It Fl n
+Precede each line with its line number.
+.It Fl O
+With
+.Fl r ,
+follow symbolic links named on the command line only.
+.It Fl o
+Print only the parts of lines that match, each on its own line.
+.It Fl p
+With
+.Fl r ,
+follow no symbolic links found in a directory (the default).
+.It Fl q
+Write nothing; exit with status 0 at the first selected line.
+.It Fl R , Fl r
+Search directories recursively.
+.It Fl S
+With
+.Fl r ,
+follow all symbolic links.
+.It Fl s
+Write no messages about missing or unreadable files.
+.It Fl U
+Accepted for compatibility.
+.It Fl v
+Select the lines that do not match.
+.It Fl w
+Match only whole words: the match must be at the start of the line or after a
+character that is not a letter, digit or underscore, and likewise at its end.
+.It Fl x
+Match only whole lines.
+.It Fl - Ns Cm binary-files Ns = Ns Ar type
+.Cm binary
+(the default),
+.Cm text
+(as
+.Fl a ) ,
+or
+.Cm without-match
+(as
+.Fl I ) .
+.It Fl - Ns Cm color Ns Op = Ns Ar when
+Highlight matches:
+.Cm auto
+(the default) when the standard output is a terminal,
+.Cm always
+or
+.Cm never .
+.It Fl - Ns Cm context Ns Op = Ns Ar num
+The same as
+.Fl C ,
+2 lines by default.
+.It Fl - Ns Cm exclude Ns = Ns Ar glob
+In a recursive search, skip files whose name matches
+.Ar glob .
+.It Fl - Ns Cm exclude-dir Ns = Ns Ar glob
+In a recursive search, skip directories whose name matches
+.Ar glob .
+.It Fl - Ns Cm include Ns = Ns Ar glob
+In a recursive search, read only files whose name matches
+.Ar glob
+(and no
+.Fl - Ns Cm exclude ) .
+.It Fl - Ns Cm line-buffered
+Flush the output after every line.
+.It Fl - Ns Cm null
+Follow each file name with a NUL byte instead of
+.Ql \&:
+or a newline.
+.El
+.Pp
+The file name precedes each line when more than one file is searched or the
+search is recursive.
+Selected lines are separated from their prefixes by
+.Ql \&: ,
+context lines by
+.Ql - .
+.Pp
+A file is binary if its first 32 KiB contain a NUL byte.
+A match in a binary file prints
+.Dq Binary file Ar name Li matches
+in place of the line.
+.Pp
+In a recursive search, devices, FIFOs and sockets are skipped, and the names in
+a directory are read in sorted order.
+.Pp
+Options may follow the operands, as with the other BSD
+.Nm
+implementations;
+.Ql --
+ends them.
+.Sh ENVIRONMENT
+.Bl -tag -width GREP_COLORS
+.It Ev GREP_COLOR
+The SGR sequence for highlighted matches; the default is
+.Ql 01;31 .
+.It Ev GREP_COLORS
+If it contains an
+.Cm mt=
+or
+.Cm ms=
+field, that sequence is used instead.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+A line was selected.
+.It 1
+No line was selected.
+.It 2
+An error occurred.
+With
+.Fl q ,
+a selected line still gives 0.
+.El
+.Sh EXAMPLES
+Find a function in the sources of a tree:
+.Dl $ grep -rn --include='*.rs' 'fn main' sys
+.Pp
+Lines that are not comments or empty:
+.Dl $ grep -Ev '^(#|$)' /etc/rc.conf
+.Pp
+Whether a user exists:
+.Dl $ grep -q '^alice:' /etc/passwd && echo yes
+.Sh SEE ALSO
+.Xr ed 1 ,
+.Xr sed 1 ,
+.Xr re_format 7
+.Sh STANDARDS
+.Nm
+conforms to IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq), whose options are
+.Fl c , E , e , F , f , i , l , n , q , s , v , w
+and
+.Fl x .
+The others are those of the BSDs.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v4 .
+This one is written in Rust for OxideBSD.
+.Sh BUGS
+With
+.Fl L ,
+the exit status reflects whether any line was selected, not whether a file was
+named (the BSD convention).

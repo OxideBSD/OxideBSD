@@ -1,0 +1,14 @@
+[package]
+name = "flate"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# DEFLATE (RFC 1951) with its gzip (RFC 1952) and zlib (RFC 1950) wrappers, written from scratch
+# for gzip(1), gunzip(1), zcat(1) and tar -z. Its own workspace, testable on the host
+# (.cargo/config.toml); the interoperability tests shell out to the host's gzip and python3.
+[workspace]
+
+[profile.test]
+opt-level = 2

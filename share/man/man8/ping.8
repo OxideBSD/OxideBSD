@@ -1,0 +1,153 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt PING 8
+.Os OxideBSD
+.Sh NAME
+.Nm ping
+.Nd send ICMP echo requests to network hosts
+.Sh SYNOPSIS
+.Nm
+.Op Fl afnoqv
+.Op Fl c Ar count
+.Op Fl i Ar wait
+.Op Fl l Ar preload
+.Op Fl m Ar ttl
+.Op Fl p Ar pattern
+.Op Fl S Ar src_addr
+.Op Fl s Ar packetsize
+.Op Fl t Ar timeout
+.Op Fl W Ar waittime
+.Op Fl z Ar tos
+.Ar host
+.Sh DESCRIPTION
+.Nm
+sends ICMP echo requests to
+.Ar host ,
+a name or an IPv4 address, once a second, and reports each echo reply:
+its size, sender, sequence number, time to live and round trip time.
+A reply seen twice is marked
+.Ql (DUP!) .
+When the count is reached, the time is up, or
+.Nm
+is interrupted
+.Pq Dv SIGINT ,
+it prints how many requests went out and how many replies came back, and
+the least, average and greatest round trip time and its standard deviation.
+.Pp
+Each request carries
+.Ar packetsize
+data bytes, of which the first 8 hold the time it was sent and the rest a
+pattern, which each reply is checked against.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Ring the bell with each reply.
+.It Fl c Ar count
+Stop after
+.Ar count
+replies, or once
+.Ar count
+requests have gone out and the last has had time to be answered.
+.It Fl f
+Flood: send a request a hundred times a second, printing
+.Ql \&.
+for each request and a backspace for each reply.
+Only the superuser may use it.
+.It Fl i Ar wait
+Wait
+.Ar wait
+seconds, which may be a fraction, between requests; 1 by default.
+Only the superuser may make it less than a second.
+.It Fl l Ar preload
+Send
+.Ar preload
+requests at once before the usual ones.
+Only the superuser may use it.
+.It Fl m Ar ttl
+The time to live of the requests.
+.It Fl n
+Numeric output: addresses are always shown as numbers.
+.It Fl o
+Stop after the first reply.
+.It Fl p Ar pattern
+Fill the data with up to 16 bytes, given as hexadecimal digits, repeated.
+.It Fl q
+Quiet: print only the first line and the statistics.
+.It Fl S Ar src_addr
+Send from the address
+.Ar src_addr .
+.It Fl s Ar packetsize
+Send
+.Ar packetsize
+data bytes, 56 by default (64 bytes of ICMP).
+Fewer than 8 leave no room for the time, so no round trip time is shown.
+.It Fl t Ar timeout
+Stop after
+.Ar timeout
+seconds, however many replies have come.
+.It Fl v
+Verbose: also report the other ICMP packets received.
+.It Fl W Ar waittime
+Wait at most
+.Ar waittime
+milliseconds for each reply: a later one is counted but not shown.
+It is also how long
+.Nm
+waits after the last request when no reply has come at all (10 seconds by
+default).
+.It Fl z Ar tos
+The type of service of the requests.
+.El
+.Pp
+.Nm
+needs a raw socket, then gives up the privileges it was run with.
+.Sh EXIT STATUS
+.Bl -tag -width indent -compact
+.It 0
+At least one reply came.
+.It 2
+Requests went out but no reply came.
+.It 64
+The command line was wrong.
+.It 68
+The host could not be found.
+.It 71
+A system call failed.
+.It 77
+An option was used that only the superuser may use.
+.El
+.Sh EXAMPLES
+Three requests to the loopback interface:
+.Bd -literal -offset indent
+$ ping -c 3 127.0.0.1
+PING 127.0.0.1 (127.0.0.1): 56 data bytes
+64 bytes from 127.0.0.1: icmp_seq=0 ttl=64 time=0.060 ms
+64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.058 ms
+64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.064 ms
+
+--- 127.0.0.1 ping statistics ---
+3 packets transmitted, 3 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 0.058/0.061/0.064/0.002 ms
+.Ed
+.Pp
+Whether a host answers within five seconds, in a script:
+.Dl $ ping -q -o -t 5 10.0.2.2 > /dev/null && echo up
+.Sh SEE ALSO
+.Xr icmp 4 ,
+.Xr inet 4
+.Sh HISTORY
+The
+.Nm
+command appeared in
+.Bx 4.3 .
+This one is written in Rust for OxideBSD.
+.Sh BUGS
+OxideBSD's IP layer does not yet act on
+.Fl m ,
+.Fl S
+and
+.Fl z :
+requests go out with the stack's own time to live (64), type of service,
+and the source address of the route to
+.Ar host .

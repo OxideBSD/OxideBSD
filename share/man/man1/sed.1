@@ -1,0 +1,346 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt SED 1
+.Os OxideBSD
+.Sh NAME
+.Nm sed
+.Nd stream editor
+.Sh SYNOPSIS
+.Nm
+.Op Fl Ealnru
+.Ar command
+.Op Fl I Ar extension
+.Op Fl i Ar extension
+.Op Ar
+.Nm
+.Op Fl Ealnru
+.Op Fl e Ar command
+.Op Fl f Ar command_file
+.Op Fl I Ar extension
+.Op Fl i Ar extension
+.Op Ar
+.Sh DESCRIPTION
+.Nm
+reads each
+.Ar file
+.Po
+.Sq Fl ,
+or none at all, being the standard input
+.Pc ,
+applies the editing commands to each line, and writes the result to the standard
+output.
+The script is every
+.Fl e
+and
+.Fl f
+argument joined by newlines in the order given or, with neither, the first
+operand.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl a
+Accepted for compatibility:
+.Ic w
+files are always created before any input is read.
+.It Fl E , Fl r
+Regular expressions are extended rather than basic; see
+.Xr re_format 7 .
+.It Fl e Ar command
+Append
+.Ar command
+to the script.
+.It Fl f Ar command_file
+Append the contents of
+.Ar command_file
+to the script.
+.It Fl I Ar extension
+Edit the files in place, saving each original under its name with
+.Ar extension
+appended (no backup if
+.Ar extension
+is empty).
+The files are one stream: line numbers run on, a range can span files, and
+.Ql $
+is the last line of the last file.
+.It Fl i Ar extension
+As
+.Fl I ,
+but each file is a stream of its own, as though edited by a separate
+.Nm :
+line numbers restart, ranges end, and
+.Ql $
+is each file's last line.
+.It Fl l , Fl u
+Flush the output after every line.
+.It Fl n
+Write the pattern space only when told to.
+A script whose first line is
+.Ql #n
+does the same.
+.El
+.Pp
+The extension is a separate argument:
+.Ql sed -i '' file
+edits without a backup.
+.Ss Operation
+.Nm
+reads a line, without its newline, into the
+.Em pattern space ,
+runs each command whose addresses select it, writes the pattern space (unless
+.Fl n ) ,
+and starts again with the next line.
+The
+.Em hold space
+keeps text between cycles.
+A last input line without a newline is written without one.
+.Ss Addresses
+A command may have no address (it applies to every line), one, or two separated
+by a comma.
+An address is
+.Bl -tag -width Ds
+.It Ar number
+the line with that number, counted across the input;
+.It Li $
+the last line;
+.It Li / Ns Ar re Ns Li / , Li \e Ns Ar c Ns Ar re Ns Ar c
+a line the regular expression
+.Ar re
+matches.
+Any character but backslash and newline may stand for
+.Ar c ;
+.Li \e Ns Ar c
+inside is a literal
+.Ar c ,
+and
+.Li \en
+a newline.
+An
+.Li I
+after it ignores case.
+The empty expression
+.Li //
+is the last one used.
+.El
+.Pp
+Two addresses select a range: from a line the first selects to the next line the
+second selects, or to that line itself when the second is a number not greater
+than the first line's.
+The second address may be
+.Li + Ns Ar N ,
+selecting
+.Ar N
+more lines.
+A
+.Ql \&!
+after the addresses applies the command to the lines not selected.
+.Ss Commands
+Commands are separated by newlines or semicolons; blanks may precede them.
+The commands
+.Ic a , b , c , i , r , t , w , \&:
+and
+.Ic #
+take the rest of the line.
+.Bl -tag -width Ds
+.It Ic { Ar commands Ic }
+Run
+.Ar commands
+on the selected lines.
+.It Ic a Ns Li \e Ar text
+Write
+.Ar text
+at the end of the cycle (or when
+.Ic n
+or
+.Ic N
+reads the next line).
+.It Ic b Op Ar label
+Branch to
+.Ar label ,
+or to the end of the script.
+.It Ic c Ns Li \e Ar text
+Delete the pattern space and, at the end of a range (or for each line with no
+range), write
+.Ar text ;
+start the next cycle.
+.It Ic d
+Delete the pattern space and start the next cycle.
+.It Ic D
+If the pattern space has no newline, as
+.Ic d ;
+otherwise delete through its first newline and start the next cycle without
+reading input.
+.It Ic g , Ic G
+Replace the pattern space with the hold space, or append a newline and the hold
+space to it.
+.It Ic h , Ic H
+Replace the hold space with the pattern space, or append a newline and the
+pattern space to it.
+.It Ic i Ns Li \e Ar text
+Write
+.Ar text
+now.
+.It Ic l
+Write the pattern space unambiguously: backslash escapes for
+.Ql \e\e ,
+alert, backspace, form feed, newline, carriage return, tab and vertical tab,
+three-digit octal for other non-printing bytes, long lines folded with
+.Ql \e ,
+and
+.Ql $
+at the end.
+.It Ic n
+Write the pattern space (unless
+.Fl n )
+and replace it with the next line; with none left, quit.
+.It Ic N
+Append a newline and the next line to the pattern space; with none left, quit
+without writing it.
+.It Ic p
+Write the pattern space.
+.It Ic P
+Write the pattern space up to its first newline.
+.It Ic q
+Write the pattern space (unless
+.Fl n )
+and any appended text, and quit.
+.It Ic r Ar file
+Write the contents of
+.Ar file
+at the end of the cycle; a file that can't be read is nothing.
+.It Ic s Ns Li / Ns Ar re Ns Li / Ns Ar replacement Ns Li / Ns Ar flags
+Replace the match of
+.Ar re
+with
+.Ar replacement ,
+in which
+.Ql &
+is the match,
+.Li \e1
+to
+.Li \e9
+its subexpressions, and
+.Li \en
+or a backslash before a newline a newline.
+Any character but backslash and newline may delimit.
+The flags are
+.Cm g
+(every match),
+.Ar N
+(the
+.Ar N Ns th
+match; with
+.Cm g ,
+it and every later one),
+.Cm p
+(write the pattern space if replaced),
+.Cm i
+or
+.Cm I
+(ignore case), and
+.Cm w Ar file
+(append the pattern space to
+.Ar file
+if replaced).
+.It Ic t Op Ar label
+Branch to
+.Ar label
+(or the end) if a substitution was made since the last line was read or
+.Ic t
+taken.
+.It Ic w Ar file
+Append the pattern space to
+.Ar file .
+Each
+.Ar file
+is created, empty, before input is read;
+.Pa /dev/stdout
+and
+.Pa /dev/stderr
+are the standard output and error.
+.It Ic x
+Exchange the pattern and hold spaces.
+.It Ic y Ns Li / Ns Ar string1 Ns Li / Ns Ar string2 Ns Li /
+Replace each character of
+.Ar string1
+with the one at the same place in
+.Ar string2 .
+.It Ic \&: Ns Ar label
+A label for
+.Ic b
+and
+.Ic t .
+.It Ic =
+Write the line number.
+.It Ic #
+A comment, to the end of the line.
+.El
+.Pp
+The text of
+.Ic a ,
+.Ic c
+and
+.Ic i
+follows a backslash and newline, or, on the same line, the command; each line of
+it but the last ends with a backslash.
+Leading blanks of each text line are dropped, and a backslash before any other
+character keeps that character.
+.Pp
+Labels and file names run to the end of the line, semicolons included.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Replace every
+.Ql foo
+with
+.Ql bar
+in a file, keeping a backup:
+.Dl $ sed -i .orig 's/foo/bar/g' file
+.Pp
+Print lines 10 to 20:
+.Dl $ sed -n '10,20p' file
+.Pp
+Join each line ending in a backslash with the next:
+.Bd -literal -offset indent
+$ sed -e ':a' -e '/\e\e$/N; s/\e\e\en//; ta' file
+.Ed
+.Pp
+Collapse runs of repeated lines, as
+.Xr uniq 1 :
+.Dl $ sed '$!N; /^\e(.*\e)\en\e1$/!P; D'
+.Sh SEE ALSO
+.Xr awk 1 ,
+.Xr ed 1 ,
+.Xr grep 1 ,
+.Xr re_format 7
+.Sh STANDARDS
+.Nm
+conforms to IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq), whose options are
+.Fl E ,
+.Fl e ,
+.Fl f
+and
+.Fl n .
+.Fl a , I , i , l , r
+and
+.Fl u ,
+the
+.Li I
+address and
+.Cm i Ns / Ns Cm I
+substitution flags, and
+.Li + Ns Ar N
+addresses are those of
+.Fx .
+.Pp
+As POSIX requires, a delimiter escaped inside a regular expression is that
+character literally (so in
+.Ql s.a\e.b.X.\&
+the dot matches only a dot), and
+.Ic N
+on the last line quits without writing the pattern space.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v7 .
+This one is written in Rust for OxideBSD.

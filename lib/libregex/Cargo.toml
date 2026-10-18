@@ -1,0 +1,23 @@
+[package]
+name = "regex_posix"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# POSIX regular expressions (XBD 9, regcomp/regexec), written for OxideBSD's native grep, sed, ed
+# and expr. Its own workspace, testable on the host (.cargo/config.toml).
+[workspace]
+
+[lib]
+name = "posixre"
+
+# Only for tests/glibc.rs, the differential test against the host's regcomp/regexec.
+[dev-dependencies]
+libc = "0.2"
+
+# Its own main: glibc's regexec can hang or overflow its stack on some patterns, so the test
+# runs it in a child process (this same binary, `--helper`) under a timeout.
+[[test]]
+name = "glibc"
+harness = false

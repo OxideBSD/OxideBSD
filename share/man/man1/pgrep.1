@@ -1,0 +1,163 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt PGREP 1
+.Os OxideBSD
+.Sh NAME
+.Nm pgrep ,
+.Nm pkill
+.Nd find or signal processes by name
+.Sh SYNOPSIS
+.Nm pgrep
+.Op Fl aLSfilnoqvx
+.Op Fl d Ar delim
+.Op Fl F Ar pidfile
+.Op Fl G Ar gid
+.Op Fl P Ar ppid
+.Op Fl U Ar uid
+.Op Fl g Ar pgrp
+.Op Fl s Ar sid
+.Op Fl t Ar tty
+.Op Fl u Ar euid
+.Ar pattern ...
+.Nm pkill
+.Op Fl Ar signal
+.Op Fl aILSfilnovx
+.Op Fl F Ar pidfile
+.Op Fl G Ar gid
+.Op Fl P Ar ppid
+.Op Fl U Ar uid
+.Op Fl g Ar pgrp
+.Op Fl s Ar sid
+.Op Fl t Ar tty
+.Op Fl u Ar euid
+.Ar pattern ...
+.Sh DESCRIPTION
+.Nm pgrep
+looks through the running processes and writes the process ID of each that
+matches, one per line.
+.Nm pkill
+sends a signal to each instead.
+.Pp
+A process matches when its name matches any
+.Ar pattern ,
+an extended regular expression
+.Pq Xr re_format 7 ,
+and it is in every list given by the options below.
+The patterns may be left out when an option selects.
+The program itself is never picked.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl Ar signal
+.Pq Nm pkill No only, and first
+The signal to send, by name (with or without
+.Ql SIG ,
+in any case) or number;
+.Dv SIGTERM
+by default.
+.It Fl a
+Include the program's own ancestors, which are left out otherwise.
+.It Fl d Ar delim
+.Pq Nm pgrep
+Separate the process IDs with
+.Ar delim
+instead of a newline.
+.It Fl F Ar pidfile
+Only the process whose ID is in
+.Ar pidfile .
+.It Fl f
+Match against the whole argument list, not just the name.
+.It Fl G Ar gid
+Processes whose real group is one of those listed.
+.It Fl g Ar pgrp
+Processes in one of the process groups listed; 0 is the program's own.
+.It Fl I
+.Pq Nm pkill
+Ask before signalling each process.
+.It Fl i
+Ignore case in the patterns.
+.It Fl L
+With
+.Fl F ,
+fail unless
+.Ar pidfile
+is locked, as a running daemon keeps its pid file
+.Pq Xr flock 2 .
+.It Fl l
+Long output:
+.Nm pgrep
+writes the name after each process ID, or with
+.Fl f
+the arguments;
+.Nm pkill
+writes the kill it did for each.
+.It Fl n
+Only the newest of the processes picked.
+.It Fl o
+Only the oldest of the processes picked.
+.It Fl P Ar ppid
+Processes whose parent is one of those listed.
+.It Fl q
+.Pq Nm pgrep
+Write nothing; just exit with the status.
+.It Fl S
+Include system processes (kernel threads, where the system has them).
+.It Fl s Ar sid
+Processes in one of the sessions listed; 0 is the program's own.
+.It Fl t Ar tty
+Processes whose controlling terminal is one of those listed, named as
+.Xr ps 1 Ns 's
+.Fl t
+takes them;
+.Ql -
+for none.
+.It Fl U Ar uid
+Processes whose real user is one of those listed, by name or number.
+.It Fl u Ar euid
+Processes whose effective user is one of those listed.
+.It Fl v
+Pick the processes that do not match instead.
+.It Fl x
+The pattern must match all of the name (or with
+.Fl f ,
+the arguments).
+.El
+.Pp
+A list is separated by commas.
+.Sh EXIT STATUS
+.Bl -tag -width indent -compact
+.It 0
+One or more processes were picked (and, for
+.Nm pkill ,
+signalled).
+.It 1
+None were.
+.It 2
+The command line was wrong.
+.It 3
+Something else failed.
+.El
+.Sh EXAMPLES
+The process IDs of every
+.Xr sh 1 :
+.Dl $ pgrep -x sh
+.Pp
+Ask the system logger to read its configuration again:
+.Dl # pkill -HUP -F /var/run/syslog.pid
+.Pp
+Whether any of a user's processes run a given script:
+.Dl $ pgrep -q -U operator -f 'backup\e.sh' && echo running
+.Sh SEE ALSO
+.Xr kill 1 ,
+.Xr ps 1 ,
+.Xr kill 2 ,
+.Xr re_format 7
+.Sh HISTORY
+.Nm pkill
+and
+.Nm pgrep
+first appeared in Solaris 7, then in
+.Nx 1.6
+and
+.Fx 5.3 .
+These are written in Rust for OxideBSD.

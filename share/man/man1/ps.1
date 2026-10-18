@@ -1,0 +1,364 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt PS 1
+.Os OxideBSD
+.Sh NAME
+.Nm ps
+.Nd process status
+.Sh SYNOPSIS
+.Nm
+.Op Fl AaCcefHjlmrSTuvwXx
+.Op Fl O Ar fmt | Fl o Ar fmt
+.Op Fl G Ar gid Ns Op , Ns Ar gid Ns ...
+.Op Fl p Ar pid Ns Op , Ns Ar pid Ns ...
+.Op Fl t Ar tty Ns Op , Ns Ar tty Ns ...
+.Op Fl U Ar user Ns Op , Ns Ar user Ns ...
+.Nm
+.Fl L
+.Sh DESCRIPTION
+.Nm
+prints a header line and then a line for each process selected.
+By default those are the processes whose effective user is the caller and
+that have a controlling terminal, in the columns
+.Cm pid , tt , state , time
+and
+.Cm command ,
+sorted by terminal and then process ID.
+The information comes from
+.Xr procfs 5 .
+.Pp
+The leading
+.Ql -
+of the first argument may be left out, as in
+.Ql ps aux ,
+and a process ID given as an operand is taken as if by
+.Fl p .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl A
+All processes: the same as
+.Fl ax .
+.It Fl a
+Processes of other users too.
+.It Fl C
+Accepted for compatibility: there is only the one CPU figure.
+.It Fl c
+Show only the command name in the
+.Cm command
+column, not the arguments.
+.It Fl e
+Show the environment after the arguments, where the system makes it known.
+.It Fl f
+Accepted for compatibility: no process is ever swapped out.
+.It Fl G Ar gid
+Processes whose real group is one of those listed, by name or number.
+.It Fl H
+Accepted for compatibility: each process is shown as one thread.
+.It Fl j
+The columns
+.Cm user , pid , ppid , pgid , sid , jobc , state , tt , time
+and
+.Cm command .
+.It Fl L
+List the keywords
+.Fl o
+knows, and exit.
+.It Fl l
+The columns
+.Cm uid , pid , ppid , cpu , pri , nice , vsz , rss , mwchan , state , tt , time
+and
+.Cm command .
+.It Fl m
+Sort by resident memory, largest first.
+.It Fl O Ar fmt
+Add the keywords in
+.Ar fmt
+after the
+.Cm pid
+column of the format in use.
+.It Fl o Ar fmt
+Show the columns named in
+.Ar fmt ,
+a list of keywords separated by commas or blanks.
+A keyword may be followed by
+.Ql =
+and a header for its column, which runs to the end of the argument;
+if every header is empty, no header line is printed.
+.Fl o
+may be given more than once.
+.It Fl p Ar pid
+Processes with the process IDs listed.
+.It Fl r
+Sort by CPU use, largest first.
+.It Fl S
+Count the CPU time of a process's waited-for children in its
+.Cm time .
+.It Fl T
+Processes on the terminal of the standard input.
+.It Fl t Ar tty
+Processes whose controlling terminal is one of those listed:
+a full name
+.Pq Pa ttyv0 , Pa /dev/ttyv0 ,
+the abbreviation
+.Cm tt
+shows
+.Pq Ql v0 ,
+or
+.Ql -
+for processes without one.
+.It Fl U Ar user
+Processes whose real user is one of those listed, by name or number.
+.It Fl u
+The columns
+.Cm user , pid , %cpu , %mem , vsz , rss , tt , state , start , time
+and
+.Cm command ;
+implies
+.Fl r .
+.It Fl v
+The columns
+.Cm pid , state , time , sl , re , pagein , vsz , rss , lim , tsiz , %cpu , %mem
+and
+.Cm command ;
+implies
+.Fl m .
+.It Fl w
+Lines are cut to the width of the terminal;
+.Fl w
+makes that at least 132 columns, and
+.Fl ww
+does not cut them.
+Output that is not to a terminal is never cut.
+.It Fl X
+With other selections, leave out processes without a controlling terminal.
+.It Fl x
+Include processes without a controlling terminal.
+.El
+.Pp
+The selections
+.Fl G , p , t , T
+and
+.Fl U
+add up: a process any of them names is shown.
+.Fl G , p
+and
+.Fl U
+imply
+.Fl x
+unless
+.Fl X
+is given.
+Of
+.Fl j , l , u
+and
+.Fl v ,
+each given adds its columns.
+.Ss Keywords
+The keywords, their headers and what they show; aliases are listed after
+the keyword they stand for.
+Values the system doesn't keep are shown as
+.Ql - .
+.Bl -tag -width "sigignore"
+.It Cm %cpu
+.Pq Cm pcpu ; %CPU
+CPU time used, as a percentage of the time since the process started.
+.It Cm %mem
+.Pq Cm pmem ; %MEM
+Resident memory as a percentage of the machine's.
+.It Cm args
+.Pq Cm command ; COMMAND
+The command and its arguments; a process without any shows its name in
+brackets, a zombie
+.Ql <defunct> .
+.It Cm comm
+.Pq COMMAND
+The command name.
+.It Cm etime
+.Pq ELAPSED
+Time since the process started,
+.Sm off
+.Oo Oo Ar dd Li \&- Oc Ar hh Li \&: Oc Ar mm Li \&: Ar ss ;
+.Sm on
+.Cm etimes
+the same in seconds.
+.It Cm f
+.Pq Cm flags ; F
+The process flags, in hexadecimal.
+.It Cm gid , rgid , svgid
+.Pq GID , RGID , SVGID
+The effective, real and saved group IDs;
+.Cm group
+and
+.Cm rgroup
+the names of the first two.
+.It Cm lstart
+.Pq STARTED
+The time the process started, in full.
+.It Cm majflt , minflt
+.Pq MAJFLT , MINFLT ; Cm pagein
+Page faults that did and did not read from a disk.
+.It Cm nice
+.Pq Cm ni ; NI
+The nice value.
+.It Cm nlwp
+.Pq NLWP
+The number of threads.
+.It Cm pgid , pid , ppid , sid
+.Pq PGID , PID , PPID , SID
+The process group, process, parent process and session IDs.
+.It Cm pri
+.Pq PRI
+The scheduling priority:
+20 and the nice value for a time-sharing process, below zero for a
+real-time one;
+.Cm rtprio
+shows
+.Ql normal
+or
+.Ql real: Ns Ar n .
+.It Cm rss
+.Pq Cm rssize , rsz ; RSS
+Resident memory, in kilobytes.
+.It Cm sigcatch , sigignore , sigmask , pending
+.Pq CAUGHT , IGNORED , BLOCKED , PENDING
+Signal masks, in hexadecimal.
+.It Cm start
+.Pq STARTED
+When the process started: the time of day within the last day, the
+weekday and hour within the last week, else the date.
+.It Cm state
+.Pq Cm stat ; STAT
+The state: one of
+.Bl -tag -width indent -compact
+.It Li D
+waiting for a disk or another uninterruptible event
+.It Li I
+idle (a Linux kernel thread)
+.It Li R
+runnable
+.It Li S
+sleeping
+.It Li T
+stopped
+.It Li Z
+a zombie, dead and not yet waited for
+.El
+and then any of
+.Bl -tag -width indent -compact
+.It Li <
+raised priority
+.It Li N
+lowered priority
+.It Li V
+a
+.Xr vfork 2
+child still borrowing its parent's memory
+.It Li s
+a session leader
+.It Li +
+in the foreground process group of its terminal
+.El
+.It Cm systime , usertime , time
+.Pq SYSTIME , USERTIME , TIME ; Cm cputime
+CPU time in the system, in the program, and both, as
+.Ar minutes : Ns Ar seconds . Ns Ar hundredths .
+.It Cm tdev
+.Pq TDEV
+The controlling terminal's device number.
+.It Cm tpgid , tsid
+.Pq TPGID , TSID
+The foreground process group and the session of the controlling terminal.
+.It Cm tt , tty
+.Pq TT , TTY
+The controlling terminal, abbreviated
+.Pf ( Pa ttyv0
+as
+.Ql v0 ,
+.Pa pts/1
+as
+.Ql 1 )
+or in full.
+.It Cm uid , ruid , svuid
+.Pq Cm euid ; UID , RUID , SVUID
+The effective, real and saved user IDs;
+.Cm user
+and
+.Cm ruser
+the names of the first two.
+.It Cm wchan
+.Pq Cm mwchan ; WCHAN
+What a sleeping process waits on.
+.El
+.Pp
+Also known, and shown as
+.Ql - :
+.Cm acflag , class , cow , cpu , dsiz , emul , inblk , jobc , ktrace ,
+.Cm label , lim , lockname , login , msgrcv , msgsnd , nivcsw , nsigs ,
+.Cm nswap , nvcsw , nwchan , oublk , paddr , re , sl , ssiz , tdaddr ,
+.Cm tdnam , tracer , tsiz , upr , uprocp
+and
+.Cm xstat .
+.Cm jid
+is always 0, and
+.Cm lwp
+and
+.Cm tid
+are the process ID.
+.Sh FILES
+.Bl -tag -width "/proc/<pid>/map" -compact
+.It Pa /proc
+the processes,
+.Xr procfs 5
+.It Pa /dev
+terminals' names
+.It Pa /etc/passwd , Pa /etc/group
+user and group names
+.El
+.Sh EXIT STATUS
+.Nm
+exits 0 if it showed a process, 1 if it showed none or something failed.
+.Sh EXAMPLES
+Every process, with its user and memory use:
+.Dl $ ps aux
+.Pp
+The process tree's IDs for one process:
+.Dl $ ps -o pid,ppid,pgid,sid,command -p 1
+.Pp
+The commands of a user's processes, without a header:
+.Dl $ ps -U operator -o comm=
+.Sh SEE ALSO
+.Xr kill 1 ,
+.Xr pgrep 1 ,
+.Xr procfs 5
+.Sh STANDARDS
+.Nm
+follows the BSDs.
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq)
+gives
+.Fl A , G , o , p , t
+and
+.Fl U
+the same meaning; its
+.Fl e ,
+.Fl f ,
+.Fl g ,
+.Fl l
+and
+.Fl n
+are not those of
+.Nm .
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v3 .
+This one is written in Rust for OxideBSD.
+.Sh BUGS
+The system keeps no decaying average of CPU use, so
+.Cm %cpu
+is the average over the process's life, and no sleep time, so a long
+sleeper shows
+.Li S ,
+not
+.Li I .

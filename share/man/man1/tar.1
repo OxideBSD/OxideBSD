@@ -1,0 +1,371 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt TAR 1
+.Os OxideBSD
+.Sh NAME
+.Nm tar
+.Nd manipulate tape archives
+.Sh SYNOPSIS
+.Nm
+.Brq Fl c | Fl r | Fl u
+.Op Fl aHhLnPvz
+.Op Fl b Ar blocks
+.Op Fl C Ar dir
+.Op Fl f Ar archive
+.Op Fl s Ar /old/new/
+.Op Fl T Ar file
+.Op Fl X Ar file
+.Op Fl -exclude Ar pattern
+.Op Fl -zstd
+.Op Ar file | Fl C Ar dir ...
+.Nm
+.Brq Fl t | Fl x
+.Op Fl kmOoPpqv
+.Op Fl C Ar dir
+.Op Fl f Ar archive
+.Op Fl s Ar /old/new/
+.Op Fl T Ar file
+.Op Fl X Ar file
+.Op Fl -exclude Ar pattern
+.Op Fl -strip-components Ar n
+.Op Ar pattern ...
+.Nm
+.Ar bundled-flags Op Ar args
+.Op Ar file | pattern ...
+.Sh DESCRIPTION
+.Nm
+writes files into an archive, lists an archive's members and extracts them.
+The first option names what to do:
+.Bl -tag -width Ds
+.It Fl c
+Create a new archive of each
+.Ar file ,
+and of everything in it if it is a directory.
+.It Fl r
+Append the files to the end of an existing archive, which must be a file and must not be
+compressed.
+.It Fl t
+List the members of the archive, or those that a
+.Ar pattern
+selects.
+.It Fl u
+As
+.Fl r ,
+but only files that are not in the archive yet or are newer than their copy in it.
+.It Fl x
+Extract the members of the archive, or those that a
+.Ar pattern
+selects.
+.El
+.Pp
+For compatibility, the first argument may be a word of option letters without a
+.Sq Fl ,
+as in
+.Ql tar xvf archive.tar ;
+the arguments of the letters
+.Cm b , C , f , I , s , T
+and
+.Cm X
+in it follow it in the same order.
+.Pp
+A
+.Ar pattern
+selects a member if it matches the member's whole name or a leading part of it ending
+before a
+.Sq / ,
+so a directory's name selects everything in it.
+In a pattern,
+.Ql * ,
+.Ql \&?
+and
+.Ql [...]
+are as in the shell, except that they also match
+.Ql / .
+A pattern that selects nothing is reported as an error at the end.
+.Pp
+The other options are:
+.Bl -tag -width Ds
+.It Fl a , Fl -auto-compress
+With
+.Fl c ,
+choose the compression from the archive's name:
+gzip for
+.Ql .tgz ,
+.Ql .taz
+and
+.Ql .gz ,
+zstd for
+.Ql .tzst
+and
+.Ql .zst .
+.It Fl b Ar blocks , Fl -blocking-factor Ar blocks
+Write records of
+.Ar blocks
+512-byte blocks (default 20); the archive is padded to a whole record.
+.It Fl C Ar dir , Fl -directory Ar dir , Fl -cd Ar dir
+Change to
+.Ar dir
+first.
+With
+.Fl c ,
+.Fl r
+and
+.Fl u ,
+.Fl C Ar dir
+may also appear among the
+.Ar file
+operands, changing directory before the files after it.
+With
+.Fl t
+and
+.Fl x ,
+it takes effect after the archive is opened.
+.It Fl f Ar archive , Fl -file Ar archive
+Use
+.Ar archive ;
+.Sq Fl
+is the standard input or output.
+.It Fl H
+Follow symbolic links named on the command line.
+.It Fl h , Fl L , Fl -dereference
+Follow all symbolic links, archiving what they point to.
+.It Fl k , Fl -keep-old-files
+Do not replace existing files when extracting.
+.It Fl m , Fl -modification-time
+Do not restore modification times when extracting.
+.It Fl n , Fl -no-recursion
+Do not descend into directories.
+.It Fl O , Fl -to-stdout
+Extract members' data to the standard output instead of to files.
+.It Fl o , Fl -no-same-owner
+Do not restore owners when extracting, even as root.
+.It Fl P , Fl -absolute-paths
+Keep a leading
+.Sq /
+in names, allow
+.Ql ..
+components, and follow symbolic links on the way to a member.
+See
+.Sx SECURITY .
+.It Fl p , Fl -preserve-permissions
+Restore permissions whole, without the umask, including the set-user-ID,
+set-group-ID and sticky bits.
+This is the default for root.
+.It Fl q , Fl -fast-read
+With patterns, stop at the first member each of them selects.
+.It Fl s Ar /old/new/ Ns Op Ar flags
+Rename members, the first time the basic regular expression
+.Ar old
+matches in a name, to
+.Ar new ,
+in which
+.Ql &
+is the matched text and
+.Ql \e1
+to
+.Ql \e9
+are its subexpressions.
+Any character may take the place of the
+.Sq / .
+The
+.Ar flags
+are
+.Cm g ,
+to replace every match,
+.Cm p ,
+to print each renaming, and
+.Cm H ,
+.Cm R ,
+.Cm S ,
+to leave hard link targets, member names and symbolic link targets alone
+.Pf ( Cm h ,
+.Cm r ,
+.Cm s
+restore them).
+With several
+.Fl s ,
+the first one that matches is applied.
+A name renamed to nothing is left out.
+.It Fl -strip-components Ar n
+Remove the first
+.Ar n
+components of each member's name when extracting; members with no more are left out.
+.It Fl T Ar file , Fl I Ar file , Fl -files-from Ar file
+Read names (or, with
+.Fl t
+and
+.Fl x ,
+patterns) from
+.Ar file ,
+one per line, before those on the command line.
+A line
+.Ql -C Ar dir
+changes directory.
+.It Fl U
+Accepted for compatibility: an existing file is always removed before its replacement is
+created.
+.It Fl v , Fl -verbose
+With
+.Fl c ,
+.Fl r ,
+.Fl u
+and
+.Fl x ,
+name each member on the standard error.
+With
+.Fl t ,
+list members as
+.Xr ls 1
+.Fl l
+does.
+.It Fl X Ar file , Fl -exclude-from Ar file
+Read exclusion patterns from
+.Ar file ,
+one per line.
+.It Fl -exclude Ar pattern
+Leave out files and members that
+.Ar pattern
+matches: the whole name, or a part of it between
+.Sq /
+characters, so
+.Ql --exclude '*.o'
+leaves out object files at any depth.
+.It Fl -format Ar format
+Write the archive as
+.Cm ustar ,
+failing for whatever that cannot hold,
+.Cm pax ,
+with an extended header for every member, or
+.Cm restricted
+(the default): ustar, with a pax extended header only before a member it cannot hold.
+.It Fl -null
+Names in a
+.Fl T
+or
+.Fl X
+file are separated by NUL bytes, not newlines.
+.It Fl -numeric-owner
+Restore owners by number, ignoring the names in the archive.
+.It Fl -same-owner , Fl -no-same-permissions
+Restore owners; apply the umask.
+.It Fl z , Fl -gzip
+Compress the archive with gzip.
+.It Fl -zstd
+Compress the archive with
+.Xr zstd 1 .
+.El
+.Pp
+When reading,
+.Nm
+recognises gzip and zstd compression by itself.
+Archives in the ustar, pax, GNU and old V7 formats are read, with pax extended and global
+headers, GNU long names and base-256 numbers.
+.Pp
+When creating, directories are walked in name order.
+A file with several links is stored once, its other names as hard links to the first.
+Sockets and the archive itself are left out.
+Without
+.Fl P ,
+a leading
+.Sq /
+or
+.Ql ../
+is removed from names, with a note.
+.Sh SECURITY
+Extraction assumes an archive was made to do harm.
+Without
+.Fl P :
+.Bl -bullet
+.It
+A leading
+.Sq /
+is removed from member names and hard link targets, and a member whose name or hard link
+target has a
+.Ql ..
+component is refused.
+.It
+Each directory on the way to a member is opened without following symbolic links, so a
+member is never written through one: an archive holding a link
+.Ql x
+to
+.Pa /etc
+and then a file
+.Ql x/passwd
+gets
+.Dq Cannot extract through symlink x .
+.It
+An existing file is removed, not overwritten, and the new one is created exclusively; a
+symbolic link in its place is replaced, never followed.
+.It
+Owners are set only by root, and the set-user-ID and set-group-ID bits only on a file that
+belongs to the archive's owner.
+.El
+.Pp
+Names shown in listings and messages have control characters written as octal escapes.
+.Sh ENVIRONMENT
+.Bl -tag -width TAPE
+.It Ev TAPE
+The archive when there is no
+.Fl f .
+.El
+.Sh FILES
+.Bl -tag -width /sbin/zstd
+.It Pa /sbin/zstd
+Used to compress and expand zstd archives.
+.El
+.Sh EXIT STATUS
+.Ex -std
+Errors with single members do not stop the others; they are reported as they happen and in
+the exit status.
+.Sh EXAMPLES
+Archive a directory, compressed:
+.Dl $ tar -czf src.tgz src
+.Pp
+List it at length:
+.Dl $ tar -tvf src.tgz
+.Pp
+Extract only its manual pages into
+.Pa /tmp :
+.Dl $ tar -xf src.tgz -C /tmp 'src/*.1'
+.Pp
+Copy a tree, keeping permissions:
+.Dl $ tar -cf - -C /usr/local share | tar -xpf - -C /mnt
+.Sh SEE ALSO
+.Xr gzip 1 ,
+.Xr zstd 1
+.Sh STANDARDS
+The archive formats are the ustar and pax interchange formats of
+IEEE Std 1003.1-2024 (\(lqPOSIX.1\(rq),
+which specifies them through
+.Xr pax 1 ;
+.Nm
+itself is not in POSIX.
+The options are those of bsdtar.
+.Sh HISTORY
+A
+.Nm
+command appeared in
+.At v7 .
+This one is written in Rust for OxideBSD.
+.Sh CAVEATS
+With no
+.Fl f
+and no
+.Ev TAPE ,
+the archive is the standard input or output; the BSDs' default is a tape drive
+.Pf ( Pa /dev/sa0
+or
+.Pa /dev/rst0 ) ,
+which OxideBSD does not have.
+.Pp
+bzip2
+.Pq Fl j ,
+xz
+.Pq Fl J
+and
+.Xr compress 1
+.Pq Fl Z
+data are refused, as are sparse members.
+Interactive renaming
+.Pq Fl w ,
+ACLs, extended attributes and file flags are not provided.

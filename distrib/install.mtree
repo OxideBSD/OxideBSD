@@ -60,6 +60,9 @@
 ./usr/tests/bin/run.sh type=file src=regress/bin-syscall-smoke/run.sh
 ./usr/tests/bin/bin1.sh type=file src=regress/bin-syscall-smoke/bin1.sh
 ./usr/tests/bin/bin2.sh type=file src=regress/bin-syscall-smoke/bin2.sh
+./usr/tests/bin/bin3.sh type=file src=regress/bin-syscall-smoke/bin3.sh
+./usr/tests/bin/bin4.sh type=file src=regress/bin-syscall-smoke/bin4.sh
+./usr/tests/bin/bin5.sh type=file src=regress/bin-syscall-smoke/bin5.sh
 ./usr/tests/cron type=dir
 ./usr/tests/cron/run.sh type=file src=regress/cron-syscall-smoke/run.sh
 ./usr/tests/musl type=file src=artifact:OXFS_MUSL_ELF_PATH
@@ -105,7 +108,6 @@
 ./usr/bin/uniq type=file src=artifact:OXFS_UNIQ_ELF_PATH
 ./bin/kill type=file src=artifact:OXFS_KILL_ELF_PATH
 ./usr/bin/ar type=file src=artifact:OXFS_AR_ELF_PATH
-./bin/ash type=file src=artifact:OXFS_ASH_ELF_PATH
 ./usr/bin/awk type=file src=artifact:OXFS_AWK_ELF_PATH
 ./usr/bin/base64 type=file src=artifact:OXFS_BASE64_ELF_PATH
 ./usr/bin/arch type=file src=artifact:OXFS_ARCH_ELF_PATH
@@ -146,11 +148,9 @@
 ./sbin/zstdcat type=file hardlink=./sbin/zstd
 ./usr/bin/du type=file src=artifact:OXFS_DU_ELF_PATH
 ./bin/ed type=file src=artifact:OXFS_ED_ELF_PATH
-./bin/egrep type=file src=artifact:OXFS_EGREP_ELF_PATH
 ./usr/bin/env type=file src=artifact:OXFS_ENV_ELF_PATH
 ./usr/bin/expand type=file src=artifact:OXFS_EXPAND_ELF_PATH
 ./bin/expr type=file src=artifact:OXFS_EXPR_ELF_PATH
-./bin/fgrep type=file src=artifact:OXFS_FGREP_ELF_PATH
 ./usr/bin/find type=file src=artifact:OXFS_FIND_ELF_PATH
 ./usr/bin/flock type=file src=artifact:OXFS_FLOCK_ELF_PATH
 ./usr/bin/fold type=file src=artifact:OXFS_FOLD_ELF_PATH
@@ -172,9 +172,13 @@
 ./usr/sbin/makefs type=file src=artifact:OXFS_MAKEFS_ELF_PATH
 ./usr/bin/mkimg type=file src=artifact:OXFS_MKIMG_ELF_PATH
 ./bin/grep type=file src=artifact:OXFS_GREP_ELF_PATH
+./bin/fgrep type=file hardlink=./bin/grep
+./bin/egrep type=file hardlink=./bin/grep
 ./usr/bin/groups type=file src=artifact:OXFS_GROUPS_ELF_PATH
-./bin/gunzip type=file src=artifact:OXFS_GUNZIP_ELF_PATH
 ./bin/gzip type=file src=artifact:OXFS_GZIP_ELF_PATH
+./bin/gzcat type=file hardlink=./bin/gzip
+./bin/zcat type=file hardlink=./bin/gzip
+./bin/gunzip type=file hardlink=./bin/gzip
 ./usr/bin/hexdump type=file src=artifact:OXFS_HEXDUMP_ELF_PATH
 ./usr/bin/install type=file src=artifact:OXFS_INSTALL_ELF_PATH
 ./bin/link type=file src=artifact:OXFS_LINK_ELF_PATH
@@ -209,8 +213,8 @@
 ./usr/bin/paste type=file src=artifact:OXFS_PASTE_ELF_PATH
 ./usr/bin/patch type=file src=artifact:OXFS_PATCH_ELF_PATH
 ./bin/pgrep type=file src=artifact:OXFS_PGREP_ELF_PATH
-./sbin/ping type=file src=artifact:OXFS_PING_ELF_PATH
-./bin/pkill type=file src=artifact:OXFS_PKILL_ELF_PATH
+./bin/pkill type=file hardlink=./bin/pgrep
+./sbin/ping type=file src=artifact:OXFS_PING_ELF_PATH mode=4555
 ./usr/bin/printenv type=file src=artifact:OXFS_PRINTENV_ELF_PATH
 ./bin/pwd type=file src=artifact:OXFS_PWD_ELF_PATH
 ./usr/bin/readlink type=file src=artifact:OXFS_READLINK_ELF_PATH
@@ -268,7 +272,6 @@
 ./usr/bin/whois type=file src=artifact:OXFS_WHOIS_ELF_PATH
 ./usr/bin/xargs type=file src=artifact:OXFS_XARGS_ELF_PATH
 ./usr/bin/xzcat type=file src=artifact:OXFS_XZCAT_ELF_PATH
-./bin/zcat type=file src=artifact:OXFS_ZCAT_ELF_PATH
 ./usr/bin/uname type=file src=artifact:OXFS_UNAME_ELF_PATH
 ./bin/hostname type=file src=artifact:OXFS_HOSTNAME_ELF_PATH
 ./usr/bin/id type=file src=artifact:OXFS_ID_ELF_PATH
@@ -380,6 +383,20 @@
 ./usr/share/man/man1 type=dir
 ./usr/share/man/oxdoc.db type=file src=artifact:OXFS_MAN_DB_PATH
 ./usr/share/man/man1/apropos.1 type=file src=share/man/man1/apropos.1
+./usr/share/man/man1/ed.1 type=file src=share/man/man1/ed.1
+./usr/share/man/man1/expr.1 type=file src=share/man/man1/expr.1
+./usr/share/man/man1/grep.1 type=file src=share/man/man1/grep.1
+./usr/share/man/man1/gzip.1 type=file src=share/man/man1/gzip.1
+./usr/share/man/man1/pgrep.1 type=file src=share/man/man1/pgrep.1
+./usr/share/man/man1/ps.1 type=file src=share/man/man1/ps.1
+./usr/share/man/man1/sed.1 type=file src=share/man/man1/sed.1
+./usr/share/man/man1/tar.1 type=file src=share/man/man1/tar.1
+./usr/share/man/man1/egrep.1 type=file hardlink=./usr/share/man/man1/grep.1
+./usr/share/man/man1/fgrep.1 type=file hardlink=./usr/share/man/man1/grep.1
+./usr/share/man/man1/gunzip.1 type=file hardlink=./usr/share/man/man1/gzip.1
+./usr/share/man/man1/zcat.1 type=file hardlink=./usr/share/man/man1/gzip.1
+./usr/share/man/man1/gzcat.1 type=file hardlink=./usr/share/man/man1/gzip.1
+./usr/share/man/man1/pkill.1 type=file hardlink=./usr/share/man/man1/pgrep.1
 ./usr/share/man/man1/cat.1 type=file src=share/man/man1/cat.1
 ./usr/share/man/man1/cp.1 type=file src=share/man/man1/cp.1
 ./usr/share/man/man1/date.1 type=file src=share/man/man1/date.1
@@ -399,6 +416,7 @@
 ./usr/share/man/man1/timeout.1 type=file src=share/man/man1/timeout.1
 ./usr/share/man/man1/true.1 type=file src=share/man/man1/true.1
 ./usr/share/man/man8/mknod.8 type=file src=share/man/man8/mknod.8
+./usr/share/man/man8/ping.8 type=file src=share/man/man8/ping.8
 ./usr/share/man/man1/whatis.1 type=file hardlink=./usr/share/man/man1/apropos.1
 ./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
 ./usr/share/man/man1/zstd.1 type=file src=external/bsd/zstd/programs/zstd.1
