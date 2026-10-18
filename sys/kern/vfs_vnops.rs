@@ -270,6 +270,22 @@ extern "C" fn vn_write(handle: u64, uio: *mut KUio, flags: u64) -> i64 {
     if flags & crate::kern::subr_uio::FOF_NEXTOFF == 0 {
         ioflag &= !IO_APPEND;
     }
+    if vtype(vp) == VREG {
+        // SAFETY: the descriptor layer hands over its live uio for the call.
+        let u = unsafe { &mut *uio };
+        let offset = if ioflag & IO_APPEND != 0 {
+            match vop_getattr(vp) {
+                Ok(va) => va.va_size,
+                Err(e) => return -(e as i64),
+            }
+        } else {
+            u.offset()
+        };
+        match crate::process::limits::check_fsize(offset, u.resid()) {
+            Ok(n) => u.limit_resid(n),
+            Err(e) => return -(e as i64),
+        }
+    }
     match vop_write(vp, uio as u64, ioflag, &current_ucred()) {
         Ok(n) => n as i64,
         Err(e) => -(e as i64),
@@ -307,6 +323,10 @@ extern "C" fn vn_truncate(handle: u64, len: u64) -> i64 {
     }
     if rdonly(vp) {
         return -(EROFS as i64);
+    }
+    // Growing a file past `RLIMIT_FSIZE` fails, with `SIGXFSZ` (POSIX `ftruncate`).
+    if let Err(e) = crate::process::limits::check_size(len) {
+        return -(e as i64);
     }
     let mut va = Vattr::NULL;
     va.va_size = len;

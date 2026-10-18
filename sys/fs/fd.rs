@@ -269,19 +269,133 @@ const BOOTSTRAP_PID: u64 = 0;
 /// handed out by `oxidebsd_alloc_fd`.
 static NEXT_REAL_FD: Mutex<u64> = Mutex::new(3);
 /// `(tgid, fd)` -> `real_fd`. Lock order: `TABLE` before `DESCRIPTIONS`.
-static TABLE: Mutex<BTreeMap<(u64, u64), u64>> = Mutex::new(BTreeMap::new());
+static TABLE: Mutex<FdTable> = Mutex::new(FdTable::new());
 static DESCRIPTIONS: Mutex<BTreeMap<u64, Description>> = Mutex::new(BTreeMap::new());
 
-/// The lowest fd number >= `min` that `pid` doesn't have open.
-fn lowest_free(table: &BTreeMap<(u64, u64), u64>, pid: u64, min: u64) -> u64 {
-    let mut candidate = min;
-    for &(_, fd) in table.range((pid, min)..=(pid, u64::MAX)).map(|(k, _)| k) {
-        if fd != candidate {
-            break;
+/// Every process's descriptors: `(tgid, fd)` -> `real_fd`, and per process a bitmap of the
+/// numbers in use, so the lowest free one is found a word at a time rather than by walking the
+/// open ones (FreeBSD's `fd_map`, with its `fd_himap` summary level: a bit per full word).
+struct FdTable {
+    map: BTreeMap<(u64, u64), u64>,
+    used: BTreeMap<u64, FdBitmap>,
+}
+
+#[derive(Default)]
+struct FdBitmap {
+    /// Bit `fd % 64` of word `fd / 64` is set while `fd` is open.
+    lo: alloc::vec::Vec<u64>,
+    /// Bit `w % 64` of word `w / 64` is set while `lo[w]` is full.
+    hi: alloc::vec::Vec<u64>,
+    /// How many fds are open.
+    count: u64,
+}
+
+impl FdBitmap {
+    fn set(&mut self, fd: u64) {
+        let (w, b) = ((fd / 64) as usize, fd % 64);
+        if self.lo.len() <= w {
+            self.lo.resize(w + 1, 0);
+            self.hi.resize(w / 64 + 1, 0);
         }
-        candidate += 1;
+        if self.lo[w] & (1 << b) == 0 {
+            self.lo[w] |= 1 << b;
+            self.count += 1;
+            if self.lo[w] == u64::MAX {
+                self.hi[w / 64] |= 1 << (w % 64);
+            }
+        }
     }
-    candidate
+
+    fn clear(&mut self, fd: u64) {
+        let (w, b) = ((fd / 64) as usize, fd % 64);
+        if w < self.lo.len() && self.lo[w] & (1 << b) != 0 {
+            self.lo[w] &= !(1 << b);
+            self.count -= 1;
+            self.hi[w / 64] &= !(1 << (w % 64));
+        }
+    }
+
+    /// The lowest number >= `min` not in use.
+    fn lowest_free(&self, min: u64) -> u64 {
+        let first = (min / 64) as usize;
+        if first >= self.lo.len() {
+            return min;
+        }
+        // The first word, with the bits below `min` counted as used.
+        let word = self.lo[first] | ((1u64 << (min % 64)) - 1);
+        if word != u64::MAX {
+            return first as u64 * 64 + (!word).trailing_zeros() as u64;
+        }
+        // Then a whole word at a time, skipping 64 full words per summary word.
+        let mut w = first + 1;
+        while w < self.lo.len() {
+            let h = self.hi[w / 64] | ((1u64 << (w % 64)) - 1);
+            if h == u64::MAX {
+                w = (w / 64 + 1) * 64;
+                continue;
+            }
+            w = (w / 64) * 64 + (!h).trailing_zeros() as usize;
+            if w >= self.lo.len() {
+                break;
+            }
+            return w as u64 * 64 + (!self.lo[w]).trailing_zeros() as u64;
+        }
+        self.lo.len() as u64 * 64
+    }
+
+    /// How many numbers below `limit` are in use.
+    fn count_below(&self, limit: u64) -> u64 {
+        if limit >= self.lo.len() as u64 * 64 {
+            return self.count;
+        }
+        let (w, b) = ((limit / 64) as usize, limit % 64);
+        let whole: u64 = self.lo[..w].iter().map(|x| x.count_ones() as u64).sum();
+        whole + (self.lo[w] & ((1u64 << b) - 1)).count_ones() as u64
+    }
+}
+
+impl FdTable {
+    const fn new() -> Self {
+        FdTable { map: BTreeMap::new(), used: BTreeMap::new() }
+    }
+
+    fn get(&self, key: &(u64, u64)) -> Option<&u64> {
+        self.map.get(key)
+    }
+
+    fn insert(&mut self, key: (u64, u64), real_fd: u64) -> Option<u64> {
+        self.used.entry(key.0).or_default().set(key.1);
+        self.map.insert(key, real_fd)
+    }
+
+    fn remove(&mut self, key: &(u64, u64)) -> Option<u64> {
+        let old = self.map.remove(key)?;
+        if let Some(bits) = self.used.get_mut(&key.0) {
+            bits.clear(key.1);
+            if bits.count == 0 {
+                self.used.remove(&key.0);
+            }
+        }
+        Some(old)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &(u64, u64)> {
+        self.map.keys()
+    }
+
+    fn range<R: core::ops::RangeBounds<(u64, u64)>>(&self, r: R) -> alloc::collections::btree_map::Range<'_, (u64, u64), u64> {
+        self.map.range(r)
+    }
+
+    /// The lowest fd number >= `min` that `pid` doesn't have open.
+    fn lowest_free(&self, pid: u64, min: u64) -> u64 {
+        self.used.get(&pid).map_or(min, |bits| bits.lowest_free(min))
+    }
+
+    /// How many fd numbers below `limit` `pid` has free.
+    fn free_below(&self, pid: u64, limit: u64) -> u64 {
+        limit.saturating_sub(self.used.get(&pid).map_or(0, |bits| bits.count_below(limit)))
+    }
 }
 
 /// Takes a reference to `real_fd`'s description that no descriptor slot holds: a message in
@@ -318,13 +432,19 @@ pub(crate) fn refs(real_fd: u64) -> u32 {
     DESCRIPTIONS.lock().get(&real_fd).map_or(0, |d| d.refs)
 }
 
+/// How many fd numbers the calling process has free under its `RLIMIT_NOFILE`.
+pub(crate) fn free_count() -> u64 {
+    let limit = crate::process::limits::current_nofile();
+    TABLE.lock().free_below(scheduler::current_tgid(), limit)
+}
+
 /// Turns a reference `hold` took into a descriptor of the calling process, at the lowest free
 /// number, with `FD_CLOEXEC` if `cloexec` (a received `SCM_RIGHTS`, `UNIX.md` §8.2).
 pub(crate) fn install_held(real_fd: u64, cloexec: bool) -> u64 {
     let tgid = scheduler::current_tgid();
     let fd = {
         let mut table = TABLE.lock();
-        let fd = lowest_free(&table, tgid, 0);
+        let fd = table.lowest_free(tgid, 0);
         table.insert((tgid, fd), real_fd);
         fd
     };
@@ -336,7 +456,7 @@ pub(crate) fn install_held(real_fd: u64, cloexec: bool) -> u64 {
 
 /// Points `(pid, fd)` at `real_fd`, which must already have a description, and counts the
 /// reference. The caller has already closed whatever `(pid, fd)` held before.
-fn install(table: &mut BTreeMap<(u64, u64), u64>, pid: u64, fd: u64, real_fd: u64) {
+fn install(table: &mut FdTable, pid: u64, fd: u64, real_fd: u64) {
     table.insert((pid, fd), real_fd);
     DESCRIPTIONS
         .lock()
@@ -605,7 +725,7 @@ pub(crate) fn finstall(real_fd: u64, ops: &'static FileOps, data: u64, flag: u32
         return real_fd as i64;
     }
     let mut table = TABLE.lock();
-    let fd = lowest_free(&table, pid, 0);
+    let fd = table.lowest_free(pid, 0);
     install(&mut table, pid, fd, real_fd);
     fd as i64
 }
@@ -709,9 +829,6 @@ const ENFILE: i64 = 23;
 const EMFILE: i64 = 24;
 
 /// How many fd numbers below `limit` `pid` has free.
-fn free_below(table: &BTreeMap<(u64, u64), u64>, pid: u64, limit: u64) -> u64 {
-    limit.saturating_sub(table.range((pid, 0)..(pid, limit)).count() as u64)
-}
 
 /// The process (by pid: an open can wait on the disk, and others run meanwhile) whose current open
 /// is the kernel's own (`kernel_open`).
@@ -748,7 +865,7 @@ pub(crate) fn check_room(n: usize) -> Result<(), i64> {
         return Err(ENFILE);
     }
     let limit = crate::process::limits::current_nofile();
-    if !kernel_opening() && free_below(&TABLE.lock(), scheduler::current_tgid(), limit) < n as u64 {
+    if !kernel_opening() && TABLE.lock().free_below(scheduler::current_tgid(), limit) < n as u64 {
         return Err(EMFILE);
     }
     Ok(())
@@ -901,7 +1018,7 @@ pub(crate) fn dup_min(oldfd: u64, min: u64) -> Result<u64, u64> {
     if min >= limit {
         return Err(crate::syscall::EINVAL);
     }
-    let newfd = lowest_free(&table, pid, min);
+    let newfd = table.lowest_free(pid, min);
     if newfd >= limit {
         return Err(EMFILE as u64);
     }

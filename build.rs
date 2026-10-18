@@ -418,6 +418,7 @@ fn main() {
     build_userland_crate("cron-syscall-smoke", "CRON_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("bin-syscall-smoke", "BIN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("kern-syscall-smoke", "KERN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("msdosfs-syscall-smoke", "MSDOSFS_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
@@ -755,6 +756,7 @@ fn main() {
     let wx_needed_elf_path = build_clang_pie("wx-needed", "wx-needed", &["-Wl,-z,wxneeded"]);
     let wx_plain_elf_path = build_clang_pie("wx-needed", "wx-plain", &[]);
     let tz_smoke_elf_path = build_c_pie(&musl_sysroot, "tz-smoke");
+    let kern_smoke_elf_path = build_c_pie(&musl_sysroot, "kern-smoke");
     let ppoll_smoke_elf_path = build_c_pie(&musl_sysroot, "ppoll-smoke");
     let fd_smoke_elf_path = build_c_pie(&musl_sysroot, "fd-smoke");
     let tty_smoke_elf_path = build_c_pie(&musl_sysroot, "tty-smoke");
@@ -1058,6 +1060,7 @@ fn main() {
         ("OXFS_ZDUMP_ELF_PATH", tz.zdump.to_str().unwrap()),
         ("OXFS_TZSETUP_ELF_PATH", tzsetup_elf_path.to_str().unwrap()),
         ("OXFS_TZ_SMOKE_ELF_PATH", tz_smoke_elf_path.to_str().unwrap()),
+        ("OXFS_KERN_SMOKE_ELF_PATH", kern_smoke_elf_path.to_str().unwrap()),
         ("OXFS_INIT_SMOKE_ELF_PATH", init_smoke_elf_path.to_str().unwrap()),
         ("OXFS_INIT_RESPAWN_SMOKE_ELF_PATH", init_respawn_smoke_elf_path.to_str().unwrap()),
         ("OXFS_CRED_SMOKE_ELF_PATH", cred_smoke_elf_path.to_str().unwrap()),
@@ -1147,6 +1150,7 @@ fn main() {
         "regress/bin-syscall-smoke/run.sh",
         "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
+        "regress/kern-syscall-smoke/run.sh",
         "regress/msdosfs-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",
         "regress/loopback-syscall-smoke/run.sh",
@@ -1904,7 +1908,8 @@ fn build_c_pie(sysroot: &Path, name: &str) -> PathBuf {
     let target_dir = Path::new(manifest_dir).join(format!("target/{name}"));
     std::fs::create_dir_all(&target_dir).unwrap_or_else(|e| panic!("creating target/{name}: {e}"));
     let out = target_dir.join(name);
-    println!("cargo:rerun-if-changed={}", src.display());
+    // The directory, not just main.c: a fixture may `#include` sections of its own.
+    println!("cargo:rerun-if-changed={}", src.parent().unwrap().display());
     let status = Command::new(sysroot.join("bin/musl-gcc"))
         .args(["-static-pie", "-pthread", "-O2", "-o"])
         .arg(&out)

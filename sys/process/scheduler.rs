@@ -445,6 +445,7 @@ fn activate_and_prepare(pid: Pid) -> u64 {
             .activate()
     };
     gdt::set_kernel_stack(next.kernel_stack_top);
+    process::mm::set_stack_limit(next.rlimits[process::limits::RLIMIT_STACK].0);
     // IA32_FS_BASE is a single global MSR, not something switch_context itself saves/restores (it
     // only touches RSP/callee-saved GPRs) -- without this, one process's own %fs-relative TLS
     // (every musl-linked binary's stack-protector check among it) would silently see whichever

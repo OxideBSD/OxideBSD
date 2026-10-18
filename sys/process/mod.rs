@@ -81,13 +81,13 @@ fn kernel_stack_size() -> usize {
 /// kernel half.
 pub const USER_STACK_TOP: u64 = 0x_5000_0000_0000;
 
-/// How far below `USER_STACK_TOP` the main thread's stack may grow: 8 MiB, real Linux's default
-/// `RLIMIT_STACK` (not consulted -- `Process::rlimits` is stored, never enforced). Only the top
-/// `user_stack_pages()` (or enough for a large argv/envp image) are mapped at exec; the rest is
-/// reserved and faulted in a page at a time by `mm::try_grow_user_stack`, like a real Unix stack.
-/// Found needed by ninja: `BuildLog::Load` keeps a 256 KiB line buffer on the stack, and the old
-/// fixed, fully-mapped 256 KiB stack faulted one page past its own end.
-pub const USER_STACK_RESERVE: u64 = 8 * 1024 * 1024;
+/// How far below `USER_STACK_TOP` the main thread's stack may ever grow: 512 MiB, FreeBSD's
+/// amd64 `MAXSSIZ`, the hard `RLIMIT_STACK` a process starts with and the most any limit can
+/// raise it to. The soft `RLIMIT_STACK` (8 MiB by default, `limits::DFLSSIZ`) is how far it grows
+/// today. Only the top `user_stack_pages()` (or enough for a large argv/envp image) are mapped at
+/// exec; the rest is reserved and faulted in a page at a time by `mm::try_grow_user_stack`, like a
+/// real Unix stack.
+pub const USER_STACK_RESERVE: u64 = 512 * 1024 * 1024;
 
 /// Floor: 4 pages (16 KiB) -- the fixed size this kernel always mapped, proven sufficient for
 /// `stsh` and every program it execs so far.
@@ -980,12 +980,10 @@ pub struct Process {
     /// a POSIX timer's whole purpose, notifying the very program that created it, means nothing to
     /// the new image.
     pub posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
-    /// `SYS_PRLIMIT64`'s backing store -- one `(rlim_cur, rlim_max)` pair per real `RLIMIT_*`
-    /// resource (`RLIM_NLIMITS = 16` on real Linux), `u64::MAX` (`RLIM_INFINITY`) in every slot by
-    /// default. Copied by `fork` (real POSIX rlimit/fork semantics, same as `uid`/`gid`/`pgid`);
-    /// preserved by `execve` (untouched, same as `cwd`/`pgid`). Enforced: `RLIMIT_MEMLOCK`
-    /// (`mlockall(MCL_FUTURE)`) and `RLIMIT_NOFILE` (`limits::current_nofile`, which starts at
-    /// `kern.maxfilesperproc`); the rest are stored only.
+    /// `getrlimit`/`setrlimit`'s limits, one `(rlim_cur, rlim_max)` pair per `RLIMIT_*` resource
+    /// (`limits::initial_rlimits`). Per process: `prlimit64` sets them on every thread of the
+    /// group. Kept by `fork` and `execve`. Enforced: `STACK`, `DATA`, `FSIZE`, `NPROC`, `NOFILE`,
+    /// `MEMLOCK` (`limits.rs`); `AS`, `CORE`, `CPU` and `RSS` are stored only (`CLEANUP.md` §3).
     pub rlimits: [(u64, u64); 16],
     /// `SYS_SETPRIORITY`/`SYS_GETPRIORITY`'s backing store — real `nice` range is `-20..=19`, `0`
     /// by default. Stored and echoed back honestly; this kernel's cooperative round-robin

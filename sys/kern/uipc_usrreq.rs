@@ -548,7 +548,10 @@ impl CmsgBuf {
 /// free descriptors. Descriptors that don't fit are released and `MSG_CTRUNC` reported. A peek
 /// shows credentials but leaves descriptors in the message. Returns the bytes, the truncation,
 /// and the descriptions to release after `STATE` is unlocked.
-fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool) -> (Vec<u8>, bool, Vec<u64>) {
+/// The control data a received message hands out, whether it was cut short (`MSG_CTRUNC`), and the
+/// descriptions it held that nobody receives. `EMSGSIZE` when the rights it carries don't fit
+/// under the receiver's `RLIMIT_NOFILE`: they are discarded, as on the BSDs (`unp_externalize`).
+fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool, fd_room: u64) -> Result<(Vec<u8>, bool, Vec<u64>), Vec<u64>> {
     let mut b = CmsgBuf { out: Vec::new(), room: ctl.room, truncated: false };
     let u = st.socks.get_mut(&so).expect("externalize: receiver gone");
     let sender = m.sender;
@@ -582,6 +585,9 @@ fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool) -
         let left = ctl.room.saturating_sub(b.out.len());
         let fit = left.saturating_sub(CMSG_HDR) / 4;
         let n = rights.len().min(fit);
+        if n as u64 > fd_room {
+            return Err(rights);
+        }
         if n > 0 {
             let fds: Vec<u32> = rights[..n].iter().map(|&r| crate::fs::fd::install_held(r, ctl.cloexec) as u32).collect();
             b.push(SCM_RIGHTS, &words(&fds));
@@ -591,7 +597,7 @@ fn externalize(st: &mut State, so: u64, m: &mut Msg, ctl: RecvCtl, peek: bool) -
             release.extend_from_slice(&rights[n..]);
         }
     }
-    (b.out, b.truncated, release)
+    Ok((b.out, b.truncated, release))
 }
 
 /// Makes (`create`) or looks up a socket file at `path` in the caller's context, through the VFS
@@ -1041,6 +1047,8 @@ impl Protocol for Local {
     }
 
     fn recv_msg(&self, so: u64, buf: &mut [u8], peek: bool, ctl: RecvCtl) -> Result<RecvMsg, i64> {
+        // Read before `STATE`'s lock: it takes the process table's.
+        let fd_room = crate::fs::fd::free_count();
         let mut st = STATE.lock();
         let u = st.socks.get_mut(&so).ok_or(EBADF as i64)?;
         let Some(mut m) = u.queue.pop_front() else {
@@ -1061,7 +1069,22 @@ impl Protocol for Local {
             return Ok(RecvMsg { r: Received::bytes(0), control: Vec::new(), ctrunc: false, stopped: true });
         }
         let (control, ctrunc, release) = if m.control.is_some() || u.passcred || u.local_creds != LocalCreds::Off {
-            externalize(&mut st, so, &mut m, ctl, peek)
+            match externalize(&mut st, so, &mut m, ctl, peek, fd_room) {
+                Ok(c) => c,
+                Err(rights) => {
+                    // The rights are gone; a stream's bytes stay to be read, a datagram goes
+                    // with them, as on FreeBSD.
+                    m.control = None;
+                    if self.ty == SOCK_STREAM {
+                        st.socks.get_mut(&so).unwrap().queue.push_front(m);
+                    } else {
+                        st.socks.get_mut(&so).unwrap().queued -= m.data.len();
+                    }
+                    drop(st);
+                    release_all(rights);
+                    return Err(EMSGSIZE as i64);
+                }
+            }
         } else {
             (Vec::new(), false, Vec::new())
         };

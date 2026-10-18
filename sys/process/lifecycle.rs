@@ -174,7 +174,11 @@ fn spawn_finish(
     let cmdline = build_cmdline(argv);
     let kernel_stack_top = kernel_stack.top();
     let rsp = crate::process::context_switch::seed_spawn_frame(kernel_stack_top);
-    address_space.vm().brk = brk;
+    {
+        let mut vm = address_space.vm();
+        vm.brk = brk;
+        vm.brk_base = brk;
+    }
 
     let process = Process {
         pid,
@@ -220,11 +224,7 @@ fn spawn_finish(
         // No login mechanism exists -- pid 1 (and every process descending from it) starts as
         // root, same reasoning as ThreadGroupShared::uid's own doc comment (via Process::shared
         // above).
-        rlimits: {
-            let mut rlimits = [(u64::MAX, u64::MAX); 16];
-            rlimits[super::limits::RLIMIT_NOFILE] = super::limits::initial_nofile();
-            rlimits
-        },
+        rlimits: super::limits::initial_rlimits(),
         nice: 0,
         sched_policy: SCHED_DEFAULT,
         sched_priority: 0,
@@ -357,17 +357,18 @@ fn user_stack_bottom(stack_top: VirtAddr, pages: u64) -> VirtAddr {
 }
 
 /// How many stack pages to map eagerly at exec: the usual `user_stack_pages()`, or enough to hold
-/// the whole argv/envp/auxv image `user_stack::build` writes through those pages' frames, capped
-/// at `USER_STACK_RESERVE`. The rest of the stack grows on demand (`mm::try_grow_user_stack`).
-/// Found live: `user_stack::write_image` `expect`s every image page to be mapped, so an `execve`
-/// whose arguments outgrew the fixed 64 pages panicked the kernel from userland.
-fn user_stack_eager_pages(arg_bytes: u64) -> u64 {
+/// the whole argv/envp/auxv image `user_stack::build` writes through those pages' frames. The rest
+/// of the stack grows on demand (`mm::try_grow_user_stack`). `E2BIG` when the image doesn't fit in
+/// the stack `RLIMIT_STACK` allows.
+fn user_stack_eager_pages(arg_bytes: u64) -> Result<u64, u64> {
     // Pointer arrays, auxv and alignment slack on top of the raw strings.
     const IMAGE_OVERHEAD: u64 = 64 * 1024;
     let needed = (arg_bytes + IMAGE_OVERHEAD).div_ceil(4096);
-    needed
-        .max(user_stack_pages())
-        .min(crate::process::USER_STACK_RESERVE / 4096)
+    let limit = crate::process::mm::stack_limit() / 4096;
+    if needed > limit {
+        return Err(E2BIG);
+    }
+    Ok(needed.max(user_stack_pages()).min(limit))
 }
 
 /// `sys_fork`'s real logic: deep-copies the calling process's address space
@@ -443,13 +444,30 @@ pub(crate) fn vfork_release(child_pid: Pid) {
 
 /// `kern.maxproc` (SYSCTL.md §§5-6), as FreeBSD's `fork1` applies it: processes (thread groups,
 /// zombies included) at the limit refuse everyone with `EAGAIN`, and the last ten slots are
-/// root's, so root can still log in and clean up.
+/// root's, so root can still log in and clean up. Then `RLIMIT_NPROC`: a caller whose real user
+/// ID already has that many processes gets `EAGAIN` too, unless it is the superuser.
 fn check_maxproc() -> Result<(), u64> {
     let max = *crate::kern::kern_sysctl::MAXPROC.lock() as usize;
-    let nprocs = PROCESS_TABLE.lock().values().filter(|p| p.pid == p.tgid).count();
-    let root = crate::process::identity::oxidebsd_current_uid() == 0;
+    let caller_pid = scheduler::current_pid();
+    let table = PROCESS_TABLE.lock();
+    let nprocs = table.values().filter(|p| p.pid == p.tgid).count();
+    let Some(me) = table.get(&caller_pid) else {
+        return Ok(());
+    };
+    let cred = me.shared.lock().cred.clone();
+    let root = cred.privileged();
     if nprocs >= max || (!root && nprocs + 10 >= max) {
         return Err(crate::syscall::EAGAIN);
+    }
+    let nproc_limit = me.rlimits[super::limits::RLIMIT_NPROC].0;
+    if !root && nproc_limit != super::limits::RLIM_INFINITY {
+        let mine = table
+            .values()
+            .filter(|p| p.pid == p.tgid && p.shared.lock().cred.ruid == cred.ruid)
+            .count() as u64;
+        if mine >= nproc_limit {
+            return Err(crate::syscall::EAGAIN);
+        }
     }
     Ok(())
 }
@@ -1502,7 +1520,7 @@ fn exec_image(
             .chain(shebang_argv_prefix.iter().flatten())
             .map(|a| a.len() as u64 + 1)
             .sum();
-        let stack_pages = user_stack_eager_pages(arg_bytes);
+        let stack_pages = user_stack_eager_pages(arg_bytes)?;
         let mapped_pages =
             map_user_stack(&mut mapper, stack_top, stack_pages, elf.exec_stack()).map_err(|_| ENOMEM)?;
         crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|_| ENOMEM)?;
@@ -1599,6 +1617,7 @@ fn exec_image(
             // `execve` removes them).
             let mut vm = me.vm();
             vm.brk = VirtAddr::new(main_bias + elf.highest_loaded_address());
+            vm.brk_base = vm.brk;
             // W^X's escape hatch (THREAT_MODEL.md §3.3, OpenBSD's): a program marked `wxneeded`,
             // run from a `wxallowed` mount.
             vm.wx_allowed = wx_allowed;

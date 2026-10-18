@@ -130,10 +130,24 @@ pub fn try_fill_file_page(fault_addr: u64, from_user: bool) -> Option<FileFill> 
     Some(FileFill::Done)
 }
 
+/// The running process's soft `RLIMIT_STACK`, page-rounded and at most the reserve: how far below
+/// `USER_STACK_TOP` its stack may grow. Kept here rather than read from the process table because
+/// the stack fault may interrupt the kernel holding the table's lock; the scheduler sets it at each
+/// switch (`set_stack_limit`), `setrlimit` when the running process changes its own.
+static STACK_LIMIT: AtomicU64 = AtomicU64::new(super::limits::DFLSSIZ);
+
+pub(crate) fn set_stack_limit(rlim_cur: u64) {
+    STACK_LIMIT.store(rlim_cur.min(USER_STACK_RESERVE) & !0xfff, Ordering::Relaxed);
+}
+
+pub(crate) fn stack_limit() -> u64 {
+    STACK_LIMIT.load(Ordering::Relaxed)
+}
+
 /// A not-present fault inside the stack reserve: maps the page. `None` when the fault isn't stack
 /// growth; `Some(false)` when there was no frame for it (the OOM killer's case).
 pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
-    let reserve_bottom = USER_STACK_TOP - USER_STACK_RESERVE;
+    let reserve_bottom = USER_STACK_TOP - stack_limit();
     if !(reserve_bottom..USER_STACK_TOP).contains(&fault_addr)
         || scheduler::current_pid() == 0
     {
@@ -279,12 +293,8 @@ const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
 
-/// Real Linux's own `RLIMIT_MEMLOCK` index into `Process::rlimits` -- `8` on every arch this
-/// kernel's own `x86_64` target shares numbering with (see `external/mit/musl/include/sys/
-/// resource.h`). The one `RLIMIT_*` resource `do_mmap` actually enforces, and only for the one
-/// real trigger POSIX documents for it (`mlockall(MCL_FUTURE)`'s own auto-lock-on-map contract,
-/// see the `auto_lock` handling below) -- every other `RLIMIT_*` stays the same honest
-/// stored-but-unenforced tier `Process::rlimits`'s own doc comment already establishes.
+/// `RLIMIT_MEMLOCK` (musl's number): bounds what `mlockall(MCL_FUTURE)` locks of later mappings
+/// (`do_mmap`'s `auto_lock`).
 const RLIMIT_MEMLOCK: u64 = 8;
 
 /// Real, cross-open shared physical-frame cache for fd-backed `MAP_SHARED` mappings — keyed by
@@ -356,6 +366,8 @@ fn add_mmap_file_ref(content_id: u64) {
 pub struct VmState {
     /// The program break (`do_brk`).
     pub brk: VirtAddr,
+    /// Where `execve` put the break: `RLIMIT_DATA` bounds how far past it the break may move.
+    pub brk_base: VirtAddr,
     /// The fd-backed mappings, for writeback and the page cache's reference counts.
     pub mmap_file_regions: Vec<MmapFileRegion>,
     /// Still-live `/dev/fb0` (or any future MMIO-backed) mappings -- see `MmapPhysRegion`'s own
@@ -408,6 +420,7 @@ impl Default for VmState {
     fn default() -> Self {
         Self {
             brk: VirtAddr::zero(),
+            brk_base: VirtAddr::zero(),
             mmap_file_regions: Vec::new(),
             mmap_phys_regions: Vec::new(),
             mlockall_future: false,
@@ -426,11 +439,11 @@ impl Default for VmState {
 /// (`sysv_shm::inherit_attachments_for_fork`). Private regions are left out: fork gave the child
 /// its own copy-on-write pages, with nothing left to write back. Memory locks are not inherited.
 pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
-    let (brk, wx_allowed, regions, text) = {
+    let (brk, brk_base, wx_allowed, regions, text) = {
         let vm = parent.vm();
         let regions: Vec<MmapFileRegion> =
             vm.mmap_file_regions.iter().filter(|r| r.shared).copied().collect();
-        (vm.brk, vm.wx_allowed, regions, vm.text.clone())
+        (vm.brk, vm.brk_base, vm.wx_allowed, regions, vm.text.clone())
     };
     for r in &regions {
         add_mmap_file_ref(r.content_id);
@@ -438,6 +451,7 @@ pub(crate) fn inherit_vm_for_fork(parent: &AddressSpace, child: &AddressSpace) {
     {
         let mut vm = child.vm();
         vm.brk = brk;
+        vm.brk_base = brk_base;
         vm.wx_allowed = wx_allowed;
         vm.mmap_file_regions = regions;
         for vp in text {
@@ -1960,6 +1974,9 @@ pub fn do_brk(caller_pid: Pid, addr: u64) -> Result<u64, u64> {
         BRK_REGION_CEILING
     };
     if addr > ceiling || shared.brk.as_u64() < crate::memory::usercopy::VM_MINUSER {
+        return Err(ENOMEM);
+    }
+    if addr.saturating_sub(shared.brk_base.as_u64()) > me.rlimits[super::limits::RLIMIT_DATA].0 {
         return Err(ENOMEM);
     }
 

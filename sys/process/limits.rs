@@ -6,7 +6,7 @@ use x86_64::structures::paging::Translate;
 use super::*;
 use crate::memory;
 use crate::memory::usercopy::{Pod, UserPtr, copyin_val, copyout, copyout_val};
-use crate::syscall::{EAGAIN, EFAULT, EINTR, EINVAL, EPERM, ETIMEDOUT};
+use crate::syscall::{EAGAIN, EFAULT, EINTR, EINVAL, EPERM, ESRCH, ETIMEDOUT};
 
 /// musl's own `struct timespec` on x86_64 -- see `sys/syscall/ffi.rs`'s/`sys/process/timers.rs`'s
 /// own `RawTimespec` (duplicated here rather than shared, same "no shared crate across this
@@ -37,8 +37,79 @@ unsafe impl Pod for RawTimespec {}
 /// Real Linux's own `RLIM_NLIMITS` -- the number of `Process::rlimits` slots that exist.
 const RLIM_NLIMITS: u64 = 16;
 
-/// `RLIMIT_NOFILE` (musl's x86_64 number): the most descriptors a process may have open.
+/// `RLIMIT_FSIZE` (musl's x86_64 numbers, here and below): the largest file a process may write.
+pub(crate) const RLIMIT_FSIZE: usize = 1;
+/// `RLIMIT_DATA`: how far the program break may move past where `execve` put it.
+pub(crate) const RLIMIT_DATA: usize = 2;
+/// `RLIMIT_STACK`: how far the main thread's stack may grow (`mm::try_grow_user_stack`).
+pub(crate) const RLIMIT_STACK: usize = 3;
+/// `RLIMIT_NPROC`: how many processes one real user ID may have.
+pub(crate) const RLIMIT_NPROC: usize = 6;
+/// `RLIMIT_NOFILE`: the most descriptors a process may have open.
 pub(crate) const RLIMIT_NOFILE: usize = 7;
+
+/// The soft `RLIMIT_STACK` a process starts with: 8 MiB, FreeBSD's `DFLSSIZ` (and the other BSDs'
+/// and Linux's default). The hard limit is `USER_STACK_RESERVE`, the most it can grow.
+pub(crate) const DFLSSIZ: u64 = 8 * 1024 * 1024;
+
+/// `RLIM_INFINITY`.
+pub(crate) const RLIM_INFINITY: u64 = u64::MAX;
+
+/// The limits the first process starts with; every other process inherits its parent's.
+pub(crate) fn initial_rlimits() -> [(u64, u64); RLIM_NLIMITS as usize] {
+    let mut rlimits = [(RLIM_INFINITY, RLIM_INFINITY); RLIM_NLIMITS as usize];
+    rlimits[RLIMIT_NOFILE] = initial_nofile();
+    rlimits[RLIMIT_STACK] = (DFLSSIZ, USER_STACK_RESERVE);
+    rlimits
+}
+
+/// The most a limit may be set to: `kern.maxfilesperproc` for `RLIMIT_NOFILE`, the stack reserve
+/// for `RLIMIT_STACK`. FreeBSD clamps a larger request to these rather than refusing it.
+fn rlimit_ceiling(resource: usize) -> u64 {
+    match resource {
+        RLIMIT_NOFILE => crate::kern::kern_sysctl::maxfilesperproc() as u64,
+        RLIMIT_STACK => USER_STACK_RESERVE,
+        _ => RLIM_INFINITY,
+    }
+}
+
+/// The calling process's soft limit for `resource`; unlimited for the kernel itself.
+pub(crate) fn current_rlimit(resource: usize) -> u64 {
+    let pid = scheduler::current_pid();
+    if pid == 0 {
+        return RLIM_INFINITY;
+    }
+    PROCESS_TABLE.lock().get(&pid).map_or(RLIM_INFINITY, |p| p.rlimits[resource].0)
+}
+
+/// Whether a write of `len` bytes at `offset` stays under the calling process's `RLIMIT_FSIZE`
+/// (FreeBSD's `vn_rlimit_fsize`): `Ok(len)` if it does, `Ok(shorter)` for a write that crosses the
+/// limit (only what fits is written, POSIX `write`), or `EFBIG` with `SIGXFSZ` sent for one that
+/// starts at or past it.
+pub(crate) fn check_fsize(offset: u64, len: u64) -> Result<u64, u64> {
+    let limit = current_rlimit(RLIMIT_FSIZE);
+    if len == 0 || offset.saturating_add(len) <= limit {
+        return Ok(len);
+    }
+    if offset >= limit {
+        let pid = scheduler::current_pid();
+        signals::post_signal(pid, SIGXFSZ);
+        return Err(crate::syscall::EFBIG);
+    }
+    Ok(limit - offset)
+}
+
+/// Whether a file may be made `size` bytes long under `RLIMIT_FSIZE` (`truncate`,
+/// `posix_fallocate`): `EFBIG` with `SIGXFSZ` sent past the limit.
+pub(crate) fn check_size(size: u64) -> Result<(), u64> {
+    if size == 0 {
+        return Ok(());
+    }
+    check_fsize(size - 1, 1).map(|_| ())
+}
+
+/// `SIGXFSZ` (musl's number).
+const SIGXFSZ: u64 = 25;
 
 /// The soft `RLIMIT_NOFILE` a process starts with. The BSDs differ (FreeBSD starts at
 /// `kern.maxfilesperproc`, OpenBSD at 512, NetBSD at 1024); the majority, a small soft limit under a
@@ -48,7 +119,7 @@ const INITIAL_NOFILE_SOFT: u64 = 1024;
 
 /// What a process starts with for `RLIMIT_NOFILE`: soft `INITIAL_NOFILE_SOFT`, hard
 /// `kern.maxfilesperproc`, the soft never above the hard.
-pub(crate) fn initial_nofile() -> (u64, u64) {
+fn initial_nofile() -> (u64, u64) {
     let hard = crate::kern::kern_sysctl::maxfilesperproc() as u64;
     (INITIAL_NOFILE_SOFT.min(hard), hard)
 }
@@ -66,11 +137,13 @@ pub(crate) fn current_nofile() -> u64 {
     cur.min(per_proc)
 }
 
-/// `SYS_PRLIMIT64`'s real logic -- real `prlimit64(pid, resource, new_limit, old_limit)`: writes
-/// the resource's *old* value to `old_ptr` first (if non-null), matching real Linux's own
-/// "read-then-write, atomically" contract, then applies `new_ptr`'s value (if non-null). Either
-/// pointer may be null independently (a bare read, a bare write, or both). See
-/// `Process::rlimits`'s own doc comment for why nothing here is actually enforced.
+/// `prlimit64(pid, resource, new_limit, old_limit)`: writes the resource's old value to `old_ptr`
+/// (if non-null), then applies `new_ptr`'s (if non-null), atomically. Limits belong to the whole
+/// process: a new one is set on every thread of the target's group.
+///
+/// POSIX's `EINVAL` for a soft limit above the hard one; `EPERM` for raising a hard limit (or a
+/// soft one past the old hard limit) without privilege, and for changing another user's process
+/// (FreeBSD's `p_cansched` rule: `Cred::may_schedule`).
 pub fn do_prlimit64(
     caller_pid: Pid,
     pid: i64,
@@ -81,24 +154,37 @@ pub fn do_prlimit64(
     if resource >= RLIM_NLIMITS {
         return Err(EINVAL);
     }
+    let resource = resource as usize;
     let target = resolve_target_pid(caller_pid, pid)?;
+    let new: Option<RawRlimit> = if new_ptr != 0 { Some(copyin_val(UserPtr::new(new_ptr))?) } else { None };
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&target)
-        .expect("prlimit64: target process missing from table");
-    if old_ptr != 0 {
-        let (cur, max) = proc.rlimits[resource as usize];
-        copyout_val(&RawRlimit { rlim_cur: cur, rlim_max: max }, UserPtr::new(old_ptr))?;
+    let caller_cred = table.get(&caller_pid).map(|p| p.shared.lock().cred.clone()).unwrap_or_else(Cred::root);
+    let proc = table.get(&target).ok_or(ESRCH)?;
+    let (old_cur, old_max) = proc.rlimits[resource];
+    let tgid = proc.tgid;
+    if new.is_some() && target != caller_pid && !caller_cred.may_schedule(&proc.shared.lock().cred) {
+        return Err(EPERM);
     }
-    if new_ptr != 0 {
-        let mut new: RawRlimit = copyin_val(UserPtr::new(new_ptr))?;
-        if resource as usize == RLIMIT_NOFILE {
-            // FreeBSD clamps both to kern.maxfilesperproc rather than refusing.
-            let per_proc = crate::kern::kern_sysctl::maxfilesperproc() as u64;
-            new.rlim_cur = new.rlim_cur.min(per_proc);
-            new.rlim_max = new.rlim_max.min(per_proc);
-        }
-        proc.rlimits[resource as usize] = (new.rlim_cur, new.rlim_max);
+    if old_ptr != 0 {
+        copyout_val(&RawRlimit { rlim_cur: old_cur, rlim_max: old_max }, UserPtr::new(old_ptr))?;
+    }
+    let Some(mut new) = new else {
+        return Ok(0);
+    };
+    if new.rlim_cur > new.rlim_max {
+        return Err(EINVAL);
+    }
+    if (new.rlim_max > old_max || new.rlim_cur > old_max) && !caller_cred.privileged() {
+        return Err(EPERM);
+    }
+    let ceiling = rlimit_ceiling(resource);
+    new.rlim_cur = new.rlim_cur.min(ceiling);
+    new.rlim_max = new.rlim_max.min(ceiling);
+    for p in table.values_mut().filter(|p| p.tgid == tgid) {
+        p.rlimits[resource] = (new.rlim_cur, new.rlim_max);
+    }
+    if resource == RLIMIT_STACK && table.get(&caller_pid).is_some_and(|p| p.tgid == tgid) {
+        mm::set_stack_limit(new.rlim_cur);
     }
     Ok(0)
 }

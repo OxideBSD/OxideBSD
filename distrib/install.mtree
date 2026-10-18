@@ -42,6 +42,9 @@
 ./usr/tests/tz type=dir
 ./usr/tests/tz/run.sh type=file src=regress/tz-syscall-smoke/run.sh
 ./usr/tests/tz/tz-smoke type=file src=artifact:OXFS_TZ_SMOKE_ELF_PATH
+./usr/tests/kern type=dir
+./usr/tests/kern/run.sh type=file src=regress/kern-syscall-smoke/run.sh
+./usr/tests/kern/kern-smoke type=file src=artifact:OXFS_KERN_SMOKE_ELF_PATH
 ./usr/tests/msdosfs type=dir
 ./usr/tests/msdosfs/run.sh type=file src=regress/msdosfs-syscall-smoke/run.sh
 ./usr/tests/openssl type=dir

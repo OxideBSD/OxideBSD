@@ -78,6 +78,11 @@ impl Uio {
         self.resid
     }
 
+    /// Shortens the transfer to at most `max` more bytes (a write cut at `RLIMIT_FSIZE`).
+    pub(crate) fn limit_resid(&mut self, max: u64) {
+        self.resid = self.resid.min(max);
+    }
+
     /// The file offset the transfer is at: where it started, moved on by every `uiomove`.
     pub(crate) fn offset(&self) -> u64 {
         self.offset

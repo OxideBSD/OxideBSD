@@ -1555,6 +1555,7 @@ pub(crate) extern "C" fn oxidebsd_sys_fallocate(fd: u64, _mode: u64, offset: u64
             if vtype(vp) == VDIR {
                 return Err(EISDIR);
             }
+            crate::process::limits::check_size(offset.saturating_add(len)).map_err(|e| e as i32)?;
             match vop_allocate(vp, offset, len) {
                 0 => Ok(0),
                 e => Err(e),
