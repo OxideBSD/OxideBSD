@@ -261,6 +261,9 @@ fn find_protocol(domain: i64, ty: i64, protocol: i64) -> Result<&'static dyn Pro
         AF_INET => match (ty, protocol) {
             (SOCK_DGRAM, 0) | (SOCK_DGRAM, 17) => Ok(&udp::UDP),
             (SOCK_STREAM, 0) | (SOCK_STREAM, 6) => Ok(&tcp::TCP),
+            // A raw socket sees every ICMP packet the host gets: root's only (FreeBSD's
+            // PRIV_NETINET_RAW). ping(8) is set-user-ID and gives root up once it has its socket.
+            (SOCK_RAW, 1) if !crate::process::identity::current_cred().privileged() => Err(crate::syscall::EPERM as i64),
             (SOCK_RAW, 1) => Ok(&icmp::RAW_ICMP),
             (SOCK_DGRAM, 6) | (SOCK_STREAM, 17) => Err(EPROTOTYPE),
             _ => Err(EPROTONOSUPPORT as i64),

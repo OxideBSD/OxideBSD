@@ -31,6 +31,15 @@ static int unprivileged_useradd(void)
 	return sh("/usr/sbin/useradd nobodyelse 2>/dev/null") != 0 ? 0 : 1;
 }
 
+/* A raw ICMP socket sees every ICMP packet the host gets: root's only. */
+static int unprivileged_raw_socket(void)
+{
+	if (setgid(4248) != 0 || setuid(4248) != 0)
+		return 10;
+	errno = 0;
+	return socket(AF_INET, SOCK_RAW, 1) == -1 && errno == EPERM ? 0 : 1;
+}
+
 static void users_main(void)
 {
 	check(sh("/usr/sbin/useradd -m -c Tester tester") == 0, "useradd -m");
@@ -55,4 +64,5 @@ static void users_main(void)
 	check(stat("/home/tester", &st) != 0 && getgrnam("tester") == NULL, "removes the home and the user's group");
 	check(sh("/usr/sbin/groupdel staff3") == 0 && getgrnam("staff3") == NULL, "groupdel");
 	check(child_exit_ok(unprivileged_useradd), "only root adds users");
+	check(child_exit_ok(unprivileged_raw_socket), "only root opens a raw ICMP socket");
 }
