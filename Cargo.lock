@@ -261,6 +261,10 @@ name = "itimer-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "kern-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "kern_mod"
 version = "0.1.0"
 
