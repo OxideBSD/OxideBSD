@@ -290,23 +290,8 @@ pub extern "C" fn _start() -> ! {
         b"mkdir -p is idempotent",
     );
 
-    // touch / touch -c
-    expect_ok(b"/bin/touch", &[b"touch", b"/t/f1"], b"touch creates");
-    expect_ok(
-        b"/bin/touch",
-        &[b"touch", b"/t/f1"],
-        b"touch on an existing file",
-    );
-    expect_ok(
-        b"/bin/touch",
-        &[b"touch", b"-c", b"/t/nope"],
-        b"touch -c on a missing file",
-    );
-    expect_fail(
-        b"/bin/cat",
-        &[b"cat", b"/t/nope"],
-        b"touch -c must not have created it",
-    );
+    // An empty file (touch(1) is a std program now, tested by bin_syscall_smoke).
+    check!(run(b"/bin/echo", &[b"echo", b"-n"], Some(b"/t/f1")) == 0, b"an empty file");
 
     // cat (and the file that everything below copies around)
     check!(
@@ -419,7 +404,7 @@ pub extern "C" fn _start() -> ! {
     );
 
     // Real timestamps: set an explicit mtime (2001-09-09 01:46:40 UTC) with a raw utimensat, see
-    // it in ls -l, then let `touch` bring it back to now. Also the error paths.
+    // it in ls -l, then truncate it back to now. Also the error paths.
     check!(
         utimensat_raw(b"/t/f1", &[0, 0, 1_000_000_000, 0]).is_ok(),
         b"utimensat with explicit times"
@@ -429,19 +414,16 @@ pub extern "C" fn _start() -> ! {
         contains(&buf[..n], b"Sep  9  2001"),
         b"ls -l shows the explicitly set mtime"
     );
-    expect_ok(
-        b"/bin/touch",
-        &[b"touch", b"/t/f1"],
-        b"touch an existing file",
-    );
+    // Truncating it marks it modified now (POSIX open, O_TRUNC).
+    check!(run(b"/bin/echo", &[b"echo", b"-n"], Some(b"/t/f1")) == 0, b"truncate an existing file");
     let n = ls_l(b"/t/f1", &mut buf);
     check!(
         !contains(&buf[..n], b"2001"),
-        b"touch moved the mtime off 2001"
+        b"O_TRUNC moved the mtime off 2001"
     );
     check!(
         contains(&buf[..n], b":"),
-        b"touch set a recent mtime (shown as HH:MM)"
+        b"to a recent mtime (shown as HH:MM)"
     );
     check!(
         utimensat_raw(b"/t/f1", &[0, 2_000_000_000, 0, 0]) == Err(22),

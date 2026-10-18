@@ -12,7 +12,6 @@ members = [
   "bin/cp",
   "bin/mv",
   "bin/ln",
-  "bin/touch",
   "regress/ring3-smoke",
   "regress/fork-exec-smoke",
   "regress/socketpair-syscall-smoke",

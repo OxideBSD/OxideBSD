@@ -616,7 +616,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libmode/src").display()
     );
-    let std_bin_paths: Vec<(String, String)> = ["sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod"]
+    let std_bin_paths: Vec<(String, String)> = ["sleep", "sync", "link", "unlink", "rmdir", "nproc", "kill", "test", "chmod", "touch"]
         .iter()
         .map(|name| {
             let env = oxfs_env_var_name(name);
@@ -1210,7 +1210,7 @@ fn main() {
 /// it) -- two producers for one `OXFS_<NAME>_ELF_PATH` once silently seeded the wrong binary.
 
 const NATIVE_BIN_UTILITIES: &[&str] = &[
-    "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln", "touch",
+    "echo", "true", "false", "pwd", "cat", "ls", "mkdir", "rm", "cp", "mv", "ln",
 ];
 
 fn oxfs_env_var_name(out_name: &str) -> String {

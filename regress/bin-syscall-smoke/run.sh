@@ -101,6 +101,25 @@ check "on directories too" [ "$(perms tree/sub)" = drwx------ ]
 check "chmod -v names the file" [ "$(chmod -v 600 f)" = f ]
 check "chmod refuses a bad mode" status_is 1 chmod u+q f
 
+# touch(1): POSIX's -a -m -c -r -t -d (CLEANUP.md: it took only -c). `date -r` reads the
+# modification time (BusyBox stat has no -c here).
+mtime() { date -u -r "$1" +%s; }
+check "touch -t sets the time" env TZ=UTC0 touch -t 202001021530.45 tt
+check "to that local time" [ "$(mtime tt)" = 1577979045 ]
+check "touch -a -t changes only the access time" env TZ=UTC0 touch -a -t 199901010000 tt
+check "leaving the modification time" [ "$(mtime tt)" = 1577979045 ]
+check "touch -d in UTC" touch -m -d 2021-03-04T05:06:07Z tt
+check "sets the modification time" [ "$(mtime tt)" = 1614834367 ]
+check "touch -r copies another file's times" touch -r tt tt2
+check "the modification time too" [ "$(mtime tt2)" = 1614834367 ]
+check "touch -c doesn't create" touch -c tt-none
+check "nothing made" not /bin/test -e tt-none
+check "touch refuses an unknown flag" status_is 1 touch -x tt3
+check "and makes no file named after it" not /bin/test -e tt3
+check "touch refuses an impossible date" status_is 1 touch -t 202002300000 tt
+check "touch -- creates a file named like a flag" touch -- -dash
+check "named so" /bin/test -f ./-dash
+
 # --- mount, umount (nmount(2)) and /etc/fstab ------------------------------------------------
 mkdir -p $T/m1 $T/m2 $T/src
 echo seen > $T/src/f
