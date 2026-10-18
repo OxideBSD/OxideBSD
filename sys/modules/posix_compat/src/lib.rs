@@ -145,7 +145,7 @@ unsafe extern "C" {
     fn oxidebsd_sys_sched_get_priority_min(policy: u64) -> i64;
     fn oxidebsd_sys_sched_rr_get_interval(pid: u64, ts_ptr: u64) -> i64;
     fn oxidebsd_sys_sched_yield() -> i64;
-    fn oxidebsd_sys_reboot(cmd: u64) -> i64;
+    fn oxidebsd_sys_reboot(cmd: u64, arg: u64) -> i64;
     fn oxidebsd_sys_futex(addr: u64, op: u64, val: u64, to: u64) -> i64;
     fn oxidebsd_sys_futex_requeue(addr: u64, addr2: u64, nr_wake: u64, nr_requeue: u64) -> i64;
     fn oxidebsd_sys_mlock(addr: u64, len: u64) -> i64;
@@ -558,9 +558,10 @@ extern "C" fn handle_sched_yield(_a0: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 
 /// Real `reboot(int type)`'s musl-side call site (`external/mit/musl/src/linux/reboot.c`) passes
 /// the two real magic numbers as the syscall's first two arguments and `type` as the third --
 /// this handler picks `cmd` out of the third register (`argp`-equivalent position) rather than the
-/// first, matching that real wire shape instead of assuming a single-argument one.
-extern "C" fn handle_reboot(_magic1: u64, _magic2: u64, cmd: u64, _a3: u64) -> i64 {
-    unsafe { oxidebsd_sys_reboot(cmd) }
+/// first, matching that real wire shape instead of assuming a single-argument one. The fourth is
+/// `RB_REROOT`'s argument, the new root (NetBSD's `bootstr` in shape).
+extern "C" fn handle_reboot(_magic1: u64, _magic2: u64, cmd: u64, arg: u64) -> i64 {
+    unsafe { oxidebsd_sys_reboot(cmd, arg) }
 }
 
 extern "C" fn handle_futex(addr: u64, op: u64, val: u64, to: u64) -> i64 {

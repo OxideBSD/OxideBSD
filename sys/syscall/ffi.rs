@@ -765,8 +765,8 @@ pub(crate) fn sys_sched_yield() -> Result<u64, u64> {
 /// `reboot.c` passes the two real magic numbers as the first two syscall args and `cmd` as the
 /// third — this ABI's 4-register width holds all three whole, no call-site patch needed). See
 /// `process::do_reboot`'s own doc comment: every success path diverges.
-pub(crate) fn sys_reboot(cmd: u64) -> Result<u64, u64> {
-    crate::process::do_reboot(cmd)
+pub(crate) fn sys_reboot(cmd: u64, arg: u64) -> Result<u64, u64> {
+    crate::process::do_reboot(cmd, arg)
 }
 
 /// `SYS_FUTEX` (real Linux's own `__NR_futex = 202`) -- real `futex(2)`'s `(uaddr, op, val, to)`
@@ -1800,8 +1800,8 @@ pub(crate) extern "C" fn oxidebsd_sys_sched_yield() -> i64 {
     result_to_ffi(sys_sched_yield())
 }
 
-pub(crate) extern "C" fn oxidebsd_sys_reboot(cmd: u64) -> i64 {
-    result_to_ffi(sys_reboot(cmd))
+pub(crate) extern "C" fn oxidebsd_sys_reboot(cmd: u64, arg: u64) -> i64 {
+    result_to_ffi(sys_reboot(cmd, arg))
 }
 
 pub(crate) extern "C" fn oxidebsd_sys_futex(addr: u64, op: u64, val: u64, to: u64) -> i64 {

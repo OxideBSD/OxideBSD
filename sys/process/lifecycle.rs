@@ -2338,15 +2338,70 @@ pub(crate) fn do_stop_self(pid: Pid, signum: u64) {
 const RB_AUTOBOOT: u64 = 0x01234567;
 const RB_HALT_SYSTEM: u64 = 0xcdef0123;
 const RB_POWER_OFF: u64 = 0x4321fedc;
+/// The root switch (RAM_FLOOR.md §5.1): FreeBSD's `RB_REROOT` value (Linux has none). Its
+/// argument, the fourth register, is a NUL-terminated `[type:]special`.
+const RB_REROOT: u64 = 0x0020_0000;
 
 /// `SYS_REBOOT`'s real logic -- matches real Linux's own magic `cmd` values against this kernel's
 /// three real actions (`sys/reboot.rs`). Root only (`EPERM` otherwise, checked before `cmd`, as
 /// Linux does for `CAP_SYS_BOOT`). Every success arm diverges (`-> !`) -- the `Result` return
 /// type exists only for the error cases. Each first runs the modules' shutdown hooks, as BSD
 /// `reboot(2)` syncs the filesystems: oxfs writes its delayed blocks and marks itself clean.
-pub fn do_reboot(cmd: u64) -> Result<u64, u64> {
+///
+/// `RB_REROOT` switches the root file system instead (RAM_FLOOR.md §5.1). From any root process
+/// (`reboot -r`) it takes the new root's `[type:]special`, looks it up (an error comes back to
+/// the caller), records it and asks init with `SIGPWR`; init, its shutdown done, calls it with no
+/// argument, and pid 1 ends: the supervisor unmounts everything, mounts the new root and starts
+/// init on it (`init::pid1_died`).
+pub fn do_reboot(cmd: u64, arg: u64) -> Result<u64, u64> {
     if crate::process::identity::oxidebsd_current_uid() != 0 {
         return Err(crate::syscall::EPERM);
+    }
+    if cmd == RB_REROOT {
+        let caller = scheduler::current_pid();
+        let is_init = PROCESS_TABLE.lock().get(&caller).is_some_and(|p| p.tgid == INIT_PID);
+        if !super::init::supervised() {
+            return Err(crate::syscall::EPERM);
+        }
+        if is_init && arg == 0 {
+            // init's call, after its shutdown: the switch `reboot -r` asked for.
+            if !super::init::reroot_requested() {
+                return Err(EINVAL);
+            }
+            super::init::switch_root();
+            terminate_thread_group(INIT_PID, 0);
+            // As in do_exit_group: pid 1 ended itself, and a zombie must not return to user mode.
+            scheduler::schedule();
+            unreachable!("do_reboot: schedule() returned to pid 1 after RB_REROOT");
+        }
+        if arg == 0 {
+            return Err(EINVAL);
+        }
+        let mut spec = Vec::new();
+        loop {
+            let mut b = [0u8; 1];
+            crate::memory::usercopy::copyin(crate::memory::usercopy::UserPtr::new(arg.wrapping_add(spec.len() as u64)), &mut b)
+                .map_err(|_| crate::syscall::EFAULT)?;
+            if b[0] == 0 {
+                break;
+            }
+            if spec.len() >= 1024 {
+                return Err(crate::syscall::ENAMETOOLONG);
+            }
+            spec.push(b[0]);
+        }
+        let target = crate::kern::vfs_mount::reroot_target(&spec).map_err(|e| e as u64)?;
+        super::init::reroot_pending(target);
+        if is_init {
+            super::init::switch_root();
+            terminate_thread_group(INIT_PID, 0);
+            scheduler::schedule();
+            unreachable!("do_reboot: schedule() returned to pid 1 after RB_REROOT");
+        }
+        // init does the shutdown, then calls back with no argument.
+        const SIGPWR: i64 = 30;
+        super::signals::do_kill(caller, INIT_PID as i64, SIGPWR)?;
+        return Ok(0);
     }
     if !matches!(cmd, RB_AUTOBOOT | RB_HALT_SYSTEM | RB_POWER_OFF) {
         return Err(EINVAL);

@@ -170,12 +170,17 @@ pub(crate) fn vfs_statfs(mp: *mut Mount) -> Result<Statfs, i32> {
 /// Mounts the root through `vfc` (FreeBSD's `vfs_mountroot`): the boot device, read-only unless
 /// the kernel was told otherwise (`/etc/rc` remounts it read-write).
 fn mountroot(vfc: &'static VfsConf) -> i32 {
-    let Some(mount) = (unsafe { (*vfc.ops).mount }) else { return EOPNOTSUPP };
     let dev = crate::kern::vfs_bdev::root().map_or(NODEV, |h| h as u64);
     let rdonly = crate::drivers::disk::oxidebsd_root_readonly_at_boot() != 0;
     let from = crate::kern::fsconf::root_entry().map(|e| e.device).unwrap_or_default();
+    mountroot_from(vfc, dev, from.as_bytes(), rdonly)
+}
+
+/// Mounts the root through `vfc` from device `dev` (`from` its name), then devfs and procfs on it.
+fn mountroot_from(vfc: &'static VfsConf, dev: u64, from: &[u8], rdonly: bool) -> i32 {
+    let Some(mount) = (unsafe { (*vfc.ops).mount }) else { return EOPNOTSUPP };
     let flags = MNT_ROOTFS | if rdonly { MNT_RDONLY } else { 0 };
-    let mp = match mount_alloc(vfc, flags, dev, b"/", from.as_bytes()) {
+    let mp = match mount_alloc(vfc, flags, dev, b"/", from) {
         Ok(mp) => mp,
         Err(e) => return e,
     };
@@ -441,6 +446,95 @@ pub(crate) fn update(mp: *mut Mount, rdonly: bool, force: bool, opts: &[u8]) -> 
     }
     note_device(mp);
     Ok(())
+}
+
+/// The root switch (`reboot -r`, RAM_FLOOR.md §5.1.3), once pid 1 is gone: every file system is
+/// unmounted, the last mounted first and the root last, each written out and marked clean, with
+/// anything still holding a vnode of it revoked; then the root is mounted from `dev` through
+/// `vfc` (`from` its name), read-only as at boot, and devfs and procfs on it. If that fails, the
+/// old root is mounted again (and the error returned); if even that fails, there is no system.
+pub(crate) fn reroot(vfc: &'static VfsConf, dev: u64, from: &[u8]) -> Result<(), i32> {
+    let root_mp = mounts().first().copied();
+    let old = root_mp.map(|mp| {
+        // SAFETY: the mounted root.
+        unsafe { (&*(*mp).mnt_vfc, (*mp).mnt_dev, name_bytes(&(*mp).mnt_fromname).to_vec()) }
+    });
+    let root = ROOTVNODE.swap(ptr::null_mut(), Ordering::AcqRel);
+    if !root.is_null() {
+        crate::kern::vfs_subr::vrele(root);
+    }
+    for mp in mounts().into_iter().rev() {
+        force_unmount(mp);
+    }
+    if dev != NODEV {
+        crate::kern::vfs_bdev::set_root(dev as u32);
+    }
+    let e = mountroot_from(vfc, dev, from, true);
+    if e == 0 {
+        crate::serial_println!("[vfs] root switched to {}", core::str::from_utf8(from).unwrap_or("?"));
+        return Ok(());
+    }
+    crate::serial_println!("[vfs] mounting the new root {} failed: {}; mounting the old one again", core::str::from_utf8(from).unwrap_or("?"), e);
+    let Some((ovfc, odev, ofrom)) = old else { return Err(e) };
+    if odev != NODEV {
+        crate::kern::vfs_bdev::set_root(odev as u32);
+    }
+    if mountroot_from(ovfc, odev, &ofrom, true) != 0 {
+        panic!("reroot: neither the new root nor the old one could be mounted");
+    }
+    Err(e)
+}
+
+/// What a root switch's `[type:]special` names (RAM_FLOOR.md §5.1.1), looked up now, while the
+/// old root is mounted: the type (`oxfs` if none is given), the block device, and `special`.
+/// `ENODEV` for an unknown type, `ENOTBLK` for something not a disk device.
+pub(crate) fn reroot_target(spec: &[u8]) -> Result<(&'static VfsConf, u64, Vec<u8>), i32> {
+    const ENOTBLK: i32 = 15;
+    const ENXIO: i32 = 6;
+    let (fstype, special) = match spec.iter().position(|&b| b == b':') {
+        Some(i) => (&spec[..i], &spec[i + 1..]),
+        None => (&b"oxfs"[..], spec),
+    };
+    let vfc = find_type(fstype).ok_or(19)?; // ENODEV
+    let cred = crate::kern::vfs_subr::current_ucred();
+    let nd = crate::kern::vfs_lookup::NameiData { path: special, nameiop: LOOKUP, follow: true, startdir: ptr::null_mut(), cred: &cred };
+    let vp = crate::kern::vfs_lookup::namei(&nd)?.into_vp();
+    // SAFETY: referenced.
+    let (t, rdev) = unsafe { ((*vp).v_type, (*vp).v_rdev) };
+    crate::kern::vfs_subr::vrele(vp);
+    if t != VCHR && t != VBLK {
+        return Err(ENOTBLK);
+    }
+    // musl's `makedev` encoding, as devfs gives it.
+    let handle = crate::kern::vfs_bdev::find(((rdev >> 8) & 0xfff) as u32, (rdev & 0xff) as u32).ok_or(ENXIO)?;
+    Ok((vfc, handle as u64, special.to_vec()))
+}
+
+/// Unmounts `mp` whatever holds it, the root included: its descriptors go to deadfs and its
+/// vnodes are doomed (FreeBSD's forced unmount), then the type writes it out and lets it go.
+fn force_unmount(mp: *mut Mount) {
+    crate::fs::fd::revoke_where(|_, vp| vp.is_some_and(|vp| unsafe { (*vp).v_mount } == mp));
+    crate::kern::vfs_subr::vflush(mp);
+    crate::kern::vfs_subr::vgone_all(mp);
+    crate::kern::vfs_subr::release_cached(mp);
+    vfs_sync(mp, MNT_WAIT);
+    if let Some(unmount) = ops(mp).unmount {
+        let _giant = fslock::Giant::enter();
+        unmount(mp, MNT_FORCE);
+    }
+    // SAFETY: nothing refers to `mp` any more.
+    unsafe {
+        let covered = (*mp).mnt_vnodecovered;
+        if !covered.is_null() {
+            (*covered).v_mountedhere = ptr::null_mut();
+            crate::kern::vfs_subr::vrele(covered);
+        }
+        if (*mp).mnt_dev != NODEV && (*mp).mnt_flag & MNT_ROOTFS == 0 {
+            crate::kern::vfs_bdev::oxidebsd_bdev_set_mounted((*mp).mnt_dev, 0);
+        }
+    }
+    MOUNTS.lock().retain(|&m| m != mp as usize);
+    mount_free(mp);
 }
 
 /// The root directory of the whole system, if the root is mounted.

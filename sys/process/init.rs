@@ -149,6 +149,55 @@ struct Supervisor {
 
 static SUPERVISOR: Mutex<Option<Supervisor>> = Mutex::new(None);
 
+/// A root switch pid 1 asked for (`reboot(RB_REROOT)`): the type, device and name of the new
+/// root, done when pid 1 is gone (`pid1_died`).
+static REROOT: Mutex<Option<(&'static vfs_if::VfsConf, u64, Vec<u8>)>> = Mutex::new(None);
+
+/// A root switch done (`switch_root`): pid 1's coming end is not a death, and init starts fresh
+/// from this image (path and contents), read from the new root while pid 1 could still sleep on
+/// the disk (`pid1_died` runs on the retired pid 1, which may be reaped while it sleeps).
+static REROOTED: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
+
+/// Records the root switch `reboot -r` asked for.
+pub(crate) fn reroot_pending(target: (&'static vfs_if::VfsConf, u64, Vec<u8>)) {
+    *REROOT.lock() = Some(target);
+}
+
+/// Switches the root (RAM_FLOOR.md §5.1.3), in pid 1's `reboot(RB_REROOT)`, its shutdown done:
+/// pid 1 is still a live process here, so the unmounts and the mount may sleep on the disk; what
+/// it holds of the old root is revoked as the file systems go, and it never returns to user mode.
+/// Its end follows (`pid1_died`, which starts init on the new root).
+pub(crate) fn switch_root() {
+    let Some((vfc, dev, from)) = REROOT.lock().take() else { return };
+    crate::serial_println!("init: switching the root to {}", core::str::from_utf8(&from).unwrap_or("?"));
+    if let Err(e) = crate::kern::vfs_mount::reroot(vfc, dev, &from) {
+        crate::serial_println!("init: the root switch failed ({}); back on the old root", e);
+    }
+    let Some(paths) = SUPERVISOR.lock().as_ref().map(|s| s.init.paths.clone()) else { return };
+    for path in paths {
+        match lifecycle::read_program(&path) {
+            Ok(image) => {
+                *REROOTED.lock() = Some((path, image));
+                return;
+            }
+            Err(e) => {
+                crate::serial_println!("init: {}: errno {}", core::str::from_utf8(&path).unwrap_or("?"), e);
+            }
+        }
+    }
+    crate::serial_println!("init: no init on the new root");
+}
+
+/// Whether a root switch has been asked for (`reboot -r`) and not yet done.
+pub(crate) fn reroot_requested() -> bool {
+    REROOT.lock().is_some()
+}
+
+/// Whether pid 1 is supervised (the real boot), so it can be restarted after a root switch.
+pub(crate) fn supervised() -> bool {
+    armed()
+}
+
 /// How pid 1 ended.
 #[derive(Clone, Copy)]
 enum Cause {
@@ -219,6 +268,26 @@ pub(crate) fn note_fault(pid: Pid, ip: u64, addr: Option<u64>) {
 /// self-exit), so its entry can't be dropped here: the pid-1 entry is moved to a fresh pid and
 /// reaped later like any exited thread, which frees pid 1 for the replacement started here.
 pub(crate) fn pid1_died(exiting: Pid, code: i32) -> bool {
+    let rerooted = REROOTED.lock().take();
+    if let Some((path, image)) = rerooted {
+        // Not a death: init asked for the switch (`switch_root`), and comes up as at boot.
+        let Some(init) = SUPERVISOR.lock().as_ref().map(|s| s.init.clone()) else { return false };
+        retire_old_pid1(exiting);
+        let argv = init.argv(&path, false);
+        let envp = init.envp(&path);
+        let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+        let envp: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
+        match lifecycle::spawn_as(INIT_PID, &image, &argv, &envp, init.console) {
+            Ok(_) => {
+                crate::serial_println!("[boot] pid 1: {}", core::str::from_utf8(&path).unwrap_or("?"));
+                adopt_orphans();
+            }
+            Err(e) => {
+                crate::serial_println!("init: could not start pid 1 ({:?}); the system is idle", e);
+            }
+        }
+        return true;
+    }
     let (cause, program, emergency) = {
         let mut guard = SUPERVISOR.lock();
         let Some(sup) = guard.as_mut() else { return false };

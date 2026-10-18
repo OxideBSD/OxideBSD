@@ -424,9 +424,9 @@ pub fn start(first_pid: Pid) -> ! {
 /// shared by `schedule()` and `start()` just before the actual `switch_context` call.
 fn activate_and_prepare(pid: Pid) -> u64 {
     let mut table = process::table().lock();
-    let next = table
-        .get_mut(&pid)
-        .expect("activate_and_prepare: pid missing from table");
+    let Some(next) = table.get_mut(&pid) else {
+        panic!("activate_and_prepare: pid {} missing from table", pid);
+    };
     next.state = ProcState::Running;
     // A fresh quantum every time a process is (re)activated -- see `Process::quantum_ticks_left`'s
     // own doc comment for why this replaced a purely global-clock-phase preemption check.
