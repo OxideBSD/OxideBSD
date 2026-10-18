@@ -1,0 +1,58 @@
+#!/sbin/init_sh
+#
+# PROVIDE: dhclient
+# KEYWORD: nojailvnet nostart
+#
+# dhclient(8) on one interface: rc.d/netif runs `/etc/rc.d/dhclient quietstart <if>` for each
+# interface whose ifconfig_<if> says DHCP; by hand, `service dhclient start|stop|status <if>`.
+# Per interface, dhclient_flags_<if> replaces dhclient_flags, and background_dhclient_<if>
+# background_dhclient (YES: don't wait for a lease, dhclient -b).
+
+. /etc/rc.subr
+
+ifn="$2"
+
+name="dhclient"
+desc="Dynamic Host Configuration Protocol (DHCP) client"
+command="/sbin/${name}"
+pidfile="/var/run/dhclient/${name}.${ifn}.pid"
+start_precmd="dhclient_prestart"
+stop_precmd="dhclient_pre_check"
+
+dhclient_pre_check()
+{
+	if [ -z "$rc_force" ] && ! dhcpif $ifn; then
+		err 1 "'$ifn' is not a DHCP-enabled interface"
+	fi
+	return 0
+}
+
+dhclient_prestart()
+{
+	dhclient_pre_check || return 1
+	_flags=$(get_if_var $ifn dhclient_flags_IF "$dhclient_flags")
+	_bg=$(get_if_var $ifn background_dhclient_IF "$background_dhclient")
+	case "$_bg" in
+	[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1) _flags="$_flags -b" ;;
+	esac
+	command_args="$_flags $ifn"
+	# The flags are per interface here, not the global ones run_rc_command would add.
+	dhclient_flags=
+	return 0
+}
+
+load_rc_config $name
+load_rc_config network
+. /etc/network.subr
+
+case "$ifn" in
+"")
+	# Only complain if a command was given without an interface.
+	[ -n "$1" ] && err 1 "$0: no interface specified"
+	;;
+*[!A-Za-z0-9]*)
+	err 1 "$0: $ifn: not an interface name"
+	;;
+esac
+
+run_rc_command "$1"

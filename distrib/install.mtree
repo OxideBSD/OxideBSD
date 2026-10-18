@@ -63,6 +63,7 @@
 ./usr/tests/bin/bin3.sh type=file src=regress/bin-syscall-smoke/bin3.sh
 ./usr/tests/bin/bin4.sh type=file src=regress/bin-syscall-smoke/bin4.sh
 ./usr/tests/bin/bin5.sh type=file src=regress/bin-syscall-smoke/bin5.sh
+./usr/tests/bin/net.sh type=file src=regress/bin-syscall-smoke/net.sh
 ./usr/tests/cron type=dir
 ./usr/tests/cron/run.sh type=file src=regress/cron-syscall-smoke/run.sh
 ./usr/tests/musl type=file src=artifact:OXFS_MUSL_ELF_PATH
@@ -215,6 +216,9 @@
 ./bin/pgrep type=file src=artifact:OXFS_PGREP_ELF_PATH
 ./bin/pkill type=file hardlink=./bin/pgrep
 ./sbin/ping type=file src=artifact:OXFS_PING_ELF_PATH mode=4555
+./sbin/ifconfig type=file src=artifact:OXFS_IFCONFIG_ELF_PATH
+./sbin/route type=file src=artifact:OXFS_ROUTE_ELF_PATH
+./sbin/dhclient type=file src=artifact:OXFS_DHCLIENT_ELF_PATH
 ./usr/bin/printenv type=file src=artifact:OXFS_PRINTENV_ELF_PATH
 ./bin/pwd type=file src=artifact:OXFS_PWD_ELF_PATH
 ./usr/bin/readlink type=file src=artifact:OXFS_READLINK_ELF_PATH
@@ -293,6 +297,7 @@
 ./etc/rc type=file src=etc/rc
 ./etc/rc.shutdown type=file src=etc/rc.shutdown
 ./etc/rc.subr type=file src=etc/rc.subr
+./etc/network.subr type=file src=etc/network.subr mode=0644
 ./etc/rc.conf type=file src=etc/rc.conf
 ./etc/ttys type=file src=etc/ttys
 ./etc/defaults type=dir
@@ -302,6 +307,9 @@
 ./etc/rc.d/root type=file src=etc/rc.d/root
 ./etc/rc.d/fsck type=file src=etc/rc.d/fsck
 ./etc/rc.d/NETWORKING type=file src=etc/rc.d/NETWORKING
+./etc/rc.d/netif type=file src=etc/rc.d/netif
+./etc/rc.d/routing type=file src=etc/rc.d/routing
+./etc/rc.d/dhclient type=file src=etc/rc.d/dhclient
 ./etc/rc.d/SERVERS type=file src=etc/rc.d/SERVERS
 ./etc/rc.d/DAEMON type=file src=etc/rc.d/DAEMON
 ./etc/rc.d/LOGIN type=file src=etc/rc.d/LOGIN
@@ -343,6 +351,8 @@
 ./home/user type=dir mode=0700 uid=1000 gid=1000
 ./var type=dir
 ./var/run type=dir
+./var/run/dhclient type=dir
+./var/db type=dir
 ./var/log type=dir
 ./var/mail type=dir
 ./var/backups type=dir
@@ -417,6 +427,9 @@
 ./usr/share/man/man1/true.1 type=file src=share/man/man1/true.1
 ./usr/share/man/man8/mknod.8 type=file src=share/man/man8/mknod.8
 ./usr/share/man/man8/ping.8 type=file src=share/man/man8/ping.8
+./usr/share/man/man8/ifconfig.8 type=file src=share/man/man8/ifconfig.8
+./usr/share/man/man8/route.8 type=file src=share/man/man8/route.8
+./usr/share/man/man8/dhclient.8 type=file src=share/man/man8/dhclient.8
 ./usr/share/man/man1/whatis.1 type=file hardlink=./usr/share/man/man1/apropos.1
 ./usr/share/man/man1/login.1 type=file src=share/man/man1/login.1
 ./usr/share/man/man1/zstd.1 type=file src=external/bsd/zstd/programs/zstd.1

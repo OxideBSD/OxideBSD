@@ -34,6 +34,8 @@ extern "C" fn test_exit_handler(code: u64, _arg1: u64, _arg2: u64, _arg3: u64) -
 fn main(boot_info: &'static BootInfo) -> ! {
     let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
+    // rl0, for net.sh (ifconfig, route, dhclient); before the big allocations (32-bit DMA).
+    oxidebsd::drivers::rtl8139::init(&mut frame_allocator, physical_memory_offset);
 
     // Populates SYS_EXIT/SYS_READ/SYS_WRITE/SYS_FORK/SYS_WAIT4/SYS_EXECVE/SYS_GETPID/SYS_CLONE/
     // SYS_MMAP/SYS_MUNMAP/SYS_BRK/SYS_MPROTECT/SYS_SET_FS_BASE/SYS_SET_TID_ADDRESS -- must load

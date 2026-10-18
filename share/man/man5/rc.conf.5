@@ -102,6 +102,52 @@ options for it.
 Remove the files in
 .Pa /var/run
 at boot.
+.It Va network_interfaces
+The interfaces
+.Pa /etc/rc.d/netif
+configures, or
+.Dq AUTO
+(the default) for all of them.
+.It Va ifconfig_ Ns Ar interface
+How to configure
+.Ar interface :
+.Xr ifconfig 8
+arguments, such as
+.Dq inet 10.0.2.15/24 ,
+or
+.Dq DHCP
+to run
+.Xr dhclient 8
+on it.
+Default for
+.Li lo0 :
+.Dq inet 127.0.0.1/8 .
+.It Va dhclient_flags , Va dhclient_flags_ Ns Ar interface
+Flags to
+.Xr dhclient 8 ,
+for every interface or for one.
+.It Va background_dhclient , Va background_dhclient_ Ns Ar interface
+.Dq YES :
+don't wait for a lease at boot.
+Default
+.Dq NO .
+.It Va defaultrouter
+The default route's gateway, set by
+.Pa /etc/rc.d/routing ,
+or
+.Dq NO
+(the default).
+It replaces a default route
+.Xr dhclient 8
+set.
+.It Va static_routes
+Names of other routes, each
+.Va route_ Ns Ar name
+holding
+.Xr route 8
+.Cm add
+arguments.
+Only default routes can be set so far.
 .El
 .Sh FILES
 .Bl -tag -width /etc/defaults/rc.conf -compact
@@ -113,12 +159,16 @@ at boot.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 hostname="shed.example.org"
+ifconfig_rl0="DHCP"
 cron_enable="YES"
 cron_flags="-J 15"
 .Ed
 .Sh SEE ALSO
+.Xr dhclient 8 ,
+.Xr ifconfig 8 ,
 .Xr rc 8 ,
-.Xr rc.subr 8
+.Xr rc.subr 8 ,
+.Xr route 8
 .Sh HISTORY
 The
 .Nm

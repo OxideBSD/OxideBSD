@@ -1,0 +1,58 @@
+#!/sbin/init_sh
+#
+# PROVIDE: routing
+# REQUIRE: netif
+# KEYWORD: nojailvnet
+#
+# The static routes of rc.conf(5): defaultrouter (the default route's gateway, or NO). A
+# default route dhclient(8) already set is replaced by it. OxideBSD has no routing table yet,
+# so static_routes can name only default routes (route_<name>="default <gateway>").
+
+. /etc/rc.subr
+
+name="routing"
+desc="Routing setup"
+start_cmd="routing_start"
+stop_cmd="routing_stop"
+extra_commands="static"
+static_cmd="routing_start"
+
+routing_start()
+{
+	case "$defaultrouter" in
+	[Nn][Oo]|"")
+		;;
+	*)
+		if route -n get default > /dev/null 2>&1; then
+			route -q change default $defaultrouter || return 1
+		else
+			route -q add default $defaultrouter || return 1
+		fi
+		echo "Setting default route: $defaultrouter."
+		;;
+	esac
+	for _r in $static_routes; do
+		case "$_r" in
+		*[!A-Za-z0-9_]*)
+			warn "static_routes: $_r: not a valid name"
+			continue
+			;;
+		esac
+		eval "_args=\${route_$_r-}"
+		if [ -z "$_args" ]; then
+			warn "route_$_r is not set"
+			continue
+		fi
+		route -q add $_args || warn "route_$_r ($_args) could not be set"
+	done
+	return 0
+}
+
+routing_stop()
+{
+	route -q flush
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"

@@ -291,6 +291,7 @@ check "bin2: cat ls cp mv dd df date stty" sh /usr/tests/bin/bin2.sh
 check "bin3: grep sed ed expr" sh /usr/tests/bin/bin3.sh
 check "bin4: gzip tar" sh /usr/tests/bin/bin4.sh </dev/null
 check "bin5: ps pgrep pkill ping" sh /usr/tests/bin/bin5.sh
+check "net: ifconfig route dhclient" sh /usr/tests/bin/net.sh </dev/null
 
 echo "bin-smoke: $fail failed"
 [ $fail -eq 0 ]

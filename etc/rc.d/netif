@@ -1,0 +1,84 @@
+#!/sbin/init_sh
+#
+# PROVIDE: netif
+# REQUIRE: FILESYSTEMS sysctl hostname
+# KEYWORD: nojailvnet
+#
+# Configures the network interfaces from rc.conf(5): ifconfig_<if>="inet address/prefixlen"
+# (any ifconfig(8) arguments) sets the interface by hand; ifconfig_<if>="DHCP" starts
+# dhclient(8) on it through rc.d/dhclient. `service netif start rl0` does one interface.
+
+. /etc/rc.subr
+
+name="netif"
+desc="Network interface setup"
+start_cmd="netif_start"
+stop_cmd="netif_stop"
+extra_commands="cloneup clonedown"
+cloneup_cmd=":"
+clonedown_cmd=":"
+
+# ifn_start if: configures one interface; 0 if anything was done to it.
+ifn_start()
+{
+	_ifn=$1
+	_args=$(ifconfig_getargs $_ifn)
+	[ -n "$_args" ] || return 1
+	if dhcpif $_ifn; then
+		_rest=$(ifconfig_nodhcp $_ifn)
+		if [ -n "$_rest" ]; then
+			ifconfig $_ifn $_rest || warn "$_ifn: ifconfig $_rest failed"
+		fi
+		ifconfig $_ifn up
+		/etc/rc.d/dhclient quietstart $_ifn
+	else
+		ifconfig $_ifn $_args || { warn "$_ifn: ifconfig $_args failed"; return 1; }
+	fi
+	return 0
+}
+
+# ifn_stop if: undoes it: stops its dhclient, removes the address, takes it down (not lo0).
+ifn_stop()
+{
+	_ifn=$1
+	[ -n "$(ifconfig_getargs $_ifn)" ] || return 1
+	if dhcpif $_ifn; then
+		/etc/rc.d/dhclient quietstop $_ifn
+	fi
+	ifconfig $_ifn delete > /dev/null 2>&1
+	case "$_ifn" in
+	lo*) ;;
+	*) ifconfig $_ifn down ;;
+	esac
+	return 0
+}
+
+netif_start()
+{
+	_done=
+	for _if in ${*:-$(network_list)}; do
+		ifn_start $_if && _done="$_done $_if"
+	done
+	if [ -n "$_done" ]; then
+		echo "Starting Network:$_done."
+		for _if in $_done; do
+			ifconfig $_if
+		done
+	fi
+	return 0
+}
+
+netif_stop()
+{
+	_done=
+	for _if in ${*:-$(network_list)}; do
+		ifn_stop $_if && _done="$_done $_if"
+	done
+	[ -n "$_done" ] && echo "Stopping Network:$_done."
+	return 0
+}
+
+load_rc_config $name
+load_rc_config network
+. /etc/network.subr
+run_rc_command "$@"

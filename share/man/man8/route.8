@@ -1,0 +1,151 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt ROUTE 8
+.Os OxideBSD
+.Sh NAME
+.Nm route
+.Nd show and set the default route
+.Sh SYNOPSIS
+.Nm
+.Op Fl nqv
+.Cm add | Cm change
+.Op Fl inet
+.Op Fl net
+.Cm default
+.Ar gateway
+.Nm
+.Op Fl nqv
+.Cm delete
+.Op Fl inet
+.Op Fl net
+.Cm default
+.Op Ar gateway
+.Nm
+.Op Fl nqv
+.Cm get
+.Op Fl inet
+.Cm default | Ar address
+.Nm
+.Op Fl nqv
+.Cm show | Cm flush
+.Sh DESCRIPTION
+OxideBSD's kernel does not have a routing table yet: an address on one of
+an interface's subnets is reached directly, and every other through the
+single default route.
+.Nm
+shows the routes and sets the default one.
+.Pp
+The commands are:
+.Bl -tag -width Ds
+.It Cm add Cm default Ar gateway
+Send everything not on a local subnet to
+.Ar gateway ,
+an IPv4 address.
+It fails if there is a default route already.
+.It Cm change Cm default Ar gateway
+Replace the default route's gateway.
+.It Cm delete Cm default Op Ar gateway
+Remove the default route
+.Pq only if its gateway is Ar gateway , No when given .
+.It Cm get Cm default | Ar address
+Show the route to
+.Ar address ,
+or the default route, in FreeBSD's layout.
+.It Cm show
+List the routes as
+.Ql netstat -rn
+does: the default route, each configured interface's subnet, and the host
+routes of the interfaces' addresses.
+.It Cm flush
+Remove the default route.
+.El
+.Pp
+The destination of the default route may be written
+.Cm default ,
+.Li 0.0.0.0
+or
+.Li 0.0.0.0/0 ;
+.Fl inet ,
+.Fl net
+and
+.Fl netmask Li 0.0.0.0
+are accepted and change nothing.
+Any other destination is refused with
+.Dq only the default route can be set .
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl n
+Show addresses as numbers.
+.Nm
+always does; this is accepted for scripts written for the other BSDs.
+.It Fl q
+Quiet: print nothing on success.
+.It Fl v
+After a change, show the default route.
+.El
+.Pp
+Only the superuser may change the routes.
+.Sh EXIT STATUS
+.Bl -tag -width indent -compact
+.It 0
+Success.
+.It 1
+The route asked for was not there, or was already.
+.It 64
+The command line was wrong.
+.It 68
+The gateway is not an address.
+.It 69
+The route asked for can't be set: only the default route can.
+.It 71
+The kernel refused the change.
+.It 77
+A user other than the superuser asked for a change.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# route add default 10.0.2.2
+add net default: gateway 10.0.2.2
+$ route -n get default
+   route to: default
+destination: default
+       mask: default
+    gateway: 10.0.2.2
+        fib: 0
+  interface: rl0
+      flags: <UP,GATEWAY,DONE,STATIC>
+ recvpipe  sendpipe  ssthresh  rtt,msec    mtu        weight    expire
+        0         0         0         0      1500         1         0
+$ route -n show
+Routing tables
+
+Internet:
+Destination        Gateway            Flags     Netif
+default            10.0.2.2           UGS         rl0
+10.0.2.0/24        link#1             U           rl0
+10.0.2.15          link#2             UHS         lo0
+127.0.0.1          link#2             UH          lo0
+# route delete default
+delete net default: gateway 10.0.2.2
+.Ed
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr dhclient 8 ,
+.Xr ifconfig 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Nm
+command appeared in
+.Bx 4.2 .
+This one is written in Rust for OxideBSD.
+.Sh BUGS
+Only the default route exists: there is no routing table, no routing socket
+and no
+.Cm monitor .
+The default route is the sysctl
+.Va net.inet.ip.default_gateway ,
+which
+.Nm
+reads and sets.

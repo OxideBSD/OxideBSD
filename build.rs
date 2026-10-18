@@ -618,6 +618,15 @@ fn main() {
     );
     let mknod_elf_path = build_static_std_crate("sbin/mknod", "OXFS_MKNOD_ELF_PATH", &musl_sysroot);
     let ping_elf_path = build_static_std_crate("sbin/ping", "OXFS_PING_ELF_PATH", &musl_sysroot);
+    // The network configuration tools: ifconfig(8), route(8), dhclient(8).
+    let net_tool_paths: Vec<(&str, PathBuf)> = [
+        ("sbin/ifconfig", "OXFS_IFCONFIG_ELF_PATH"),
+        ("sbin/route", "OXFS_ROUTE_ELF_PATH"),
+        ("sbin/dhclient", "OXFS_DHCLIENT_ELF_PATH"),
+    ]
+    .into_iter()
+    .map(|(dir, var)| (var, build_static_std_crate(dir, var, &musl_sysroot)))
+    .collect();
     // The text and archive tools' own libraries (POSIX regular expressions, DEFLATE), which the
     // helper doesn't watch itself.
     for lib in ["lib/libregex/src", "lib/libz/src"] {
@@ -1133,6 +1142,7 @@ fn main() {
     oxfs_extra_env.extend(std_bin_paths.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     oxfs_extra_env.push(("OXFS_MKNOD_ELF_PATH", mknod_elf_path.to_str().unwrap()));
     oxfs_extra_env.push(("OXFS_PING_ELF_PATH", ping_elf_path.to_str().unwrap()));
+    oxfs_extra_env.extend(net_tool_paths.iter().map(|(k, v)| (*k, v.to_str().unwrap())));
     // Seeded by oxfs's include_bytes!, which cargo only re-reads if this script reruns.
     for seeded in [
         "etc",
@@ -1146,6 +1156,7 @@ fn main() {
         "regress/bin-syscall-smoke/bin3.sh",
         "regress/bin-syscall-smoke/bin4.sh",
         "regress/bin-syscall-smoke/bin5.sh",
+        "regress/bin-syscall-smoke/net.sh",
         "usr.sbin/periodic",
         "regress/tz-syscall-smoke/run.sh",
         "regress/kern-syscall-smoke/run.sh",

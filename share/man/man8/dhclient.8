@@ -1,0 +1,179 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt DHCLIENT 8
+.Os OxideBSD
+.Sh NAME
+.Nm dhclient
+.Nd Dynamic Host Configuration Protocol (DHCP) client
+.Sh SYNOPSIS
+.Nm
+.Op Fl bdrv
+.Op Fl l Ar leasefile
+.Op Fl p Ar pidfile
+.Ar interface
+.Sh DESCRIPTION
+.Nm
+gets an IPv4 address and network configuration for
+.Ar interface
+from a DHCP server, applies it, and keeps it: it renews the lease before it
+runs out, and takes the configuration away if it does.
+One
+.Nm
+runs per interface; at boot
+.Pa /etc/rc.d/netif
+starts it for each interface whose
+.Va ifconfig_ Ns Ar interface
+in
+.Xr rc.conf 5
+is
+.Dq DHCP .
+.Pp
+It follows RFC 2131.
+It broadcasts a DHCPDISCOVER, requests the first acceptable offer, and once
+the server acknowledges it is bound.
+Halfway through the lease (the server's renewal time, T1) it asks the
+server that granted the lease to extend it; at seven eighths (T2) it asks any
+server; and if the lease expires all the same, it removes the address and
+starts again.
+A lease saved by an earlier run that hasn't expired is asked for again first.
+Requests are sent again after 4, 8, 16, 32 and then every 64 seconds, each
+time one second more or less at random.
+.Pp
+A lease gives the interface its address and mask, sets the default route
+to the lease's first router, and rewrites
+.Pa /etc/resolv.conf
+with the lease's name servers and domain (a lease without name servers
+leaves it as it is).
+The domain name and host name a server sends are used only if they are
+plain names: one with any other character is ignored.
+The client identifier sent is the interface's Ethernet address.
+.Pp
+Unless
+.Fl d
+or
+.Fl b
+is given,
+.Nm
+stays in the foreground until it is bound, or for 60 seconds, so that the
+boot goes on with the network configured, and then goes into the
+background.
+It logs through
+.Xr syslog 3
+with the
+.Dv daemon
+facility, and also to the standard error while in the foreground.
+SIGTERM, SIGINT and SIGHUP make it exit, leaving the interface configured
+and the lease saved.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl b
+Go into the background at once.
+.It Fl d
+Stay in the foreground.
+.It Fl l Ar leasefile
+Save the lease in
+.Ar leasefile
+instead of
+.Pa /var/db/dhclient.leases. Ns Ar interface .
+.It Fl p Ar pidfile
+Write the process ID to
+.Ar pidfile
+instead of
+.Pa /var/run/dhclient/dhclient. Ns Ar interface Ns Pa .pid .
+.It Fl r
+On exit, send the server a DHCPRELEASE and remove the address.
+.It Fl v
+Also log every message ignored, and why.
+.El
+.Pp
+Only the superuser may run
+.Nm .
+A second
+.Nm
+for the same interface finds the first's pid file locked and exits.
+.Sh FILES
+.Bl -tag -width "/var/run/dhclient/dhclient.<if>.pid" -compact
+.It Pa /var/db/dhclient.leases. Ns Ar interface
+The lease, in FreeBSD's layout:
+.Bd -literal -offset indent
+lease {
+  interface "rl0";
+  fixed-address 10.0.2.15;
+  option subnet-mask 255.255.255.0;
+  option routers 10.0.2.2;
+  option domain-name-servers 10.0.2.3;
+  option dhcp-lease-time 86400;
+  option dhcp-renewal-time 43200;
+  option dhcp-rebinding-time 75600;
+  option dhcp-server-identifier 10.0.2.2;
+  renew 1 2026/10/19 09:00:00;
+  rebind 1 2026/10/19 18:00:00;
+  expire 1 2026/10/19 21:00:00;
+}
+.Ed
+The times are UTC, after the day of the week (0 is Sunday).
+.It Pa /var/run/dhclient/dhclient. Ns Ar interface Ns Pa .pid
+The process ID of the client for
+.Ar interface .
+.It Pa /etc/resolv.conf
+Written from the lease, all at once.
+.El
+.Sh EXIT STATUS
+.Nm
+exits 0 when it is told to stop, and 1 if it can't start.
+.Sh EXAMPLES
+Under QEMU:
+.Bd -literal -offset indent
+# dhclient -d rl0
+DHCPDISCOVER on rl0 to 255.255.255.255 port 67 interval 4
+DHCPOFFER from 10.0.2.2
+DHCPREQUEST on rl0 to 255.255.255.255 port 67
+DHCPACK from 10.0.2.2
+bound to 10.0.2.15 -- renewal in 43200 seconds.
+.Ed
+.Pp
+In
+.Xr rc.conf 5 :
+.Bd -literal -offset indent
+ifconfig_rl0="DHCP"
+.Ed
+.Pp
+and by hand, through its
+.Pa rc.d
+script:
+.Dl # service dhclient restart rl0
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr resolv.conf 5 ,
+.Xr ifconfig 8 ,
+.Xr route 8
+.Rs
+.%A R. Droms
+.%T Dynamic Host Configuration Protocol
+.%R RFC 2131
+.%D March 1997
+.Re
+.Rs
+.%A S. Alexander
+.%A R. Droms
+.%T DHCP Options and BOOTP Vendor Extensions
+.%R RFC 2132
+.%D March 1997
+.Re
+.Sh HISTORY
+A
+.Nm
+from the ISC's DHCP distribution was in the BSDs' base systems from the late
+1990s; OpenBSD rewrote it, and
+.Fx 6.0
+took the rewrite.
+OpenBSD has since replaced it with the smaller dhcpleased.
+This one is written in Rust for OxideBSD: a small daemon in dhcpleased's
+manner, under FreeBSD's name and file layout.
+.Sh BUGS
+There is no configuration file: the options asked for and the ones used are
+fixed.
+The offered address isn't checked with ARP before it is used, and only the
+first offer is considered.
+The host name a server sends is saved in the lease but never set.

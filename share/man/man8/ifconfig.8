@@ -1,0 +1,156 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 18, 2026
+.Dt IFCONFIG 8
+.Os OxideBSD
+.Sh NAME
+.Nm ifconfig
+.Nd configure network interface parameters
+.Sh SYNOPSIS
+.Nm
+.Op Fl a
+.Op Fl d
+.Op Fl u
+.Nm
+.Fl l
+.Op Fl d
+.Op Fl u
+.Nm
+.Ar interface
+.Op Cm inet
+.Op Ar address Ns Op / Ns Ar prefixlen
+.Op Cm netmask Ar mask
+.Op Cm broadcast Ar address
+.Op Cm alias | Cm -alias | Cm delete
+.Op Cm up | Cm down
+.Sh DESCRIPTION
+.Nm
+shows the network interfaces and sets their IPv4 address and whether they
+are up.
+With no arguments, or
+.Fl a ,
+it describes every interface; with an
+.Ar interface
+alone, that one.
+.Fl d
+and
+.Fl u
+keep only the interfaces that are down, or up.
+.Fl l
+lists the interfaces' names on one line instead.
+.Pp
+Each description is a first line with the interface's name, its flags (in
+hexadecimal and by name), its metric and its MTU, then a line with its
+Ethernet address, if it has one, and a line with its IPv4 address, its mask
+in hexadecimal and, for an interface that broadcasts, its broadcast address.
+.Nm inet
+alone after the interface shows only the address line.
+.Pp
+The flags are:
+.Bl -tag -width MULTICAST -compact
+.It Dv UP
+The interface is up.
+.It Dv BROADCAST
+It can broadcast.
+.It Dv LOOPBACK
+It is a loopback interface.
+.It Dv RUNNING
+Its driver has resources allocated.
+.It Dv SIMPLEX
+It can't hear its own transmissions (an Ethernet).
+.It Dv MULTICAST
+It can do multicast.
+.El
+.Pp
+The arguments after the interface change it, and only the superuser may
+give them:
+.Bl -tag -width Ds
+.It Ar address Ns Op / Ns Ar prefixlen
+Give the interface this IPv4 address, in dotted form, replacing the one it
+had.
+A prefix length gives the mask; without it, or
+.Cm netmask ,
+the address's class decides it, as in the BSDs.
+Giving an address brings the interface up, unless
+.Cm down
+is also given.
+.It Cm netmask Ar mask
+The mask, dotted
+.Pq Li 255.255.255.0
+or hexadecimal
+.Pq Li 0xffffff00 ;
+it must be contiguous.
+Without an
+.Ar address ,
+it changes the current address's mask.
+.It Cm broadcast Ar address
+The broadcast address.
+It is always the subnet's: this is accepted only when it names that one.
+.It Cm alias
+Add
+.Ar address .
+An OxideBSD interface has a single IPv4 address, so this works only on an
+interface without one, or with that same address.
+.It Cm -alias , Cm delete
+Remove the address,
+.Ar address
+if given.
+.It Cm up , Cm down
+Bring the interface up, or take it down.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+The interfaces of a machine under QEMU:
+.Bd -literal -offset indent
+$ ifconfig
+rl0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500
+	ether 52:54:00:12:34:56
+	inet 10.0.2.15 netmask 0xffffff00 broadcast 10.0.2.255
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> metric 0 mtu 16384
+	inet 127.0.0.1 netmask 0xff000000
+.Ed
+.Pp
+Set an address by hand, and remove it:
+.Bd -literal -offset indent
+# ifconfig rl0 inet 10.0.2.15/24
+# ifconfig rl0 inet 10.0.2.15 netmask 255.255.255.0
+# ifconfig rl0 delete
+.Ed
+.Pp
+At boot,
+.Pa /etc/rc.d/netif
+runs
+.Nm
+with each
+.Va ifconfig_ Ns Ar interface
+of
+.Xr rc.conf 5 .
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "ifconfig: interface %s does not exist"
+No interface has that name.
+.It "ifconfig: ioctl (SIOCSIFADDR): Operation not permitted"
+A change was asked for by a user other than the superuser.
+.It "ifconfig: %s: only one address per interface (remove %s first)"
+.Cm alias
+was given for an interface that already has another address.
+.El
+.Sh SEE ALSO
+.Xr rc.conf 5 ,
+.Xr dhclient 8 ,
+.Xr route 8
+.Sh HISTORY
+The
+.Nm
+command appeared in
+.Bx 4.2 .
+This one is written in Rust for OxideBSD.
+.Sh BUGS
+An interface has at most one IPv4 address, and nothing else about it (MTU,
+metric, Ethernet address, media) can be changed.
+IPv6 isn't supported.
+There are no
+.Cm media
+and
+.Cm status
+lines: the kernel doesn't know the link's state.

@@ -1,0 +1,68 @@
+#
+# /etc/network.subr: the functions rc.d/netif, rc.d/dhclient and rc.d/routing share, as
+# FreeBSD's network.subr (a small subset). Sourced after /etc/rc.subr and load_rc_config.
+#
+
+# get_if_var if var [default]: the value of ${var} with IF replaced by the interface's name
+# (dhclient_flags_IF -> dhclient_flags_rl0). Names that aren't letters and digits have none.
+get_if_var()
+{
+	case "$1" in
+	""|*[!A-Za-z0-9]*)
+		echo "$3"
+		return
+		;;
+	esac
+	_giv_var="${2%%IF*}$1${2#*IF}"
+	eval "_giv_val=\${$_giv_var-}"
+	if [ -n "$_giv_val" ]; then
+		echo "$_giv_val"
+	else
+		echo "$3"
+	fi
+}
+
+# ifconfig_getargs if: ifconfig_<if>'s value.
+ifconfig_getargs()
+{
+	get_if_var "$1" ifconfig_IF
+}
+
+# dhcpif if: ifconfig_<if> names DHCP (or SYNCDHCP), alone or among other words.
+dhcpif()
+{
+	for _dhcpif_w in $(ifconfig_getargs "$1"); do
+		case "$_dhcpif_w" in
+		[Dd][Hh][Cc][Pp]|[Ss][Yy][Nn][Cc][Dd][Hh][Cc][Pp])
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
+# ifconfig_nodhcp if: ifconfig_<if>'s words other than DHCP, for ifconfig(8).
+ifconfig_nodhcp()
+{
+	_ind_out=
+	for _ind_w in $(ifconfig_getargs "$1"); do
+		case "$_ind_w" in
+		[Dd][Hh][Cc][Pp]|[Ss][Yy][Nn][Cc][Dd][Hh][Cc][Pp]) ;;
+		*) _ind_out="$_ind_out $_ind_w" ;;
+		esac
+	done
+	echo $_ind_out
+}
+
+# network_list: the interfaces to configure: $network_interfaces, or all of them for AUTO.
+network_list()
+{
+	case "$network_interfaces" in
+	[Aa][Uu][Tt][Oo]|"")
+		ifconfig -l
+		;;
+	*)
+		echo $network_interfaces
+		;;
+	esac
+}
