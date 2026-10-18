@@ -852,7 +852,7 @@ static MSDOSFS_VFSCONF: VfsConf = VfsConf {
     v_data_size: 8,
     // Not the name cache: a name is found in any case, and the cache would give getcwd(3) the
     // case a lookup used, not the one on the volume.
-    flags: VFCF_NOCACHE,
+    flags: VFCF_CASEFOLD,
 };
 
 extern "C" fn msdosfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {

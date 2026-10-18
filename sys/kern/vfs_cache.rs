@@ -10,6 +10,10 @@
 //! The reverse index (vnode -> the names it's cached under) also answers `getcwd(3)`'s question,
 //! "what is this directory called in its parent", without reading the parent (FreeBSD's
 //! `vn_fullpath`); a directory the cache has forgotten falls back to looking itself up in `..`.
+//!
+//! On a file system whose names compare without case (`VFCF_CASEFOLD`, msdosfs) the key is the
+//! name folded to lower case, so every spelling finds the one entry. `getcwd` is never answered
+//! from such a key: the caller's spelling isn't the name as stored.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -46,6 +50,25 @@ static CACHE: Mutex<Cache> =
         opened: BTreeMap::new(),
     });
 
+/// Whether `dvp`'s file system compares names without case.
+fn casefold(dvp: *mut Vnode) -> bool {
+    // SAFETY: the caller holds `dvp`; its mount and type are live.
+    unsafe { (*(*(*dvp).v_mount).mnt_vfc).flags & vfs_if::VFCF_CASEFOLD != 0 }
+}
+
+/// The cache key for `name` in `dvp`: folded to lower case on a `VFCF_CASEFOLD` file system
+/// (each character's Unicode lower case for UTF-8 names, ASCII for other bytes).
+fn key(dvp: *mut Vnode, name: &[u8]) -> (usize, Vec<u8>) {
+    if !casefold(dvp) {
+        return (dvp as usize, name.to_vec());
+    }
+    let folded = match core::str::from_utf8(name) {
+        Ok(s) => s.chars().flat_map(char::to_lowercase).collect::<alloc::string::String>().into_bytes(),
+        Err(_) => name.to_ascii_lowercase(),
+    };
+    (dvp as usize, folded)
+}
+
 fn limit() -> usize {
     (crate::kern::vfs_subr::maxvnodes() * 2) as usize
 }
@@ -68,7 +91,7 @@ impl Cache {
 /// `cache_lookup`: what the cache knows about `name` in `dvp`.
 pub(crate) fn lookup(dvp: *mut Vnode, name: &[u8]) -> Option<Hit> {
     let cache = CACHE.lock();
-    match cache.entries.get(&(dvp as usize, name.to_vec())) {
+    match cache.entries.get(&key(dvp, name)) {
         Some(&(0, _)) => Some(Hit::Missing),
         Some(&(vp, _)) => Some(Hit::Found(vp as *mut Vnode)),
         None => None,
@@ -80,8 +103,8 @@ pub(crate) fn enter(dvp: *mut Vnode, name: &[u8], vp: *mut Vnode) {
     if name == b"." || name == b".." {
         return;
     }
+    let key = key(dvp, name);
     let mut cache = CACHE.lock();
-    let key = (dvp as usize, name.to_vec());
     cache.remove_key(&key);
     while cache.entries.len() >= limit() {
         let Some(oldest) = cache.by_age.values().next().cloned() else { break };
@@ -99,7 +122,26 @@ pub(crate) fn enter(dvp: *mut Vnode, name: &[u8], vp: *mut Vnode) {
 /// Forgets `name` in `dvp` (`cache_purge_name`: a remove, a rename's source or target, a create
 /// over a negative entry).
 pub(crate) fn purge_name(dvp: *mut Vnode, name: &[u8]) {
-    CACHE.lock().remove_key(&(dvp as usize, name.to_vec()));
+    let key = key(dvp, name);
+    let mut cache = CACHE.lock();
+    // A folded name may have been entered under other spellings' folds (Unicode case isn't one to
+    // one): every key in `dvp` naming the same file goes too.
+    if casefold(dvp)
+        && let Some(&(vp, _)) = cache.entries.get(&key)
+        && vp != 0
+    {
+        let same: Vec<(usize, Vec<u8>)> = cache
+            .entries
+            .range((dvp as usize, Vec::new())..)
+            .take_while(|((d, _), _)| *d == dvp as usize)
+            .filter(|(_, (v, _))| *v == vp)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in same {
+            cache.remove_key(&k);
+        }
+    }
+    cache.remove_key(&key);
 }
 
 /// Forgets everything naming `vp` and everything in it if it's a directory (`cache_purge`: before
@@ -147,7 +189,13 @@ pub(crate) fn purge_negative(dvp: *mut Vnode) {
 /// A name `vp` is cached under and the directory it's in, for `getcwd`.
 pub(crate) fn name_of(vp: *mut Vnode) -> Option<(*mut Vnode, Vec<u8>)> {
     let cache = CACHE.lock();
-    let (dvp, name) = match cache.names_of.get(&(vp as usize)).and_then(|n| n.last()) {
+    // A folded key isn't the name as stored: skip those (the reverse index keeps them all, so
+    // `vgone` still purges them).
+    let shown = cache
+        .names_of
+        .get(&(vp as usize))
+        .and_then(|n| n.iter().rev().find(|(d, _)| !casefold(*d as *mut Vnode)));
+    let (dvp, name) = match shown {
         Some(k) => k.clone(),
         None => cache.opened.get(&(vp as usize))?.clone(),
     };

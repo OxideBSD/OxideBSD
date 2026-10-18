@@ -45,6 +45,9 @@ pub const VFCF_SYNTHETIC: u32 = 1;
 pub const VFCF_NOCACHE: u32 = 2;
 /// `from` names a directory the kernel looks up for the mount (`MountArgs::from_vp`): nullfs.
 pub const VFCF_FROM_VNODE: u32 = 4;
+/// Names compare without case (msdosfs): the name cache keys them folded, and never answers
+/// `getcwd` from a folded key (the directory is asked for the name as stored).
+pub const VFCF_CASEFOLD: u32 = 8;
 
 /// Per-type mount operations (FreeBSD's `struct vfsops`). A null entry takes the kernel's
 /// default: `EOPNOTSUPP` for `mount`/`root`/`vget`, success for `unmount`/`sync`, zeros for

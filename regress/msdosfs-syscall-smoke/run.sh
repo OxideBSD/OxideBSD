@@ -73,6 +73,7 @@ for t in 12 16 32; do
 	check "FAT$t: no hard links" is "$(links $D/README.TXT)" 1
 	check "FAT$t: .. leads back up" is "$(cd $D/sub/deeper/.. && pwd)" "$D/sub"
 	check "FAT$t: getcwd inside it" is "$(cd $D/sub/deeper && /bin/pwd)" "$D/sub/deeper"
+	check "FAT$t: getcwd reports the stored case, whatever case it was reached by" is "$(cd $D/SUB/Deeper && /bin/pwd)" "$D/sub/deeper"
 	check "FAT$t: ... from the root's .. too" is "$(cd $D/sub/.. && ls README.TXT)" README.TXT
 	check "FAT$t: df knows it" eval "df $D | grep -q fat$t"
 	check "FAT$t: unmounts" umount $D
