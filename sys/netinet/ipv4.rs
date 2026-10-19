@@ -113,16 +113,35 @@ fn is_to_dhcp_client(packet: &[u8]) -> bool {
 /// (non-interrupt) context where a short busy-wait is acceptable. A known simplification: a real
 /// stack would queue the packet and retry asynchronously instead of blocking the caller.
 pub fn send_packet(src: Ipv4Addr, dest_ip: Ipv4Addr, protocol: u8, payload: &[u8]) -> Option<()> {
+    send_packet_with(src, dest_ip, protocol, payload, HeaderOptions::default())
+}
+
+/// What a socket may ask of the IP header it sends (`IP_TTL`, `IP_TOS`, DF).
+#[derive(Clone, Copy, Debug)]
+pub struct HeaderOptions {
+    pub ttl: u8,
+    pub tos: u8,
+    pub dont_fragment: bool,
+}
+
+impl Default for HeaderOptions {
+    fn default() -> Self {
+        HeaderOptions { ttl: DEFAULT_TTL, tos: 0, dont_fragment: false }
+    }
+}
+
+/// `send_packet`, with the header's TTL, TOS and DF as `opts` says.
+pub fn send_packet_with(src: Ipv4Addr, dest_ip: Ipv4Addr, protocol: u8, payload: &[u8], opts: HeaderOptions) -> Option<()> {
     let route = ifnet::route(dest_ip)?;
 
     let total_length = HEADER_LEN + payload.len();
     let mut packet = Vec::with_capacity(total_length);
     packet.push(VERSION_IHL);
-    packet.push(0); // DSCP/ECN
+    packet.push(opts.tos); // DSCP/ECN
     packet.extend_from_slice(&(total_length as u16).to_be_bytes());
     packet.extend_from_slice(&[0, 0]); // identification
-    packet.extend_from_slice(&[0, 0]); // flags/fragment offset
-    packet.push(DEFAULT_TTL);
+    packet.extend_from_slice(&[if opts.dont_fragment { 0x40 } else { 0 }, 0]); // flags/fragment offset
+    packet.push(opts.ttl);
     packet.push(protocol);
     packet.extend_from_slice(&[0, 0]); // header checksum placeholder
     packet.extend_from_slice(&src);

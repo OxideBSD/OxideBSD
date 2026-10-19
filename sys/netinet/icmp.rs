@@ -29,6 +29,7 @@ const HEADER_LEN: usize = 8;
 
 const EDESTADDRREQ: i64 = 89;
 const EHOSTUNREACH: i64 = 113;
+const EADDRNOTAVAIL: i64 = 99;
 
 /// Bounded for the same reason `udp::MAX_QUEUED_DATAGRAMS` is -- a raw socket nobody's reading
 /// from can't grow without limit.
@@ -41,6 +42,9 @@ const MAX_QUEUED_PACKETS: usize = 32;
 static LAST_ECHO_REPLY: Mutex<Option<(Ipv4Addr, u16, u16)>> = Mutex::new(None);
 
 struct RawSocket {
+    /// The address `bind` gave it (`INADDR_ANY` if none): its packets' source, and the only
+    /// destination it receives for.
+    local: Ipv4Addr,
     /// (source IP, full IP packet incl. header) -- see this module's own doc comment for why the
     /// header has to stay attached here, unlike every other per-protocol receive queue in this
     /// stack.
@@ -77,12 +81,12 @@ pub fn handle_packet(ip_packet: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) {
         }
     }
 
-    deliver_to_raw_sockets(src_ip, ip_packet);
+    deliver_to_raw_sockets(src_ip, dst_ip, ip_packet);
 }
 
-fn deliver_to_raw_sockets(src_ip: Ipv4Addr, ip_packet: &[u8]) {
+fn deliver_to_raw_sockets(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, ip_packet: &[u8]) {
     let mut sockets = RAW_SOCKETS.lock();
-    for socket in sockets.values_mut() {
+    for socket in sockets.values_mut().filter(|s| s.local == crate::net::ifnet::ANY || s.local == dst_ip) {
         if socket.recv_queue.len() >= MAX_QUEUED_PACKETS {
             socket.recv_queue.pop_front(); // drop oldest -- same backpressure udp.rs uses
         }
@@ -96,7 +100,7 @@ pub(crate) static RAW_ICMP: RawIcmp = RawIcmp;
 
 impl Protocol for RawIcmp {
     fn attach(&self, so: u64) -> Result<(), i64> {
-        RAW_SOCKETS.lock().insert(so, RawSocket { recv_queue: VecDeque::new() });
+        RAW_SOCKETS.lock().insert(so, RawSocket { local: crate::net::ifnet::ANY, recv_queue: VecDeque::new() });
         Ok(())
     }
 
@@ -105,18 +109,24 @@ impl Protocol for RawIcmp {
         super::forget_options(so);
     }
 
-    /// A raw socket has no port: the address is checked and otherwise ignored (real `ping`
-    /// binds only with `-I`).
-    fn bind(&self, _so: u64, addr: &[u8]) -> Result<(), i64> {
-        super::parse_sockaddr_in(addr).map(|_| ()).ok_or(EINVAL as i64)
+    /// A raw socket has no port: the address, one of this host's or `INADDR_ANY`, becomes its
+    /// packets' source and the destination it receives for (`ping -S`).
+    fn bind(&self, so: u64, addr: &[u8]) -> Result<(), i64> {
+        let (ip, _) = super::parse_sockaddr_in(addr).ok_or(EINVAL as i64)?;
+        if ip != crate::net::ifnet::ANY && !crate::net::ifnet::is_local(ip) {
+            return Err(EADDRNOTAVAIL);
+        }
+        RAW_SOCKETS.lock().get_mut(&so).ok_or(EBADF as i64)?.local = ip;
+        Ok(())
     }
 
     /// Sends `data` (a complete ICMP message, header and checksum built by the caller, as
     /// `ping.c` does) in an IPv4 envelope.
-    fn send(&self, _so: u64, data: &[u8], to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
+    fn send(&self, so: u64, data: &[u8], to: Option<&[u8]>, _flags: i64) -> Result<usize, i64> {
         let (dest_ip, _) = to.and_then(super::parse_sockaddr_in).ok_or(EDESTADDRREQ)?;
-        let src = crate::net::ifnet::route(dest_ip).ok_or(EHOSTUNREACH)?.src;
-        match ipv4::send_packet(src, dest_ip, ipv4::PROTO_ICMP, data) {
+        let bound = RAW_SOCKETS.lock().get(&so).map_or(crate::net::ifnet::ANY, |s| s.local);
+        let src = crate::net::ifnet::source_for(bound, dest_ip).ok_or(EHOSTUNREACH)?;
+        match ipv4::send_packet_with(src, dest_ip, ipv4::PROTO_ICMP, data, super::header_options(so)) {
             Some(()) => Ok(data.len()),
             None => Err(EHOSTUNREACH),
         }
@@ -150,9 +160,9 @@ impl Protocol for RawIcmp {
         super::get_option(so, level, name, false)
     }
 
-    /// Unbound (the address given to `bind` is checked, not kept): `INADDR_ANY`.
-    fn sockname(&self, _so: u64) -> Result<SockAddr, i64> {
-        Ok(super::sockaddr_in(crate::net::ifnet::ANY, 0))
+    /// The address `bind` gave it, else `INADDR_ANY`.
+    fn sockname(&self, so: u64) -> Result<SockAddr, i64> {
+        Ok(super::sockaddr_in(RAW_SOCKETS.lock().get(&so).map_or(crate::net::ifnet::ANY, |s| s.local), 0))
     }
 
     fn readiness(&self, so: u64) -> Readiness {

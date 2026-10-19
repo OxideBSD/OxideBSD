@@ -224,7 +224,7 @@ impl Protocol for Udp {
         packet.extend_from_slice(&[0, 0]); // checksum: 0 is a legal "not computed" value over IPv4
         packet.extend_from_slice(data);
 
-        match ipv4::send_packet(src, dest_ip, PROTO_UDP, &packet) {
+        match ipv4::send_packet_with(src, dest_ip, PROTO_UDP, &packet, super::header_options(so)) {
             Some(()) => Ok(data.len()),
             None => Err(EHOSTUNREACH),
         }

@@ -37,14 +37,21 @@ const IPPROTO_IP: i64 = 0;
 pub(crate) const IPPROTO_TCP: i64 = 6;
 const IP_TOS: i64 = 1;
 const IP_TTL: i64 = 2;
+/// Linux's path-MTU discovery modes; `IP_PMTUDISC_DO` and `_PROBE` set DF.
+const IP_MTU_DISCOVER: i64 = 10;
+const IP_PMTUDISC_DO: i32 = 2;
+const IP_PMTUDISC_PROBE: i32 = 3;
+/// FreeBSD's: set DF.
+const IP_DONTFRAG: i64 = 67;
 const IP_MULTICAST_IF: i64 = 32;
 const IP_MULTICAST_TTL: i64 = 33;
 const IP_MULTICAST_LOOP: i64 = 34;
 const TCP_NODELAY: i64 = 1;
 
-/// Values set for the IP- and TCP-level options, per socket. They're recorded and reported back
-/// but not yet acted on: packets go out with the stack's own TTL and TOS, and TCP sends every
-/// segment at once anyway (stop-and-wait), which is what `TCP_NODELAY` asks for.
+/// Values set for the IP- and TCP-level options, per socket. A UDP or raw socket's `IP_TTL`,
+/// `IP_TOS` and DF (`IP_MTU_DISCOVER`, `IP_DONTFRAG`) go into the headers it sends
+/// (`header_options`); TCP's segments keep the stack's, and TCP sends every segment at once
+/// anyway (stop-and-wait), which is what `TCP_NODELAY` asks for.
 static OPTIONS: spin::Mutex<alloc::collections::BTreeMap<(u64, i64, i64), alloc::vec::Vec<u8>>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
@@ -53,7 +60,7 @@ fn known_option(level: i64, name: i64, tcp: bool) -> bool {
     match level {
         IPPROTO_IP => matches!(
             name,
-            IP_TOS | IP_TTL | IP_MULTICAST_IF | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
+            IP_TOS | IP_TTL | IP_MTU_DISCOVER | IP_DONTFRAG | IP_MULTICAST_IF | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
         ),
         IPPROTO_TCP => tcp && name == TCP_NODELAY,
         _ => false,
@@ -68,8 +75,34 @@ pub(crate) fn set_option(so: u64, level: i64, name: i64, val: &[u8], tcp: bool) 
     if val.len() < 4 {
         return Err(crate::syscall::EINVAL as i64);
     }
+    let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
+    match (level, name) {
+        // -1 asks for the default again (Linux); otherwise 1-255, as on the BSDs.
+        (IPPROTO_IP, IP_TTL) if v == -1 => {
+            OPTIONS.lock().remove(&(so, level, name));
+            return Ok(());
+        }
+        (IPPROTO_IP, IP_TTL) if !(1..=255).contains(&v) => return Err(crate::syscall::EINVAL as i64),
+        (IPPROTO_IP, IP_TOS) if !(0..=255).contains(&v) => return Err(crate::syscall::EINVAL as i64),
+        (IPPROTO_IP, IP_MTU_DISCOVER) if !(0..=5).contains(&v) => return Err(crate::syscall::EINVAL as i64),
+        _ => {}
+    }
     OPTIONS.lock().insert((so, level, name), val.to_vec());
     Ok(())
+}
+
+/// The IP header fields socket `so` asked for: TTL, TOS, and whether DF is set.
+pub(crate) fn header_options(so: u64) -> ipv4::HeaderOptions {
+    let opts = OPTIONS.lock();
+    let int = |name: i64| {
+        opts.get(&(so, IPPROTO_IP, name)).map(|v| i32::from_ne_bytes([v[0], v[1], v[2], v[3]]))
+    };
+    ipv4::HeaderOptions {
+        ttl: int(IP_TTL).map_or(ipv4::DEFAULT_TTL, |t| t as u8),
+        tos: int(IP_TOS).unwrap_or(0) as u8,
+        dont_fragment: int(IP_DONTFRAG).is_some_and(|v| v != 0)
+            || int(IP_MTU_DISCOVER).is_some_and(|v| v == IP_PMTUDISC_DO || v == IP_PMTUDISC_PROBE),
+    }
 }
 
 pub(crate) fn get_option(so: u64, level: i64, name: i64, tcp: bool) -> Result<alloc::vec::Vec<u8>, i64> {
