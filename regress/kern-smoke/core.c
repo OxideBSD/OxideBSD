@@ -1,8 +1,8 @@
 /*
- * kern-smoke core: core dumps (CLEANUP.md §3: RLIMIT_CORE): a process killed by SIGABRT or
- * SIGSEGV leaves an ELF core (ET_CORE, a CORE NT_PRSTATUS with the signal, PT_LOAD segments) and
- * its wait status says so (WCOREDUMP); RLIMIT_CORE 0, kern.coredump 0, a changed credential and
- * SIGKILL leave none; kern.corefile names it.
+ * kern-smoke core: core dumps (CLEANUP.md §3: RLIMIT_CORE): a process killed by SIGABRT,
+ * SIGSEGV or another process's SIGQUIT leaves an ELF core (ET_CORE, a CORE NT_PRSTATUS with the
+ * signal, PT_LOAD segments) and its wait status says so (WCOREDUMP); RLIMIT_CORE 0,
+ * kern.coredump 0, a changed credential and SIGKILL leave none; kern.corefile names it.
  */
 #include <elf.h>
 
@@ -101,6 +101,26 @@ static void core_main(void)
 	kill(p, SIGKILL);
 	waitpid(p, &st, 0);
 	check(WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL && !WCOREDUMP(st), "SIGKILL leaves no core");
+
+	/* A core signal from another process: the target, running, writes its own core. */
+	int ready[2];
+	pipe(ready);
+	p = fork();
+	if (p == 0) {
+		chdir(core_dir);
+		write(ready[1], "", 1);
+		for (;;)
+			;
+	}
+	char c;
+	read(ready[0], &c, 1);
+	close(ready[0]);
+	close(ready[1]);
+	kill(p, SIGQUIT);
+	waitpid(p, &st, 0);
+	check(WIFSIGNALED(st) && WTERMSIG(st) == SIGQUIT && WCOREDUMP(st), "a SIGQUIT another process sends dumps core");
+	check(check_core(path, SIGQUIT) > 0, "with SIGQUIT in it");
+	unlink(path);
 
 	check(system("/sbin/sysctl -q kern.coredump=0 >/dev/null") == 0, "kern.coredump=0");
 	st = in_child(die_abort);

@@ -902,11 +902,25 @@ fn deliver_pending_signal(frame: &mut SyscallFrame, chained: bool) {
         }
         crate::process::SignalDelivery::Core(signum) => {
             // Killed with a core (`kern::kern_core`). A signal a fault raised came through the
-            // fault trampoline's system call, so the registers are the fault's, kept for it.
+            // fault trampoline's system call, so the registers are the fault's, kept for it; one
+            // the timer redirected ring-3 code to take (another process sent it) has the
+            // interrupted rip, rflags, rcx and r11 in the trampoline's scratch page.
             let regs = if (crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA..crate::process::fault_trampoline::FAULT_TRAMPOLINE_VA + 0x1000)
                 .contains(&frame.rcx)
             {
-                crate::kern::kern_core::take_fault(pid).unwrap_or_else(|| frame.user_regs())
+                crate::kern::kern_core::take_fault(pid).unwrap_or_else(|| {
+                    use crate::process::fault_trampoline::{
+                        FAULT_SCRATCH_VA, R11_SCRATCH_OFFSET, RCX_SCRATCH_OFFSET, TRUE_RESUME_RIP_OFFSET,
+                        TRUE_RFLAGS_OFFSET,
+                    };
+                    let scratch = |off: u64| copyin_val::<u64>(UserPtr::new(FAULT_SCRATCH_VA + off)).unwrap_or(0);
+                    let mut regs = frame.user_regs();
+                    regs[6] = scratch(R11_SCRATCH_OFFSET);
+                    regs[11] = scratch(RCX_SCRATCH_OFFSET);
+                    regs[16] = scratch(TRUE_RESUME_RIP_OFFSET);
+                    regs[18] = scratch(TRUE_RFLAGS_OFFSET);
+                    regs
+                })
             } else {
                 frame.user_regs()
             };

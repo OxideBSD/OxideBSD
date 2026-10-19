@@ -324,14 +324,30 @@ fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, 
         return Ok(0);
     }
 
-    if target == caller_pid {
+    // The caller itself, or another thread of its process (the one `route_signal_target` chose
+    // to take a process-directed signal): left pending, the thread woken, so it acts on the
+    // signal at its own return to user mode. Terminating the group from here would end the
+    // caller in the middle of its own system call.
+    let same_group = {
+        let table = PROCESS_TABLE.lock();
+        let tgid = |p: Pid| table.get(&p).map(|p| p.tgid);
+        target != caller_pid && tgid(target).is_some() && tgid(target) == tgid(caller_pid)
+    };
+    if target == caller_pid || same_group {
         let mut table = PROCESS_TABLE.lock();
         let me = table
-            .get_mut(&caller_pid)
+            .get_mut(&target)
             .expect("kill: current process missing from table");
         // Real kill(2) has no path to report a queue-full EAGAIN back to a caller sending itself a
         // signal -- see record_pending's own doc comment.
         let _ = record_pending(me, sig, SI_USER, caller_pid, caller_uid, 0);
+        if same_group {
+            wake_if_paused(target, me, sig);
+            wake_if_sigwaiting(target, me, sig);
+            wake_if_sleeping(target, me, sig);
+            wake_if_mq_waiting(target, me, sig);
+            wake_if_futex_waiting(target, me, sig);
+        }
         return Ok(0);
     }
 
@@ -382,6 +398,7 @@ fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, 
             0 if is_blocked => Action::SetPending,
             0 => match default_disposition(sig) {
                 DefaultDisposition::Ignore => Action::Discard,
+                DefaultDisposition::Core if returns_to_user(proc) => Action::SetPending,
                 DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                 DefaultDisposition::Stop => Action::Stop,
             },
@@ -499,7 +516,8 @@ pub fn signal_foreground_group(pgid: Pid, sig: u64) {
                     0 if is_blocked => Action::SetPending,
                     0 => match default_disposition(sig) {
                         DefaultDisposition::Ignore => Action::Discard,
-                        DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
+                        DefaultDisposition::Core if returns_to_user(proc) => Action::SetPending,
+                DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                         DefaultDisposition::Stop => Action::Stop,
                     },
                     _ => Action::SetPending,
@@ -649,6 +667,15 @@ fn record_pending(
 /// counts) without consuming anything: this is a pure readiness check, called before a syscall
 /// commits to blocking (or re-checked after waking), never a substitute for the real delivery that
 /// still happens at `deliver_pending_signal` once the caller's own `Err(EINTR)` unwinds there.
+/// Whether `proc` is on its way back to user mode, where a pending signal is delivered (at a
+/// system call's exit, or the timer's redirect of ring-3 code): running or ready to. A core
+/// signal another process sends it is then left pending, so it writes its own core
+/// (`kern::kern_core`, which reads the running address space); one blocked or stopped is killed
+/// at once, without a core, since nothing may wake it.
+fn returns_to_user(proc: &Process) -> bool {
+    matches!(proc.state, ProcState::Running | ProcState::Ready)
+}
+
 pub(crate) fn has_interrupting_signal(proc: &Process) -> bool {
     let mut pending = proc.pending_signals & !proc.blocked_signals;
     if pending == 0 {
@@ -1604,6 +1631,7 @@ pub fn do_sigqueue(
             0 if is_blocked => Action::SetPending,
             0 => match default_disposition(sig) {
                 DefaultDisposition::Ignore => Action::Discard,
+                DefaultDisposition::Core if returns_to_user(proc) => Action::SetPending,
                 DefaultDisposition::Terminate | DefaultDisposition::Core => Action::Terminate,
                 DefaultDisposition::Stop => Action::Stop,
             },
