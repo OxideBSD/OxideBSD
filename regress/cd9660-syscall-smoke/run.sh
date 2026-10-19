@@ -3,7 +3,8 @@
 # On-target check for CD drives on IDE and cd9660 (INSTALLER.md §5.3, §6), seeded as
 # /usr/tests/cd9660/run.sh. The runner puts scripts/mkcd9660testimg.sh's discs in the IDE drives:
 # ide0 rr.iso (Rock Ridge + Joliet, a FAT image as MBR partition 2), ide1 plain.iso, ide2
-# joliet.iso, ide3 empty; the system's disk is virt0. Runs as root; prints one line per check and
+# joliet.iso, ide3 empty; the system's disk is virt0. On virtio-scsi: scsi0 the boot medium,
+# scsi1 rr.iso again, scsi2 a disk of 4096-byte sectors (GPT partition `k4`), scsi3 a blank disk. Runs as root; prints one line per check and
 # exits 0 if all pass.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
@@ -34,7 +35,7 @@ big_ok() { is "$(sha256sum "$1/$2" | cut -d' ' -f1)" "$(cat "$1/$3")"; }
 mkdir -p /tmp/cd/rr /tmp/cd/joliet /tmp/cd/plain /tmp/cd/empty /tmp/cd/esp
 
 # --- The drives -------------------------------------------------------------------------------
-check "kern.disks lists the CD drives" is "$(sysctl -n kern.disks)" "virt0 ide0 ide1 ide2 ide3"
+check "kern.disks lists the CD drives" is "$(sysctl -n kern.disks)" "virt0 ide0 ide1 ide2 ide3 scsi0 scsi1 scsi2 scsi3"
 check "ide0 is a cd" is "$(disk_sysctl ide0 kind)" cd
 check "... of 2048-byte sectors" is "$(disk_sysctl ide0 sectorsize)" 2048
 check "... its model the drive's" is "$(disk_sysctl ide0 model)" "QEMU DVD-ROM"
@@ -108,6 +109,32 @@ umount $P
 check "norrip,nojoliet shows the plain names of a Rock Ridge disc" mount -t cd9660 -o norrip,nojoliet /dev/ide0 $P
 check "... in lower case" is "$(cat $P/readme.txt)" "hello, ISO 9660"
 umount $P
+
+# --- virtio-scsi ------------------------------------------------------------------------------
+S=/tmp/cd/scsi
+mkdir -p $S /tmp/cd/boot
+check "scsi0 and scsi1 are cds" is "$(disk_sysctl scsi0 kind) $(disk_sysctl scsi1 kind)" "cd cd"
+check "... scsi2 and scsi3 disks" is "$(disk_sysctl scsi2 kind) $(disk_sysctl scsi3 kind)" "disk disk"
+check "scsi0's model is the drive's" is "$(disk_sysctl scsi0 model)" "QEMU QEMU CD-ROM"
+check "the boot medium mounts" mount -t cd9660 /dev/scsi0 /tmp/cd/boot
+check "... with the kernel on it" [ -s /tmp/cd/boot/boot/kernel ]
+check "... and Limine's configuration" [ -s /tmp/cd/boot/boot/limine/limine.conf ]
+umount /tmp/cd/boot
+check "a disc on virtio-scsi mounts" mount -t cd9660 /dev/scsi1 $S
+check "... a big file reads whole" big_ok $S BIG.BIN BIG.SHA
+check "... and Rock Ridge" is "$(readlink $S/link)" README.TXT
+check "... and can't be written to" not sh -c 'printf x | dd of=/dev/scsi1 conv=notrunc 2>/dev/null'
+umount $S
+check "scsi2's sectors are 4096 bytes" is "$(disk_sysctl scsi2 sectorsize)" 4096
+check "... its GPT in them" sh -c 'dd if=/dev/gpt/k4 bs=512 count=1 2>/dev/null | grep -q PART4K-MARKER'
+check "... as scsi2p1" sh -c 'dd if=/dev/scsi2p1 bs=512 count=1 2>/dev/null | grep -q PART4K-MARKER'
+# Sectors 12 and 13 share a 4096-byte sector: each write reads it, patches 512 bytes, writes it.
+check "512-byte writes inside a 4096-byte sector" sh -c 'printf left | dd of=/dev/scsi2p1 bs=512 seek=12 conv=notrunc,sync 2>/dev/null && printf middle | dd of=/dev/scsi2p1 bs=512 seek=13 conv=notrunc,sync 2>/dev/null'
+check "... read back" is "$(dd if=/dev/scsi2p1 bs=512 skip=13 count=1 2>/dev/null | tr -d '\000')" middle
+check "... the second leaving the first" is "$(dd if=/dev/scsi2p1 bs=512 skip=12 count=1 2>/dev/null | tr -d '\000')" left
+check "... and the partition's start" sh -c 'dd if=/dev/scsi2p1 bs=512 count=1 2>/dev/null | grep -q PART4K-MARKER'
+check "scsi3 reads and writes" sh -c 'printf scsi3 | dd of=/dev/scsi3 bs=512 seek=777 conv=notrunc,sync 2>/dev/null && [ "$(dd if=/dev/scsi3 bs=512 skip=777 count=1 2>/dev/null | tr -d "\000")" = scsi3 ]'
+check "... its size is 64 MiB" is "$(disk_sysctl scsi3 size)" 67108864
 
 # --- No disc ----------------------------------------------------------------------------------
 check "the empty drive doesn't mount" not mount -t cd9660 /dev/ide3 /tmp/cd/empty 2>/dev/null

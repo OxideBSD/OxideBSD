@@ -3,11 +3,13 @@
 //! on the host; it is installed on the target too.
 //!
 //! ```text
-//! mkimg -s scheme -o outfile [-c capacity] [-b bootcode] -p partition ...
+//! mkimg -s scheme -o outfile [-S secsz] [-c capacity] [-b bootcode] -p partition ...
 //! ```
 //!
 //! - `-s gpt` or `-s mbr`: the partitioning scheme.
 //! - `-o outfile`: the disk image written.
+//! - `-S secsz`: the disk's logical sector size, which its tables count in: 512 (the default),
+//!   1024, 2048 or 4096 (a "4Kn" disk). Not with `-b`.
 //! - `-c capacity`: the disk's size at least, in bytes or with a `k`, `m` or `g` suffix; the last
 //!   partition does not grow into it.
 //! - `-p type[/label]:=file`: a partition holding `file`; `-p type[/label]::size`: an empty one
@@ -33,12 +35,14 @@ use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::process::ExitCode;
 
+/// The unit partitions are laid out in; the disk's own sectors (`-S`) are a multiple of it.
 const SECTOR: u64 = 512;
-/// Partitions start on this boundary, in sectors (1 MiB).
+/// Partitions start on this boundary, in 512-byte sectors (1 MiB).
 const ALIGN: u64 = 2048;
 const GPT_ENTRIES: u64 = 128;
 const GPT_ENTRY_SIZE: u64 = 128;
-const GPT_ENTRY_SECTORS: u64 = GPT_ENTRIES * GPT_ENTRY_SIZE / SECTOR;
+/// The entry array's bytes (16 KiB): a whole number of sectors of every size `-S` takes.
+const GPT_ENTRY_BYTES: u64 = GPT_ENTRIES * GPT_ENTRY_SIZE;
 /// The EFI system partition's type, `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`.
 const EFI_TYPE_GUID: [u8; 16] = guid_bytes(0xC12A_7328, 0xF81F, 0x11D2, [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B]);
 const EFI_MBR_TYPE: u8 = 0xEF;
@@ -53,7 +57,7 @@ const STAGE2_LOC_OFFSET: usize = 0x1a4;
 const MBR_STAGE2_LOC: u64 = 4096;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: mkimg -s gpt|mbr -o outfile [-c capacity] [-b bootcode] -p type[/label]:=file|::size ...");
+    eprintln!("usage: mkimg -s gpt|mbr -o outfile [-S secsz] [-c capacity] [-b bootcode] -p type[/label]:=file|::size ...");
     ExitCode::from(1)
 }
 
@@ -99,7 +103,7 @@ struct Part {
     label: String,
     /// The image to copy in, if any.
     file: Option<File>,
-    /// Size in sectors, a whole number of 4 KiB blocks.
+    /// Size and start in 512-byte sectors, whole 4 KiB blocks.
     sectors: u64,
     first: u64,
 }
@@ -172,9 +176,12 @@ fn derived_guid(seed: &[u8]) -> [u8; 16] {
     out
 }
 
-/// The GPT: the first `2 + GPT_ENTRY_SECTORS` sectors (protective MBR, header, entries) and the
-/// last `GPT_ENTRY_SECTORS + 1` (backup entries and header).
-fn gpt(total: u64, parts: &[Part]) -> (Vec<u8>, Vec<u8>) {
+/// The GPT of a disk of `total` sectors of `ss` bytes: its first `2 + entry sectors` sectors
+/// (protective MBR, header, entries) and its last `entry sectors + 1` (backup entries and header).
+/// Partition positions are converted from 512-byte sectors to the disk's.
+fn gpt(total: u64, parts: &[Part], ss: u64) -> (Vec<u8>, Vec<u8>) {
+    let scale = ss / SECTOR;
+    let entry_sectors = GPT_ENTRY_BYTES / ss;
     let layout: Vec<u8> = parts
         .iter()
         .flat_map(|p| [&p.kind.guid()[..], p.label.as_bytes(), &p.first.to_le_bytes(), &p.sectors.to_le_bytes()].concat())
@@ -186,22 +193,22 @@ fn gpt(total: u64, parts: &[Part]) -> (Vec<u8>, Vec<u8>) {
         let e = &mut entries[i * GPT_ENTRY_SIZE as usize..(i + 1) * GPT_ENTRY_SIZE as usize];
         e[0..16].copy_from_slice(&p.kind.guid());
         e[16..32].copy_from_slice(&derived_guid(&[&layout[..], &(i as u64).to_le_bytes()].concat()));
-        e[32..40].copy_from_slice(&p.first.to_le_bytes());
-        e[40..48].copy_from_slice(&(p.first + p.sectors - 1).to_le_bytes());
+        e[32..40].copy_from_slice(&(p.first / scale).to_le_bytes());
+        e[40..48].copy_from_slice(&((p.first + p.sectors) / scale - 1).to_le_bytes());
         for (j, unit) in p.label.encode_utf16().enumerate() {
             e[56 + j * 2..58 + j * 2].copy_from_slice(&unit.to_le_bytes());
         }
     }
     let entries_crc = crc32(&entries);
-    let last_usable = total - 2 - GPT_ENTRY_SECTORS;
+    let last_usable = total - 2 - entry_sectors;
     let header = |this: u64, other: u64, entries_lba: u64| -> Vec<u8> {
-        let mut h = vec![0u8; SECTOR as usize];
+        let mut h = vec![0u8; ss as usize];
         h[0..8].copy_from_slice(b"EFI PART");
         h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
         h[12..16].copy_from_slice(&92u32.to_le_bytes());
         h[24..32].copy_from_slice(&this.to_le_bytes());
         h[32..40].copy_from_slice(&other.to_le_bytes());
-        h[40..48].copy_from_slice(&(2 + GPT_ENTRY_SECTORS).to_le_bytes());
+        h[40..48].copy_from_slice(&(2 + entry_sectors).to_le_bytes());
         h[48..56].copy_from_slice(&last_usable.to_le_bytes());
         h[56..72].copy_from_slice(&disk_guid);
         h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
@@ -212,14 +219,14 @@ fn gpt(total: u64, parts: &[Part]) -> (Vec<u8>, Vec<u8>) {
         h[16..20].copy_from_slice(&crc.to_le_bytes());
         h
     };
-    let mut head = vec![0u8; (SECTOR * (2 + GPT_ENTRY_SECTORS)) as usize];
+    let mut head = vec![0u8; (ss * (2 + entry_sectors)) as usize];
     // The protective MBR: one 0xEE entry over the disk (capped at 32 bits).
     mbr_entry(&mut head, 0, 0xEE, 1, total - 1);
-    head[SECTOR as usize..2 * SECTOR as usize].copy_from_slice(&header(1, total - 1, 2));
-    head[2 * SECTOR as usize..].copy_from_slice(&entries);
-    let mut tail = vec![0u8; (SECTOR * (GPT_ENTRY_SECTORS + 1)) as usize];
+    head[ss as usize..2 * ss as usize].copy_from_slice(&header(1, total - 1, 2));
+    head[2 * ss as usize..].copy_from_slice(&entries);
+    let mut tail = vec![0u8; (ss * (entry_sectors + 1)) as usize];
     tail[..entries.len()].copy_from_slice(&entries);
-    tail[entries.len()..].copy_from_slice(&header(total - 1, 1, total - 1 - GPT_ENTRY_SECTORS));
+    tail[entries.len()..].copy_from_slice(&header(total - 1, 1, total - 1 - entry_sectors));
     (head, tail)
 }
 
@@ -271,7 +278,11 @@ fn install_bootcode(disk: &File, scheme: Scheme, parts: &[Part], code: &[u8]) ->
     disk.write_all_at(stage2, loc).map_err(|e| e.to_string())
 }
 
-fn run(scheme: Scheme, out: &str, capacity: u64, bootcode: Option<&[u8]>, mut parts: Vec<Part>) -> Result<(), String> {
+fn run(scheme: Scheme, out: &str, ss: u64, capacity: u64, bootcode: Option<&[u8]>, mut parts: Vec<Part>) -> Result<(), String> {
+    if bootcode.is_some() && ss != SECTOR {
+        return Err("-b needs 512-byte sectors".into());
+    }
+    let scale = ss / SECTOR;
     if scheme == Scheme::Mbr && parts.len() > 4 {
         return Err("MBR holds at most four partitions".into());
     }
@@ -284,9 +295,9 @@ fn run(scheme: Scheme, out: &str, capacity: u64, bootcode: Option<&[u8]>, mut pa
         next = (p.first + p.sectors).div_ceil(ALIGN) * ALIGN;
     }
     let end = parts.last().map_or(ALIGN, |p| p.first + p.sectors);
-    // Room after the last partition for the backup GPT.
-    let tail = if scheme == Scheme::Gpt { GPT_ENTRY_SECTORS + 1 } else { 0 };
-    let total = (end + tail).max(capacity.div_ceil(SECTOR));
+    // Room after the last partition for the backup GPT; the disk in its own sectors.
+    let tail = if scheme == Scheme::Gpt { (GPT_ENTRY_BYTES / ss + 1) * scale } else { 0 };
+    let total = (end + tail).max(capacity.div_ceil(SECTOR)).div_ceil(scale);
     if scheme == Scheme::Mbr && total > u32::MAX as u64 {
         return Err("too large for MBR (2 TiB)".into());
     }
@@ -297,18 +308,18 @@ fn run(scheme: Scheme, out: &str, capacity: u64, bootcode: Option<&[u8]>, mut pa
         .truncate(true)
         .open(out)
         .map_err(|e| format!("{out}: {e}"))?;
-    disk.set_len(total * SECTOR).map_err(|e| format!("{out}: {e}"))?;
+    disk.set_len(total * ss).map_err(|e| format!("{out}: {e}"))?;
     let io = |e: std::io::Error| format!("{out}: {e}");
     match scheme {
         Scheme::Gpt => {
-            let (head, tail) = gpt(total, &parts);
+            let (head, tail) = gpt(total, &parts, ss);
             disk.write_all_at(&head, 0).map_err(io)?;
-            disk.write_all_at(&tail, (total - GPT_ENTRY_SECTORS - 1) * SECTOR).map_err(io)?;
+            disk.write_all_at(&tail, (total * ss) - tail.len() as u64).map_err(io)?;
         }
         Scheme::Mbr => {
             let mut sector0 = vec![0u8; SECTOR as usize];
             for (i, p) in parts.iter().enumerate() {
-                mbr_entry(&mut sector0, i, p.kind.mbr(), p.first, p.sectors);
+                mbr_entry(&mut sector0, i, p.kind.mbr(), p.first / scale, p.sectors / scale);
             }
             disk.write_all_at(&sector0, 0).map_err(io)?;
         }
@@ -350,6 +361,7 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
 
 fn main() -> ExitCode {
     let (mut scheme, mut out, mut capacity, mut parts, mut bootcode) = (None, None, 0, Vec::new(), None);
+    let mut ss = SECTOR;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let Some(value) = args.next() else { return usage() };
@@ -362,6 +374,10 @@ fn main() -> ExitCode {
                 }
             }
             "-o" => out = Some(value),
+            "-S" => match value.parse::<u64>() {
+                Ok(n @ (512 | 1024 | 2048 | 4096)) => ss = n,
+                _ => return usage(),
+            },
             "-b" => match std::fs::read(&value) {
                 Ok(code) => bootcode = Some(code),
                 Err(e) => {
@@ -387,7 +403,7 @@ fn main() -> ExitCode {
     if parts.is_empty() {
         return usage();
     }
-    match run(scheme, &out, capacity, bootcode.as_deref(), parts) {
+    match run(scheme, &out, ss, capacity, bootcode.as_deref(), parts) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mkimg: {e}");

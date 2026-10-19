@@ -15,6 +15,8 @@ pub mod null;
 pub mod part;
 pub mod pci;
 pub mod rtl8139;
+pub mod scsi;
 pub mod usb;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_scsi;

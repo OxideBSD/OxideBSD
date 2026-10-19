@@ -107,14 +107,15 @@ cp /tmp/devfs/devfs.conf.orig /etc/devfs.conf
 
 # --- The disk registry (INSTALLER.md §5) --------------------------------------------------------
 # The runner attaches virt0 (GPT, one partition labelled `extra`), virt1 (blank), ide0 (blank,
-# 130 GiB, on the primary master) beside the system's disk, ide1 (the secondary master).
+# 130 GiB, on the primary master) beside the system's disk, ide1 (the secondary master); scsi0 is
+# the boot medium.
 disk_sysctl() { sysctl -n "kern.disk.$1.$2" 2>&1; }
 # Writes $2 at 512-byte sector $3 of device $1 and reads it back.
 sector_round_trip() {
 	printf '%s' "$2" | dd of="$1" bs=512 seek="$3" conv=notrunc,sync 2>/dev/null &&
 		[ "$(dd if="$1" bs=512 skip="$3" count=1 2>/dev/null | tr -d '\000')" = "$2" ]
 }
-check "kern.disks lists every disk" [ "$(sysctl -n kern.disks)" = "virt0 virt1 ide0 ide1" ]
+check "kern.disks lists every disk" [ "$(sysctl -n kern.disks)" = "virt0 virt1 ide0 ide1 scsi0" ]
 for d in virt0 virt0p1 gpt/extra virt1 ide0 ide1 ide1p1; do
 	check "/dev/$d is crw-------" mode_is /dev/$d crw-------
 done

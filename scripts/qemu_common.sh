@@ -130,13 +130,14 @@ esac
 set -- "$@" \
     -drive "if=none,id=oxfsdisk,format=raw,file=$QEMU_DISK_IMAGE" \
     -device "$data_disk"
-# QEMU_EXTRA_ARGS: more devices a test wants (words, no spaces in them).
-# shellcheck disable=SC2086
-set -- "$@" ${QEMU_EXTRA_ARGS:-}
 # QEMU_NO_ISO=1: no CD, the firmware boots the disk.
 if [ "${QEMU_NO_ISO:-0}" != 1 ]; then
     set -- "$@" -drive "if=none,id=isocd,media=cdrom,file=$QEMU_ISO_PATH" $boot_cd
 fi
+# QEMU_EXTRA_ARGS: more devices a test wants (words, no spaces in them), after the boot CD's
+# controller (virtio-scsi `scsi0`), which they may use.
+# shellcheck disable=SC2086
+set -- "$@" ${QEMU_EXTRA_ARGS:-}
 
 qemu_common_find_ovmf() {
     if [ -n "${OXIDEBSD_OVMF_PATH:-}" ]; then

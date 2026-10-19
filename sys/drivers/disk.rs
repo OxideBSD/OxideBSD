@@ -1,7 +1,9 @@
 //! The disk registry (`OxideBSD-doc/INSTALLER.md` §5): `init` registers every disk the kernel
 //! drives at boot -- each virtio-blk device (`virt0`, `virt1`, ... in PCI order), then each IDE
-//! disk (`ide0`, ... in the order primary master, primary slave, secondary master, secondary
-//! slave; ATA by bus-master DMA when the controller can, else PIO) -- with the partitions of each
+//! disk or CD drive (`ide0`, ... in the order primary master, primary slave, secondary master,
+//! secondary slave; ATA by bus-master DMA when the controller can, else PIO; ATAPI by PIO), then
+//! each virtio-scsi disk or CD drive (`scsi0`, ... in controller, target order) -- with the
+//! partitions of each
 //! (`part`: GPT, else MBR). Disks are named by bus, one counter per bus, optical drives counted
 //! with disks (their kind is in `kern.disk.<name>.kind`); partitions are `<disk>p<N>` (GPT) or
 //! `<disk>s<N>` (MBR), and labelled GPT partitions are also `gpt/<label>` (FreeBSD's `glabel`;
@@ -41,7 +43,17 @@ enum Backend {
     Ata(Channel, Drive),
     Atapi(Channel, Drive),
     Virtio(usize),
+    Scsi(super::virtio_scsi::Unit),
     Memory,
+}
+
+/// Runs `f` with the SCSI transport a backend speaks (`drivers::scsi`), if it speaks SCSI.
+fn with_scsi<R>(backend: Backend, f: impl FnOnce(&dyn super::scsi::Transport) -> R) -> Option<R> {
+    match backend {
+        Backend::Atapi(channel, drive) => Some(f(&super::ata::Atapi(channel, drive))),
+        Backend::Scsi(unit) => Some(f(&unit)),
+        _ => None,
+    }
 }
 
 /// What a disk is (`kern.disk.<name>.kind`).
@@ -90,6 +102,7 @@ static ROOT_READONLY_AT_BOOT: AtomicBool = AtomicBool::new(false);
 /// Device numbers (Linux's majors, `OxideBSD-doc/DEVFS.md` §3.5), one major per driver: minor
 /// `unit << 8` for a whole disk, `unit << 8 | N` for its partition N.
 const IDE_MAJOR: u32 = 3;
+const SCSI_MAJOR: u32 = 8;
 const VIRTIO_MAJOR: u32 = 252;
 /// `/dev/gpt/<label>`: another name for a labelled GPT partition, minors in the order found.
 const GPT_LABEL_MAJOR: u32 = 253;
@@ -142,17 +155,32 @@ pub fn init(
             let sectors = super::ata::capacity_sectors(channel, drive);
             found.push(register(name, Backend::Ata(channel, drive), Kind::Disk, sectors, 512, model, IDE_MAJOR, unit));
         } else if super::ata::atapi_present(channel, drive) {
-            // Empty, or a disc: its size now, checked again at each open (`media_check`).
-            let (sectors, size) = cd_capacity(channel, drive).0;
-            if sectors == 0 {
-                serial_println!("[boot] disk: {}: CD drive, no disc", name);
-            } else {
-                serial_println!("[boot] disk: {}: CD drive, disc of {} MiB", name, sectors / 2048);
-            }
-            let disk = register(name, Backend::Atapi(channel, drive), Kind::Cd, sectors, size, model, IDE_MAJOR, unit);
-            found.push(disk);
+            found.push(register_cd(name, Backend::Atapi(channel, drive), model, IDE_MAJOR, unit));
         } else {
             continue;
+        }
+        unit += 1;
+    }
+    let mut unit = 0;
+    for f in super::virtio_scsi::init(frame_allocator, mapper, phys_mem_offset) {
+        let name = alloc::format!("scsi{unit}");
+        let backend = Backend::Scsi(f.unit);
+        match f.device_type {
+            super::scsi::TYPE_CDROM => found.push(register_cd(name, backend, f.model, SCSI_MAJOR, unit)),
+            super::scsi::TYPE_DISK => match super::scsi::capacity(&f.unit).0 {
+                Some((blocks, size)) if (512..=4096).contains(&size) && size.is_power_of_two() => {
+                    let sectors = blocks * (size as u64 / 512);
+                    found.push(register(name, backend, Kind::Disk, sectors, size, f.model, SCSI_MAJOR, unit));
+                }
+                _ => {
+                    serial_println!("[boot] disk: {}: no medium, or sectors of a size not driven -- left out", name);
+                    continue;
+                }
+            },
+            t => {
+                serial_println!("[boot] disk: {}: SCSI device type {:#04x} isn't a disk or CD -- left out", name, t);
+                continue;
+            }
         }
         unit += 1;
     }
@@ -197,26 +225,44 @@ fn attach(disk: u32, parts: &mut Vec<Found>) {
     attach_partitions(disk, parts);
 }
 
+/// Registers a CD drive, empty or with a disc: its size now, checked again at each open
+/// (`media_check`).
+fn register_cd(name: String, backend: Backend, model: String, major: u32, unit: u32) -> u32 {
+    let (sectors, size) = cd_capacity(backend).0;
+    if sectors == 0 {
+        serial_println!("[boot] disk: {}: CD drive, no disc", name);
+    } else {
+        serial_println!("[boot] disk: {}: CD drive, disc of {} MiB", name, sectors / 2048);
+    }
+    register(name, backend, Kind::Cd, sectors, size, model, major, unit)
+}
+
 /// The size of the disc in a CD drive, `(512-byte sectors, sector size)` (`(0, 2048)` when it's
-/// empty), and whether the disc changed since the drive was last asked.
-fn cd_capacity(channel: Channel, drive: Drive) -> ((u64, u32), bool) {
-    let (capacity, changed) = super::ata::atapi_capacity(channel, drive);
-    let capacity = capacity.map_or((0, super::ata::CD_SECTOR as u32), |(n, size)| (n * (size as u64 / 512), size));
+/// empty), and whether the disc changed since the drive was last asked. A drive reporting a
+/// sector size a data disc doesn't have (2352, raw; or 0) is read in 2048-byte sectors.
+fn cd_capacity(backend: Backend) -> ((u64, u32), bool) {
+    const CD_SECTOR: u32 = 2048;
+    let (capacity, changed) = with_scsi(backend, super::scsi::capacity).unwrap_or((None, false));
+    let capacity = capacity.map_or((0, CD_SECTOR), |(n, size)| {
+        let size = if (512..=CD_SECTOR).contains(&size) && size.is_power_of_two() { size } else { CD_SECTOR };
+        (n * (size as u64 / 512), size)
+    });
     (capacity, changed)
 }
 
 /// Reads disk `disk`'s partition table and registers each partition's block device and raw `/dev`
-/// node (and its label's), adding them to `parts`. A CD's table is read as a USB stick's would be:
-/// a hybrid image's MBR or GPT counts 512-byte sectors.
+/// node (and its label's), adding them to `parts`. A disk's table counts in its own sectors; a
+/// CD's is read as a USB stick's would be: a hybrid image's MBR or GPT counts 512-byte sectors.
 fn attach_partitions(disk: u32, parts: &mut Vec<Found>) {
     use crate::kern::vfs_bdev;
-    let (name, major, minor, sectors) = {
+    let (name, major, minor, sectors, table_sector) = {
         let d = &DISKS.lock()[disk as usize];
-        (d.name.clone(), d.major, d.unit << 8, d.sectors)
+        let table_sector = if d.kind == Kind::Cd { 512 } else { d.sector_size as usize };
+        (d.name.clone(), d.major, d.unit << 8, d.sectors, table_sector)
     };
     let mut nodes = Vec::new();
-    let mut head = alloc::vec![0u8; 5 * 4096];
-    let table = if read_sectors(disk, 0, &mut head) { super::part::read(&head) } else { Vec::new() };
+    let mut head = alloc::vec![0u8; 34 * table_sector];
+    let table = if read_sectors(disk, 0, &mut head) { super::part::read(&head, table_sector) } else { Vec::new() };
     for p in table {
         if p.index > 0xff || p.first_lba.checked_add(p.sectors).is_none_or(|end| end > sectors) {
             serial_println!("[boot] disk: {}: partition {} lies outside the disk -- ignored", name, p.index);
@@ -250,17 +296,16 @@ pub(crate) fn media_check(major: u32, minor: u32) {
     let Some((_, _, disk)) = vfs_bdev::find(major, minor).and_then(vfs_bdev::extent) else { return };
     let (backend, whole, old_parts, old_sectors) = {
         let disks = DISKS.lock();
-        let Some(d) = disks.get(disk as usize) else { return };
+        let Some(d) = disks.get(disk as usize).filter(|d| d.kind == Kind::Cd) else { return };
         (d.backend, d.whole, d.parts.clone(), d.sectors)
     };
-    let Backend::Atapi(channel, drive) = backend else { return };
     let in_use = core::iter::once(whole)
         .chain(old_parts.iter().map(|&(h, _, _)| h))
         .any(|h| crate::kern::vfs_mount::dev_in_use(h as u64));
     if in_use {
         return;
     }
-    let ((sectors, size), changed) = cd_capacity(channel, drive);
+    let ((sectors, size), changed) = cd_capacity(backend);
     if !changed && sectors == old_sectors {
         return;
     }
@@ -291,15 +336,14 @@ pub(crate) fn mounted(handle: u32, mounted: bool) {
     let Some((_, _, disk)) = crate::kern::vfs_bdev::extent(handle) else { return };
     let (backend, whole, parts) = {
         let disks = DISKS.lock();
-        let Some(d) = disks.get(disk as usize) else { return };
+        let Some(d) = disks.get(disk as usize).filter(|d| d.kind == Kind::Cd) else { return };
         (d.backend, d.whole, d.parts.clone())
     };
-    let Backend::Atapi(channel, drive) = backend else { return };
     let still = core::iter::once(whole)
         .chain(parts.iter().map(|&(h, _, _)| h))
         .any(|h| crate::kern::vfs_mount::dev_in_use(h as u64));
     if mounted || !still {
-        super::ata::atapi_lock(channel, drive, mounted);
+        with_scsi(backend, |t| super::scsi::lock(t, mounted));
     }
 }
 
@@ -355,7 +399,8 @@ pub fn init_memory(phys_mem_offset: VirtAddr) {
 pub fn stats() -> (u64, u64) {
     let (ata_transfers, ata_irqs) = super::ata::dma_stats();
     let (virtio_transfers, virtio_irqs) = super::virtio_blk::stats();
-    (ata_transfers + virtio_transfers, ata_irqs + virtio_irqs)
+    let (scsi_requests, scsi_irqs) = super::virtio_scsi::stats();
+    (ata_transfers + virtio_transfers + scsi_requests, ata_irqs + virtio_irqs + scsi_irqs)
 }
 
 /// The space-separated names of the registered disks (`kern.disks`).
@@ -383,21 +428,27 @@ fn backend(disk: u32) -> Option<(Backend, u64)> {
     DISKS.lock().get(disk as usize).map(|d| (d.backend, d.sector_size as u64))
 }
 
-/// Reads whole device sectors from device sector `lba`.
-fn device_read(backend: Backend, lba: u64, buf: &mut [u8]) -> bool {
+/// Reads whole device sectors (of `ss` bytes) from device sector `lba`.
+fn device_read(backend: Backend, ss: u64, lba: u64, buf: &mut [u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::read_disk_sectors(channel, drive, lba, buf).is_ok(),
         Backend::Atapi(channel, drive) => super::ata::atapi_read(channel, drive, lba, buf).is_ok(),
+        Backend::Scsi(unit) => {
+            super::scsi::read(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
+        }
         Backend::Virtio(unit) => super::virtio_blk::read_sectors(unit, lba, buf),
         Backend::Memory => super::md::read_sectors(lba, buf),
     }
 }
 
-/// Writes whole device sectors at device sector `lba`, durably.
-fn device_write(backend: Backend, lba: u64, buf: &[u8]) -> bool {
+/// Writes whole device sectors (of `ss` bytes) at device sector `lba`, durably.
+fn device_write(backend: Backend, ss: u64, lba: u64, buf: &[u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::write_disk_sectors(channel, drive, lba, buf).is_ok(),
         Backend::Atapi(..) => false, // read-only
+        Backend::Scsi(unit) => {
+            super::scsi::write(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
+        }
         Backend::Virtio(unit) => super::virtio_blk::write_sectors(unit, lba, buf),
         Backend::Memory => super::md::write_sectors(lba, buf),
     }
@@ -417,10 +468,10 @@ pub(crate) fn read_sectors(disk: u32, lba: u64, buf: &mut [u8]) -> bool {
     let Some((backend, sector_size)) = backend(disk) else { return false };
     let (first, count, at) = covering(sector_size, lba, buf.len() as u64 / 512);
     if at == 0 && buf.len() as u64 == count * sector_size {
-        return device_read(backend, first, buf);
+        return device_read(backend, sector_size, first, buf);
     }
     let mut whole = alloc::vec![0u8; (count * sector_size) as usize];
-    if !device_read(backend, first, &mut whole) {
+    if !device_read(backend, sector_size, first, &mut whole) {
         return false;
     }
     buf.copy_from_slice(&whole[at..at + buf.len()]);
@@ -433,14 +484,14 @@ pub(crate) fn write_sectors(disk: u32, lba: u64, buf: &[u8]) -> bool {
     let Some((backend, sector_size)) = backend(disk) else { return false };
     let (first, count, at) = covering(sector_size, lba, buf.len() as u64 / 512);
     if at == 0 && buf.len() as u64 == count * sector_size {
-        return device_write(backend, first, buf);
+        return device_write(backend, sector_size, first, buf);
     }
     let mut whole = alloc::vec![0u8; (count * sector_size) as usize];
-    if !device_read(backend, first, &mut whole) {
+    if !device_read(backend, sector_size, first, &mut whole) {
         return false;
     }
     whole[at..at + buf.len()].copy_from_slice(buf);
-    device_write(backend, first, &whole)
+    device_write(backend, sector_size, first, &whole)
 }
 
 /// Asks oxfs to mount the root read-only (the real boot path, `kernel_main`).
@@ -481,8 +532,7 @@ extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
         return -(crate::syscall::ENXIO as i64);
     };
     let read_only = crate::kern::vfs_bdev::extent(handle)
-        .and_then(|(_, _, disk)| backend(disk))
-        .is_some_and(|(b, _)| matches!(b, Backend::Atapi(..)));
+        .is_some_and(|(_, _, disk)| DISKS.lock().get(disk as usize).is_some_and(|d| d.kind == Kind::Cd));
     if flags & O_ACCMODE != 0 && read_only {
         return -(crate::syscall::EROFS as i64);
     }

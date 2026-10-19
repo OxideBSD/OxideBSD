@@ -89,7 +89,7 @@ case "$TEST_NAME" in
         ;;
     cd9660_syscall_smoke)
         # ISO 9660 discs in IDE CD drives (scripts/mkcd9660testimg.sh, below): all four positions
-        # are CD drives, so the system's disk is virtio-blk.
+        # are CD drives, so the system's disk is virtio-blk; and virtio-scsi disks and a CD.
         CD9660_TEST=1
         QEMU_DISK_DEFAULT=virtio
         ;;
@@ -213,6 +213,21 @@ if [ "${CD9660_TEST:-0}" = 1 ]; then
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd2,bus=ide.1,unit=0"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=cd3,media=cdrom"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd3,bus=ide.1,unit=1"
+    # On the boot medium's virtio-scsi controller (target 0, scsi0): rr.iso again (scsi1), a disk
+    # of 4096-byte sectors with a GPT in them, partition `k4` starting with a marker (scsi2), and
+    # a blank disk of 512-byte ones (scsi3).
+    printf 'PART4K-MARKER' > target/images/cd9660/k4.part
+    truncate -s 1M target/images/cd9660/k4.part
+    rm -f target/images/cd9660/4kn.img target/images/cd9660/512.img
+    target/host-tools/x86_64-unknown-linux-gnu/release/mkimg -s gpt -S 4096 -o target/images/cd9660/4kn.img \
+        -p "fat32lba/k4:=target/images/cd9660/k4.part"
+    truncate -s 64M target/images/cd9660/512.img
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=scd1,media=cdrom,readonly=on,file=target/images/cd9660/rr.iso"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device scsi-cd,drive=scd1,bus=scsi0.0,scsi-id=1"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sd4k,format=raw,file=target/images/cd9660/4kn.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device scsi-hd,drive=sd4k,bus=scsi0.0,scsi-id=2,logical_block_size=4096,physical_block_size=4096"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sd512,format=raw,file=target/images/cd9660/512.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device scsi-hd,drive=sd512,bus=scsi0.0,scsi-id=3"
 fi
 if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
     # Two virtio-blk disks (virt0: a GPT with one partition labelled `extra`; virt1: blank) and,

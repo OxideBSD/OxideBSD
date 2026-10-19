@@ -9,6 +9,7 @@
 .Nm
 .Fl s Ar scheme
 .Fl o Ar outfile
+.Op Fl S Ar secsz
 .Op Fl c Ar capacity
 .Fl p Ar partition
 .Op Fl p Ar partition ...
@@ -36,6 +37,9 @@ suffix.
 The space after the last partition is left free.
 .It Fl o Ar outfile
 The image to write.
+.It Fl S Ar secsz
+The disk's logical sector size, which its partition table counts in: 512 (the
+default), 1024, 2048 or 4096, as for a disk with 4096-byte sectors.
 .It Fl p Ar type Ns Oo / Ns Ar label Oc Ns := Ns Ar file
 A partition of
 .Ar type

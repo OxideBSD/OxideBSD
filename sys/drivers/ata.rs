@@ -589,19 +589,10 @@ pub const CD_SECTOR: usize = 2048;
 const ATAPI_MAX_SECTORS: usize = 31;
 /// A packet command's budget: a drive spinning a disc up takes seconds.
 const ATAPI_TIMEOUT_MS: u64 = 10_000;
-/// How long `atapi_capacity` waits for a drive whose disc is "becoming ready".
-const ATAPI_READY_MS: u64 = 8_000;
+/// The packet: every SCSI command an optical drive takes fits in 12 bytes.
+const PACKET_LEN: usize = 12;
 
-const SCSI_TEST_UNIT_READY: u8 = 0x00;
 const SCSI_REQUEST_SENSE: u8 = 0x03;
-const SCSI_PREVENT_ALLOW_MEDIUM_REMOVAL: u8 = 0x1E;
-const SCSI_READ_CAPACITY_10: u8 = 0x25;
-const SCSI_READ_10: u8 = 0x28;
-
-const SENSE_NOT_READY: u8 = 0x02;
-const SENSE_UNIT_ATTENTION: u8 = 0x06;
-/// Additional sense code "medium not present".
-const ASC_NO_MEDIUM: u8 = 0x3A;
 
 /// Polls the status until `BSY` clears, bounded by `ms`.
 fn wait_not_busy(io_base: u16, ms: u64) -> Result<u8, AtaError> {
@@ -696,58 +687,34 @@ fn packet(channel: Channel, drive: Drive, cdb: &[u8; 12], data: &mut [u8]) -> Re
     }
 }
 
-/// Whether a disc is in the drive and readable, and if so its size: `(sectors, sector size)` from
-/// `READ CAPACITY(10)`; and whether the drive reported a unit attention (the disc changed, or the
-/// drive was reset) since it was last asked. Waits out a disc spinning up; `None` at once for an
-/// empty drive.
-pub fn atapi_capacity(channel: Channel, drive: Drive) -> (Option<(u64, u32)>, bool) {
-    let deadline = crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(ATAPI_READY_MS);
-    let mut changed = false;
-    loop {
-        match packet(channel, drive, &[SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &mut []) {
-            Ok(_) => break,
-            Err(AtaError::Sense(SENSE_UNIT_ATTENTION, _, _)) if crate::cpu::tsc::now() < deadline => changed = true,
-            Err(AtaError::Sense(SENSE_NOT_READY, ASC_NO_MEDIUM, _)) => return (None, changed),
-            Err(AtaError::Sense(SENSE_NOT_READY, _, _)) if crate::cpu::tsc::now() < deadline => {
-                core::hint::spin_loop();
-            }
-            Err(_) => return (None, changed),
+/// The packet device at one position, as a SCSI transport (`drivers::scsi`): a command padded to
+/// a 12-byte packet, data in by PIO. Optical drives are read-only here: no data goes out.
+#[derive(Clone, Copy)]
+pub struct Atapi(pub Channel, pub Drive);
+
+impl super::scsi::Transport for Atapi {
+    fn command(&self, cdb: &[u8], data: super::scsi::Data) -> Result<usize, super::scsi::ScsiError> {
+        use super::scsi::{Data, ScsiError};
+        if cdb.len() > PACKET_LEN {
+            return Err(ScsiError::Transport);
         }
+        let mut packet_bytes = [0u8; PACKET_LEN];
+        packet_bytes[..cdb.len()].copy_from_slice(cdb);
+        let buf: &mut [u8] = match data {
+            Data::None => &mut [],
+            Data::In(b) => b,
+            Data::Out(_) => return Err(ScsiError::Transport),
+        };
+        packet(self.0, self.1, &packet_bytes, buf).map_err(|e| match e {
+            AtaError::Sense(k, asc, ascq) => ScsiError::Sense(k, asc, ascq),
+            _ => ScsiError::Transport,
+        })
     }
-    let mut cap = [0u8; 8];
-    let cdb = [SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    match packet(channel, drive, &cdb, &mut cap) {
-        Ok(8) => {}
-        _ => return (None, changed),
-    }
-    let last = u32::from_be_bytes(cap[0..4].try_into().unwrap()) as u64;
-    let size = u32::from_be_bytes(cap[4..8].try_into().unwrap());
-    // Some drives report 2352 (raw) or 0 for a data disc; READ(10) moves 2048-byte sectors.
-    // A sector size other than 512's multiples up to 2048 isn't a data disc's.
-    let size = if size == 0 || size > CD_SECTOR as u32 || size % 512 != 0 { CD_SECTOR as u32 } else { size };
-    (Some((last + 1, size)), changed)
 }
 
 /// Reads whole 2048-byte sectors from `lba` into `buf`, one `READ(10)` per `ATAPI_MAX_SECTORS`.
 pub fn atapi_read(channel: Channel, drive: Drive, lba: u64, buf: &mut [u8]) -> Result<(), AtaError> {
-    for (i, chunk) in buf.chunks_mut(ATAPI_MAX_SECTORS * CD_SECTOR).enumerate() {
-        let at = lba + (i * ATAPI_MAX_SECTORS) as u64;
-        let count = (chunk.len() / CD_SECTOR) as u16;
-        let at32 = u32::try_from(at).map_err(|_| AtaError::OutOfRange)?;
-        let a = at32.to_be_bytes();
-        let c = count.to_be_bytes();
-        let cdb = [SCSI_READ_10, 0, a[0], a[1], a[2], a[3], 0, c[0], c[1], 0, 0, 0];
-        if packet(channel, drive, &cdb, chunk)? != chunk.len() {
-            return Err(AtaError::DeviceError(0));
-        }
-    }
-    Ok(())
-}
-
-/// Locks (`true`) or unlocks the drive's tray: a mounted disc can't be ejected from the drive.
-pub fn atapi_lock(channel: Channel, drive: Drive, lock: bool) {
-    let cdb = [SCSI_PREVENT_ALLOW_MEDIUM_REMOVAL, 0, 0, 0, lock as u8, 0, 0, 0, 0, 0, 0, 0];
-    let _ = packet(channel, drive, &cdb, &mut []);
+    super::scsi::read(&Atapi(channel, drive), lba, CD_SECTOR, ATAPI_MAX_SECTORS, buf).map_err(|_| AtaError::DeviceError(0))
 }
 
 // --- bus-master DMA --------------------------------------------------------------------------

@@ -374,9 +374,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - A new installed file goes in `distrib/install.mtree`, and its set in `distrib/sets/lists/*`
   (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
   default).
-- Disks: a registry (`drivers::disk`, INSTALLER.md §5): every virtio-blk unit, then every IDE
-  disk (all four positions, DMA per channel, LBA48), named by bus (`virt0`, `ide0`); minors
-  `unit << 8 | partition`. Root from fsconf, else the first oxfs partition. Boot ISO: virtio-scsi.
+- Disks: a registry (`drivers::disk`, INSTALLER.md §5): virtio-blk, IDE (ATA DMA per channel,
+  LBA48; ATAPI CDs), virtio-scsi (`scsi0` = the boot ISO under QEMU), named by bus; minors
+  `unit << 8 | partition`. SCSI commands live in `drivers::scsi` over a `Transport`. The block
+  layer is 512-byte; `disk` translates for 2048 (CD) / 4096 sectors. Root from fsconf.
   `no-ata` protects real hardware from being formatted.
 - rtl8139 DMA is 32-bit: `rtl8139::init` must run before big allocations.
 

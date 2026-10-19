@@ -1,8 +1,10 @@
 //! Partition tables (`OxideBSD-doc/RAM_FLOOR.md` §3.4.5): reading a disk's GPT, or its MBR when it
 //! has no GPT. The kernel never writes one (RAM_FLOOR.md §4.2.1): mkimg(1) does.
 //!
-//! Disks are addressed here in 512-byte sectors (LBAs), as both tables are; `drivers::disk` works
-//! in 4 KiB blocks, so a partition oxfs can use must start and end on a block boundary. GPT
+//! A table counts in its disk's own sectors (512 bytes, or 4096 on a "4Kn" disk; a CD's hybrid
+//! image counts 512, as it does written to a USB stick); `read` returns partitions in 512-byte
+//! sectors, the block layer's unit. oxfs works in 4 KiB blocks, so a partition it can use must
+//! start and end on a block boundary. GPT
 //! partitions are named `<disk>p<N>`, MBR ones `<disk>s<N>` (N from 1); only the four MBR primary
 //! entries are read, no extended or logical partitions yet.
 
@@ -47,15 +49,34 @@ impl Partition {
     }
 }
 
-/// The partitions in `head`, the disk's first 34 sectors (MBR, GPT header and entries): the GPT's
-/// if there is a valid one, else the MBR's primary entries. Empty for a disk with neither.
-pub fn read(head: &[u8]) -> Vec<Partition> {
-    if head.len() < SECTOR * 34 || head[510..512] != [0x55, 0xAA] {
+/// The partitions in `head`, the disk's first 34 sectors of `sector` bytes (MBR, GPT header and
+/// entries): the GPT's if there is a valid one, else the MBR's primary entries. Empty for a disk
+/// with neither. Positions in 512-byte sectors.
+pub fn read(head: &[u8], sector: usize) -> Vec<Partition> {
+    if !sector.is_power_of_two() || sector < SECTOR || head.len() < sector * 34 || head[510..512] != [0x55, 0xAA] {
         return Vec::new();
     }
+    let scale = (sector / SECTOR) as u64;
+    let mut parts = read_scaled(head, sector);
+    parts.retain_mut(|p| {
+        p.first_lba = match p.first_lba.checked_mul(scale) {
+            Some(n) => n,
+            None => return false,
+        };
+        p.sectors = match p.sectors.checked_mul(scale) {
+            Some(n) => n,
+            None => return false,
+        };
+        true
+    });
+    parts
+}
+
+/// `read`'s partitions, in the disk's own sectors.
+fn read_scaled(head: &[u8], sector: usize) -> Vec<Partition> {
     let mbr_types: Vec<u8> = (0..4).map(|i| head[446 + i * 16 + 4]).collect();
     if mbr_types.contains(&MBR_GPT_PROTECTIVE)
-        && let Some(gpt) = read_gpt(head)
+        && let Some(gpt) = read_gpt(head, sector)
     {
         return gpt;
     }
@@ -79,8 +100,8 @@ pub fn read(head: &[u8]) -> Vec<Partition> {
 
 /// The GPT's used entries, if the header at LBA 1 is valid (signature, header CRC, entries CRC)
 /// and its entries lie within `head`.
-fn read_gpt(head: &[u8]) -> Option<Vec<Partition>> {
-    let h = &head[SECTOR..2 * SECTOR];
+fn read_gpt(head: &[u8], sector: usize) -> Option<Vec<Partition>> {
+    let h = &head[sector..sector + SECTOR];
     if &h[0..8] != b"EFI PART" {
         return None;
     }
@@ -96,7 +117,7 @@ fn read_gpt(head: &[u8]) -> Option<Vec<Partition>> {
     let entries_lba = u64::from_le_bytes(h[72..80].try_into().unwrap()) as usize;
     let count = u32::from_le_bytes(h[80..84].try_into().unwrap()) as usize;
     let size = u32::from_le_bytes(h[84..88].try_into().unwrap()) as usize;
-    let start = entries_lba * SECTOR;
+    let start = entries_lba.checked_mul(sector)?;
     let end = start.checked_add(count.checked_mul(size)?)?;
     if size < 128 || end > head.len() {
         return None;
