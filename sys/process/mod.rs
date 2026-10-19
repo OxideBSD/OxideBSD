@@ -951,6 +951,9 @@ pub struct Process {
     /// Real `/proc/[pid]/cmdline` wire format: each `argv` entry followed by one NUL byte, no
     /// trailing separator beyond that. Same copy-on-fork/reset-on-exec semantics as `comm`.
     pub cmdline: Vec<u8>,
+    /// `/proc/[pid]/environ`: the environment `execve` gave the program, in `cmdline`'s format.
+    /// Readable by the process's own user and root only (`procfs::oxidebsd_proc_environ`).
+    pub environ: Vec<u8>,
     /// `SYS_SETITIMER`'s `ITIMER_REAL` state (`do_setitimer`/`do_getitimer`) — the absolute
     /// `interrupts::ticks()` deadline this process's next `SIGALRM` fires at, `None` while
     /// disarmed. Checked by `interrupts::timer_interrupt_handler` alongside its existing
@@ -1083,6 +1086,11 @@ pub struct Process {
     /// a forked child (real POSIX: a process's own CPU time never carries over from a parent);
     /// preserved by `execve` (the same process, still accumulating, just running a new image).
     pub cpu_ticks: u64,
+    /// Page faults the kernel resolved for this thread without the disk (minor: a zero page, a
+    /// copy on write, a cached file page) and with it (major: a file page read in). Counted by the
+    /// fault handler in `mm::FAULTS` and added here at each switch away (`scheduler::schedule`).
+    pub minflt: u64,
+    pub majflt: u64,
     /// The part of `cpu_ticks` spent in the kernel (ticks that interrupted ring 0): `times`'s
     /// `tms_stime`, `getrusage`'s `ru_stime`; the rest is user time.
     pub sys_ticks: u64,

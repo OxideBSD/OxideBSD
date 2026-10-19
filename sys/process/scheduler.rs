@@ -251,6 +251,9 @@ fn schedule_inner() {
             let prev = table
                 .get_mut(&prev_pid)
                 .expect("schedule: current process missing from table");
+            let (minor, major) = crate::process::mm::take_faults();
+            prev.minflt += minor;
+            prev.majflt += major;
             // A process asleep inside the filesystem for anything but the disk holds up every
             // other process's file access (`fs::fslock`); a sleep that waits on another process
             // there must release the lock first (`fslock::release_for_sleep`). Reported, the

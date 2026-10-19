@@ -1304,6 +1304,8 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         }
         "oxidebsd_proc_cmdline" => Some(crate::process::oxidebsd_proc_cmdline as *const () as u64),
         "oxidebsd_proc_oom_adj" => Some(crate::process::oxidebsd_proc_oom_adj as *const () as u64),
+        "oxidebsd_proc_environ" => Some(crate::process::oxidebsd_proc_environ as *const () as u64),
+        "oxidebsd_proc_wchan" => Some(crate::process::oxidebsd_proc_wchan as *const () as u64),
         "oxidebsd_proc_status" => Some(crate::process::oxidebsd_proc_status as *const () as u64),
         "oxidebsd_proc_meminfo" => Some(crate::process::oxidebsd_proc_meminfo as *const () as u64),
         "oxidebsd_proc_initdeaths" => Some(crate::process::init::oxidebsd_proc_initdeaths as *const () as u64),

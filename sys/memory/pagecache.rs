@@ -243,6 +243,11 @@ pub enum FillError {
     Unavailable,
 }
 
+/// Whether page `page` of entry `id` is in memory already (a fault on it is minor).
+pub fn cached(id: EntryId, page: u64) -> bool {
+    CACHE.lock().entries.get(&id).is_some_and(|e| e.frames.get(page as usize).is_some_and(|f| f.is_some()))
+}
+
 /// `frame`, saying why it failed.
 pub fn fill(id: EntryId, page: u64, from: Fill) -> Result<PhysFrame<Size4KiB>, FillError> {
     use FillError::{NoMemory, Unavailable};

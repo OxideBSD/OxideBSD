@@ -457,6 +457,7 @@ fn timer_interrupt_handler(frame: &mut TrapFrame) {
         }
         if now.is_multiple_of(crate::cpu::pit::TIMER_HZ as u64) {
             crate::process::sched_4bsd::schedcpu(&mut table);
+            crate::process::limits::cpu_limits(&mut table);
         }
         crate::kern::kern_synch::tick(&table, now);
         // Terminal reads whose VTIME ran out.

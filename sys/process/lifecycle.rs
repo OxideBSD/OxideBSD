@@ -81,7 +81,7 @@ pub(crate) fn spawn_unloaded(pid: Pid, name: &[u8], console: bool) -> Result<Pid
         return Err(SpawnError::OutOfMemory);
     };
     let zero = VirtAddr::zero();
-    spawn_finish(address_space, kernel_stack, Some(pid), zero, zero, zero, None, &[name], console)
+    spawn_finish(address_space, kernel_stack, Some(pid), zero, zero, zero, None, &[name], &[], console)
 }
 
 /// Gives the calling process, started by `spawn_unloaded`, its program: builds the image in a
@@ -117,6 +117,7 @@ pub(crate) fn load_into_current(
         me.user_stack_top = initial_rsp;
         me.comm = basename(arg0.strip_prefix(b"-").unwrap_or(arg0)).to_vec();
         me.cmdline = build_cmdline(argv);
+        me.environ = build_cmdline(envp);
         let old = me.address_space.replace(space);
         // SAFETY: the new table carries the kernel's half like every address space.
         unsafe { me.address_space.as_ref().unwrap().activate() };
@@ -152,7 +153,7 @@ fn spawn_into(
         with_frame_allocator(|fa| unsafe { address_space.teardown(phys_offset, fa) });
         return Err(SpawnError::OutOfMemory);
     };
-    spawn_finish(address_space, kernel_stack, pid, brk, entry, initial_rsp, parent, argv, console)
+    spawn_finish(address_space, kernel_stack, pid, brk, entry, initial_rsp, parent, argv, envp, console)
 }
 
 /// Loads the program and builds its initial user stack in a not-yet-active address space.
@@ -210,6 +211,7 @@ fn spawn_finish(
     initial_rsp: VirtAddr,
     parent: Option<Pid>,
     argv: &[&[u8]],
+    envp: &[&[u8]],
     console: bool,
 ) -> Result<Pid, SpawnError> {
     let pid = pid.inspect(|&p| reserve_pid(p)).unwrap_or_else(alloc_pid);
@@ -266,6 +268,7 @@ fn spawn_finish(
         sid: pid,
         comm,
         cmdline,
+        environ: build_cmdline(envp),
         real_timer_deadline: None,
         real_timer_interval_ticks: 0,
         posix_timers: [None; MAX_POSIX_TIMERS],
@@ -284,6 +287,8 @@ fn spawn_finish(
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: crate::cpu::fpu::clean_state(),
         cpu_ticks: 0,
+        minflt: 0,
+        majflt: 0,
         sys_ticks: 0,
         child_cpu_ticks: 0,
         child_sys_ticks: 0,
@@ -540,7 +545,7 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         parent_signal_stack,
         parent_altstack,
         parent_comm,
-        parent_cmdline,
+        (parent_cmdline, parent_environ),
         parent_rlimits,
         parent_nice,
         parent_sched_policy,
@@ -610,7 +615,7 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
             // Real fork() semantics: the child keeps the parent's comm/cmdline until it execs its
             // own -- same reasoning as brk/fs_base/cwd above.
             parent.comm.clone(),
-            parent.cmdline.clone(),
+            (parent.cmdline.clone(), parent.environ.clone()),
             // Real POSIX rlimit/nice/scheduling-attribute/fork semantics: all four are copied,
             // same as uid/gid/pgid -- see Process::rlimits's own doc comment.
             parent.rlimits,
@@ -690,6 +695,7 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         sid: parent_sid,
         comm: parent_comm,
         cmdline: parent_cmdline,
+        environ: parent_environ,
         // Not inherited -- see `real_timer_deadline`'s own doc comment (real POSIX itimer/fork
         // semantics: a forked child starts with its own disarmed timer).
         real_timer_deadline: None,
@@ -718,6 +724,8 @@ fn fork_impl(kind: ForkKind) -> Result<u64, u64> {
         // Not inherited -- real POSIX: a forked child's own CPU time starts at 0, it hasn't run
         // yet (see this field's own doc comment on Process).
         cpu_ticks: 0,
+        minflt: 0,
+        majflt: 0,
         sys_ticks: 0,
         // Not inherited -- a fresh child hasn't reaped any children of its own yet (see this
         // field's own doc comment on Process).
@@ -874,7 +882,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         parent_signal_stack,
         parent_altstack,
         parent_comm,
-        parent_cmdline,
+        (parent_cmdline, parent_environ),
         parent_rlimits,
         parent_nice,
         parent_sched_policy,
@@ -908,7 +916,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
             caller.signal_stack.clone(),
             caller.altstack,
             caller.comm.clone(),
-            caller.cmdline.clone(),
+            (caller.cmdline.clone(), caller.environ.clone()),
             caller.rlimits,
             caller.nice,
             caller.sched_policy,
@@ -964,6 +972,7 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         sid: parent_sid,
         comm: parent_comm,
         cmdline: parent_cmdline,
+        environ: parent_environ,
         // Not inherited -- same "starts fresh" policy do_fork_from_current's own construction
         // already establishes for these two fields.
         real_timer_deadline: None,
@@ -981,6 +990,8 @@ pub fn do_clone(flags: u64, newsp: u64, ptid: u64, ctid: u64) -> Result<u64, u64
         rt_queue: core::array::from_fn(|_| Vec::new()),
         fpu_state: parent_fpu_state,
         cpu_ticks: 0,
+        minflt: 0,
+        majflt: 0,
         sys_ticks: 0,
         // A `clone(2)`-created thread never becomes an independent `wait4` target (see
         // `do_clone`'s own doc comment) and never reaps children of its own -- starts at 0, same
@@ -1114,10 +1125,10 @@ fn basename(path: &[u8]) -> &[u8] {
 
 /// Real `/proc/[pid]/cmdline` wire format: each `argv` entry followed by one NUL byte, no
 /// trailing separator beyond that.
-fn build_cmdline(argv: &[&[u8]]) -> Vec<u8> {
+fn build_cmdline<T: AsRef<[u8]>>(argv: &[T]) -> Vec<u8> {
     let mut out = Vec::new();
     for arg in argv {
-        out.extend_from_slice(arg);
+        out.extend_from_slice(arg.as_ref());
         out.push(0);
     }
     out
@@ -1683,6 +1694,7 @@ fn exec_image(
         // it, since only the interpreter is ever really "exec'd" at the kernel level.
         me.comm = basename(&effective_path).to_vec();
         me.cmdline = build_cmdline(&argv);
+        me.environ = build_cmdline(&envp);
         // The old program's TLS base doesn't mean anything to the new one -- reset the stored value
         // (restored on every future context switch, see Process::fs_base's own doc comment) *and*
         // the live MSR right now, since execve keeps running as this exact process/kernel stack with

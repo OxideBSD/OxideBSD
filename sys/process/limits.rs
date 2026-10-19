@@ -37,7 +37,10 @@ unsafe impl Pod for RawTimespec {}
 /// Real Linux's own `RLIM_NLIMITS` -- the number of `Process::rlimits` slots that exist.
 const RLIM_NLIMITS: u64 = 16;
 
-/// `RLIMIT_FSIZE` (musl's x86_64 numbers, here and below): the largest file a process may write.
+/// `RLIMIT_CPU` (musl's x86_64 numbers, here and below): the CPU seconds a process may use
+/// (`cpu_limits`).
+pub(crate) const RLIMIT_CPU: usize = 0;
+/// `RLIMIT_FSIZE`: the largest file a process may write.
 pub(crate) const RLIMIT_FSIZE: usize = 1;
 /// `RLIMIT_DATA`: how far the program break may move past where `execve` put it.
 pub(crate) const RLIMIT_DATA: usize = 2;
@@ -45,6 +48,38 @@ pub(crate) const RLIMIT_DATA: usize = 2;
 pub(crate) const RLIMIT_STACK: usize = 3;
 /// `RLIMIT_CORE`: the largest core file a process may leave (`kern::kern_core`).
 pub(crate) const RLIMIT_CORE: usize = 4;
+/// Once a second, from the timer (`interrupts`): a process (every thread of it) past its soft
+/// `RLIMIT_CPU` gets `SIGXCPU`, every second it stays past, and one at its hard limit `SIGKILL`,
+/// as on Linux and FreeBSD. Pending bits, as an interval timer's expiry sets: delivered as the
+/// process returns to user mode, which a process using CPU time soon does.
+pub(crate) fn cpu_limits(table: &mut alloc::collections::BTreeMap<Pid, alloc::boxed::Box<Process>>) {
+    let hz = crate::cpu::pit::TIMER_HZ as u64;
+    let mut due: alloc::vec::Vec<(Pid, u64)> = alloc::vec::Vec::new();
+    for (&pid, p) in table.iter() {
+        let (soft, hard) = p.rlimits[RLIMIT_CPU];
+        if p.tgid != pid || (soft == RLIM_INFINITY && hard == RLIM_INFINITY) || matches!(p.state, ProcState::Zombie(_)) {
+            continue;
+        }
+        let secs = table.values().filter(|t| t.tgid == pid).map(|t| t.cpu_ticks).sum::<u64>() / hz;
+        if secs >= hard {
+            due.push((pid, super::SIGKILL));
+        } else if secs >= soft {
+            due.push((pid, super::SIGXCPU));
+        }
+    }
+    for (pid, sig) in due {
+        if let Some(p) = table.get_mut(&pid) {
+            p.pending_signals |= 1 << (sig - 1);
+            super::signals::wake_if_paused(pid, p, sig);
+            super::signals::wake_if_sleeping(pid, p, sig);
+            super::signals::wake_if_mq_waiting(pid, p, sig);
+            super::signals::wake_if_futex_waiting(pid, p, sig);
+        }
+    }
+}
+
+/// `RLIMIT_RSS`: kept and reported (`/proc/<pid>/stat`'s rsslim), not enforced.
+pub(crate) const RLIMIT_RSS: usize = 5;
 /// `RLIMIT_NPROC`: how many processes one real user ID may have.
 pub(crate) const RLIMIT_NPROC: usize = 6;
 /// `RLIMIT_NOFILE`: the most descriptors a process may have open.

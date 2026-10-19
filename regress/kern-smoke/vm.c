@@ -196,6 +196,17 @@ static void vm_main(void)
 	check(has_line("/proc/self/maps", "[stack]"), "with the stack");
 	munmap(m, pg);
 
+	/* MAP_FIXED_NOREPLACE fails over a mapping instead of replacing it (VMMAP.md §4.3). */
+	char *nr = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	nr[pg] = 7;
+	check(mmap(nr + pg, pg, PROT_READ, MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0) == MAP_FAILED &&
+	          errno == EEXIST && nr[pg] == 7,
+	      "MAP_FIXED_NOREPLACE over a mapping is EEXIST, the mapping kept");
+	munmap(nr + pg, pg);
+	check(mmap(nr + pg, pg, PROT_READ, MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0) == nr + pg,
+	      "and maps where nothing is");
+	munmap(nr, 2 * pg);
+
 	/* Anonymous memory is made at its first touch (VMMAP.md §5). */
 	size_t gib = (size_t)1 << 30;
 	volatile char *lazy = mmap(NULL, gib, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

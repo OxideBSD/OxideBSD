@@ -60,6 +60,7 @@ pub fn try_resolve_cow(fault_addr: u64) -> Option<bool> {
         // The other side copied or went away: the page is just this one's again.
         entry.set_flags(writable);
         x86_64::instructions::tlb::flush(page.start_address());
+        count_fault(false);
         return Some(true);
     }
     // The frame allocator is never held while user code runs or a copy routine works (COW.md
@@ -77,6 +78,7 @@ pub fn try_resolve_cow(fault_addr: u64) -> Option<bool> {
         // The last other mapping went meanwhile (not possible on one core, but it would leak).
         memory::try_with_frame_allocator(|fa| unsafe { fa.deallocate_frame(old) });
     }
+    count_fault(false);
     Some(true)
 }
 
@@ -111,6 +113,8 @@ pub fn try_fill_file_page(fault_addr: u64, from_user: bool) -> Option<FileFill> 
     let (id, file_page, executable) = file_entry(pending)?;
     let raw = pending.addr().as_u64() | pending.flags().bits();
     let from = if from_user { memory::pagecache::Fill::UserFault } else { memory::pagecache::Fill::KernelFault };
+    // Major if the page has to come from the disk.
+    let major = !memory::pagecache::cached(id, file_page);
     let frame = match memory::pagecache::fill(id, file_page, from) {
         Ok(frame) => frame,
         Err(memory::pagecache::FillError::NoMemory) => return Some(FileFill::NoMemory),
@@ -118,6 +122,7 @@ pub fn try_fill_file_page(fault_addr: u64, from_user: bool) -> Option<FileFill> 
     };
     // The fill may have slept on the disk: another thread may have filled the page, or unmapped
     // it, meanwhile. Only the entry as it was is replaced.
+    count_fault(major);
     let Some(entry) = leaf_entry(l4(), phys_offset, page_va) else { return Some(FileFill::Done) };
     if entry.addr().as_u64() | entry.flags().bits() == raw {
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | SHARED_LEAF | CACHED_LEAF;
@@ -194,7 +199,24 @@ pub fn try_grow_user_stack(fault_addr: u64) -> Option<bool> {
     });
     // No frame: out of memory. A table frame `map_to` couldn't get, or the allocator lock held by
     // the interrupted code: a plain fault.
-    mapped.flatten()
+    let mapped = mapped.flatten();
+    if mapped == Some(true) {
+        count_fault(false);
+    }
+    mapped
+}
+
+/// The running thread's resolved page faults since it was switched in, minor and major
+/// (`Process::minflt`): the fault handler may interrupt the kernel holding the process table, so
+/// it counts here, and the scheduler moves the counts to the thread.
+static FAULTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+pub(crate) fn count_fault(major: bool) {
+    FAULTS[major as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn take_faults() -> (u64, u64) {
+    (FAULTS[0].swap(0, Ordering::Relaxed), FAULTS[1].swap(0, Ordering::Relaxed))
 }
 
 /// The running address space's `VmState` and its level 4 table, set by `AddressSpace::activate`
@@ -270,7 +292,11 @@ pub fn try_fill_anon(fault_addr: u64, write: bool, exec: bool) -> Option<bool> {
             .ok()
             .map(|()| true)
     });
-    mapped.flatten()
+    let mapped = mapped.flatten();
+    if mapped == Some(true) {
+        count_fault(false);
+    }
+    mapped
 }
 
 /// Fills the anonymous pages of `[addr, end)` the map allows reading (`mlock`, `mlockall`):
@@ -457,6 +483,9 @@ const MAP_SHARED: u64 = 0x01;
 const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
+/// `MAP_FIXED` that fails (`EEXIST`) instead of replacing what's mapped (VMMAP.md §4.3; FreeBSD's
+/// `MAP_EXCL`, whose number musl gives `MAP_NORESERVE`).
+const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
 
 /// `RLIMIT_MEMLOCK` (musl's number): bounds what `mlockall(MCL_FUTURE)` locks of later mappings
 /// (`do_mmap`'s `auto_lock`).
@@ -707,7 +736,8 @@ pub fn do_mmap(
         return Err(EINVAL);
     }
     let anon = flags & MAP_ANON != 0;
-    let fixed = flags & MAP_FIXED != 0;
+    let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
+    let fixed = flags & MAP_FIXED != 0 || noreplace;
     if !anon && fd < 0 {
         return Err(EBADF);
     }
@@ -749,7 +779,15 @@ pub fn do_mmap(
         {
             return Err(ENOMEM);
         }
-        let _ = do_munmap(caller_pid, addr_hint, region_len);
+        if noreplace {
+            let table = PROCESS_TABLE.lock();
+            let me = table.get(&caller_pid).expect("mmap: current process missing from table");
+            if me.vm().map.overlaps(addr_hint, addr_hint + region_len) {
+                return Err(crate::syscall::EEXIST);
+            }
+        } else {
+            let _ = do_munmap(caller_pid, addr_hint, region_len);
+        }
         Some(addr_hint)
     } else {
         None

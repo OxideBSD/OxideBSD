@@ -15,6 +15,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -53,6 +54,8 @@ static int child_exit_ok(int (*fn)(void))
 #include "users.c"
 #include "vm.c"
 #include "core.c"
+#include "proc.c"
+#include "inet.c"
 
 static const struct {
 	const char *name;
@@ -65,6 +68,8 @@ static const struct {
 	{ "users", users_main },
 	{ "vm", vm_main },
 	{ "core", core_main },
+	{ "proc", proc_main },
+	{ "inet", inet_main },
 };
 
 int main(int argc, char **argv)

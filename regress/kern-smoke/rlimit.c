@@ -1,7 +1,7 @@
 /*
  * kern-smoke rlimit: resource limits (OxideBSD-doc CLEANUP.md §3-4): setrlimit's checks, and
- * RLIMIT_STACK, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_NPROC and RLIMIT_NOFILE (descriptor numbering,
- * SCM_RIGHTS) enforced.
+ * RLIMIT_STACK, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_NPROC, RLIMIT_NOFILE (descriptor numbering,
+ * SCM_RIGHTS) and RLIMIT_CPU (SIGXCPU, then SIGKILL) enforced.
  */
 
 /* --- setrlimit's own rules --- */
@@ -215,6 +215,36 @@ static int rights_past_nofile(void)
 	return 0;
 }
 
+static volatile sig_atomic_t got_xcpu;
+
+static void on_xcpu(int sig)
+{
+	(void)sig;
+	got_xcpu = 1;
+}
+
+/* Spins past a 1 s soft RLIMIT_CPU (hard 5 s) until SIGXCPU arrives. */
+static int cpu_soft(void)
+{
+	struct rlimit rl = { 1, 5 };
+	signal(SIGXCPU, on_xcpu);
+	if (setrlimit(RLIMIT_CPU, &rl) != 0)
+		return 10;
+	while (!got_xcpu)
+		;
+	return 0;
+}
+
+/* Spins into a 1 s hard RLIMIT_CPU: SIGKILL. */
+static int cpu_hard(void)
+{
+	struct rlimit rl = { 1, 1 };
+	if (setrlimit(RLIMIT_CPU, &rl) != 0)
+		return 10;
+	for (;;)
+		;
+}
+
 static void rlimit_main(void)
 {
 	struct rlimit rl;
@@ -241,4 +271,8 @@ static void rlimit_main(void)
 
 	fd_numbering();
 	check(child_exit_ok(rights_past_nofile), "SCM_RIGHTS past RLIMIT_NOFILE is EMSGSIZE, rights discarded");
+
+	check(child_exit_ok(cpu_soft), "past the soft RLIMIT_CPU: SIGXCPU");
+	st = in_child(cpu_hard);
+	check(WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "at the hard RLIMIT_CPU: SIGKILL");
 }

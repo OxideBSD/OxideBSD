@@ -89,7 +89,7 @@ pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
 
 /// Formats a real `/proc/[pid]/stat` line (`pid (comm) state ppid pgrp session ...`, all ~52
 /// space-separated fields real Linux defines) into `buf_ptr`/`buf_cap`; `0` for what this kernel
-/// doesn't track (`vsize`, `rss`, fault counts, ...).
+/// doesn't track (the children's fault counts, the code and stack addresses, ...).
 /// Returns bytes written, or `-1` if `pid` no longer exists (a race between the caller's own
 /// existence check and this call -- the process table isn't locked across both).
 pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
@@ -107,6 +107,37 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     let comm = proc.comm.clone();
     let start = proc.start_ticks;
     let vsize = proc.address_space.as_ref().map_or(0, |space| space.vm().map.size());
+    let rss = proc.address_space.as_ref().map_or(0, |space| {
+        let ranges: Vec<(u64, u64)> = space
+            .vm()
+            .map
+            .iter()
+            .filter(|(_, e)| e.kind != super::vm_map::VmKind::Kernel)
+            .map(|(s, e)| (s, e.end))
+            .collect();
+        ranges.into_iter().map(|(s, e)| resident_pages(space, s, e)).sum()
+    });
+    let threads = table.values().filter(|p| p.tgid == proc.tgid && !matches!(p.state, ProcState::Zombie(_))).count();
+    let (minflt, majflt) = (proc.minflt, proc.majflt);
+    // Linux's PF_EXITING for a thread that has exited.
+    let flags: i64 = if matches!(proc.state, ProcState::Zombie(_)) { 0x4 } else { 0 };
+    // A process-directed signal is pending on whichever thread was chosen to take it: a thread
+    // group's leader reports every thread's, as Linux's shared pending set.
+    let pending = if pid as Pid == proc.tgid {
+        table.values().filter(|t| t.tgid == proc.tgid).fold(0, |m, t| m | t.pending_signals)
+    } else {
+        proc.pending_signals
+    };
+    let rsslim = proc.rlimits[super::limits::RLIMIT_RSS].0;
+    // Signals ignored and caught, as bit masks (signal n is bit n - 1).
+    let (ignored, caught) = {
+        let shared = proc.shared.lock();
+        (1..=64u64).fold((0u64, 0u64), |(i, c), sig| match shared.sigactions[sig as usize].handler {
+            0 => (i, c),
+            1 => (i | 1 << (sig - 1), c),
+            _ => (i, c | 1 << (sig - 1)),
+        })
+    };
     let (utime, stime) = (proc.cpu_ticks.saturating_sub(proc.sys_ticks), proc.sys_ticks);
     let (cutime, cstime) = (proc.child_cpu_ticks.saturating_sub(proc.child_sys_ticks), proc.child_sys_ticks);
     // proc(5)'s priority: 20 + nice for a time-sharing thread, -1 - rank for a real-time one.
@@ -136,16 +167,18 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     out.push(state);
 
     // Fields 4 (ppid) through 52 (exit_code) -- see proc(5). Non-zero entries: pgrp/session/
-    // tty_nr (idx 1/2/3), tpgid (idx 4, written separately: it can be -1), utime..cstime (idx
-    // 10-13, clock ticks), priority and nice (idx 14/15), num_threads (idx 16), blocked (idx 28),
-    // exit_signal (idx 34, SIGCHLD), start_brk (idx 43).
+    // tty_nr (idx 1/2/3), tpgid (idx 4, written separately: it can be -1), flags, minflt and
+    // majflt (idx 5/6/8), utime..cstime (idx 10-13, clock ticks), priority and nice (idx 14/15),
+    // num_threads (idx 16), starttime, vsize, rss (pages) and rsslim (idx 18-21), the pending,
+    // blocked, ignored and caught signals (idx 27-30), exit_signal (idx 34, SIGCHLD), start_brk
+    // (idx 43).
     let fields: [i64; 49] = [
-        ppid as i64, pgid as i64, sid as i64, tty_nr as i64, 0, 0, 0, 0, 0, 0, // 4-13
+        ppid as i64, pgid as i64, sid as i64, tty_nr as i64, 0, flags, minflt as i64, 0, majflt as i64, 0, // 4-13
         utime as i64, stime as i64, cutime as i64, cstime as i64,
         // priority (18), nice, num_threads, itrealvalue, starttime (22, in clock ticks since boot:
         // the tick is 100 Hz, sysconf(_SC_CLK_TCK)), ...
-        priority, nice, 1, 0, start as i64, vsize as i64, 0, 0, 0, 0, 0, 0, 0, 0,
-        blocked as i64, 0, 0, 0, 0, 0, // 28-33
+        priority, nice, threads as i64, 0, start as i64, vsize as i64, rss as i64, rsslim as i64, 0, 0, 0, 0, 0,
+        pending as i64, blocked as i64, ignored as i64, caught as i64, 0, 0, 0, // 27-33
         17, 0, 0, 0, 0, 0, 0, // 34-40 (exit_signal, processor, rt_priority, ...)
         0, 0, brk as i64, 0, 0, 0, 0, 0, // 41-48 (start_data, end_data, start_brk, ...)
     ];
@@ -164,6 +197,19 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     copy_into(&out, buf_ptr, buf_cap)
 }
 
+/// The pages of `[start, end)` with a frame in `space`'s page tables. Called with the process
+/// table locked, which every page table change takes.
+fn resident_pages(space: &crate::memory::address_space::AddressSpace, start: u64, end: u64) -> u64 {
+    use x86_64::structures::paging::mapper::{Translate, TranslateResult};
+    let phys_offset = crate::memory::phys_mem_offset();
+    // SAFETY: only read, under the process table's lock.
+    let mapper = unsafe { space.mapper(phys_offset) };
+    (start..end)
+        .step_by(4096)
+        .filter(|&va| matches!(mapper.translate(x86_64::VirtAddr::new(va)), TranslateResult::Mapped { .. }))
+        .count() as u64
+}
+
 /// `/proc/<pid>/map` in FreeBSD procfs's format or, with `linux`, `/proc/<pid>/maps` in Linux's:
 /// one line per entry of the process's map (`vm_map`), the kernel's own pages left out. Paths of
 /// mapped files aren't known yet (FreeBSD's `-`, Linux's blank). `-1` if `pid` is gone.
@@ -179,22 +225,7 @@ pub(crate) extern "C" fn oxidebsd_proc_map(pid: u64, linux: u64, buf_ptr: *mut u
     };
     let entries: Vec<(u64, super::vm_map::VmEntry)> =
         space.vm().map.iter().filter(|(_, e)| e.kind != VmKind::Kernel).map(|(s, e)| (s, *e)).collect();
-    // Resident pages: those with a frame in the page tables.
-    let phys_offset = crate::memory::phys_mem_offset();
-    // SAFETY: only read, under the process table's lock, which every page table change takes.
-    let mapper = unsafe { space.mapper(phys_offset) };
-    let resident = |start: u64, end: u64| -> u64 {
-        use x86_64::structures::paging::mapper::{Translate, TranslateResult};
-        let mut n = 0;
-        let mut va = start;
-        while va < end {
-            if let TranslateResult::Mapped { .. } = mapper.translate(x86_64::VirtAddr::new(va)) {
-                n += 1;
-            }
-            va += 4096;
-        }
-        n
-    };
+    let resident = |start: u64, end: u64| resident_pages(space, start, end);
     let mut out = Vec::new();
     let hex = |out: &mut Vec<u8>, v: u64, width: usize| {
         let digits = b"0123456789abcdef";
@@ -274,6 +305,65 @@ pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_c
         return -1;
     };
     copy_into(&proc.cmdline, buf_ptr, buf_cap)
+}
+
+/// `/proc/<pid>/environ`: the environment the program was started with, in `cmdline`'s format.
+/// Only the process's own user (its real or effective user ID) and root may read it: `-2` for
+/// anyone else, `-1` if `pid` is gone.
+pub(crate) extern "C" fn oxidebsd_proc_environ(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+        return -1;
+    };
+    let owner = {
+        let shared = proc.shared.lock();
+        (shared.cred.ruid, shared.cred.euid)
+    };
+    if !cred.privileged() && cred.euid != owner.0 && cred.euid != owner.1 {
+        return -2;
+    }
+    copy_into(&proc.environ, buf_ptr, buf_cap)
+}
+
+/// `/proc/<pid>/wchan`: what a sleeping thread waits for, by the names the BSDs' `ps -o wchan`
+/// shows, and a newline; `0` for one that isn't asleep. `-1` if `pid` is gone.
+pub(crate) extern "C" fn oxidebsd_proc_wchan(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
+    let cred = identity::current_cred();
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+        return -1;
+    };
+    let name: &[u8] = match proc.state {
+        ProcState::Blocked(reason) => match reason {
+            BlockReason::WaitingForFsLock => b"fslock",
+            BlockReason::WaitingForDisk => b"biord",
+            BlockReason::WaitingForChild(_) => b"wait",
+            BlockReason::WaitingForPipeData(_) => b"piperd",
+            BlockReason::WaitingForPipeSpace(_) => b"pipewr",
+            BlockReason::WaitingForTty(..) => b"ttyin",
+            BlockReason::WaitingForTtyOutput(_) => b"ttyout",
+            BlockReason::Sleeping(_) => b"nanslp",
+            BlockReason::WaitingForSignal => b"pause",
+            BlockReason::Polling(_) => b"select",
+            BlockReason::WaitingForMqData(..) => b"mqrecv",
+            BlockReason::WaitingForMqSpace(..) => b"mqsend",
+            BlockReason::WaitingForSysvMsgSend(_) => b"msgsnd",
+            BlockReason::WaitingForSysvMsgRecv(_) => b"msgrcv",
+            BlockReason::WaitingForFlock(_) => b"flock",
+            BlockReason::WaitingForSemOp(..) => b"semwait",
+            BlockReason::WaitingForSpecificSignal(..) => b"sigwait",
+            BlockReason::WaitingForFutex(..) => b"uwait",
+            BlockReason::WaitingForVforkChild(_) => b"ppwait",
+            #[allow(unreachable_patterns)]
+            _ => b"sleep",
+        },
+        ProcState::Stopped(_) => b"stopevent",
+        _ => b"0",
+    };
+    let mut out = name.to_vec();
+    out.push(b'\n');
+    copy_into(&out, buf_ptr, buf_cap)
 }
 
 /// `/proc/<pid>/oom_adj`: the thread group's OOM adjustment (OxideBSD-doc `COW.md` §6.3), as
@@ -426,5 +516,9 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_global(buf_ptr: *mut u8, buf_cap: u6
     out.extend_from_slice(b"cpu  0 0 0 ");
     push_decimal(&mut out, idle);
     out.extend_from_slice(b" 0 0 0 0\n");
+    // The boot time, in seconds since the Epoch (`kern.boottime`).
+    out.extend_from_slice(b"btime ");
+    push_decimal(&mut out, crate::cpu::rtc::boot_time().0.max(0) as u64);
+    out.push(b'\n');
     copy_into(&out, buf_ptr, buf_cap)
 }
