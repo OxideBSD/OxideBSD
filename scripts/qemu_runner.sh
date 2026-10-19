@@ -87,6 +87,12 @@ case "$TEST_NAME" in
         # FAT12, FAT16 and FAT32 volumes beside the root (scripts/mkmsdostestimg.sh, below).
         MSDOSFS_TEST=1
         ;;
+    cd9660_syscall_smoke)
+        # ISO 9660 discs in IDE CD drives (scripts/mkcd9660testimg.sh, below): all four positions
+        # are CD drives, so the system's disk is virtio-blk.
+        CD9660_TEST=1
+        QEMU_DISK_DEFAULT=virtio
+        ;;
     devfs_syscall_smoke)
         # The disk registry (INSTALLER.md §5.1): more disks than the system's, below.
         DISK_REGISTRY_TEST=1
@@ -195,6 +201,19 @@ if [ "${MSDOSFS_TEST:-0}" = 1 ]; then
     scripts/mkmsdostestimg.sh "$QEMU_DISK_SOURCE"
 fi
 
+if [ "${CD9660_TEST:-0}" = 1 ]; then
+    # ide0: Rock Ridge + Joliet (with an MBR partition 2), ide1: plain ISO 9660, ide2: Joliet
+    # only, ide3: an empty drive (regress/cd9660-syscall-smoke/run.sh).
+    scripts/mkcd9660testimg.sh target/images/cd9660 > /dev/null 2>&1
+    QEMU_EXTRA_ARGS="-drive if=none,id=cd0,media=cdrom,readonly=on,file=target/images/cd9660/rr.iso"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd0,bus=ide.0,unit=0"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=cd1,media=cdrom,readonly=on,file=target/images/cd9660/plain.iso"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd1,bus=ide.0,unit=1"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=cd2,media=cdrom,readonly=on,file=target/images/cd9660/joliet.iso"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd2,bus=ide.1,unit=0"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=cd3,media=cdrom"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=cd3,bus=ide.1,unit=1"
+fi
 if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
     # Two virtio-blk disks (virt0: a GPT with one partition labelled `extra`; virt1: blank) and,
     # on the primary IDE master, a blank 130 GiB disk past LBA28's reach (sparse: it costs no

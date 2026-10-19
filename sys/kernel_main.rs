@@ -323,6 +323,12 @@ pub fn load_file_systems(
     const MSDOSFS_PANIC_SYMBOL: &str = env!("MSDOSFS_MOD_PANIC_SYMBOL");
     crate::module::load("msdosfs", MSDOSFS_MOD, MSDOSFS_PANIC_SYMBOL, false, mapper, frame_allocator)
         .unwrap_or_else(|e| panic!("failed to load the msdosfs module: {e:?}"));
+
+    // ISO 9660 (INSTALLER.md §6): CDs, the install medium. Not fatal on panic either.
+    const CD9660_MOD: &[u8] = include_bytes!(env!("CD9660_MOD_PATH"));
+    const CD9660_PANIC_SYMBOL: &str = env!("CD9660_MOD_PANIC_SYMBOL");
+    crate::module::load("cd9660", CD9660_MOD, CD9660_PANIC_SYMBOL, false, mapper, frame_allocator)
+        .unwrap_or_else(|e| panic!("failed to load the cd9660 module: {e:?}"));
 }
 
 /// For test kernels, which run no `/etc/rc`: mounts the tmpfs on `/dev/shm` that `/etc/fstab`

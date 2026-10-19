@@ -52,6 +52,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd9660"
+version = "0.1.0"
+dependencies = [
+ "cd9660_format",
+ "kern_mod",
+ "vfs_if",
+]
+
+[[package]]
+name = "cd9660-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
+name = "cd9660_format"
+version = "0.1.0"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

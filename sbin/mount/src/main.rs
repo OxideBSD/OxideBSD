@@ -362,6 +362,10 @@ fn main() -> ExitCode {
         };
     }
 
+    // -r and -w for a new mount: the kernel's `ro` and `rw` options (after fstab's, so they win).
+    if mode_given {
+        options.push(String::from(if rdonly { "ro" } else { "rw" }));
+    }
     let result = match rest.as_slice() {
         [] if vfstype.is_none() && options.is_empty() => {
             list();

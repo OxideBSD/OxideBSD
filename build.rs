@@ -417,6 +417,7 @@ fn main() {
     build_userland_crate("tz-syscall-smoke", "TZ_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("kern-syscall-smoke", "KERN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("msdosfs-syscall-smoke", "MSDOSFS_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("cd9660-syscall-smoke", "CD9660_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("devfs-syscall-smoke", "DEVFS_SYSCALL_SMOKE_ELF_PATH");
@@ -1114,6 +1115,7 @@ fn main() {
         "regress/tz-syscall-smoke/run.sh",
         "regress/kern-syscall-smoke/run.sh",
         "regress/msdosfs-syscall-smoke/run.sh",
+        "regress/cd9660-syscall-smoke/run.sh",
         "regress/openssl-syscall-smoke/run.sh",
         "regress/loopback-syscall-smoke/run.sh",
         "regress/devfs-syscall-smoke/run.sh",
@@ -1131,6 +1133,7 @@ fn main() {
     build_module_crate("devfs", "DEVFS", &[]);
     build_module_crate("nullfs", "NULLFS", &[]);
     build_module_crate("msdosfs", "MSDOSFS", &[]);
+    build_module_crate("cd9660", "CD9660", &[]);
     build_sets_and_images(&oxfs_extra_env);
 
     // Multiboot2 boot path (see CLAUDE.md's Multiboot2 section): a genuinely separate final ELF,

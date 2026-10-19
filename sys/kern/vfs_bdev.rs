@@ -9,7 +9,8 @@
 //! raw writes to any device overlapping it are refused then (`EPERM`), since they would go around
 //! its cache (RAM_FLOOR.md §3.4.3, first for the root only).
 //!
-//! Handles are indices into `BDEVS`, which only grows: devices are found at boot.
+//! Handles are indices into `BDEVS`, which only grows: devices are found at boot, and when a CD's
+//! disc changes (`retire` the old partitions').
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, Ordering};
@@ -29,6 +30,8 @@ pub(crate) struct Bdev {
     pub disk: u32,
     /// A file system has it mounted read-write.
     pub mounted_rw: bool,
+    /// Gone (`retire`): kept only so handles stay indices.
+    pub retired: bool,
 }
 
 static BDEVS: Mutex<Vec<Bdev>> = Mutex::new(Vec::new());
@@ -42,13 +45,29 @@ pub(crate) const SECTOR: u64 = 512;
 pub(crate) fn register(name: &str, major: u32, minor: u32, first: u64, sectors: u64, disk: u32) -> u32 {
     let mut bdevs = BDEVS.lock();
     let _ = name; // `/dev`'s name for it, registered with devfs by the disk layer
-    bdevs.push(Bdev { major, minor, first, sectors, disk, mounted_rw: false });
+    bdevs.push(Bdev { major, minor, first, sectors, disk, mounted_rw: false, retired: false });
     (bdevs.len() - 1) as u32
 }
 
 /// The device numbered `major`/`minor` (a `/dev` node's), if any.
 pub(crate) fn find(major: u32, minor: u32) -> Option<u32> {
-    BDEVS.lock().iter().position(|b| b.major == major && b.minor == minor).map(|i| i as u32)
+    BDEVS.lock().iter().position(|b| !b.retired && b.major == major && b.minor == minor).map(|i| i as u32)
+}
+
+/// Device `handle` is gone (a partition of a CD whose disc changed): nothing finds it, and it has
+/// no sectors left to read.
+pub(crate) fn retire(handle: u32) {
+    if let Some(b) = BDEVS.lock().get_mut(handle as usize) {
+        b.retired = true;
+        b.sectors = 0;
+    }
+}
+
+/// Device `handle` (a CD drive's whole disc) now has `sectors` sectors.
+pub(crate) fn set_sectors(handle: u32, sectors: u64) {
+    if let Some(b) = BDEVS.lock().get_mut(handle as usize) {
+        b.sectors = sectors;
+    }
 }
 
 /// `(first sector, sectors, disk)` of device `handle`.

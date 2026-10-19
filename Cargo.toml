@@ -68,6 +68,7 @@ members = [
   "regress/tz-syscall-smoke",
   "regress/kern-syscall-smoke",
   "regress/msdosfs-syscall-smoke",
+  "regress/cd9660-syscall-smoke",
   "regress/openssl-syscall-smoke",
   "regress/loopback-syscall-smoke",
   "regress/devfs-syscall-smoke",
@@ -96,13 +97,14 @@ members = [
   "sys/modules/sysctl",
   "sys/modules/tmpfs",
   "sys/modules/msdosfs",
+  "sys/modules/cd9660",
   "sys/modules/procctl",
   "sys/modules/vfork",
   "sys/modules/alloc_smoke",
   "sys/modules/vfs",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcertstore", "lib/libkern-mod", "lib/libmsdosfs", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
+exclude = ["lib/libcd9660", "lib/libcertstore", "lib/libkern-mod", "lib/libmsdosfs", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
 
 [package]
 name = "oxidebsd"
@@ -454,6 +456,10 @@ harness = false
 
 [[test]]
 name = "msdosfs_syscall_smoke"
+harness = false
+
+[[test]]
+name = "cd9660_syscall_smoke"
 harness = false
 
 [[test]]

@@ -214,6 +214,8 @@ pub(crate) const ERANGE: u64 = 34;
 /// `sys/modules/oxfs`'s own local copy of this constant, used for its unrelated `ENXIO`-on-`open()`
 /// device-node case).
 pub(crate) const ENXIO: u64 = 6;
+/// Opening a CD's raw device for writing (`drivers::disk`). `30` in musl.
+pub(crate) const EROFS: u64 = 30;
 /// A write past the end of a raw disk device (`drivers::disk`). `28` in musl.
 pub(crate) const ENOSPC: u64 = 28;
 /// Returned by `process::mm::do_mmap_file_backed` when a real `off`/`len` combination against a

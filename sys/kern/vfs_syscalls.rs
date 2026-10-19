@@ -1831,7 +1831,9 @@ fn mount_device(from: &[u8], rd: bool, cred: &Ucred) -> Result<u64, i32> {
     if t != VCHR && t != VBLK {
         return Err(ENOTBLK);
     }
-    // musl's `makedev` encoding, as devfs gives it (and `vn_open` reads it).
+    // musl's `makedev` encoding, as devfs gives it (and `vn_open` reads it). A CD drive's disc is
+    // checked first: it may have changed since the last look (`drivers::disk::media_check`).
+    crate::drivers::disk::media_check(vfs_if::major(rdev), vfs_if::minor(rdev));
     let handle = crate::kern::vfs_bdev::find(vfs_if::major(rdev), vfs_if::minor(rdev)).ok_or(ENXIO)?;
     if vfs_mount::dev_in_use(handle as u64) {
         return Err(EBUSY);

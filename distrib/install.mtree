@@ -48,6 +48,8 @@
 ./usr/tests/kern/kern-smoke type=file src=artifact:OXFS_KERN_SMOKE_ELF_PATH
 ./usr/tests/msdosfs type=dir
 ./usr/tests/msdosfs/run.sh type=file src=regress/msdosfs-syscall-smoke/run.sh
+./usr/tests/cd9660 type=dir
+./usr/tests/cd9660/run.sh type=file src=regress/cd9660-syscall-smoke/run.sh
 ./usr/tests/openssl type=dir
 ./usr/tests/openssl/run.sh type=file src=regress/openssl-syscall-smoke/run.sh
 ./usr/tests/openssl/openssl-smoke type=file src=artifact:OXFS_OPENSSL_SMOKE_ELF_PATH
@@ -489,6 +491,7 @@
 ./usr/share/man/man4/pts.4 type=file src=share/man/man4/pts.4
 ./usr/share/man/man4/unix.4 type=file src=share/man/man4/unix.4
 ./usr/share/man/man5 type=dir
+./usr/share/man/man5/cd9660.5 type=file src=share/man/man5/cd9660.5
 ./usr/share/man/man5/devfs.5 type=file src=share/man/man5/devfs.5
 ./usr/share/man/man5/devfs.conf.5 type=file src=share/man/man5/devfs.conf.5
 ./usr/share/man/man5/fsconf.5 type=file src=share/man/man5/fsconf.5

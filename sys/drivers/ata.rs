@@ -22,8 +22,13 @@
 //! master, primary slave, secondary master, secondary slave (`ide0`, `ide1`, ...). Each channel
 //! with a disk gets its own bus-master DMA (`init_dma`); the two drives on a channel share it, and
 //! every command on a channel holds its lock. Commands are LBA28 where they fit and LBA48 above
-//! (on drives that support it), so disks past 128 GiB work. ATAPI drives answer as such and are
-//! logged; they aren't driven yet (INSTALLER.md §11, step 2).
+//! (on drives that support it), so disks past 128 GiB work.
+//!
+//! **ATAPI** (optical drives, INSTALLER.md §5.3): a packet device is registered as a CD, with its
+//! own counter position among the disks. Its commands are SCSI ones (MMC) sent as a 12-byte
+//! packet through the `PACKET` command, data moved by PIO in blocks of up to 31 sectors (the byte
+//! count limit), read-only: `TEST UNIT READY` (with `REQUEST SENSE` to tell "no disc" from
+//! "becoming ready"), `READ CAPACITY(10)`, `READ(10)` and `PREVENT ALLOW MEDIUM REMOVAL`.
 
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
@@ -60,6 +65,9 @@ pub enum AtaError {
     /// The sectors asked for lie past the drive's end, or past what its addressing reaches (LBA28
     /// on a drive without LBA48).
     OutOfRange,
+    /// A packet command failed: the SCSI sense key, additional sense code and qualifier
+    /// (`REQUEST SENSE`).
+    Sense(u8, u8, u8),
 }
 
 /// A channel's ports. Reading its status register (`io_base + 7`) acknowledges the drive's pending
@@ -128,6 +136,11 @@ const CMD_WRITE_DMA_EXT: u8 = 0x35;
 const CMD_CACHE_FLUSH: u8 = 0xE7;
 const CMD_CACHE_FLUSH_EXT: u8 = 0xEA;
 const CMD_IDENTIFY: u8 = 0xEC;
+const CMD_PACKET: u8 = 0xA0;
+const CMD_IDENTIFY_PACKET: u8 = 0xA1;
+
+/// The error register (read) and features register (write).
+const REG_ERROR_FEATURES: u16 = 1;
 
 /// LBA28's reach: sectors below this address with the short command forms.
 const LBA28_LIMIT: u64 = 1 << 28;
@@ -141,13 +154,20 @@ const TIMEOUT_MS: u64 = 3000;
 /// What `IDENTIFY` told of one position's drive, set once by `init`.
 struct DriveInfo {
     present: AtomicBool,
+    /// A packet (ATAPI) device: an optical drive.
+    atapi: AtomicBool,
     lba48: AtomicBool,
     /// Its size in 512-byte sectors (the LBA48 count where it has one).
     sectors: AtomicU64,
 }
 
 static DRIVES: [DriveInfo; 4] = [const {
-    DriveInfo { present: AtomicBool::new(false), lba48: AtomicBool::new(false), sectors: AtomicU64::new(0) }
+    DriveInfo {
+        present: AtomicBool::new(false),
+        atapi: AtomicBool::new(false),
+        lba48: AtomicBool::new(false),
+        sectors: AtomicU64::new(0),
+    }
 }; 4];
 /// Each drive's model string (`IDENTIFY` words 27-46), for `kern.disk.<name>.model`.
 static MODELS: Mutex<[Option<String>; 4]> = Mutex::new([const { None }; 4]);
@@ -392,15 +412,16 @@ enum Identified {
     Nothing,
     /// An ATA disk: its size in sectors, whether it speaks LBA48, its model.
     Ata { sectors: u64, lba48: bool, model: String },
-    /// A packet (ATAPI) device: an optical drive, not driven yet.
-    Atapi,
+    /// A packet (ATAPI) device: an optical drive, and its model.
+    Atapi { model: String },
 }
 
 /// Issues `IDENTIFY` against `channel`/`drive`. An ATA drive answers with 256 words: its capacity
 /// (words 60-61, or 100-103 with LBA48, word 83 bit 10), its model (words 27-46, two characters
 /// per word, high byte first). The whole payload is drained either way: the data port must be
 /// emptied to leave the channel clean for the next command. A packet device aborts the command
-/// and leaves its signature (`0x14`/`0xEB`, SATA's `0x69`/`0x96`) in the LBA mid/high registers.
+/// and leaves its signature (`0x14`/`0xEB`, SATA's `0x69`/`0x96`) in the LBA mid/high registers;
+/// `IDENTIFY PACKET DEVICE` then gives the same 256 words for it.
 fn identify(channel: Channel, drive: Drive) -> Identified {
     let p = ports(channel);
     select(&p, drive, 0xA0);
@@ -426,27 +447,45 @@ fn identify(channel: Channel, drive: Drive) -> Identified {
     };
     match signature {
         (0, 0) => {}
-        (0x14, 0xEB) | (0x69, 0x96) => return Identified::Atapi,
+        (0x14, 0xEB) | (0x69, 0x96) => {
+            select(&p, drive, 0xA0);
+            command(channel, CMD_IDENTIFY_PACKET);
+            return match identify_words(&p) {
+                Some(words) => Identified::Atapi { model: model_of(&words) },
+                None => Identified::Atapi { model: String::new() },
+            };
+        }
         _ => return Identified::Nothing,
     }
-    if wait_for_data(p.io_base).is_err() {
+    let Some(words) = identify_words(&p) else {
         return Identified::Nothing;
-    }
-    let mut words = [0u16; 256];
-    // SAFETY: draining the IDENTIFY payload the drive just signalled ready.
-    unsafe { insw(p.io_base + REG_DATA, words.as_mut_ptr() as *mut u8, 256) };
+    };
     let lba48 = words[83] & (1 << 10) != 0;
     let sectors = if lba48 {
         (0..4).fold(0u64, |acc, i| acc | (words[100 + i] as u64) << (16 * i))
     } else {
         words[60] as u64 | (words[61] as u64) << 16
     };
+    Identified::Ata { sectors, lba48, model: model_of(&words) }
+}
+
+/// The 256 words an `IDENTIFY` (or `IDENTIFY PACKET DEVICE`) just issued returns.
+fn identify_words(p: &ChannelPorts) -> Option<[u16; 256]> {
+    wait_for_data(p.io_base).ok()?;
+    let mut words = [0u16; 256];
+    // SAFETY: draining the payload the drive just signalled ready.
+    unsafe { insw(p.io_base + REG_DATA, words.as_mut_ptr() as *mut u8, 256) };
+    Some(words)
+}
+
+/// The model string in identify words 27-46, two characters per word, high byte first.
+fn model_of(words: &[u16; 256]) -> String {
     let model: String = words[27..47]
         .iter()
         .flat_map(|w| [(w >> 8) as u8, *w as u8])
         .map(|b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' })
         .collect();
-    Identified::Ata { sectors, lba48, model: String::from(model.trim()) }
+    String::from(model.trim())
 }
 
 /// Probes all four legacy channel/drive combinations via `IDENTIFY`, logging each. Never panics on
@@ -469,8 +508,10 @@ pub fn init() {
                 d.present.store(true, Ordering::Relaxed);
                 MODELS.lock()[i] = Some(model);
             }
-            Identified::Atapi => {
-                serial_println!("[boot] ata: {}: ATAPI device (not driven yet)", LABELS[i]);
+            Identified::Atapi { model } => {
+                serial_println!("[boot] ata: {}: ATAPI, \"{}\"", LABELS[i], model);
+                info(channel, drive).atapi.store(true, Ordering::Relaxed);
+                MODELS.lock()[i] = Some(model);
             }
             Identified::Nothing => {
                 serial_println!("[boot] ata: {} not present", LABELS[i]);
@@ -482,6 +523,11 @@ pub fn init() {
 /// Whether an ATA disk at `channel`/`drive` answered `IDENTIFY` at boot.
 pub fn present(channel: Channel, drive: Drive) -> bool {
     info(channel, drive).present.load(Ordering::Relaxed)
+}
+
+/// Whether an ATAPI (optical) drive at `channel`/`drive` answered at boot.
+pub fn atapi_present(channel: Channel, drive: Drive) -> bool {
+    info(channel, drive).atapi.load(Ordering::Relaxed)
 }
 
 /// The disk's size in 512-byte sectors (`0` for none).
@@ -532,6 +578,176 @@ fn check_range(channel: Channel, drive: Drive, lba: u64, len: usize) -> Result<(
         return Err(AtaError::OutOfRange);
     }
     Ok(())
+}
+
+// --- ATAPI ------------------------------------------------------------------------------------
+
+/// A CD's sector size.
+pub const CD_SECTOR: usize = 2048;
+/// Sectors per `READ(10)`, and the byte count limit of one data block: 31 * 2048 = 63488, under
+/// the register pair's 65534.
+const ATAPI_MAX_SECTORS: usize = 31;
+/// A packet command's budget: a drive spinning a disc up takes seconds.
+const ATAPI_TIMEOUT_MS: u64 = 10_000;
+/// How long `atapi_capacity` waits for a drive whose disc is "becoming ready".
+const ATAPI_READY_MS: u64 = 8_000;
+
+const SCSI_TEST_UNIT_READY: u8 = 0x00;
+const SCSI_REQUEST_SENSE: u8 = 0x03;
+const SCSI_PREVENT_ALLOW_MEDIUM_REMOVAL: u8 = 0x1E;
+const SCSI_READ_CAPACITY_10: u8 = 0x25;
+const SCSI_READ_10: u8 = 0x28;
+
+const SENSE_NOT_READY: u8 = 0x02;
+const SENSE_UNIT_ATTENTION: u8 = 0x06;
+/// Additional sense code "medium not present".
+const ASC_NO_MEDIUM: u8 = 0x3A;
+
+/// Polls the status until `BSY` clears, bounded by `ms`.
+fn wait_not_busy(io_base: u16, ms: u64) -> Result<u8, AtaError> {
+    let deadline = crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(ms);
+    loop {
+        let status = read_status(io_base);
+        if status == 0xFF {
+            return Err(AtaError::NoDevice);
+        }
+        if status & STATUS_BSY == 0 {
+            return Ok(status);
+        }
+        if crate::cpu::tsc::now() >= deadline {
+            return Err(AtaError::Timeout);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Sends `cdb` to the packet device at `channel`/`drive` and reads what it returns into `data`
+/// (at most `data.len()` bytes; any more is drained and dropped), by PIO, the channel's lock held
+/// by the caller. The bytes read, or the sense of a failed command.
+fn packet_locked(channel: Channel, drive: Drive, cdb: &[u8; 12], data: &mut [u8]) -> Result<usize, AtaError> {
+    let p = ports(channel);
+    select(&p, drive, 0xA0);
+    wait_not_busy(p.io_base, ATAPI_TIMEOUT_MS)?;
+    let limit = (ATAPI_MAX_SECTORS * CD_SECTOR) as u16;
+    unsafe {
+        Port::<u8>::new(p.io_base + REG_ERROR_FEATURES).write(0); // PIO, no overlap
+        Port::<u8>::new(p.io_base + REG_LBA_MID).write(limit as u8);
+        Port::<u8>::new(p.io_base + REG_LBA_HIGH).write((limit >> 8) as u8);
+    }
+    command(channel, CMD_PACKET);
+    let status = wait_not_busy(p.io_base, ATAPI_TIMEOUT_MS)?;
+    if status & STATUS_ERR != 0 {
+        return Err(sense_from_error(&p));
+    }
+    if status & STATUS_DRQ == 0 {
+        return Err(AtaError::DeviceError(status));
+    }
+    // SAFETY: the drive asked for the packet (DRQ); a 12-byte CDB is six words.
+    unsafe { outsw(p.io_base + REG_DATA, cdb.as_ptr(), 6) };
+    let mut done = 0;
+    loop {
+        // 400 ns before the status means anything.
+        for _ in 0..4 {
+            unsafe { Port::<u8>::new(p.control).read() };
+        }
+        let status = wait_not_busy(p.io_base, ATAPI_TIMEOUT_MS)?;
+        if status & STATUS_ERR != 0 {
+            return Err(sense_from_error(&p));
+        }
+        if status & STATUS_DRQ == 0 {
+            return Ok(done);
+        }
+        let count = unsafe {
+            Port::<u8>::new(p.io_base + REG_LBA_MID).read() as usize
+                | (Port::<u8>::new(p.io_base + REG_LBA_HIGH).read() as usize) << 8
+        };
+        let words = count.div_ceil(2);
+        let take = words.min((data.len() - done) / 2);
+        // SAFETY: the drive has `count` bytes ready; `take` words fit in `data`.
+        unsafe { insw(p.io_base + REG_DATA, data[done..].as_mut_ptr(), take) };
+        for _ in take..words {
+            unsafe { Port::<u16>::new(p.io_base + REG_DATA).read() };
+        }
+        done += take * 2;
+    }
+}
+
+/// The sense key a failed packet command left in the error register's high nibble (no ASC: the
+/// caller asks `REQUEST SENSE` when it needs one).
+fn sense_from_error(p: &ChannelPorts) -> AtaError {
+    let error = unsafe { Port::<u8>::new(p.io_base + REG_ERROR_FEATURES).read() };
+    AtaError::Sense(error >> 4, 0, 0)
+}
+
+/// `packet_locked` under the channel's lock; a failed command's sense filled in by `REQUEST
+/// SENSE`.
+fn packet(channel: Channel, drive: Drive, cdb: &[u8; 12], data: &mut [u8]) -> Result<usize, AtaError> {
+    let _guard = CHANNELS[channel_index(channel)].lock();
+    match packet_locked(channel, drive, cdb, data) {
+        Err(AtaError::Sense(key, _, _)) => {
+            let mut sense = [0u8; 18];
+            let cdb = [SCSI_REQUEST_SENSE, 0, 0, 0, sense.len() as u8, 0, 0, 0, 0, 0, 0, 0];
+            match packet_locked(channel, drive, &cdb, &mut sense) {
+                Ok(n) if n >= 14 => Err(AtaError::Sense(sense[2] & 0x0F, sense[12], sense[13])),
+                _ => Err(AtaError::Sense(key, 0, 0)),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Whether a disc is in the drive and readable, and if so its size: `(sectors, sector size)` from
+/// `READ CAPACITY(10)`; and whether the drive reported a unit attention (the disc changed, or the
+/// drive was reset) since it was last asked. Waits out a disc spinning up; `None` at once for an
+/// empty drive.
+pub fn atapi_capacity(channel: Channel, drive: Drive) -> (Option<(u64, u32)>, bool) {
+    let deadline = crate::cpu::tsc::now() + crate::cpu::tsc::ms_to_cycles(ATAPI_READY_MS);
+    let mut changed = false;
+    loop {
+        match packet(channel, drive, &[SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &mut []) {
+            Ok(_) => break,
+            Err(AtaError::Sense(SENSE_UNIT_ATTENTION, _, _)) if crate::cpu::tsc::now() < deadline => changed = true,
+            Err(AtaError::Sense(SENSE_NOT_READY, ASC_NO_MEDIUM, _)) => return (None, changed),
+            Err(AtaError::Sense(SENSE_NOT_READY, _, _)) if crate::cpu::tsc::now() < deadline => {
+                core::hint::spin_loop();
+            }
+            Err(_) => return (None, changed),
+        }
+    }
+    let mut cap = [0u8; 8];
+    let cdb = [SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    match packet(channel, drive, &cdb, &mut cap) {
+        Ok(8) => {}
+        _ => return (None, changed),
+    }
+    let last = u32::from_be_bytes(cap[0..4].try_into().unwrap()) as u64;
+    let size = u32::from_be_bytes(cap[4..8].try_into().unwrap());
+    // Some drives report 2352 (raw) or 0 for a data disc; READ(10) moves 2048-byte sectors.
+    // A sector size other than 512's multiples up to 2048 isn't a data disc's.
+    let size = if size == 0 || size > CD_SECTOR as u32 || size % 512 != 0 { CD_SECTOR as u32 } else { size };
+    (Some((last + 1, size)), changed)
+}
+
+/// Reads whole 2048-byte sectors from `lba` into `buf`, one `READ(10)` per `ATAPI_MAX_SECTORS`.
+pub fn atapi_read(channel: Channel, drive: Drive, lba: u64, buf: &mut [u8]) -> Result<(), AtaError> {
+    for (i, chunk) in buf.chunks_mut(ATAPI_MAX_SECTORS * CD_SECTOR).enumerate() {
+        let at = lba + (i * ATAPI_MAX_SECTORS) as u64;
+        let count = (chunk.len() / CD_SECTOR) as u16;
+        let at32 = u32::try_from(at).map_err(|_| AtaError::OutOfRange)?;
+        let a = at32.to_be_bytes();
+        let c = count.to_be_bytes();
+        let cdb = [SCSI_READ_10, 0, a[0], a[1], a[2], a[3], 0, c[0], c[1], 0, 0, 0];
+        if packet(channel, drive, &cdb, chunk)? != chunk.len() {
+            return Err(AtaError::DeviceError(0));
+        }
+    }
+    Ok(())
+}
+
+/// Locks (`true`) or unlocks the drive's tray: a mounted disc can't be ejected from the drive.
+pub fn atapi_lock(channel: Channel, drive: Drive, lock: bool) {
+    let cdb = [SCSI_PREVENT_ALLOW_MEDIUM_REMOVAL, 0, 0, 0, lock as u8, 0, 0, 0, 0, 0, 0, 0];
+    let _ = packet(channel, drive, &cdb, &mut []);
 }
 
 // --- bus-master DMA --------------------------------------------------------------------------

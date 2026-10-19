@@ -32,12 +32,13 @@ required -- probe it and keep a fallback.
   via musl's `ld.so`), ring 3, a native BSD-style syscall ABI over `SYSCALL`/`SYSRETQ`.
 - Syscalls are registered at runtime by dynamically loaded kernel modules (`sys/module.rs`,
   `sys/modules/*`): `native_abi`, `posix_compat`, `signal`, `vfs`, `oxfs`, `procfs`, `socket`,
-  `clock`, `sysctl`, `msdosfs`.
+  `clock`, `sysctl`, `msdosfs`, `cd9660`.
 - A BSD vnode VFS (`OxideBSD-doc/VFS.md`, `sys/kern/vfs_*.rs`): the kernel's `namei`, name cache,
   mounts and path system calls; file systems are modules serving vnode operations. oxfs
   (`sys/modules/oxfs`): the disk's Unix inode/block file system; tmpfs, devfs (`/dev`), procfs
-  (`/proc`), nullfs (layered over any type through the kernel's `oxidebsd_vop_*`) and msdosfs
-  (FAT12/16/32; `/boot/efi` on disks with an ESP) are modules of their own.
+  (`/proc`), nullfs (layered over any type through the kernel's `oxidebsd_vop_*`), msdosfs
+  (FAT12/16/32; `/boot/efi` on disks with an ESP) and cd9660 (ISO 9660, read-only, over
+  `lib/libcd9660`) are modules of their own.
 - Process table, round-robin scheduler with ring-3 preemption, fork/execve/wait4, real threads
   (`clone`/futex), signals, job control, ttys (`sys/tty`), SysV + POSIX IPC.
 - Networking: rtl8139, Ethernet/ARP/IPv4/ICMP/UDP/TCP, `AF_UNIX`, poll/select, DNS via musl.

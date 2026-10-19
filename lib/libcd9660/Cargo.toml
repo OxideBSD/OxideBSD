@@ -1,0 +1,10 @@
+[package]
+name = "cd9660_format"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# ISO 9660's on-disk format with Rock Ridge and Joliet, for the kernel's cd9660 module. No
+# dependencies; its own workspace, testable on the host, like lib/libmsdosfs.
+[workspace]

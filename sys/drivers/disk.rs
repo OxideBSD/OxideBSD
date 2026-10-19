@@ -39,6 +39,7 @@ use crate::serial_println;
 #[derive(Clone, Copy)]
 enum Backend {
     Ata(Channel, Drive),
+    Atapi(Channel, Drive),
     Virtio(usize),
     Memory,
 }
@@ -71,6 +72,13 @@ struct Disk {
     /// Its own sector size in bytes, a multiple of 512.
     sector_size: u32,
     model: String,
+    /// Its device numbers' major and unit (minor `unit << 8`), and the whole disk's block device.
+    major: u32,
+    unit: u32,
+    whole: u32,
+    /// The block devices and `/dev` nodes (`major`, `minor`) of its partitions and their labels,
+    /// replaced when a CD's disc changes (`media_check`).
+    parts: Vec<(u32, u32, u32)>,
 }
 
 /// Every disk, in registration order: a disk's index here is its number for `kern::vfs_bdev`.
@@ -92,9 +100,19 @@ static NEXT_LABEL_MINOR: AtomicU32 = AtomicU32::new(0);
 static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, u32>> = Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Adds a disk to the registry; its index.
-fn register(name: String, backend: Backend, kind: Kind, sectors: u64, sector_size: u32, model: String) -> u32 {
+fn register(
+    name: String,
+    backend: Backend,
+    kind: Kind,
+    sectors: u64,
+    sector_size: u32,
+    model: String,
+    major: u32,
+    unit: u32,
+) -> u32 {
     let mut disks = DISKS.lock();
-    disks.push(Disk { name: name.clone(), backend, kind, sectors, sector_size, model });
+    let disk = Disk { name: name.clone(), backend, kind, sectors, sector_size, model, major, unit, whole: 0, parts: Vec::new() };
+    disks.push(disk);
     let index = (disks.len() - 1) as u32;
     drop(disks);
     crate::kern::kern_sysctl::disk_registered(name, index);
@@ -111,27 +129,37 @@ pub fn init(
     let mut found = Vec::new();
     for (unit, sectors) in super::virtio_blk::init(frame_allocator, mapper, phys_mem_offset).into_iter().enumerate() {
         let name = alloc::format!("virt{unit}");
-        let disk = register(name.clone(), Backend::Virtio(unit), Kind::Disk, sectors, 512, String::from("virtio-blk"));
-        found.push((disk, name, VIRTIO_MAJOR, unit as u32));
+        let model = String::from("virtio-blk");
+        found.push(register(name, Backend::Virtio(unit), Kind::Disk, sectors, 512, model, VIRTIO_MAJOR, unit as u32));
     }
     super::ata::init();
     super::ata::init_dma(frame_allocator, phys_mem_offset);
     let mut unit = 0;
     for (channel, drive) in super::ata::POSITIONS {
-        if !super::ata::present(channel, drive) {
+        let name = alloc::format!("ide{unit}");
+        let model = super::ata::model(channel, drive);
+        if super::ata::present(channel, drive) {
+            let sectors = super::ata::capacity_sectors(channel, drive);
+            found.push(register(name, Backend::Ata(channel, drive), Kind::Disk, sectors, 512, model, IDE_MAJOR, unit));
+        } else if super::ata::atapi_present(channel, drive) {
+            // Empty, or a disc: its size now, checked again at each open (`media_check`).
+            let (sectors, size) = cd_capacity(channel, drive).0;
+            if sectors == 0 {
+                serial_println!("[boot] disk: {}: CD drive, no disc", name);
+            } else {
+                serial_println!("[boot] disk: {}: CD drive, disc of {} MiB", name, sectors / 2048);
+            }
+            let disk = register(name, Backend::Atapi(channel, drive), Kind::Cd, sectors, size, model, IDE_MAJOR, unit);
+            found.push(disk);
+        } else {
             continue;
         }
-        let name = alloc::format!("ide{unit}");
-        let sectors = super::ata::capacity_sectors(channel, drive);
-        let model = super::ata::model(channel, drive);
-        let disk = register(name.clone(), Backend::Ata(channel, drive), Kind::Disk, sectors, 512, model);
-        found.push((disk, name, IDE_MAJOR, unit));
         unit += 1;
     }
 
     let mut parts = Vec::new();
-    for (disk, name, major, unit) in found {
-        attach(disk, &name, major, unit, &mut parts);
+    for disk in found {
+        attach(disk, &mut parts);
     }
     // oxfs's 4 KiB blocks: its partition must start on one (`Partition::blocks`).
     match choose_root(&parts).and_then(|r| Some((r, r.part.blocks()?))) {
@@ -155,14 +183,38 @@ struct Found {
     part: Partition,
 }
 
-/// Reads disk `disk`'s partition table and registers the disk's block devices and raw `/dev`
-/// nodes; adds its partitions to `parts`.
-fn attach(disk: u32, name: &str, major: u32, unit: u32, parts: &mut Vec<Found>) {
+/// Registers disk `disk`'s block device and raw `/dev` node, then its partitions'
+/// (`attach_partitions`), adding them to `parts`.
+fn attach(disk: u32, parts: &mut Vec<Found>) {
     use crate::kern::vfs_bdev;
-    let sectors = DISKS.lock()[disk as usize].sectors;
-    let minor = unit << 8;
-    vfs_bdev::register(name, major, minor, 0, sectors, disk);
-    let _ = crate::fs::devfs::make_dev(name, major, minor, 0, 0, 0o600, raw_open);
+    let (name, major, minor, sectors) = {
+        let d = &DISKS.lock()[disk as usize];
+        (d.name.clone(), d.major, d.unit << 8, d.sectors)
+    };
+    let whole = vfs_bdev::register(&name, major, minor, 0, sectors, disk);
+    DISKS.lock()[disk as usize].whole = whole;
+    let _ = crate::fs::devfs::make_dev(&name, major, minor, 0, 0, 0o600, raw_open);
+    attach_partitions(disk, parts);
+}
+
+/// The size of the disc in a CD drive, `(512-byte sectors, sector size)` (`(0, 2048)` when it's
+/// empty), and whether the disc changed since the drive was last asked.
+fn cd_capacity(channel: Channel, drive: Drive) -> ((u64, u32), bool) {
+    let (capacity, changed) = super::ata::atapi_capacity(channel, drive);
+    let capacity = capacity.map_or((0, super::ata::CD_SECTOR as u32), |(n, size)| (n * (size as u64 / 512), size));
+    (capacity, changed)
+}
+
+/// Reads disk `disk`'s partition table and registers each partition's block device and raw `/dev`
+/// node (and its label's), adding them to `parts`. A CD's table is read as a USB stick's would be:
+/// a hybrid image's MBR or GPT counts 512-byte sectors.
+fn attach_partitions(disk: u32, parts: &mut Vec<Found>) {
+    use crate::kern::vfs_bdev;
+    let (name, major, minor, sectors) = {
+        let d = &DISKS.lock()[disk as usize];
+        (d.name.clone(), d.major, d.unit << 8, d.sectors)
+    };
+    let mut nodes = Vec::new();
     let mut head = alloc::vec![0u8; 5 * 4096];
     let table = if read_sectors(disk, 0, &mut head) { super::part::read(&head) } else { Vec::new() };
     for p in table {
@@ -173,16 +225,81 @@ fn attach(disk: u32, name: &str, major: u32, unit: u32, parts: &mut Vec<Found>) 
         let dev = alloc::format!("{name}{}", p.suffix());
         let handle = vfs_bdev::register(&dev, major, minor | p.index, p.first_lba, p.sectors, disk);
         let _ = crate::fs::devfs::make_dev(&dev, major, minor | p.index, 0, 0, 0o600, raw_open);
+        nodes.push((handle, major, minor | p.index));
         if let Some(label) = &p.label {
             let label_dev = alloc::format!("gpt/{label}");
             let label_minor = NEXT_LABEL_MINOR.fetch_add(1, Ordering::Relaxed);
             if crate::fs::devfs::make_dev(&label_dev, GPT_LABEL_MAJOR, label_minor, 0, 0, 0o600, raw_open).is_ok() {
-                vfs_bdev::register(&label_dev, GPT_LABEL_MAJOR, label_minor, p.first_lba, p.sectors, disk);
+                let h = vfs_bdev::register(&label_dev, GPT_LABEL_MAJOR, label_minor, p.first_lba, p.sectors, disk);
+                nodes.push((h, GPT_LABEL_MAJOR, label_minor));
             } else {
                 serial_println!("[boot] disk: {}: label {} is taken -- only {} names it", name, label_dev, dev);
             }
         }
         parts.push(Found { name: dev, handle, part: p });
+    }
+    DISKS.lock()[disk as usize].parts = nodes;
+}
+
+/// Before device `major`/`minor` is opened or mounted: if it's on a CD drive and nothing on the
+/// drive is mounted, asks the drive whether its disc changed (or came or went), and if so takes
+/// the new size and partitions, the old partitions' devices gone (their open descriptors read
+/// nothing more). INSTALLER.md §5.3: discs change without a reboot.
+pub(crate) fn media_check(major: u32, minor: u32) {
+    use crate::kern::vfs_bdev;
+    let Some((_, _, disk)) = vfs_bdev::find(major, minor).and_then(vfs_bdev::extent) else { return };
+    let (backend, whole, old_parts, old_sectors) = {
+        let disks = DISKS.lock();
+        let Some(d) = disks.get(disk as usize) else { return };
+        (d.backend, d.whole, d.parts.clone(), d.sectors)
+    };
+    let Backend::Atapi(channel, drive) = backend else { return };
+    let in_use = core::iter::once(whole)
+        .chain(old_parts.iter().map(|&(h, _, _)| h))
+        .any(|h| crate::kern::vfs_mount::dev_in_use(h as u64));
+    if in_use {
+        return;
+    }
+    let ((sectors, size), changed) = cd_capacity(channel, drive);
+    if !changed && sectors == old_sectors {
+        return;
+    }
+    for &(handle, major, minor) in &old_parts {
+        vfs_bdev::retire(handle);
+        let _ = crate::fs::devfs::destroy_dev(major, minor);
+    }
+    {
+        let mut disks = DISKS.lock();
+        let d = &mut disks[disk as usize];
+        d.sectors = sectors;
+        d.sector_size = size;
+        d.parts.clear();
+    }
+    vfs_bdev::set_sectors(whole, sectors);
+    let name = DISKS.lock()[disk as usize].name.clone();
+    if sectors == 0 {
+        serial_println!("[disk] {}: no disc", name);
+    } else {
+        serial_println!("[disk] {}: disc of {} MiB", name, sectors / 2048);
+    }
+    attach_partitions(disk, &mut Vec::new());
+}
+
+/// A file system mounted (`true`) or unmounted device `handle` (called once the mount list says
+/// so): a CD drive's tray is locked while anything on it is mounted.
+pub(crate) fn mounted(handle: u32, mounted: bool) {
+    let Some((_, _, disk)) = crate::kern::vfs_bdev::extent(handle) else { return };
+    let (backend, whole, parts) = {
+        let disks = DISKS.lock();
+        let Some(d) = disks.get(disk as usize) else { return };
+        (d.backend, d.whole, d.parts.clone())
+    };
+    let Backend::Atapi(channel, drive) = backend else { return };
+    let still = core::iter::once(whole)
+        .chain(parts.iter().map(|&(h, _, _)| h))
+        .any(|h| crate::kern::vfs_mount::dev_in_use(h as u64));
+    if mounted || !still {
+        super::ata::atapi_lock(channel, drive, mounted);
     }
 }
 
@@ -224,7 +341,8 @@ fn choose_root(parts: &[Found]) -> Option<&Found> {
 pub fn init_memory(phys_mem_offset: VirtAddr) {
     let blocks = crate::memory::usable_ram_bytes() / 4 / 4096;
     super::md::init(blocks, phys_mem_offset);
-    let disk = register(String::from("md0"), Backend::Memory, Kind::Memory, blocks * 8, 512, String::from("memory disk"));
+    let model = String::from("memory disk");
+    let disk = register(String::from("md0"), Backend::Memory, Kind::Memory, blocks * 8, 512, model, 0, 0);
     let handle = crate::kern::vfs_bdev::register("md0", 0, 0, 0, blocks * 8, disk);
     crate::kern::vfs_bdev::set_root(handle);
     serial_println!(
@@ -269,6 +387,7 @@ fn backend(disk: u32) -> Option<(Backend, u64)> {
 fn device_read(backend: Backend, lba: u64, buf: &mut [u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::read_disk_sectors(channel, drive, lba, buf).is_ok(),
+        Backend::Atapi(channel, drive) => super::ata::atapi_read(channel, drive, lba, buf).is_ok(),
         Backend::Virtio(unit) => super::virtio_blk::read_sectors(unit, lba, buf),
         Backend::Memory => super::md::read_sectors(lba, buf),
     }
@@ -278,6 +397,7 @@ fn device_read(backend: Backend, lba: u64, buf: &mut [u8]) -> bool {
 fn device_write(backend: Backend, lba: u64, buf: &[u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::write_disk_sectors(channel, drive, lba, buf).is_ok(),
+        Backend::Atapi(..) => false, // read-only
         Backend::Virtio(unit) => super::virtio_blk::write_sectors(unit, lba, buf),
         Backend::Memory => super::md::write_sectors(lba, buf),
     }
@@ -350,14 +470,22 @@ fn overlaps_mounted(handle: u32) -> bool {
         .is_some_and(|(first, sectors, disk)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, disk))
 }
 
-/// Opens raw device `major:minor`. Writing is refused (`EPERM`) for a device overlapping one a
-/// file system has mounted read-write: the writes would go around its cache (RAM_FLOOR.md
+/// Opens raw device `major:minor` (a CD drive's disc checked first, `media_check`). Writing is
+/// refused on a CD (`EROFS`), and (`EPERM`) for a device overlapping one a file system has mounted
+/// read-write: the writes would go around its cache (RAM_FLOOR.md
 /// §3.4.3). `fsck_oxfs` writes the root while it's read-only.
 extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
     const O_ACCMODE: u64 = 3;
+    media_check(major as u32, minor as u32);
     let Some(handle) = crate::kern::vfs_bdev::find(major as u32, minor as u32) else {
         return -(crate::syscall::ENXIO as i64);
     };
+    let read_only = crate::kern::vfs_bdev::extent(handle)
+        .and_then(|(_, _, disk)| backend(disk))
+        .is_some_and(|(b, _)| matches!(b, Backend::Atapi(..)));
+    if flags & O_ACCMODE != 0 && read_only {
+        return -(crate::syscall::EROFS as i64);
+    }
     if flags & O_ACCMODE != 0 && overlaps_mounted(handle) {
         return -(crate::syscall::EPERM as i64);
     }

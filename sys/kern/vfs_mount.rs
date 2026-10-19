@@ -353,6 +353,11 @@ pub(crate) fn domount(
     crate::kern::vfs_subr::vrele(root);
     note_device(mp);
     MOUNTS.lock().push(mp as usize);
+    // SAFETY: as above.
+    let dev = unsafe { (*mp).mnt_dev };
+    if dev != NODEV {
+        crate::drivers::disk::mounted(dev as u32, true); // a CD drive's tray locks
+    }
     Ok(())
 }
 
@@ -402,6 +407,11 @@ pub(crate) fn dounmount(mp: *mut Mount, flags: u64) -> Result<(), i32> {
     }
     crate::kern::vfs_subr::vrele(covered);
     MOUNTS.lock().retain(|&m| m != mp as usize);
+    // SAFETY: as above.
+    let dev = unsafe { (*mp).mnt_dev };
+    if dev != NODEV {
+        crate::drivers::disk::mounted(dev as u32, false);
+    }
     mount_free(mp);
     Ok(())
 }
@@ -534,6 +544,11 @@ fn force_unmount(mp: *mut Mount) {
         }
     }
     MOUNTS.lock().retain(|&m| m != mp as usize);
+    // SAFETY: as above.
+    let dev = unsafe { (*mp).mnt_dev };
+    if dev != NODEV {
+        crate::drivers::disk::mounted(dev as u32, false);
+    }
     mount_free(mp);
 }
 

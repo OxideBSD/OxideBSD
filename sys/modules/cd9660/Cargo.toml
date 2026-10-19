@@ -1,0 +1,10 @@
+[package]
+name = "cd9660"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+kern_mod = { path = "../../../lib/libkern-mod" }
+vfs_if = { path = "../../../lib/libvfs" }
+cd9660_format = { path = "../../../lib/libcd9660" }
