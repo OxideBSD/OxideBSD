@@ -419,7 +419,7 @@ pub(crate) fn update(mp: *mut Mount, rdonly: bool, force: bool, opts: &[u8]) -> 
     let dev = unsafe { (*mp).mnt_dev };
     if !rdonly && old & MNT_RDONLY != 0 && dev != NODEV && old & MNT_ROOTFS == 0 {
         let overlaps = crate::kern::vfs_bdev::extent(dev as u32)
-            .is_some_and(|(first, sectors, memory)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, memory));
+            .is_some_and(|(first, sectors, disk)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, disk));
         if overlaps {
             return Err(16); // EBUSY
         }
@@ -506,7 +506,7 @@ pub(crate) fn reroot_target(spec: &[u8]) -> Result<(&'static VfsConf, u64, Vec<u
         return Err(ENOTBLK);
     }
     // musl's `makedev` encoding, as devfs gives it.
-    let handle = crate::kern::vfs_bdev::find(((rdev >> 8) & 0xfff) as u32, (rdev & 0xff) as u32).ok_or(ENXIO)?;
+    let handle = crate::kern::vfs_bdev::find(vfs_if::major(rdev), vfs_if::minor(rdev)).ok_or(ENXIO)?;
     Ok((vfc, handle as u64, special.to_vec()))
 }
 

@@ -25,7 +25,7 @@ use oxidebsd::serial_println;
 
 limine_entry_point!(main);
 
-fn round_trip(lba: u32, pattern: &[u8; 512]) {
+fn round_trip(lba: u64, pattern: &[u8; 512]) {
     ata::write_sector(Channel::Secondary, Drive::Master, lba, pattern)
         .unwrap_or_else(|e| panic!("write_sector(lba={lba}) failed: {e:?}"));
 
@@ -44,7 +44,7 @@ fn sector_checks(mode: &str) {
     // A few different LBAs, not just 0 -- catches an address-computation bug that only a
     // non-first sector would expose (e.g. the drive/head or LBA-high registers never actually
     // being written).
-    for &lba in &[0u32, 1, 7, 100] {
+    for &lba in &[0u64, 1, 7, 100] {
         let mut pattern = [0u8; 512];
         for (i, b) in pattern.iter_mut().enumerate() {
             *b = ((lba as usize + i) % 256) as u8;
@@ -69,7 +69,10 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
     ata::init();
-    assert!(ata::present(), "ata_smoke's own test-args should have attached a data disk at secondary/master");
+    assert!(
+        ata::present(Channel::Secondary, Drive::Master),
+        "ata_smoke's own test-args should have attached a data disk at secondary/master"
+    );
     serial_println!("ata_smoke: data disk detected");
 
     sector_checks("PIO");

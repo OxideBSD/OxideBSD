@@ -87,6 +87,10 @@ case "$TEST_NAME" in
         # FAT12, FAT16 and FAT32 volumes beside the root (scripts/mkmsdostestimg.sh, below).
         MSDOSFS_TEST=1
         ;;
+    devfs_syscall_smoke)
+        # The disk registry (INSTALLER.md §5.1): more disks than the system's, below.
+        DISK_REGISTRY_TEST=1
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
@@ -189,6 +193,26 @@ fi
 if [ "${MSDOSFS_TEST:-0}" = 1 ]; then
     QEMU_DISK_SOURCE="target/images/msdosfs-test.img"
     scripts/mkmsdostestimg.sh "$QEMU_DISK_SOURCE"
+fi
+
+if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
+    # Two virtio-blk disks (virt0: a GPT with one partition labelled `extra`; virt1: blank) and,
+    # on the primary IDE master, a blank 130 GiB disk past LBA28's reach (sparse: it costs no
+    # space), beside the system's disk on the secondary master: the kernel names them virt0,
+    # virt1, ide0 (the big one) and ide1 (regress/devfs-syscall-smoke/run.sh).
+    mkdir -p target/images/registry
+    head -c 1048576 /dev/zero > target/images/registry/extra.part
+    rm -f target/images/registry/virt0.img target/images/registry/virt1.img target/images/registry/ide.img
+    target/host-tools/x86_64-unknown-linux-gnu/release/mkimg -s gpt -o target/images/registry/virt0.img \
+        -p "fat32lba/extra:=target/images/registry/extra.part"
+    truncate -s 32M target/images/registry/virt1.img
+    truncate -s 130G target/images/registry/ide.img
+    QEMU_EXTRA_ARGS="-drive if=none,id=regv0,format=raw,file=target/images/registry/virt0.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device virtio-blk-pci,drive=regv0,disable-legacy=on"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=regv1,format=raw,file=target/images/registry/virt1.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device virtio-blk-pci,drive=regv1,disable-legacy=on"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=regide,format=raw,file=target/images/registry/ide.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=regide,bus=ide.0,unit=0"
 fi
 
 if [ "$IS_TEST" = 1 ]; then

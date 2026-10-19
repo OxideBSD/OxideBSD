@@ -94,6 +94,24 @@ pub struct MountArgs {
 /// `MountArgs::dev` for a file system with no device.
 pub const NODEV: u64 = u64::MAX;
 
+/// A device number in musl's `makedev` encoding (`<sys/sysmacros.h>`), as `stat(2)`'s `st_rdev`
+/// and `v_rdev` carry it: `major << 8 | minor` while both are small (`minor < 256`, `major <
+/// 4096`), the rest of each in the high bits.
+pub const fn makedev(major: u32, minor: u32) -> u64 {
+    let (ma, mi) = (major as u64, minor as u64);
+    (ma & 0xffff_f000) << 32 | (ma & 0xfff) << 8 | (mi & 0xffff_ff00) << 12 | mi & 0xff
+}
+
+/// `makedev`'s major number.
+pub const fn major(dev: u64) -> u32 {
+    ((dev >> 32 & 0xffff_f000) | (dev >> 8 & 0xfff)) as u32
+}
+
+/// `makedev`'s minor number.
+pub const fn minor(dev: u64) -> u32 {
+    ((dev >> 12 & 0xffff_ff00) | (dev & 0xff)) as u32
+}
+
 // --- Mounts -------------------------------------------------------------------------------------
 
 /// One mounted instance of a type (FreeBSD's `struct mount`). Kernel-owned.
@@ -210,8 +228,7 @@ pub struct Vnode {
     pub v_fileid: u64,
     /// A mount covering this directory, or null.
     pub v_mountedhere: *mut Mount,
-    /// The device of a `VCHR`/`VBLK` vnode, in musl's `makedev` encoding (`major << 8 | minor` for
-    /// the small numbers OxideBSD's devices have).
+    /// The device of a `VCHR`/`VBLK` vnode, in musl's `makedev` encoding (`makedev`).
     pub v_rdev: u64,
     /// Kernel-private: the page cache object, the FIFO or socket rendezvous.
     pub v_object: u64,

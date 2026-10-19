@@ -213,7 +213,7 @@ const KIND_VNODE: i64 = 7;
 pub(crate) extern "C" fn oxidebsd_real_fd_kind(real_fd: u64, arg: *mut u64) -> i64 {
     let (code, value) = if let Some(id) = crate::tty::of_real_fd(real_fd) {
         let (major, minor) = crate::tty::device(id);
-        (KIND_TTY, (major as u64) << 8 | minor as u64)
+        (KIND_TTY, vfs_if::makedev(major, minor))
     } else {
         let Some(kind) = DESCRIPTIONS.lock().get(&real_fd).map(|d| d.kind) else {
             return -1;
@@ -644,7 +644,7 @@ pub(crate) fn fallback_stat(real_fd: u64) -> Option<crate::kern::vfs_vnops::Stat
             return st;
         }
         let (major, minor) = crate::tty::device(id);
-        return Some(synthetic(0o020600, (major as u64) << 8 | minor as u64, 0));
+        return Some(synthetic(0o020600, vfs_if::makedev(major, minor), 0));
     }
     if let Some(vp) = vnode_of(real_fd) {
         return vn_stat(vp).ok();

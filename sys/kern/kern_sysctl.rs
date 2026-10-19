@@ -1019,6 +1019,60 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
     for (name, id) in crate::module::charged_modules() {
         add_module_leaves(t, name, id);
     }
+
+    add_leaf(
+        t,
+        &kern,
+        Leaf {
+            number: None,
+            name: "disks",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RD,
+            descr: "Disks the kernel drives",
+            get: || string(crate::drivers::disk::names().as_bytes()),
+            set: None,
+        },
+    );
+    add_node(t, &kern, None, "disk", "Each disk the kernel drives");
+    for (index, name) in crate::drivers::disk::names().split(' ').filter(|n| !n.is_empty()).enumerate() {
+        add_disk_leaves(t, name, index as u32);
+    }
+}
+
+/// `kern.disk.<name>.kind`, `.size`, `.sectorsize` and `.model`: registered disk `index`
+/// (`drivers::disk`, `OxideBSD-doc/INSTALLER.md` §5.5).
+fn add_disk_leaves(t: &mut BTreeMap<Vec<i32>, Oid>, name: &str, index: u32) {
+    let Some(disks) = oid_of(t, "kern.disk") else { return };
+    let node = add_node(t, &disks, None, name, "Disk");
+    type Get = fn(u32) -> Vec<u8>;
+    let leaves: [(&'static str, &'static str, u32, &'static str, Get); 4] = [
+        ("kind", "What the disk is: disk, cd or memory", CTLTYPE_STRING, "A", |i| {
+            string(crate::drivers::disk::describe(i).map_or("", |d| d.0).as_bytes())
+        }),
+        ("size", "Size in bytes", CTLTYPE_ULONG, "LU", |i| ulong(crate::drivers::disk::describe(i).map_or(0, |d| d.1))),
+        ("sectorsize", "Sector size in bytes", CTLTYPE_UINT, "IU", |i| {
+            uint(crate::drivers::disk::describe(i).map_or(0, |d| d.2 as u64))
+        }),
+        ("model", "Model, as the disk reports it", CTLTYPE_STRING, "A", |i| {
+            string(crate::drivers::disk::describe(i).map_or(String::new(), |d| d.3).as_bytes())
+        }),
+    ];
+    for (leaf, descr, kind, fmt, get) in leaves {
+        let mut oid = node.clone();
+        oid.push(child_number(t, &node, None));
+        let name = full_name(t, &node, leaf);
+        t.insert(oid, Oid { name, kind, flags: CTLFLAG_RD, fmt, descr, get: None, get_arg: Some((get, index)), set: None });
+    }
+}
+
+/// Called by the disk registry as each disk registers: adds its `kern.disk.<name>` leaves when the
+/// tree is already built (otherwise `populate` adds them).
+pub(crate) fn disk_registered(name: String, index: u32) {
+    let mut t = TREE.lock();
+    if !t.is_empty() {
+        add_disk_leaves(&mut t, &name, index);
+    }
 }
 
 /// `kern.module.<name>.alloc` and `.allocs`: the bytes and the allocations module `name` (charge

@@ -395,7 +395,7 @@ fn vget(mp: *mut Mount, n: *mut Node, vpp: *mut *mut Vnode) -> i32 {
         }
         set_node_of(vp, n);
         if let Data::Dev(ma, mi) = node.data {
-            (*vp).v_rdev = ((ma as u64) << 8) | mi as u64;
+            (*vp).v_rdev = makedev(ma, mi);
         }
         if node.id == ROOT_ID {
             (*vp).v_flag |= VV_ROOT;
@@ -737,7 +737,7 @@ extern "C" fn devfs_getattr(vp: *mut Vnode, vap: *mut Vattr) -> i32 {
     let Some(n) = node_of(vp) else { return EIO };
     let (size, rdev) = match &n.data {
         Data::Dir(d) => ((d.entries.len() as u64 + 2) * 32, 0),
-        Data::Dev(ma, mi) => (0, ((*ma as u64) << 8) | *mi as u64),
+        Data::Dev(ma, mi) => (0, makedev(*ma, *mi)),
         Data::Lnk(t) => (t.len() as u64, 0),
         Data::Sock => (0, 0),
     };

@@ -250,8 +250,8 @@ fn open_common(path: &[u8], start: *mut Vnode, flags: u64, mode: u64) -> R {
         // Every device, in devfs or made by mknod elsewhere, opens through the kernel's registry
         // by number (`DEVFS.md` §3.4).
         VCHR => {
-            let rdev = unsafe { (*vp).v_rdev } as u32;
-            let r = crate::fs::devfs::oxidebsd_dev_open(((rdev >> 8) & 0xfff) as u64, (rdev & 0xff) as u64, flags);
+            let rdev = unsafe { (*vp).v_rdev };
+            let r = crate::fs::devfs::oxidebsd_dev_open(vfs_if::major(rdev) as u64, vfs_if::minor(rdev) as u64, flags);
             if r < 0 {
                 vrele(vp);
                 return Err((-r) as i32);
@@ -1516,7 +1516,7 @@ pub(crate) fn revoke_vnode(vp: *mut Vnode) {
         vtype == VCHR
             && crate::tty::of_real_fd(handle).is_some_and(|id| {
                 let (major, minor) = crate::tty::device(id);
-                (major as u64) << 8 | minor as u64 == rdev
+                vfs_if::makedev(major as u32, minor as u32) == rdev
             })
     });
     vfs_subr::vgone(vp);
@@ -1832,13 +1832,13 @@ fn mount_device(from: &[u8], rd: bool, cred: &Ucred) -> Result<u64, i32> {
         return Err(ENOTBLK);
     }
     // musl's `makedev` encoding, as devfs gives it (and `vn_open` reads it).
-    let handle = crate::kern::vfs_bdev::find(((rdev >> 8) & 0xfff) as u32, (rdev & 0xff) as u32).ok_or(ENXIO)?;
+    let handle = crate::kern::vfs_bdev::find(vfs_if::major(rdev), vfs_if::minor(rdev)).ok_or(ENXIO)?;
     if vfs_mount::dev_in_use(handle as u64) {
         return Err(EBUSY);
     }
     if !rd {
         let overlaps = crate::kern::vfs_bdev::extent(handle)
-            .is_some_and(|(first, sectors, memory)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, memory));
+            .is_some_and(|(first, sectors, disk)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, disk));
         if overlaps {
             return Err(EBUSY);
         }

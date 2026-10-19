@@ -152,8 +152,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     )
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
-    // Finds the data disk (`drivers::disk`: virtio-blk, else the IDE disk by DMA or PIO) before
-    // oxfs loads, below -- its module_init mounts it, formats it, or, with none, runs in memory.
+    // Registers every disk (`drivers::disk`: virtio-blk, then IDE by DMA or PIO) and picks the
+    // root before oxfs loads, below -- its module_init mounts it, or, with none, the memory disk.
     //
     // Skipped entirely with `no-ata`/`no-disk` on the kernel command line: a safety gate for
     // real hardware, where oxfs would format whatever disk it found (`boot::ata_disabled`).

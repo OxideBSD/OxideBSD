@@ -291,7 +291,7 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `vfs_subr::vrele_deferred`.
 - A type neither `VFCF_SYNTHETIC` nor `VFCF_FROM_VNODE` gets its device from `nmount`, which
   opens the disk node `from` names (`MountArgs::dev`); one mount per device. devfs's `v_rdev` is
-  musl's `makedev` encoding (`major << 8 | minor`).
+  musl's full `makedev` encoding (`vfs_if::makedev`/`major`/`minor`; never `<< 8`).
 - msdosfs's format is `lib/libmsdosfs` (shared with makefs, newfs_msdos, fsck_msdosfs); FAT times
   are local (`kern.utc_offset`, `adjkerntz(8)`). Its bio hook orders writes data, then FAT, then
   directories; anything freeing clusters writes the entry naming them first.
@@ -373,7 +373,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - A new installed file goes in `distrib/install.mtree`, and its set in `distrib/sets/lists/*`
   (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
   default).
-- Disk: virtio-blk, else IDE secondary master (DMA, else PIO). The boot ISO is on virtio-scsi.
+- Disks: a registry (`drivers::disk`, INSTALLER.md §5): every virtio-blk unit, then every IDE
+  disk (all four positions, DMA per channel, LBA48), named by bus (`virt0`, `ide0`); minors
+  `unit << 8 | partition`. Root from fsconf, else the first oxfs partition. Boot ISO: virtio-scsi.
   `no-ata` protects real hardware from being formatted.
 - rtl8139 DMA is 32-bit: `rtl8139::init` must run before big allocations.
 

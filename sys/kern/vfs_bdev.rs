@@ -1,6 +1,7 @@
 //! Block devices for file systems (OxideBSD-doc `VFS.md` §8.2): every disk, partition and memory
 //! disk the kernel found, each a handle bounded to its own sectors. A file system reads and writes
-//! its device through the handle in 512-byte sectors (`oxidebsd_bdev_read`/`_write`), normally
+//! its device through the handle in 512-byte sectors (`oxidebsd_bdev_read`/`_write`), whatever
+//! the disk's own sector size (`drivers::disk` translates), normally
 //! through the buffer cache (`vfs_bio`); the raw `/dev` nodes (`drivers::disk`) read and write the
 //! same extents directly, uncached, as FreeBSD's do.
 //!
@@ -24,8 +25,8 @@ pub(crate) struct Bdev {
     /// The extent on the disk underneath, in 512-byte sectors.
     pub first: u64,
     pub sectors: u64,
-    /// On the memory disk (`drivers::md`) rather than the physical one.
-    pub memory: bool,
+    /// The disk underneath: its index in the disk registry (`drivers::disk`).
+    pub disk: u32,
     /// A file system has it mounted read-write.
     pub mounted_rw: bool,
 }
@@ -37,11 +38,11 @@ static ROOT: AtomicI64 = AtomicI64::new(-1);
 
 pub(crate) const SECTOR: u64 = 512;
 
-/// Adds a device; its handle.
-pub(crate) fn register(name: &str, major: u32, minor: u32, first: u64, sectors: u64, memory: bool) -> u32 {
+/// Adds a device, sectors `[first, first + sectors)` of registered disk `disk`; its handle.
+pub(crate) fn register(name: &str, major: u32, minor: u32, first: u64, sectors: u64, disk: u32) -> u32 {
     let mut bdevs = BDEVS.lock();
     let _ = name; // `/dev`'s name for it, registered with devfs by the disk layer
-    bdevs.push(Bdev { major, minor, first, sectors, memory, mounted_rw: false });
+    bdevs.push(Bdev { major, minor, first, sectors, disk, mounted_rw: false });
     (bdevs.len() - 1) as u32
 }
 
@@ -50,9 +51,9 @@ pub(crate) fn find(major: u32, minor: u32) -> Option<u32> {
     BDEVS.lock().iter().position(|b| b.major == major && b.minor == minor).map(|i| i as u32)
 }
 
-/// `(first sector, sectors, on the memory disk)` of device `handle`.
-pub(crate) fn extent(handle: u32) -> Option<(u64, u64, bool)> {
-    BDEVS.lock().get(handle as usize).map(|b| (b.first, b.sectors, b.memory))
+/// `(first sector, sectors, disk)` of device `handle`.
+pub(crate) fn extent(handle: u32) -> Option<(u64, u64, u32)> {
+    BDEVS.lock().get(handle as usize).map(|b| (b.first, b.sectors, b.disk))
 }
 
 /// Makes `handle` the root file system's device.
@@ -73,18 +74,18 @@ pub(crate) fn root() -> Option<u32> {
     (root >= 0).then_some(root as u32)
 }
 
-/// Whether sectors `[first, first + sectors)` of the physical disk (or the memory disk) overlap a
-/// device a file system has mounted read-write.
-pub(crate) fn overlaps_mounted_rw(first: u64, sectors: u64, memory: bool) -> bool {
+/// Whether sectors `[first, first + sectors)` of disk `disk` overlap a device a file system has
+/// mounted read-write.
+pub(crate) fn overlaps_mounted_rw(first: u64, sectors: u64, disk: u32) -> bool {
     BDEVS.lock().iter().any(|b| {
-        b.mounted_rw && b.memory == memory && first < b.first + b.sectors && b.first < first + sectors
+        b.mounted_rw && b.disk == disk && first < b.first + b.sectors && b.first < first + sectors
     })
 }
 
 /// Checks that `len` bytes at device sector `sector` lie inside `handle`'s extent; the disk's
 /// sector they start at.
-fn locate(handle: u32, sector: u64, len: usize) -> Result<(u64, bool), u64> {
-    let (first, sectors, memory) = extent(handle).ok_or(EIO)?;
+fn locate(handle: u32, sector: u64, len: usize) -> Result<(u64, u32), u64> {
+    let (first, sectors, disk) = extent(handle).ok_or(EIO)?;
     if len as u64 % SECTOR != 0 {
         return Err(EIO);
     }
@@ -92,20 +93,20 @@ fn locate(handle: u32, sector: u64, len: usize) -> Result<(u64, bool), u64> {
     if sector.checked_add(count).is_none_or(|end| end > sectors) {
         return Err(EIO);
     }
-    Ok((first + sector, memory))
+    Ok((first + sector, disk))
 }
 
 /// Reads `buf.len()` bytes (whole sectors) from device `handle` at its sector `sector`.
 pub(crate) fn read(handle: u32, sector: u64, buf: &mut [u8]) -> Result<(), u64> {
-    let (lba, memory) = locate(handle, sector, buf.len())?;
-    if crate::drivers::disk::read_sectors(memory, lba, buf) { Ok(()) } else { Err(EIO) }
+    let (lba, disk) = locate(handle, sector, buf.len())?;
+    if crate::drivers::disk::read_sectors(disk, lba, buf) { Ok(()) } else { Err(EIO) }
 }
 
 /// Writes `buf` (whole sectors) to device `handle` at its sector `sector`, durably: on the disk
 /// when this returns.
 pub(crate) fn write(handle: u32, sector: u64, buf: &[u8]) -> Result<(), u64> {
-    let (lba, memory) = locate(handle, sector, buf.len())?;
-    if crate::drivers::disk::write_sectors(memory, lba, buf) { Ok(()) } else { Err(EIO) }
+    let (lba, disk) = locate(handle, sector, buf.len())?;
+    if crate::drivers::disk::write_sectors(disk, lba, buf) { Ok(()) } else { Err(EIO) }
 }
 
 /// Kernel API for file systems: the root file system's device handle, `-1` if there is none.

@@ -1,160 +1,231 @@
-//! The data disk: `init` finds it at boot -- a virtio-blk disk if there is one (the
-//! fastest under QEMU), else the legacy IDE disk at secondary master (by bus-master DMA when the
-//! controller can, else PIO) -- and then oxfs's partition on it (`OxideBSD-doc/RAM_FLOOR.md`
-//! §3.4.5): the first GPT or MBR partition of oxfs's type (`part`). The kernel never partitions
-//! or formats a disk (RAM_FLOOR.md §4.2.1): one without an oxfs partition, like no disk at all,
-//! leaves oxfs the memory disk (`md`), empty until the mfsroot fills it. oxfs never knows which.
-//! The disk, each partition and the memory disk become block devices (`kern::vfs_bdev`), the
-//! root's chosen here; file systems read them through their handles. One disk, found once.
+//! The disk registry (`OxideBSD-doc/INSTALLER.md` §5): `init` registers every disk the kernel
+//! drives at boot -- each virtio-blk device (`virt0`, `virt1`, ... in PCI order), then each IDE
+//! disk (`ide0`, ... in the order primary master, primary slave, secondary master, secondary
+//! slave; ATA by bus-master DMA when the controller can, else PIO) -- with the partitions of each
+//! (`part`: GPT, else MBR). Disks are named by bus, one counter per bus, optical drives counted
+//! with disks (their kind is in `kern.disk.<name>.kind`); partitions are `<disk>p<N>` (GPT) or
+//! `<disk>s<N>` (MBR), and labelled GPT partitions are also `gpt/<label>` (FreeBSD's `glabel`;
+//! the first of a label wins). Each becomes a block device (`kern::vfs_bdev`) and a raw device in
+//! `/dev`, readable and writable by root, except that a device overlapping one a file system has
+//! mounted read-write can't be written (RAM_FLOOR.md §3.4.3: the writes would go around its
+//! cache).
 //!
-//! Disks are named by bus (`virt0`, `ide0`; `nvme0`, `sata0`, `sda0`, `mmc0` when those drivers
-//! exist), partitions `<disk>p<N>` (GPT) or `<disk>s<N>` (MBR). Each gets a raw device in `/dev`,
-//! readable and writable by root, except that the root file system's can't be written while it's
-//! mounted read-write (RAM_FLOOR.md §3.4.3: the writes would go around its cache).
+//! The root is oxfs's partition `/boot/fsconf` names, on any disk, else the first oxfs partition
+//! in registration order (RAM_FLOOR.md §3.4.5). The kernel never partitions or formats a disk
+//! (RAM_FLOOR.md §4.2.1): with no oxfs partition anywhere, like no disk at all, oxfs gets the
+//! memory disk (`md0`), empty until the mfsroot fills it. oxfs never knows which.
+//!
+//! The block layer addresses every disk in 512-byte sectors; a disk with larger ones (a CD's
+//! 2048, INSTALLER.md §5.4) is translated here, partial sectors read whole (and written back
+//! whole).
 //!
 //! File systems reach their devices through `kern::vfs_bdev` and the buffer cache
-//! (`kern::vfs_bio`); this file finds the disk and serves the raw `/dev` nodes.
+//! (`kern::vfs_bio`); this file finds the disks and serves the raw `/dev` nodes.
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use spin::Mutex;
 
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 
+use super::ata::{Channel, Drive};
+use super::part::Partition;
 use crate::serial_println;
 
-const NONE: u8 = 0;
-const ATA: u8 = 1;
-const VIRTIO: u8 = 2;
+/// Which driver serves a disk, and which of its devices it is.
+#[derive(Clone, Copy)]
+enum Backend {
+    Ata(Channel, Drive),
+    Virtio(usize),
+    Memory,
+}
 
-/// The physical data disk's driver, `NONE` without one.
-static BACKEND: AtomicU8 = AtomicU8::new(NONE);
+/// What a disk is (`kern.disk.<name>.kind`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Disk,
+    Cd,
+    Memory,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Disk => "disk",
+            Kind::Cd => "cd",
+            Kind::Memory => "memory",
+        }
+    }
+}
+
+/// One registered disk.
+struct Disk {
+    name: String,
+    backend: Backend,
+    kind: Kind,
+    /// Its size in 512-byte sectors (the block layer's unit).
+    sectors: u64,
+    /// Its own sector size in bytes, a multiple of 512.
+    sector_size: u32,
+    model: String,
+}
+
+/// Every disk, in registration order: a disk's index here is its number for `kern::vfs_bdev`.
+/// Grow-only.
+static DISKS: Mutex<Vec<Disk>> = Mutex::new(Vec::new());
 /// Whether oxfs should mount the root read-only at boot (`set_root_readonly_at_boot`).
 static ROOT_READONLY_AT_BOOT: AtomicBool = AtomicBool::new(false);
 
-/// The disk's device numbers (Linux's, `OxideBSD-doc/DEVFS.md` §3.5): whole disk minor 0,
-/// partition N minor N.
+/// Device numbers (Linux's majors, `OxideBSD-doc/DEVFS.md` §3.5), one major per driver: minor
+/// `unit << 8` for a whole disk, `unit << 8 | N` for its partition N.
 const IDE_MAJOR: u32 = 3;
 const VIRTIO_MAJOR: u32 = 252;
-/// `/dev/gpt/<label>`: another name for a labelled GPT partition (FreeBSD's `glabel`), minor N
-/// for partition N of the one data disk.
+/// `/dev/gpt/<label>`: another name for a labelled GPT partition, minors in the order found.
 const GPT_LABEL_MAJOR: u32 = 253;
+static NEXT_LABEL_MINOR: AtomicU32 = AtomicU32::new(0);
 
 /// Open raw devices: `real_fd -> block device handle` (`kern::vfs_bdev`). The offset is the
 /// file's (`fs::fd`).
 static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, u32>> = Mutex::new(alloc::collections::BTreeMap::new());
 
-/// Finds the data disk: virtio-blk first, then the IDE disk (setting up its DMA), else a memory
-/// disk.
+/// Adds a disk to the registry; its index.
+fn register(name: String, backend: Backend, kind: Kind, sectors: u64, sector_size: u32, model: String) -> u32 {
+    let mut disks = DISKS.lock();
+    disks.push(Disk { name: name.clone(), backend, kind, sectors, sector_size, model });
+    let index = (disks.len() - 1) as u32;
+    drop(disks);
+    crate::kern::kern_sysctl::disk_registered(name, index);
+    index
+}
+
+/// Registers every disk: virtio-blk first, then the IDE disks (setting up their DMA); then their
+/// partitions and `/dev` nodes, and the root (else a memory disk).
 pub fn init(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     mapper: &mut impl Mapper<Size4KiB>,
     phys_mem_offset: VirtAddr,
 ) {
-    if super::virtio_blk::init(frame_allocator, mapper, phys_mem_offset) {
-        BACKEND.store(VIRTIO, Ordering::Relaxed);
-        attach("virt0", VIRTIO_MAJOR, phys_mem_offset);
-        return;
+    let mut found = Vec::new();
+    for (unit, sectors) in super::virtio_blk::init(frame_allocator, mapper, phys_mem_offset).into_iter().enumerate() {
+        let name = alloc::format!("virt{unit}");
+        let disk = register(name.clone(), Backend::Virtio(unit), Kind::Disk, sectors, 512, String::from("virtio-blk"));
+        found.push((disk, name, VIRTIO_MAJOR, unit as u32));
     }
     super::ata::init();
-    if super::ata::present() {
-        super::ata::init_dma(frame_allocator, phys_mem_offset);
-        BACKEND.store(ATA, Ordering::Relaxed);
-        attach("ide0", IDE_MAJOR, phys_mem_offset);
-    } else {
-        init_memory(phys_mem_offset);
-    }
-}
-
-/// The physical disk's size in 512-byte sectors.
-fn disk_sectors() -> u64 {
-    match BACKEND.load(Ordering::Relaxed) {
-        ATA => super::ata::capacity_sectors(),
-        VIRTIO => super::virtio_blk::capacity_sectors(),
-        _ => 0,
-    }
-}
-
-/// Reads the partition table of the physical disk `name`, gives oxfs its partition, and
-/// registers the raw devices.
-fn attach(name: &str, major: u32, phys_mem_offset: VirtAddr) {
-    use crate::kern::vfs_bdev;
-    let sectors = disk_sectors();
-    let parts = read_partitions();
-    vfs_bdev::register(name, major, 0, 0, sectors, false);
-    let _ = crate::fs::devfs::make_dev(name, major, 0, 0, 0, 0o600, raw_open);
-    for p in &parts {
-        let dev = alloc::format!("{name}{}", p.suffix());
-        vfs_bdev::register(&dev, major, p.index, p.first_lba, p.sectors, false);
-        let _ = crate::fs::devfs::make_dev(&dev, major, p.index, 0, 0, 0o600, raw_open);
-        if let Some(label) = &p.label {
-            let dev = alloc::format!("gpt/{label}");
-            vfs_bdev::register(&dev, GPT_LABEL_MAJOR, p.index, p.first_lba, p.sectors, false);
-            let _ = crate::fs::devfs::make_dev(&dev, GPT_LABEL_MAJOR, p.index, 0, 0, 0o600, raw_open);
+    super::ata::init_dma(frame_allocator, phys_mem_offset);
+    let mut unit = 0;
+    for (channel, drive) in super::ata::POSITIONS {
+        if !super::ata::present(channel, drive) {
+            continue;
         }
+        let name = alloc::format!("ide{unit}");
+        let sectors = super::ata::capacity_sectors(channel, drive);
+        let model = super::ata::model(channel, drive);
+        let disk = register(name.clone(), Backend::Ata(channel, drive), Kind::Disk, sectors, 512, model);
+        found.push((disk, name, IDE_MAJOR, unit));
+        unit += 1;
+    }
+
+    let mut parts = Vec::new();
+    for (disk, name, major, unit) in found {
+        attach(disk, &name, major, unit, &mut parts);
     }
     // oxfs's 4 KiB blocks: its partition must start on one (`Partition::blocks`).
-    match choose_root(name, &parts).and_then(|p| Some((p, p.blocks()?))) {
-        Some((p, (_, blocks))) => {
-            if let Some(handle) = vfs_bdev::find(major, p.index) {
-                vfs_bdev::set_root(handle);
-            }
-            serial_println!("[boot] disk: oxfs on {}{} ({} MiB)", name, p.suffix(), blocks / 256);
+    match choose_root(&parts).and_then(|r| Some((r, r.part.blocks()?))) {
+        Some((r, (_, blocks))) => {
+            crate::kern::vfs_bdev::set_root(r.handle);
+            serial_println!("[boot] disk: oxfs on {} ({} MiB)", r.name, blocks / 256);
         }
         None => {
             serial_println!(
-                "[boot] disk: no oxfs partition on {} (partition and newfs_oxfs it, or install a system image)",
-                name
+                "[boot] disk: no usable oxfs partition on any disk (partition and newfs_oxfs one, or install a system image)"
             );
             init_memory(phys_mem_offset);
         }
     }
 }
 
-/// oxfs's partition on disk `name`: the root device `/boot/fsconf` names (`/dev/virt0p1`, or
-/// `/dev/gpt/<label>`), if it's on this disk; else the first oxfs partition.
-fn choose_root<'a>(name: &str, parts: &'a [super::part::Partition]) -> Option<&'a super::part::Partition> {
+/// A partition found at boot: its `/dev` name, its block device, and where it is.
+struct Found {
+    name: String,
+    handle: u32,
+    part: Partition,
+}
+
+/// Reads disk `disk`'s partition table and registers the disk's block devices and raw `/dev`
+/// nodes; adds its partitions to `parts`.
+fn attach(disk: u32, name: &str, major: u32, unit: u32, parts: &mut Vec<Found>) {
+    use crate::kern::vfs_bdev;
+    let sectors = DISKS.lock()[disk as usize].sectors;
+    let minor = unit << 8;
+    vfs_bdev::register(name, major, minor, 0, sectors, disk);
+    let _ = crate::fs::devfs::make_dev(name, major, minor, 0, 0, 0o600, raw_open);
+    let mut head = alloc::vec![0u8; 5 * 4096];
+    let table = if read_sectors(disk, 0, &mut head) { super::part::read(&head) } else { Vec::new() };
+    for p in table {
+        if p.index > 0xff || p.first_lba.checked_add(p.sectors).is_none_or(|end| end > sectors) {
+            serial_println!("[boot] disk: {}: partition {} lies outside the disk -- ignored", name, p.index);
+            continue;
+        }
+        let dev = alloc::format!("{name}{}", p.suffix());
+        let handle = vfs_bdev::register(&dev, major, minor | p.index, p.first_lba, p.sectors, disk);
+        let _ = crate::fs::devfs::make_dev(&dev, major, minor | p.index, 0, 0, 0o600, raw_open);
+        if let Some(label) = &p.label {
+            let label_dev = alloc::format!("gpt/{label}");
+            let label_minor = NEXT_LABEL_MINOR.fetch_add(1, Ordering::Relaxed);
+            if crate::fs::devfs::make_dev(&label_dev, GPT_LABEL_MAJOR, label_minor, 0, 0, 0o600, raw_open).is_ok() {
+                vfs_bdev::register(&label_dev, GPT_LABEL_MAJOR, label_minor, p.first_lba, p.sectors, disk);
+            } else {
+                serial_println!("[boot] disk: {}: label {} is taken -- only {} names it", name, label_dev, dev);
+            }
+        }
+        parts.push(Found { name: dev, handle, part: p });
+    }
+}
+
+/// The root's partition: the device `/boot/fsconf` names (`/dev/virt0p1`, or `/dev/gpt/<label>`),
+/// on whichever disk; else the first oxfs partition, with a word when there are several to choose
+/// from (an `/etc/fstab` root entry settles it).
+fn choose_root(parts: &[Found]) -> Option<&Found> {
     if let Some(device) = crate::kern::fsconf::root_device() {
         let spec = device.strip_prefix("/dev/").unwrap_or(&device);
-        let named = parts.iter().find(|p| {
-            alloc::format!("{name}{}", p.suffix()) == spec
-                || p.label.as_deref().is_some_and(|l| spec.strip_prefix("gpt/") == Some(l))
+        let named = parts.iter().find(|f| {
+            f.name == spec || f.part.label.as_deref().is_some_and(|l| spec.strip_prefix("gpt/") == Some(l))
         });
         match named {
-            Some(p) => {
+            Some(f) => {
                 serial_println!("[boot] disk: root {} (from /boot/fsconf)", device);
-                return Some(p);
+                return Some(f);
             }
             None => {
                 serial_println!(
-                    "[boot] disk: root {} (from /boot/fsconf) isn't on {} -- using its first oxfs partition",
-                    device,
-                    name
+                    "[boot] disk: root {} (from /boot/fsconf) isn't on any disk -- using the first oxfs partition",
+                    device
                 );
             }
         }
     }
-    parts.iter().find(|p| p.oxfs)
-}
-
-/// The physical disk's partitions, from its first 34 sectors.
-fn read_partitions() -> Vec<super::part::Partition> {
-    let mut head = alloc::vec![0u8; 5 * 4096];
-    if !read_sectors(false, 0, &mut head) {
-        return Vec::new();
+    let mut oxfs = parts.iter().filter(|f| f.part.oxfs);
+    let first = oxfs.next()?;
+    if oxfs.next().is_some() {
+        serial_println!(
+            "[boot] disk: several oxfs partitions and no root entry in /boot/fsconf -- using {}; add a root entry to /etc/fstab",
+            first.name
+        );
     }
-    super::part::read(&head)
+    Some(first)
 }
 
-/// Makes a memory disk of a quarter of RAM the data disk (`md`): with no real disk, or with
-/// `no-ata`, where real disks aren't probed at all.
+/// Makes a memory disk of a quarter of RAM the root (`md0`): with no oxfs partition on any disk, or
+/// with `no-ata`, where real disks aren't probed at all.
 pub fn init_memory(phys_mem_offset: VirtAddr) {
     let blocks = crate::memory::usable_ram_bytes() / 4 / 4096;
     super::md::init(blocks, phys_mem_offset);
-    let handle = crate::kern::vfs_bdev::register("md0", 0, 0, 0, blocks * 8, true);
+    let disk = register(String::from("md0"), Backend::Memory, Kind::Memory, blocks * 8, 512, String::from("memory disk"));
+    let handle = crate::kern::vfs_bdev::register("md0", 0, 0, 0, blocks * 8, disk);
     crate::kern::vfs_bdev::set_root(handle);
     serial_println!(
         "[boot] disk: no data disk -- a {} MiB memory disk this boot, nothing persists",
@@ -162,38 +233,94 @@ pub fn init_memory(phys_mem_offset: VirtAddr) {
     );
 }
 
-/// `(transfers, completion interrupts)` on the data disk so far, for the boot log.
+/// `(transfers, completion interrupts)` on the disks so far, for the boot log.
 pub fn stats() -> (u64, u64) {
-    match BACKEND.load(Ordering::Relaxed) {
-        ATA => super::ata::dma_stats(),
-        VIRTIO => super::virtio_blk::stats(),
-        _ => (0, 0),
+    let (ata_transfers, ata_irqs) = super::ata::dma_stats();
+    let (virtio_transfers, virtio_irqs) = super::virtio_blk::stats();
+    (ata_transfers + virtio_transfers, ata_irqs + virtio_irqs)
+}
+
+/// The space-separated names of the registered disks (`kern.disks`).
+pub fn names() -> String {
+    let disks = DISKS.lock();
+    let names: Vec<&str> = disks.iter().map(|d| d.name.as_str()).collect();
+    names.join(" ")
+}
+
+/// Disk `disk`'s `(kind, size in bytes, sector size, model)` (`kern.disk.<name>`).
+pub fn describe(disk: u32) -> Option<(&'static str, u64, u32, String)> {
+    let disks = DISKS.lock();
+    let d = disks.get(disk as usize)?;
+    Some((d.kind.name(), d.sectors * 512, d.sector_size, d.model.clone()))
+}
+
+/// Whether disk `disk` is the memory disk.
+fn is_memory(disk: u32) -> bool {
+    DISKS.lock().get(disk as usize).is_some_and(|d| d.kind == Kind::Memory)
+}
+
+/// Disk `disk`'s driver and sector size. The registry's lock is dropped before any I/O: a
+/// transfer may sleep.
+fn backend(disk: u32) -> Option<(Backend, u64)> {
+    DISKS.lock().get(disk as usize).map(|d| (d.backend, d.sector_size as u64))
+}
+
+/// Reads whole device sectors from device sector `lba`.
+fn device_read(backend: Backend, lba: u64, buf: &mut [u8]) -> bool {
+    match backend {
+        Backend::Ata(channel, drive) => super::ata::read_disk_sectors(channel, drive, lba, buf).is_ok(),
+        Backend::Virtio(unit) => super::virtio_blk::read_sectors(unit, lba, buf),
+        Backend::Memory => super::md::read_sectors(lba, buf),
     }
 }
 
-/// Reads whole sectors from `lba` of the physical disk (or of the memory disk, `memory`) into
-/// `buf`: the block layer's way down (`kern::vfs_bdev`), unbounded -- the handle bounds it.
-pub(crate) fn read_sectors(memory: bool, lba: u64, buf: &mut [u8]) -> bool {
-    if memory {
-        return super::md::read_sectors(lba, buf);
-    }
-    match BACKEND.load(Ordering::Relaxed) {
-        ATA => super::ata::read_disk_sectors(lba, buf).is_ok(),
-        VIRTIO => super::virtio_blk::read_sectors(lba, buf),
-        _ => false,
+/// Writes whole device sectors at device sector `lba`, durably.
+fn device_write(backend: Backend, lba: u64, buf: &[u8]) -> bool {
+    match backend {
+        Backend::Ata(channel, drive) => super::ata::write_disk_sectors(channel, drive, lba, buf).is_ok(),
+        Backend::Virtio(unit) => super::virtio_blk::write_sectors(unit, lba, buf),
+        Backend::Memory => super::md::write_sectors(lba, buf),
     }
 }
 
-/// Writes whole sectors at `lba`, durably.
-pub(crate) fn write_sectors(memory: bool, lba: u64, buf: &[u8]) -> bool {
-    if memory {
-        return super::md::write_sectors(lba, buf);
+/// The device sectors `[first, first + count)` (of `sector_size` bytes) covering 512-byte
+/// sectors `[lba, lba + n)`, and the byte offset of `lba` in the first.
+fn covering(sector_size: u64, lba: u64, n: u64) -> (u64, u64, usize) {
+    let per = sector_size / 512;
+    let first = lba / per;
+    (first, (lba + n).div_ceil(per) - first, ((lba % per) * 512) as usize)
+}
+
+/// Reads whole 512-byte sectors from `lba` of disk `disk` into `buf`: the block layer's way down
+/// (`kern::vfs_bdev`), unbounded -- the handle bounds it.
+pub(crate) fn read_sectors(disk: u32, lba: u64, buf: &mut [u8]) -> bool {
+    let Some((backend, sector_size)) = backend(disk) else { return false };
+    let (first, count, at) = covering(sector_size, lba, buf.len() as u64 / 512);
+    if at == 0 && buf.len() as u64 == count * sector_size {
+        return device_read(backend, first, buf);
     }
-    match BACKEND.load(Ordering::Relaxed) {
-        ATA => super::ata::write_disk_sectors(lba, buf).is_ok(),
-        VIRTIO => super::virtio_blk::write_sectors(lba, buf),
-        _ => false,
+    let mut whole = alloc::vec![0u8; (count * sector_size) as usize];
+    if !device_read(backend, first, &mut whole) {
+        return false;
     }
+    buf.copy_from_slice(&whole[at..at + buf.len()]);
+    true
+}
+
+/// Writes whole 512-byte sectors at `lba` of disk `disk`, durably; a partial device sector is
+/// read, patched and written back.
+pub(crate) fn write_sectors(disk: u32, lba: u64, buf: &[u8]) -> bool {
+    let Some((backend, sector_size)) = backend(disk) else { return false };
+    let (first, count, at) = covering(sector_size, lba, buf.len() as u64 / 512);
+    if at == 0 && buf.len() as u64 == count * sector_size {
+        return device_write(backend, first, buf);
+    }
+    let mut whole = alloc::vec![0u8; (count * sector_size) as usize];
+    if !device_read(backend, first, &mut whole) {
+        return false;
+    }
+    whole[at..at + buf.len()].copy_from_slice(buf);
+    device_write(backend, first, &whole)
 }
 
 /// Asks oxfs to mount the root read-only (the real boot path, `kernel_main`).
@@ -206,7 +333,7 @@ pub fn set_root_readonly_at_boot() {
 pub extern "C" fn oxidebsd_root_readonly_at_boot() -> u64 {
     let on_memory = crate::kern::vfs_bdev::root()
         .and_then(crate::kern::vfs_bdev::extent)
-        .is_some_and(|(_, _, memory)| memory);
+        .is_some_and(|(_, _, disk)| is_memory(disk));
     (ROOT_READONLY_AT_BOOT.load(Ordering::Relaxed) && !on_memory) as u64
 }
 
@@ -220,7 +347,7 @@ pub extern "C" fn oxidebsd_root_mounted_rw(rw: u64) {
 /// Whether raw device `handle` overlaps a device a file system has mounted read-write.
 fn overlaps_mounted(handle: u32) -> bool {
     crate::kern::vfs_bdev::extent(handle)
-        .is_some_and(|(first, sectors, memory)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, memory))
+        .is_some_and(|(first, sectors, disk)| crate::kern::vfs_bdev::overlaps_mounted_rw(first, sectors, disk))
 }
 
 /// Opens raw device `major:minor`. Writing is refused (`EPERM`) for a device overlapping one a
@@ -341,8 +468,9 @@ extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, _fla
     n as i64
 }
 
-/// `DIOCGSECTORSIZE`: a raw device's sector size (`u32`, always 512). FreeBSD's name in
-/// `<sys/disk.h>`; the number is OxideBSD's own, `_IOR('d', 128, u32)` in musl's encoding.
+/// `DIOCGSECTORSIZE`: a raw device's sector size (`u32`: its disk's, 512 or a CD's 2048).
+/// FreeBSD's name in `<sys/disk.h>`; the number is OxideBSD's own, `_IOR('d', 128, u32)` in musl's
+/// encoding.
 pub const DIOCGSECTORSIZE: u64 = 0x8004_6480;
 /// `DIOCGMEDIASIZE`: a raw device's size in bytes (`i64`, FreeBSD's `off_t`), so `newfs_oxfs`
 /// can lay a filesystem out over it. `_IOR('d', 129, i64)`.
@@ -356,9 +484,10 @@ pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> 
         return None;
     }
     let handle = RAW_OPEN.lock().get(&real_fd).copied()?;
-    let (_, sectors, _) = crate::kern::vfs_bdev::extent(handle)?;
+    let (_, sectors, disk) = crate::kern::vfs_bdev::extent(handle)?;
     Some(if request == DIOCGSECTORSIZE {
-        copyout_val(&512u32, UserPtr::new(argp)).map(|()| 0)
+        let sector_size = backend(disk).map_or(512, |(_, size)| size as u32);
+        copyout_val(&sector_size, UserPtr::new(argp)).map(|()| 0)
     } else {
         copyout_val(&((sectors * 512) as i64), UserPtr::new(argp)).map(|()| 0)
     })
@@ -367,14 +496,4 @@ pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> 
 extern "C" fn raw_close(real_fd: u64) -> i64 {
     RAW_OPEN.lock().remove(&real_fd);
     0
-}
-
-/// The data disk's name for the boot log and `/etc/fstab`: `virt0`, `ide0`, or empty.
-#[allow(dead_code)]
-pub fn disk_name() -> String {
-    String::from(match BACKEND.load(Ordering::Relaxed) {
-        VIRTIO => "virt0",
-        ATA => "ide0",
-        _ => "",
-    })
 }

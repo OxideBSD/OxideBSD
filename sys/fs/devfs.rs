@@ -107,7 +107,7 @@ pub(crate) extern "C" fn oxidebsd_dev_open(major: u64, minor: u64, flags: u64) -
             let fd = open(major, minor, flags);
             // Tagged with its number, so `fstat` reports the device (a terminal already is).
             if fd >= 0 && let Some(real_fd) = crate::fs::fd::real_fd_of(fd as u64) {
-                crate::fs::fd::tag_device(real_fd, major << 8 | minor);
+                crate::fs::fd::tag_device(real_fd, vfs_if::makedev(major as u32, minor as u32));
             }
             fd
         }

@@ -1,15 +1,17 @@
-//! virtio-blk: a virtio block device (virtio 1.2 specification §5.2) as the data disk
-//! (`drivers::disk`). The default under QEMU (`scripts/qemu_common.sh`), because unlike IDE PIO no
-//! data passes through I/O ports: the device reads and writes a DMA buffer directly.
+//! virtio-blk: virtio block devices (virtio 1.2 specification §5.2), each a disk in the registry
+//! (`drivers::disk`: `virt0`, `virt1`, ... in PCI order). The default under QEMU
+//! (`scripts/qemu_common.sh`), because unlike IDE PIO no data passes through I/O ports: the device
+//! reads and writes a DMA buffer directly.
 //!
-//! One request at a time through queue 0: a chain of the request header (device-readable), the
-//! data (through a bounce buffer, `BUFFER_BLOCKS` at a time), and the status byte
-//! (device-writable). Completion is interrupt-driven with a polling fallback
-//! (`dma::wait_until`): the PCI interrupt line's handler acknowledges the ISR, waking a `hlt`; the
-//! wait itself watches the used ring. With `F_FLUSH` negotiated, every write batch ends with a
-//! flush request, so it's durable when `write_blocks` returns, as the ATA path's `CACHE FLUSH`
-//! makes it.
+//! Each unit takes one request at a time through its queue 0: a chain of the request header
+//! (device-readable), the data (through a bounce buffer, `BUFFER_BLOCKS` at a time), and the status
+//! byte (device-writable). Completion is interrupt-driven with a polling fallback
+//! (`dma::wait_for_disk`): the PCI interrupt lines' handler acknowledges every unit's ISR, waking
+//! the waiters; each wait watches its own used ring. With `F_FLUSH` negotiated, every write batch
+//! ends with a flush request, so it's durable when `write_sectors` returns, as the ATA path's
+//! `CACHE FLUSH` makes it.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
@@ -47,10 +49,13 @@ struct Disk {
     capacity: u64,
 }
 
-static DISK: Mutex<Option<Disk>> = Mutex::new(None);
-/// The ISR status register, for the interrupt handler, which can't take `DISK` (it may have
-/// interrupted a holder). `0` until `init` succeeds.
-static ISR_ADDR: AtomicU64 = AtomicU64::new(0);
+/// The units, in PCI order: set once by `init`.
+static UNITS: spin::Once<Vec<Mutex<Disk>>> = spin::Once::new();
+/// Each unit's ISR status register, for the interrupt handler, which can't take a unit's lock (it
+/// may have interrupted a holder). `0` past the units `init` started.
+static ISR_ADDRS: [AtomicU64; MAX_UNITS] = [const { AtomicU64::new(0) }; MAX_UNITS];
+/// Units driven at most (more are logged and left alone).
+const MAX_UNITS: usize = 16;
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static IRQS: AtomicU64 = AtomicU64::new(0);
 
@@ -59,34 +64,66 @@ pub fn stats() -> (u64, u64) {
     (REQUESTS.load(Ordering::Relaxed), IRQS.load(Ordering::Relaxed))
 }
 
-/// The PCI interrupt line (possibly shared): reading the ISR acknowledges the device, so the line
-/// drops before EOI. The waiter re-checks the used ring itself; this only wakes it.
+/// A unit's PCI interrupt line (possibly shared, with each other or other devices): reading each
+/// unit's ISR acknowledges it, so the line drops before EOI. Each waiter re-checks its used ring
+/// itself; this only wakes them.
 fn irq_handler() {
-    let isr = ISR_ADDR.load(Ordering::Relaxed);
-    if isr == 0 {
-        return;
+    let mut any = false;
+    for isr in &ISR_ADDRS {
+        let isr = isr.load(Ordering::Relaxed);
+        // SAFETY: a mapped ISR register.
+        if isr != 0 && unsafe { (isr as *const u8).read_volatile() } & 1 != 0 {
+            any = true;
+        }
     }
-    // SAFETY: the mapped ISR register.
-    if unsafe { (isr as *const u8).read_volatile() } & 1 != 0 {
+    if any {
         IRQS.fetch_add(1, Ordering::Relaxed);
         super::dma::wake_disk_waiters(&mut crate::process::table().lock());
     }
 }
 
-/// Finds and starts a virtio-blk device. `false` (logged) if there's none or it fails to start.
+/// Finds and starts every virtio-blk device; the capacity (in 512-byte sectors) of each started,
+/// its unit number its index. Ones that fail to start are logged and left out.
 pub fn init(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     mapper: &mut impl Mapper<Size4KiB>,
     phys_mem_offset: VirtAddr,
-) -> bool {
-    let Some(pci) = super::pci::find_by_id(VENDOR, DEVICE_MODERN)
-        .or_else(|| super::pci::find_by_id(VENDOR, DEVICE_TRANSITIONAL))
-    else {
-        return false;
-    };
+) -> Vec<u64> {
+    let mut pcis = super::pci::find_all_by_id(VENDOR, DEVICE_MODERN);
+    pcis.extend(super::pci::find_all_by_id(VENDOR, DEVICE_TRANSITIONAL));
+    pcis.sort_by_key(|p| (p.bus, p.device, p.function));
+    let mut units = Vec::new();
+    for pci in pcis {
+        if units.len() == MAX_UNITS {
+            serial_println!("[boot] virtio-blk: more than {} devices -- the rest not used", MAX_UNITS);
+            break;
+        }
+        if let Some(disk) = start(pci, units.len(), frame_allocator, mapper, phys_mem_offset) {
+            units.push(Mutex::new(disk));
+        }
+    }
+    let capacities = units.iter().map(|u| u.lock().capacity).collect();
+    UNITS.call_once(|| units);
+    capacities
+}
+
+/// Starts the device at `pci` as unit `unit`. `None` (logged) if it fails to.
+fn start(
+    pci: super::pci::PciDevice,
+    unit: usize,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    mapper: &mut impl Mapper<Size4KiB>,
+    phys_mem_offset: VirtAddr,
+) -> Option<Disk> {
     let fail = |why: &str| {
-        serial_println!("[boot] virtio-blk: {} -- not used", why);
-        false
+        serial_println!(
+            "[boot] virtio-blk at {:02x}:{:02x}.{}: {} -- not used",
+            pci.bus,
+            pci.device,
+            pci.function,
+            why
+        );
+        None
     };
     let Some(dev) = VirtioPci::new(pci, frame_allocator, mapper, phys_mem_offset) else {
         return fail("no modern (virtio 1.x) interface");
@@ -108,7 +145,7 @@ pub fn init(
     // Interrupt-line values 0-2 and >= 16 (0xFF: none assigned) can't be a usable PIC line here.
     let irq = pci.interrupt_line;
     let irq_ok = (3..16).contains(&irq);
-    ISR_ADDR.store(dev.isr_addr().as_u64(), Ordering::Release);
+    ISR_ADDRS[unit].store(dev.isr_addr().as_u64(), Ordering::Release);
     let _ = dev.read_isr(); // clear anything pending from setup
     if irq_ok {
         x86_64::instructions::interrupts::without_interrupts(|| {
@@ -118,7 +155,8 @@ pub fn init(
         });
     }
     serial_println!(
-        "[boot] virtio-blk at {:02x}:{:02x}.{}: {} MiB, flush {}, {}",
+        "[boot] virtio-blk: virt{} at {:02x}:{:02x}.{}: {} MiB, flush {}, {}",
+        unit,
         pci.bus,
         pci.device,
         pci.function,
@@ -126,8 +164,7 @@ pub fn init(
         if features & F_FLUSH != 0 { "yes" } else { "no" },
         if irq_ok { alloc::format!("IRQ {irq}") } else { alloc::string::String::from("no IRQ, polling") }
     );
-    *DISK.lock() = Some(Disk { dev, queue, request, buffer, flush: features & F_FLUSH != 0, capacity });
-    true
+    Some(Disk { dev, queue, request, buffer, flush: features & F_FLUSH != 0, capacity })
 }
 
 impl Disk {
@@ -165,20 +202,16 @@ impl Disk {
     }
 }
 
-/// The disk's size in 512-byte sectors, `0` without one.
-pub fn capacity_sectors() -> u64 {
-    DISK.lock().as_ref().map_or(0, |disk| disk.capacity)
+/// Unit `unit`'s lock, if there is such a unit.
+fn unit(unit: usize) -> Option<&'static Mutex<Disk>> {
+    UNITS.get()?.get(unit)
 }
 
-/// Reads blocks from `start_block` into `buf` (a whole number of 4 KiB blocks).
-pub fn read_blocks(start_block: u64, buf: &mut [u8]) -> bool {
-    read_sectors(start_block * 8, buf)
-}
-
-/// Reads sectors from `lba` into `buf` (a whole number of 512-byte sectors).
-pub fn read_sectors(lba: u64, buf: &mut [u8]) -> bool {
-    let mut guard = DISK.lock();
-    let Some(disk) = guard.as_mut() else { return false };
+/// Reads unit `n`'s sectors from `lba` into `buf` (a whole number of 512-byte sectors).
+pub fn read_sectors(n: usize, lba: u64, buf: &mut [u8]) -> bool {
+    let Some(unit) = unit(n) else { return false };
+    let mut guard = unit.lock();
+    let disk = &mut *guard;
     for (i, chunk) in buf.chunks_mut(BUFFER_BLOCKS * 4096).enumerate() {
         let sector = lba + (i * BUFFER_BLOCKS * 8) as u64;
         if !disk.request(T_IN, sector, chunk.len()) {
@@ -190,15 +223,12 @@ pub fn read_sectors(lba: u64, buf: &mut [u8]) -> bool {
     true
 }
 
-/// Writes blocks from `buf` at `start_block`, then flushes, so they're durable on return.
-pub fn write_blocks(start_block: u64, buf: &[u8]) -> bool {
-    write_sectors(start_block * 8, buf)
-}
-
-/// Writes sectors at `lba` from `buf` (whole sectors), then flushes.
-pub fn write_sectors(lba: u64, buf: &[u8]) -> bool {
-    let mut guard = DISK.lock();
-    let Some(disk) = guard.as_mut() else { return false };
+/// Writes unit `n`'s sectors at `lba` from `buf` (whole sectors), then flushes, so they're durable
+/// on return.
+pub fn write_sectors(n: usize, lba: u64, buf: &[u8]) -> bool {
+    let Some(unit) = unit(n) else { return false };
+    let mut guard = unit.lock();
+    let disk = &mut *guard;
     for (i, chunk) in buf.chunks(BUFFER_BLOCKS * 4096).enumerate() {
         let sector = lba + (i * BUFFER_BLOCKS * 8) as u64;
         // SAFETY: no request is in flight.

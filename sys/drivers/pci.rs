@@ -224,6 +224,17 @@ pub fn find_by_id(vendor: u16, device_id: u16) -> Option<PciDevice> {
     found
 }
 
+/// Every device matching a vendor/device ID pair, in bus order.
+pub fn find_all_by_id(vendor: u16, device_id: u16) -> alloc::vec::Vec<PciDevice> {
+    let mut found = alloc::vec::Vec::new();
+    for_each_device(|dev| {
+        if dev.vendor_id == vendor && dev.device_id == device_id {
+            found.push(dev);
+        }
+    });
+    found
+}
+
 /// Maps `page_count` pages of device registers at physical `phys_base` to their HHDM address
 /// (`phys_mem_offset + phys_base`) as uncached, and returns that address. The HHDM alone can't be
 /// trusted to cover them: firmware parks large or 64-bit BARs in a high MMIO window above what

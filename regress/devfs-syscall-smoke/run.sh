@@ -105,5 +105,35 @@ check "own applies" node_is /dev/tty crw-rw-rw- root tty
 check "link applies" [ -L /dev/nothing ]
 cp /tmp/devfs/devfs.conf.orig /etc/devfs.conf
 
+# --- The disk registry (INSTALLER.md §5) --------------------------------------------------------
+# The runner attaches virt0 (GPT, one partition labelled `extra`), virt1 (blank), ide0 (blank,
+# 130 GiB, on the primary master) beside the system's disk, ide1 (the secondary master).
+disk_sysctl() { sysctl -n "kern.disk.$1.$2" 2>&1; }
+# Writes $2 at 512-byte sector $3 of device $1 and reads it back.
+sector_round_trip() {
+	printf '%s' "$2" | dd of="$1" bs=512 seek="$3" conv=notrunc,sync 2>/dev/null &&
+		[ "$(dd if="$1" bs=512 skip="$3" count=1 2>/dev/null | tr -d '\000')" = "$2" ]
+}
+check "kern.disks lists every disk" [ "$(sysctl -n kern.disks)" = "virt0 virt1 ide0 ide1" ]
+for d in virt0 virt0p1 gpt/extra virt1 ide0 ide1 ide1p1; do
+	check "/dev/$d is crw-------" mode_is /dev/$d crw-------
+done
+check "virt1 has no partitions" sh -c '[ ! -e /dev/virt1p1 ] && [ ! -e /dev/virt1s1 ]'
+check "a second unit's minor is unit << 8" sh -c 'ls -l /dev/virt1 | grep -q " 252, *256 "'
+check "... and its partitions' unit << 8 | N" sh -c 'ls -l /dev/ide1p1 | grep -q " 3, *257 "'
+check "kern.disk.ide0.size is 130 GiB" [ "$(disk_sysctl ide0 size)" = 139586437120 ]
+check "kern.disk.virt1.size is 32 MiB" [ "$(disk_sysctl virt1 size)" = 33554432 ]
+check "kern.disk.virt0.kind is disk" [ "$(disk_sysctl virt0 kind)" = disk ]
+check "kern.disk.ide1.sectorsize is 512" [ "$(disk_sysctl ide1 sectorsize)" = 512 ]
+check "kern.disk.ide1.model is the drive's" [ "$(disk_sysctl ide1 model)" = "QEMU HARDDISK" ]
+check "virt1 reads and writes" sector_round_trip /dev/virt1 virt1-data 100
+check "virt0's partition does too" sector_round_trip /dev/gpt/extra extra-data 10
+check "... the same sectors as through virt0p1" [ "$(dd if=/dev/virt0p1 bs=512 skip=10 count=1 2>/dev/null | tr -d '\000')" = extra-data ]
+check "ide0 reads and writes below 128 GiB (LBA28)" sector_round_trip /dev/ide0 low-data 1000
+check "... and above it (LBA48)" sector_round_trip /dev/ide0 high-data 268435500
+check "... at its last sector" sector_round_trip /dev/ide0 last-data 272629759
+check "... and not past its end" not sh -c 'printf x | dd of=/dev/ide0 bs=512 seek=272629760 conv=notrunc,sync 2>/dev/null'
+check "the root's disk can't be written while mounted" not sh -c 'printf x | dd of=/dev/ide1 bs=512 seek=1 conv=notrunc,sync 2>/dev/null'
+
 echo "devfs-smoke: $fail failed"
 [ $fail -eq 0 ]
