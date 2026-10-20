@@ -3829,7 +3829,9 @@ fn build_nano(musl_sysroot: &Path, ncurses_sysroot: &Path) -> PathBuf {
             "LDFLAGS",
             format!("-pie -L{}", ncurses_sysroot.join("lib").display()),
         )
-        .args(["--host=x86_64-unknown-linux-musl", "--disable-nls"])
+        // Maintainer mode (on by default in nano's configure.ac) regenerates aclocal.m4/configure
+        // whenever a checkout leaves them older than configure.ac or m4/*: git doesn't keep mtimes.
+        .args(["--host=x86_64-unknown-linux-musl", "--disable-nls", "--disable-maintainer-mode"])
         .stdout(std::process::Stdio::null())
         .status()
         .unwrap_or_else(|e| panic!("failed to run nano configure: {e}"));
