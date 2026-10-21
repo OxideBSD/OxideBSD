@@ -27,9 +27,10 @@ mod kthreads {
     use oxidebsd::cpu::interrupts::ticks;
     use oxidebsd::kern::kern_kthread::{alive, kthread_add, kthread_exit, kthread_yield};
     use oxidebsd::kern::kern_synch::{Slept, pause, tsleep, wakeup, wakeup_one};
+    use oxidebsd::kern::subr_taskqueue::{self as tq, TASKQUEUE_THREAD, Task};
 
     /// One bit per check below.
-    const CHECKS: u32 = 9;
+    const CHECKS: u32 = 14;
     static PASSED: AtomicU32 = AtomicU32::new(0);
     static FAILED: AtomicU32 = AtomicU32::new(0);
     pub static VERDICT: AtomicU64 = AtomicU64::new(0);
@@ -121,6 +122,87 @@ mod kthreads {
         }
     }
 
+    /// 9: a task enqueued three times before it runs runs once, told of all three.
+    static COALESCED: Task = Task::new(coalesced, 0);
+    static COALESCED_SEEN: AtomicU32 = AtomicU32::new(0);
+    fn coalesced(_: usize, pending: u32) {
+        COALESCED_SEEN.fetch_add(pending << 8 | 1, Ordering::Relaxed);
+    }
+    fn coalescer(_: usize) {
+        for _ in 0..3 {
+            tq::enqueue(&TASKQUEUE_THREAD, &COALESCED);
+        }
+        pause(5);
+        // One run (low byte 1) with pending 3.
+        result(9, COALESCED_SEEN.load(Ordering::Relaxed) == 3 << 8 | 1);
+    }
+
+    /// 10: a task enqueued by an interrupt handler runs. IRQ 13 (the old FPU line) is free under
+    /// QEMU; `int` raises its vector by hand.
+    static FROM_IRQ: Task = Task::new(from_irq, 0);
+    static FROM_IRQ_SEEN: AtomicU32 = AtomicU32::new(0);
+    static IRQ_ARMED: AtomicBool = AtomicBool::new(false);
+    fn from_irq(_: usize, pending: u32) {
+        FROM_IRQ_SEEN.fetch_add(pending, Ordering::Relaxed);
+    }
+    fn irq13() {
+        if IRQ_ARMED.swap(false, Ordering::Relaxed) {
+            tq::enqueue(&TASKQUEUE_THREAD, &FROM_IRQ);
+        }
+    }
+    fn irq_raiser(_: usize) {
+        const _: () = assert!(oxidebsd::cpu::pic::PIC_1_OFFSET + 13 == 45);
+        oxidebsd::cpu::interrupts::register_irq_handler(13, irq13);
+        IRQ_ARMED.store(true, Ordering::Relaxed);
+        // SAFETY: vector 45 is IRQ 13's stub; its handlers are ours.
+        unsafe { core::arch::asm!("int 45") };
+        pause(5);
+        result(10, FROM_IRQ_SEEN.load(Ordering::Relaxed) == 1);
+    }
+
+    /// 11: a task enqueued again while it runs runs again.
+    static AGAIN: Task = Task::new(again, 0);
+    static AGAIN_RUNS: AtomicU32 = AtomicU32::new(0);
+    fn again(_: usize, pending: u32) {
+        if AGAIN_RUNS.fetch_add(pending, Ordering::Relaxed) == 0 {
+            tq::enqueue(&TASKQUEUE_THREAD, &AGAIN);
+        }
+    }
+    fn againer(_: usize) {
+        tq::enqueue(&TASKQUEUE_THREAD, &AGAIN);
+        pause(5);
+        result(11, AGAIN_RUNS.load(Ordering::Relaxed) == 2);
+    }
+
+    /// 12: `drain` returns only once a task that sleeps has finished.
+    static SLOW: Task = Task::new(slow, 0);
+    static SLOW_DONE: AtomicBool = AtomicBool::new(false);
+    fn slow(_: usize, _: u32) {
+        pause(5);
+        SLOW_DONE.store(true, Ordering::Relaxed);
+    }
+    fn drainer(_: usize) {
+        tq::enqueue(&TASKQUEUE_THREAD, &SLOW);
+        tq::drain(&TASKQUEUE_THREAD, &SLOW);
+        result(12, SLOW_DONE.load(Ordering::Relaxed));
+    }
+
+    /// 13: a queue of one's own, with two threads of its own, runs its tasks.
+    static OWN: Task = Task::new(own, 0);
+    static OWN_RAN_ON: AtomicU64 = AtomicU64::new(0);
+    fn own(_: usize, _: u32) {
+        OWN_RAN_ON.store(oxidebsd::process::scheduler::current_pid(), Ordering::Relaxed);
+    }
+    fn owner(_: usize) {
+        let queue = tq::create("tq-test");
+        let ok = tq::start_threads(queue, 2).is_ok();
+        tq::enqueue(queue, &OWN);
+        tq::drain(queue, &OWN);
+        // Only its own threads run it: on a kernel thread, not this one.
+        let on = OWN_RAN_ON.load(Ordering::Relaxed);
+        result(13, ok && alive(on) && on != oxidebsd::process::scheduler::current_pid());
+    }
+
     /// Waits for the others (up to 10 s), then gives the verdict.
     fn judge(_: usize) {
         let all = (1 << CHECKS) - 1;
@@ -147,6 +229,12 @@ mod kthreads {
         add(hog, "hog");
         EXITER.store(add(exiter, "exiter"), Ordering::Relaxed);
         SLEEPER.store(add(forever, "forever"), Ordering::Relaxed);
+        tq::start_system();
+        add(coalescer, "coalescer");
+        add(irq_raiser, "irq-raiser");
+        add(againer, "againer");
+        add(drainer, "drainer");
+        add(owner, "owner");
         add(judge, "judge");
     }
 }

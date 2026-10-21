@@ -257,6 +257,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     crate::process::init::arm(crate::process::init::boot_init(), crate::process::init::boot_emergency());
     let pid1 = crate::process::init::start_pid1()
         .unwrap_or_else(|| panic!("no init found: nothing in init_path, nor /bin/sh, could be started"));
+    // The system taskqueue's thread (KTHREAD.md §6.4), after pid 1 has its number.
+    crate::kern::subr_taskqueue::start_system();
 
     crate::process::scheduler::start(pid1)
 }
