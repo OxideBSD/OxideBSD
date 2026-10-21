@@ -460,6 +460,7 @@ fn timer_interrupt_handler(frame: &mut TrapFrame) {
             crate::process::limits::cpu_limits(&mut table);
         }
         crate::kern::kern_synch::tick(&table, now);
+        crate::kern::kern_synch::expire_sleeps(&mut table, now);
         // Terminal reads whose VTIME ran out.
         crate::tty::expire_timers(&mut table, now);
         // Disk waits re-check every tick, in case a completion interrupt was lost.

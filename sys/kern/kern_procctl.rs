@@ -81,6 +81,7 @@ fn targets(caller: Pid, idtype: u64, id: u64) -> Result<Vec<Pid>, u64> {
         P_PID => {
             let pid = if id == 0 { me.tgid } else { id as Pid };
             match table.get(&pid) {
+                Some(p) if process::is_kernel_thread(p) => return Err(EPERM),
                 Some(p) if live(p) => alloc::vec![p.tgid],
                 _ => Vec::new(),
             }

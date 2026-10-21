@@ -58,6 +58,7 @@ unsafe extern "C" {
     pub fn switch_context(old_rsp_slot: *mut u64, new_rsp: u64);
 
     fn spawn_trampoline_asm();
+    fn kthread_trampoline_asm();
     fn fork_trampoline_asm();
 }
 
@@ -111,6 +112,25 @@ pub(crate) fn seed_spawn_frame(kernel_stack_top: VirtAddr) -> u64 {
 ///
 /// `parent_frame` must point at a valid, fully-initialized `SyscallFrame` (i.e. the caller's own
 /// `syscall::current_frame()`, called from within `sys_fork`'s own handling).
+/// A never-run kernel thread's first frame: `switch_context` returns into
+/// `kthread_trampoline_asm`, which calls `kern_kthread::kthread_start(func, arg)` (passed in `r12`
+/// and `r13`, which `switch_context` pops).
+pub(crate) fn seed_kthread_frame(kernel_stack_top: VirtAddr, func: usize, arg: usize) -> u64 {
+    let frame_addr = kernel_stack_top.as_u64() - size_of::<SwitchFrame>() as u64;
+    let frame = SwitchFrame {
+        r15: 0,
+        r14: 0,
+        r13: arg as u64,
+        r12: func as u64,
+        rbx: 0,
+        rbp: 0,
+        return_address: kthread_trampoline_asm as *const () as u64,
+    };
+    // SAFETY: the top of a fresh kernel stack, owned by nothing else yet.
+    unsafe { core::ptr::write(frame_addr as *mut SwitchFrame, frame) };
+    frame_addr
+}
+
 pub(crate) unsafe fn seed_fork_frame(
     kernel_stack_top: VirtAddr,
     parent_frame: *const SyscallFrame,
@@ -206,6 +226,12 @@ global_asm!(
     // Defensive realignment, not a derived offset -- see this file's module doc comment.
     "and rsp, -16",
     "call spawn_trampoline_inner", // -> !, never returns
+    ".global kthread_trampoline_asm",
+    "kthread_trampoline_asm:",
+    "mov rdi, r12",
+    "mov rsi, r13",
+    "and rsp, -16",
+    "call kthread_start", // -> !, never returns
     ".global fork_trampoline_asm",
     "fork_trampoline_asm:",
     // RSP already points exactly at the copied SyscallFrame's first field -- see seed_fork_frame.

@@ -238,7 +238,12 @@ fn priority_targets(table: &BTreeMap<Pid, Box<Process>>, caller_pid: Pid, which:
     let groups: Vec<Pid> = match which {
         PRIO_PROCESS => {
             let pid = if who == 0 { me.tgid } else { who as Pid };
-            alloc::vec![table.get(&pid).ok_or(ESRCH)?.tgid]
+            let target = table.get(&pid).ok_or(ESRCH)?;
+            if super::is_kernel_thread(target) {
+                // One kernel thread, not the kernel process's every thread.
+                return Ok(alloc::vec![pid]);
+            }
+            alloc::vec![target.tgid]
         }
         PRIO_PGRP => {
             let pgrp = if who == 0 { me.pgid } else { who as Pid };
@@ -267,7 +272,7 @@ pub fn do_setpriority(caller_pid: Pid, which: u64, who: i64, prio: i32) -> Resul
     let mut result = Ok(0);
     for pid in priority_targets(&table, caller_pid, which, who)? {
         let p = table.get_mut(&pid).unwrap();
-        if !cred.may_schedule(&p.shared.lock().cred) {
+        if super::is_kernel_thread(p) || !cred.may_schedule(&p.shared.lock().cred) {
             result = Err(EPERM);
         } else if nice < p.nice && !cred.privileged() {
             result = Err(crate::syscall::EACCES);
@@ -469,7 +474,7 @@ pub fn do_sched_setscheduler(
     let proc = table
         .get_mut(&target)
         .expect("sched_setscheduler: target process missing from table");
-    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
+    if super::is_kernel_thread(proc) || !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     let (min, max) = sched_priority_range(policy);
@@ -516,7 +521,7 @@ pub fn do_sched_setparam(caller_pid: Pid, pid: i64, param_ptr: u64) -> Result<u6
     let proc = table
         .get_mut(&target)
         .expect("sched_setparam: target process missing from table");
-    if !has_sched_permission(&caller, &proc.shared.lock().cred) {
+    if super::is_kernel_thread(proc) || !has_sched_permission(&caller, &proc.shared.lock().cred) {
         return Err(EPERM);
     }
     let (min, max) = sched_priority_range(proc.sched_policy);

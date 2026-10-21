@@ -15,6 +15,152 @@ use oxidebsd::syscall::oxidebsd_register_syscall;
 
 limine_entry_point!(main);
 
+/// Kernel threads (OxideBSD-doc KTHREAD.md §10 step 1): `SYS_TEST_KTHREAD` tells
+/// `regress/kern-smoke/kthread.c` the id of a kernel thread that sleeps for good (`0`), the
+/// verdict of the threads' own checks below (`1`: 0 while they run, 1 when all passed, else 2 |
+/// the failed checks << 8), and whether the sleeper is still there (`2`).
+const SYS_TEST_KTHREAD: u64 = 9996;
+
+mod kthreads {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use oxidebsd::cpu::interrupts::ticks;
+    use oxidebsd::kern::kern_kthread::{alive, kthread_add, kthread_exit, kthread_yield};
+    use oxidebsd::kern::kern_synch::{Slept, pause, tsleep, wakeup, wakeup_one};
+
+    /// One bit per check below.
+    const CHECKS: u32 = 9;
+    static PASSED: AtomicU32 = AtomicU32::new(0);
+    static FAILED: AtomicU32 = AtomicU32::new(0);
+    pub static VERDICT: AtomicU64 = AtomicU64::new(0);
+    pub static SLEEPER: AtomicU64 = AtomicU64::new(0);
+    static EXITER: AtomicU64 = AtomicU64::new(0);
+
+    static FLAG: AtomicBool = AtomicBool::new(false);
+    static ONE: AtomicU32 = AtomicU32::new(0);
+    static TIMEOUT_CHAN: u8 = 0;
+    static NEVER_CHAN: u8 = 0;
+
+    fn chan<T>(x: &'static T) -> usize {
+        x as *const T as usize
+    }
+
+    fn result(check: u32, ok: bool) {
+        oxidebsd::serial_println!("kthread-smoke: {}: check {}", if ok { "ok" } else { "FAIL" }, check);
+        if ok { &PASSED } else { &FAILED }.fetch_or(1 << check, Ordering::Relaxed);
+    }
+
+    /// 0: sleeps until `waker` sets the flag and wakes it.
+    fn sleeper(_: usize) {
+        let mut woken = 0;
+        while !FLAG.load(Ordering::Relaxed) {
+            if tsleep(chan(&FLAG), None) == Slept::Woken {
+                woken += 1;
+            }
+        }
+        result(0, woken >= 1);
+    }
+
+    /// 1: sets the flag after a while, and wakes the sleeper.
+    fn waker(_: usize) {
+        pause(5);
+        FLAG.store(true, Ordering::Relaxed);
+        wakeup(chan(&FLAG));
+        result(1, true);
+    }
+
+    /// 2: a timeout of 3 ticks times out, after 3 ticks.
+    fn timeout(_: usize) {
+        let t0 = ticks();
+        let slept = tsleep(chan(&TIMEOUT_CHAN), Some(3));
+        result(2, slept == Slept::TimedOut && ticks() - t0 >= 3);
+    }
+
+    fn one_sleeper(_: usize) {
+        tsleep(chan(&ONE), None);
+        ONE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 3, 4: `wakeup_one` wakes one of the two sleepers, then the other.
+    fn one_waker(_: usize) {
+        pause(3);
+        wakeup_one(chan(&ONE));
+        pause(3);
+        result(3, ONE.load(Ordering::Relaxed) == 1);
+        wakeup_one(chan(&ONE));
+        pause(3);
+        result(4, ONE.load(Ordering::Relaxed) == 2);
+    }
+
+    /// 5: yielding comes back.
+    fn yielder(_: usize) {
+        kthread_yield();
+        kthread_yield();
+        result(5, true);
+    }
+
+    /// 6: runs 150 ms without sleeping: the scheduler logs it ("[kthread] hog ran").
+    fn hog(_: usize) {
+        let until = oxidebsd::cpu::tsc::now() + oxidebsd::cpu::tsc::ms_to_cycles(150);
+        while oxidebsd::cpu::tsc::now() < until {
+            core::hint::spin_loop();
+        }
+        result(6, true);
+    }
+
+    /// 7: ends itself with `kthread_exit` (8: and is gone afterwards).
+    fn exiter(_: usize) {
+        result(7, true);
+        kthread_exit();
+    }
+
+    /// Sleeps for good: `kthread.c` tries to signal and renice it.
+    fn forever(_: usize) {
+        loop {
+            tsleep(chan(&NEVER_CHAN), None);
+        }
+    }
+
+    /// Waits for the others (up to 10 s), then gives the verdict.
+    fn judge(_: usize) {
+        let all = (1 << CHECKS) - 1;
+        for _ in 0..1000 {
+            pause(1);
+            if PASSED.load(Ordering::Relaxed) | FAILED.load(Ordering::Relaxed) == all & !(1 << 8) {
+                break;
+            }
+        }
+        result(8, !alive(EXITER.load(Ordering::Relaxed)));
+        let failed = FAILED.load(Ordering::Relaxed) | (all & !PASSED.load(Ordering::Relaxed));
+        VERDICT.store(if failed == 0 { 1 } else { 2 | (failed as u64) << 8 }, Ordering::Relaxed);
+    }
+
+    pub fn start() {
+        let add = |f: fn(usize), name| kthread_add(f, 0, name).unwrap_or_else(|e| panic!("kthread_add {name}: {e}"));
+        add(sleeper, "sleeper");
+        add(waker, "waker");
+        add(timeout, "timeout");
+        add(one_sleeper, "one-a");
+        add(one_sleeper, "one-b");
+        add(one_waker, "one-waker");
+        add(yielder, "yielder");
+        add(hog, "hog");
+        EXITER.store(add(exiter, "exiter"), Ordering::Relaxed);
+        SLEEPER.store(add(forever, "forever"), Ordering::Relaxed);
+        add(judge, "judge");
+    }
+}
+
+extern "C" fn test_kthread_handler(what: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> i64 {
+    use core::sync::atomic::Ordering;
+    match what {
+        0 => kthreads::SLEEPER.load(Ordering::Relaxed) as i64,
+        1 => kthreads::VERDICT.load(Ordering::Relaxed) as i64,
+        2 => oxidebsd::kern::kern_kthread::alive(kthreads::SLEEPER.load(Ordering::Relaxed)) as i64,
+        _ => -22,
+    }
+}
+
 /// Must match `regress/kern-syscall-smoke/src/main.rs`'s own `SYS_TEST_EXIT` constant -- no
 /// shared crate across this ABI boundary, same convention every other regress/kernel pair here
 /// uses.
@@ -158,6 +304,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
     );
     let pid1 = oxidebsd::process::spawn(KERN_SYSCALL_SMOKE_ELF, None)
         .unwrap_or_else(|e| panic!("failed to spawn kern-syscall-smoke: {e:?}"));
+    // After pid 1, which keeps its number.
+    assert_eq!(oxidebsd_register_syscall(SYS_TEST_KTHREAD, test_kthread_handler), 0, "SYS_TEST_KTHREAD registration failed");
+    kthreads::start();
 
     oxidebsd::process::scheduler::start(pid1)
 }

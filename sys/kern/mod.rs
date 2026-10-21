@@ -4,6 +4,7 @@
 pub mod fsconf;
 pub mod kern_core;
 pub mod kern_descrip;
+pub mod kern_kthread;
 pub mod kern_procctl;
 pub mod kern_synch;
 pub mod kern_sysctl;

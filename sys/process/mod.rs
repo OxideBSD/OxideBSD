@@ -159,6 +159,10 @@ pub enum BlockReason {
     /// `process::table()`" shape terminal input's own reader wakeup already
     /// established for `WaitingForStdin`, just driven by the timer IRQ instead of the keyboard one.
     Sleeping(u64),
+    /// Asleep in `kern_synch::tsleep` on wait channel `.0` until `kern_synch::wakeup`, or the
+    /// timer reaching tick `.1` (`u64::MAX`: no timeout). `.2` orders the sleepers on a channel
+    /// for `wakeup_one`. Uninterruptible.
+    KernelSleep(usize, u64, u64),
     /// Blocked in `do_pause` (`SYS_PAUSE`) until a deliverable signal (pending and not blocked)
     /// exists — real POSIX `pause(2)` semantics: waits for a signal that either terminates the
     /// process or invokes a caught handler. Woken by `do_kill`/`signal_foreground_group`'s own
@@ -1201,6 +1205,15 @@ pub struct CascadeBudget {
     /// Remaining real-time-signal instance counts still owed a chained delivery, indexed exactly
     /// like `Process::rt_queue` (`sig - SIGRTMIN`).
     pub(crate) rt: [u16; RT_SIGNAL_COUNT],
+}
+
+/// The kernel process's thread-group id (`OxideBSD-doc/KTHREAD.md` §3): the kernel threads'. No
+/// entry has pid 0, so none of them is a leader.
+pub const KERNEL_TGID: Pid = 0;
+
+/// Whether `p` is a kernel thread.
+pub fn is_kernel_thread(p: &Process) -> bool {
+    p.tgid == KERNEL_TGID
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);

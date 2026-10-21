@@ -284,6 +284,10 @@ fn kill(caller_pid: Pid, target_pid: i64, sig: i64, fault: bool) -> Result<u64, 
         return Ok(0);
     }
     let target = target_pid as u64;
+    // Kernel threads take no signals (OxideBSD-doc KTHREAD.md §3.4), as FreeBSD's system processes.
+    if PROCESS_TABLE.lock().get(&target).is_some_and(|p| super::is_kernel_thread(p)) {
+        return Err(EPERM);
+    }
 
     // Real kill(pid, 0): no signal is actually sent -- only existence and permission are checked.
     // The standard POSIX idiom for "is this pid still alive" (`kill -0 $pid`) depends on this, and
@@ -623,6 +627,9 @@ fn record_pending(
     sender_uid: u32,
     value: u64,
 ) -> Result<(), u64> {
+    if super::is_kernel_thread(proc) {
+        return Ok(()); // discarded (KTHREAD.md §3.4)
+    }
     proc.pending_signals |= 1 << (sig - 1);
     let info = QueuedSigInfo {
         code,
@@ -1548,6 +1555,10 @@ pub fn do_sigqueue(
         return Err(EINVAL);
     }
     let target = target_pid as u64;
+    // Kernel threads take no signals (OxideBSD-doc KTHREAD.md §3.4), as FreeBSD's system processes.
+    if PROCESS_TABLE.lock().get(&target).is_some_and(|p| super::is_kernel_thread(p)) {
+        return Err(EPERM);
+    }
     let sig = sig as u64;
     let caller = current_cred();
     // siginfo's si_uid is the sender's real user ID (POSIX).

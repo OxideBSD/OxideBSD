@@ -56,6 +56,7 @@ static int child_exit_ok(int (*fn)(void))
 #include "core.c"
 #include "proc.c"
 #include "inet.c"
+#include "kthread.c"
 
 static const struct {
 	const char *name;
@@ -70,6 +71,7 @@ static const struct {
 	{ "core", core_main },
 	{ "proc", proc_main },
 	{ "inet", inet_main },
+	{ "kthread", kthread_main },
 };
 
 int main(int argc, char **argv)

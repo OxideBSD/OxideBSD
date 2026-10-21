@@ -56,10 +56,13 @@ pub(crate) fn usrpri(p: &Process) -> u32 {
 }
 
 /// What the scheduler orders ready threads by, lower first: a real-time thread's place (`100 -
-/// sched_priority`, so 1..=99), else its time-sharing priority (120..=223). Equal keys run in the
-/// order they became ready.
+/// sched_priority`, so 1..=99), else a kernel thread's band (`PRI_KERN`, between them as on
+/// FreeBSD: `OxideBSD-doc/KTHREAD.md` §4.3), else its time-sharing priority (120..=223). Equal
+/// keys run in the order they became ready.
 pub(crate) fn key(p: &Process) -> u32 {
-    if matches!(p.sched_policy, SCHED_FIFO | SCHED_RR) && p.sched_priority > 0 {
+    if super::is_kernel_thread(p) {
+        PRI_KERN
+    } else if matches!(p.sched_policy, SCHED_FIFO | SCHED_RR) && p.sched_priority > 0 {
         REALTIME_KEYS - p.sched_priority.clamp(1, 99) as u32
     } else {
         usrpri(p)
@@ -68,6 +71,8 @@ pub(crate) fn key(p: &Process) -> u32 {
 
 /// Keys below this are real-time (`key`).
 pub(crate) const REALTIME_KEYS: u32 = 100;
+/// Every kernel thread's key: after the real-time ones, before any time-sharing one.
+pub(crate) const PRI_KERN: u32 = REALTIME_KEYS;
 
 /// The run queue a key falls in: one per real-time rank, one per `RQ_PPQ` time-sharing
 /// priorities, as the BSDs' run queues are. A thread is preempted only by one in a better queue,

@@ -56,6 +56,9 @@ use crate::serial_println;
 /// `0` is never a valid `Pid` (`process::alloc_pid` starts at 1) — used as "no current process,"
 /// true only before the very first `scheduler::start`.
 static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
+/// When the running thread was last switched to (TSC): how long a kernel thread keeps the CPU
+/// (`kern_kthread::ran`).
+static RUN_STARTED: AtomicU64 = AtomicU64::new(0);
 static READY_QUEUE: Mutex<VecDeque<Pid>> = Mutex::new(VecDeque::new());
 
 /// Discard slot for `switch_context`'s `old_rsp_slot` on the very first switch (`start`), which
@@ -254,6 +257,10 @@ fn schedule_inner() {
             let (minor, major) = crate::process::mm::take_faults();
             prev.minflt += minor;
             prev.majflt += major;
+            if process::is_kernel_thread(prev) {
+                let ran = crate::cpu::tsc::now().saturating_sub(RUN_STARTED.load(Ordering::Relaxed));
+                crate::kern::kern_kthread::ran(prev, ran);
+            }
             // A process asleep inside the filesystem for anything but the disk holds up every
             // other process's file access (`fs::fslock`); a sleep that waits on another process
             // there must release the lock first (`fslock::release_for_sleep`). Reported, the
@@ -317,6 +324,7 @@ fn schedule_inner() {
             let mut table = process::table().lock();
             let prev = table.get_mut(&prev_pid).unwrap();
             prev.state = ProcState::Running;
+            RUN_STARTED.store(crate::cpu::tsc::now(), Ordering::Relaxed);
             // Same fresh-quantum reasoning as `activate_and_prepare` -- this fast path (nothing
             // else was ready, so the same process just keeps running) skips that function
             // entirely, so it needs its own reset here.
@@ -421,6 +429,7 @@ fn activate_and_prepare(pid: Pid) -> u64 {
         panic!("activate_and_prepare: pid {} missing from table", pid);
     };
     next.state = ProcState::Running;
+    RUN_STARTED.store(crate::cpu::tsc::now(), Ordering::Relaxed);
     // A fresh quantum every time a process is (re)activated -- see `Process::quantum_ticks_left`'s
     // own doc comment for why this replaced a purely global-clock-phase preemption check.
     next.quantum_ticks_left = crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS;

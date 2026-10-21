@@ -327,6 +327,99 @@ fn spawn_finish(
     Ok(pid)
 }
 
+/// The kernel process's address space (no user half) and its shared state, made by the first
+/// kernel thread (`OxideBSD-doc/KTHREAD.md` §3.2). Kept here for good: the address space is never
+/// torn down, however many kernel threads exit.
+static KERNEL_SPACE: spin::Once<(AddressSpace, Arc<Mutex<ThreadGroupShared>>)> = spin::Once::new();
+
+/// A new kernel thread (`kern::kern_kthread::kthread_add`) named `name`, `Ready` to call `func`
+/// with `arg` (by `context_switch::seed_kthread_frame`); its thread id, or `ENOMEM`. Its id is
+/// never pid 1, which `init` gives out itself.
+pub(crate) fn spawn_kernel_thread(func: usize, arg: usize, name: &[u8]) -> Result<Pid, u64> {
+    let (space, shared) = match KERNEL_SPACE.get() {
+        Some(k) => k,
+        None => {
+            let phys_offset = memory::phys_mem_offset();
+            let space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa)).map_err(|()| ENOMEM)?;
+            let shared = Arc::new(Mutex::new(ThreadGroupShared {
+                cwd: 0,
+                root: 0,
+                umask: 0o022,
+                cred: Cred::root(),
+                sigactions: [SigAction::DEFAULT; (SIGRTMAX + 1) as usize],
+                oom_adj: 0,
+            }));
+            KERNEL_SPACE.call_once(|| (space, shared))
+        }
+    };
+    let kernel_stack = KernelStack::new().map_err(|()| ENOMEM)?;
+    reserve_pid(INIT_PID);
+    let pid = alloc_pid();
+    let kernel_stack_top = kernel_stack.top();
+    let rsp = crate::process::context_switch::seed_kthread_frame(kernel_stack_top, func, arg);
+    let thread = Process {
+        pid,
+        tgid: KERNEL_TGID,
+        parent: None,
+        children: Vec::new(),
+        state: ProcState::Ready,
+        address_space: Some(space.share()),
+        kernel_stack,
+        kernel_stack_top,
+        rsp,
+        entry_point: VirtAddr::zero(),
+        user_stack_top: VirtAddr::zero(),
+        shared: shared.clone(),
+        fs_base: 0,
+        start_ticks: crate::cpu::interrupts::ticks(),
+        clear_child_tid: 0,
+        pending_signals: 0,
+        blocked_signals: 0,
+        signal_stack: Vec::new(),
+        altstack: AltStack::default(),
+        on_altstack: false,
+        preempted_resume: None,
+        estcpu: 0,
+        pgid: 0,
+        sid: 0,
+        comm: name[..name.len().min(MAXCOMLEN)].to_vec(),
+        cmdline: Vec::new(),
+        environ: Vec::new(),
+        real_timer_deadline: None,
+        real_timer_interval_ticks: 0,
+        posix_timers: [None; MAX_POSIX_TIMERS],
+        rlimits: super::limits::initial_rlimits(),
+        nice: 0,
+        sched_policy: SCHED_DEFAULT,
+        sched_priority: 0,
+        stop_notify_pending: false,
+        cont_notify_pending: false,
+        sigsuspend_restore_mask: None,
+        sysv_sem_undo: Vec::new(),
+        pending_siginfo: [QueuedSigInfo::default(); 35],
+        rt_queue: core::array::from_fn(|_| Vec::new()),
+        fpu_state: crate::cpu::fpu::clean_state(),
+        cpu_ticks: 0,
+        minflt: 0,
+        majflt: 0,
+        sys_ticks: 0,
+        child_cpu_ticks: 0,
+        child_sys_ticks: 0,
+        quantum_ticks_left: crate::cpu::interrupts::PREEMPT_QUANTUM_TICKS,
+        off_cpu_cycles: 0,
+        switched_out_at: 0,
+        cascade_budget: None,
+        tty_timed_out: false,
+        vfork_parent: None,
+    };
+    PROCESS_TABLE.lock().insert(pid, Box::new(thread));
+    scheduler::enqueue_ready(pid);
+    Ok(pid)
+}
+
+/// A kernel thread's name at most (FreeBSD's `MAXCOMLEN`).
+pub(crate) const MAXCOMLEN: usize = 19;
+
 /// Maps a fresh user stack ending at `stack_top`, returning the `(Page, PhysFrame)` map of every
 /// page it just mapped — `user_stack::build` needs this to write the argv/envp/auxv image into the
 /// right physical frames afterward, the same way `elf::load` already tracks its own mapped pages
