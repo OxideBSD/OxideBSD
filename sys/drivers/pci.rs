@@ -224,6 +224,17 @@ pub fn find_by_id(vendor: u16, device_id: u16) -> Option<PciDevice> {
     found
 }
 
+/// Every device matching a class/subclass pair, in bus order.
+pub fn find_all_by_class(class: u8, subclass: u8) -> alloc::vec::Vec<PciDevice> {
+    let mut found = alloc::vec::Vec::new();
+    for_each_device(|dev| {
+        if dev.class == class && dev.subclass == subclass {
+            found.push(dev);
+        }
+    });
+    found
+}
+
 /// Every device matching a vendor/device ID pair, in bus order.
 pub fn find_all_by_id(vendor: u16, device_id: u16) -> alloc::vec::Vec<PciDevice> {
     let mut found = alloc::vec::Vec::new();

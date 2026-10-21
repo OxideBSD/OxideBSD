@@ -479,7 +479,7 @@ fn identify_words(p: &ChannelPorts) -> Option<[u16; 256]> {
 }
 
 /// The model string in identify words 27-46, two characters per word, high byte first.
-fn model_of(words: &[u16; 256]) -> String {
+pub(super) fn model_of(words: &[u16; 256]) -> String {
     let model: String = words[27..47]
         .iter()
         .flat_map(|w| [(w >> 8) as u8, *w as u8])

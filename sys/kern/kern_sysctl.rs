@@ -1043,8 +1043,19 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
 /// `kern.disk.<name>.kind`, `.size`, `.sectorsize` and `.model`: registered disk `index`
 /// (`drivers::disk`, `OxideBSD-doc/INSTALLER.md` §5.5).
 fn add_disk_leaves(t: &mut BTreeMap<Vec<i32>, Oid>, name: &str, index: u32) {
-    let Some(disks) = oid_of(t, "kern.disk") else { return };
-    let node = add_node(t, &disks, None, name, "Disk");
+    let Some(mut node) = oid_of(t, "kern.disk") else { return };
+    // A dot in a disk's name is a level (INSTALLER.md §5.5): `sata0.3` is node `3` of `sata0`.
+    let mut levels = name.split('.').peekable();
+    while let Some(level) = levels.next() {
+        let full = alloc::format!("{}.{level}", t[&node].name);
+        node = match oid_of(t, &full) {
+            Some(oid) => oid,
+            None => {
+                let descr = if levels.peek().is_some() { "Disks on this controller or port" } else { "Disk" };
+                add_node(t, &node, None, level, descr)
+            }
+        };
+    }
     type Get = fn(u32) -> Vec<u8>;
     let leaves: [(&'static str, &'static str, u32, &'static str, Get); 4] = [
         ("kind", "What the disk is: disk, cd or memory", CTLTYPE_STRING, "A", |i| {

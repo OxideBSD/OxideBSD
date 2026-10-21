@@ -92,7 +92,7 @@ user before large structural commitments.
   nested cargo lock deadlock.
 - **Editing `build.rs` forces a large rebuild** (`build_busybox.rs` only rebuilds BusyBox, under
   a minute). Never `touch build.rs` to force rebuilds.
-- Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio`, `OXIDEBSD_DISK_IMAGE`,
+- Useful env: `OXIDEBSD_FIRMWARE=bios`, `OXIDEBSD_QEMU_DISK=ide|virtio|sata`, `OXIDEBSD_DISK_IMAGE`,
   `OXIDEBSD_QEMU_USB=1`, `OXIDEBSD_QEMU_DISPLAY=none`, `OXIDEBSD_QEMU_MONITOR=<port>`,
   `OXIDEBSD_QEMU_MEM=<MiB>` (default 8192; the floor is 64),
   `OXIDEBSD_QEMU_CPU=max` (QEMU's default CPU has no SMEP/SMAP; set this to exercise them),
@@ -375,7 +375,7 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
   default).
 - Disks: a registry (`drivers::disk`, INSTALLER.md §5): virtio-blk, IDE (ATA DMA per channel,
-  LBA48; ATAPI CDs), virtio-scsi (`scsi0` = the boot ISO under QEMU), named by bus; minors
+  LBA48; ATAPI CDs), AHCI (`sata<C>.<P>[.<M>]`, named by port, not a counter), virtio-scsi (`scsi0` = the boot ISO under QEMU), named by bus; minors
   `unit << 8 | partition`. SCSI commands live in `drivers::scsi` over a `Transport`. The block
   layer is 512-byte; `disk` translates for 2048 (CD) / 4096 sectors. Root from fsconf.
   `no-ata` protects real hardware from being formatted.

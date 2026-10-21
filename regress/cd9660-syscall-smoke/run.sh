@@ -4,8 +4,10 @@
 # /usr/tests/cd9660/run.sh. The runner puts scripts/mkcd9660testimg.sh's discs in the IDE drives:
 # ide0 rr.iso (Rock Ridge + Joliet, a FAT image as MBR partition 2), ide1 plain.iso, ide2
 # joliet.iso, ide3 empty; the system's disk is virt0. On virtio-scsi: scsi0 the boot medium,
-# scsi1 rr.iso again, scsi2 a disk of 4096-byte sectors (GPT partition `k4`), scsi3 a blank disk. Runs as root; prints one line per check and
-# exits 0 if all pass.
+# scsi1 rr.iso again, scsi2 a disk of 4096-byte sectors (GPT partition `k4`), scsi3 a blank disk.
+# On AHCI, named by port: sata0.0 a 64 MiB disk (GPT partition `satatest`), sata0.2 rr.iso,
+# sata0.4 a 130 GiB disk, sata1.5 (the second controller's) an empty drive. Runs as root; prints
+# one line per check and exits 0 if all pass.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
 export PATH
@@ -31,11 +33,16 @@ mounted() { grep -q " $1 cd9660 " /proc/mounts; }
 mounted_ro() { grep " $1 cd9660 " /proc/mounts | grep -q "[ ,]ro[ ,]"; }
 disk_sysctl() { sysctl -n "kern.disk.$1.$2" 2>&1; }
 big_ok() { is "$(sha256sum "$1/$2" | cut -d' ' -f1)" "$(cat "$1/$3")"; }
+sector_round_trip() {
+	printf '%s' "$2" | dd of="$1" bs=512 seek="$3" conv=notrunc,sync 2>/dev/null &&
+		[ "$(dd if="$1" bs=512 skip="$3" count=1 2>/dev/null | tr -d '\000')" = "$2" ]
+}
+sum() { sha256sum | cut -d' ' -f1; }
 
 mkdir -p /tmp/cd/rr /tmp/cd/joliet /tmp/cd/plain /tmp/cd/empty /tmp/cd/esp
 
 # --- The drives -------------------------------------------------------------------------------
-check "kern.disks lists the CD drives" is "$(sysctl -n kern.disks)" "virt0 ide0 ide1 ide2 ide3 scsi0 scsi1 scsi2 scsi3"
+check "kern.disks lists the CD drives" is "$(sysctl -n kern.disks)" "virt0 ide0 ide1 ide2 ide3 sata0.0 sata0.2 sata0.4 sata1.5 scsi0 scsi1 scsi2 scsi3"
 check "ide0 is a cd" is "$(disk_sysctl ide0 kind)" cd
 check "... of 2048-byte sectors" is "$(disk_sysctl ide0 sectorsize)" 2048
 check "... its model the drive's" is "$(disk_sysctl ide0 model)" "QEMU DVD-ROM"
@@ -135,6 +142,42 @@ check "... the second leaving the first" is "$(dd if=/dev/scsi2p1 bs=512 skip=12
 check "... and the partition's start" sh -c 'dd if=/dev/scsi2p1 bs=512 count=1 2>/dev/null | grep -q PART4K-MARKER'
 check "scsi3 reads and writes" sh -c 'printf scsi3 | dd of=/dev/scsi3 bs=512 seek=777 conv=notrunc,sync 2>/dev/null && [ "$(dd if=/dev/scsi3 bs=512 skip=777 count=1 2>/dev/null | tr -d "\000")" = scsi3 ]'
 check "... its size is 64 MiB" is "$(disk_sysctl scsi3 size)" 67108864
+
+# --- AHCI -------------------------------------------------------------------------------------
+A=/tmp/cd/sata
+mkdir -p $A
+check "sata0.0 is a disk" is "$(disk_sysctl sata0.0 kind)" disk
+check "... its model the drive's" is "$(disk_sysctl sata0.0 model)" "QEMU HARDDISK"
+check "... of 64 MiB" is "$(disk_sysctl sata0.0 size)" 67108864
+check "sata0.2 is a cd" is "$(disk_sysctl sata0.2 kind)" cd
+check "... its model the drive's" is "$(disk_sysctl sata0.2 model)" "QEMU DVD-ROM"
+check "sata1.5 is an empty cd" is "$(disk_sysctl sata1.5 kind) $(disk_sysctl sata1.5 size)" "cd 0"
+check "the empty port between has no disk" not sysctl -n kern.disk.sata0.1.kind 2>/dev/null
+check "a port is a level of kern.disk" sh -c 'sysctl -a 2>/dev/null | grep -q "^kern.disk.sata0.4.size"'
+for d in sata0.0 sata0.0p1 gpt/satatest sata0.2 sata0.2s1 sata0.2s2 sata0.4 sata1.5; do
+	check "/dev/$d is there" [ -c /dev/$d ]
+done
+check "a drive's minor is its place" sh -c 'ls -l /dev/sata0.2 | grep -q " 251, *12032 "'
+check "... on the second controller too" sh -c 'ls -l /dev/sata1.5 | grep -q " 251, *155392 "'
+dd if=/dev/urandom of=/tmp/sata.bin bs=64k count=16 2>/dev/null
+check "1 MiB written through gpt/satatest (several commands)" dd if=/tmp/sata.bin of=/dev/gpt/satatest bs=64k conv=notrunc 2>/dev/null
+check "... reads back the same through sata0.0p1" is "$(dd if=/dev/sata0.0p1 bs=64k count=16 2>/dev/null | sum)" "$(sum < /tmp/sata.bin)"
+check "newfs_msdos on it" sh -c 'newfs_msdos -F 16 /dev/gpt/satatest > /dev/null 2>&1'
+check "... it mounts" mount -t msdosfs /dev/gpt/satatest $A
+check "... takes a file" sh -c "echo on-sata > $A/hello.txt"
+umount $A
+check "... still there mounted again" sh -c "mount -t msdosfs /dev/gpt/satatest $A && [ \"\$(cat $A/hello.txt)\" = on-sata ]"
+umount $A
+check "sata0.4 reads and writes below 128 GiB (LBA48 drive)" sector_round_trip /dev/sata0.4 low-sata 1000
+check "... above it" sector_round_trip /dev/sata0.4 high-sata 268435500
+check "... at its last sector" sector_round_trip /dev/sata0.4 last-sata 272629759
+check "... and not past its end" not sh -c 'printf x | dd of=/dev/sata0.4 bs=512 seek=272629760 conv=notrunc,sync 2>/dev/null'
+check "a disc on AHCI mounts" mount -t cd9660 /dev/sata0.2 $A
+check "... a big file reads whole" big_ok $A BIG.BIN BIG.SHA
+check "... and Rock Ridge" is "$(readlink $A/link)" README.TXT
+check "... and can't be written to" not sh -c 'printf x | dd of=/dev/sata0.2 conv=notrunc 2>/dev/null'
+umount $A
+check "the empty AHCI drive doesn't mount" not mount -t cd9660 /dev/sata1.5 $A 2>/dev/null
 
 # --- No disc ----------------------------------------------------------------------------------
 check "the empty drive doesn't mount" not mount -t cd9660 /dev/ide3 /tmp/cd/empty 2>/dev/null

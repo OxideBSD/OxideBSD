@@ -2,10 +2,11 @@
 //! drives at boot -- each virtio-blk device (`virt0`, `virt1`, ... in PCI order), then each IDE
 //! disk or CD drive (`ide0`, ... in the order primary master, primary slave, secondary master,
 //! secondary slave; ATA by bus-master DMA when the controller can, else PIO; ATAPI by PIO), then
-//! each virtio-scsi disk or CD drive (`scsi0`, ... in controller, target order) -- with the
-//! partitions of each
-//! (`part`: GPT, else MBR). Disks are named by bus, one counter per bus, optical drives counted
-//! with disks (their kind is in `kern.disk.<name>.kind`); partitions are `<disk>p<N>` (GPT) or
+//! each AHCI disk or CD drive (`sata<C>.<P>`, `sata<C>.<P>.<M>`: by controller, port and port
+//! multiplier port, `ahci`), then each virtio-scsi disk or CD drive (`scsi0`, ... in controller,
+//! target order) -- with the partitions of each (`part`: GPT, else MBR). Disks are named by bus,
+//! one counter per bus except AHCI's, optical drives counted with disks (their kind is in
+//! `kern.disk.<name>.kind`); partitions are `<disk>p<N>` (GPT) or
 //! `<disk>s<N>` (MBR), and labelled GPT partitions are also `gpt/<label>` (FreeBSD's `glabel`;
 //! the first of a label wins). Each becomes a block device (`kern::vfs_bdev`) and a raw device in
 //! `/dev`, readable and writable by root, except that a device overlapping one a file system has
@@ -42,6 +43,8 @@ use crate::serial_println;
 enum Backend {
     Ata(Channel, Drive),
     Atapi(Channel, Drive),
+    /// A SATA disk or ATAPI drive (`Unit::atapi`).
+    Ahci(super::ahci::Unit),
     Virtio(usize),
     Scsi(super::virtio_scsi::Unit),
     Memory,
@@ -52,6 +55,7 @@ fn with_scsi<R>(backend: Backend, f: impl FnOnce(&dyn super::scsi::Transport) ->
     match backend {
         Backend::Atapi(channel, drive) => Some(f(&super::ata::Atapi(channel, drive))),
         Backend::Scsi(unit) => Some(f(&unit)),
+        Backend::Ahci(unit) if unit.atapi() => Some(f(&unit)),
         _ => None,
     }
 }
@@ -103,6 +107,8 @@ static ROOT_READONLY_AT_BOOT: AtomicBool = AtomicBool::new(false);
 /// `unit << 8` for a whole disk, `unit << 8 | N` for its partition N.
 const IDE_MAJOR: u32 = 3;
 const SCSI_MAJOR: u32 = 8;
+/// AHCI's unit is the drive's place (`ahci::Unit::number`), not a counter.
+const SATA_MAJOR: u32 = 251;
 const VIRTIO_MAJOR: u32 = 252;
 /// `/dev/gpt/<label>`: another name for a labelled GPT partition, minors in the order found.
 const GPT_LABEL_MAJOR: u32 = 253;
@@ -132,8 +138,8 @@ fn register(
     index
 }
 
-/// Registers every disk: virtio-blk first, then the IDE disks (setting up their DMA); then their
-/// partitions and `/dev` nodes, and the root (else a memory disk).
+/// Registers every disk: virtio-blk first, then the IDE disks (setting up their DMA), AHCI's and
+/// virtio-scsi's; then their partitions and `/dev` nodes, and the root (else a memory disk).
 pub fn init(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     mapper: &mut impl Mapper<Size4KiB>,
@@ -160,6 +166,15 @@ pub fn init(
             continue;
         }
         unit += 1;
+    }
+    for f in super::ahci::init(frame_allocator, mapper, phys_mem_offset) {
+        let (name, number, backend) = (f.unit.name(), f.unit.number(), Backend::Ahci(f.unit));
+        if f.unit.atapi() {
+            found.push(register_cd(name, backend, f.model, SATA_MAJOR, number));
+        } else {
+            let sectors = f.sectors * (f.sector_size as u64 / 512);
+            found.push(register(name, backend, Kind::Disk, sectors, f.sector_size, f.model, SATA_MAJOR, number));
+        }
     }
     let mut unit = 0;
     for f in super::virtio_scsi::init(frame_allocator, mapper, phys_mem_offset) {
@@ -400,7 +415,11 @@ pub fn stats() -> (u64, u64) {
     let (ata_transfers, ata_irqs) = super::ata::dma_stats();
     let (virtio_transfers, virtio_irqs) = super::virtio_blk::stats();
     let (scsi_requests, scsi_irqs) = super::virtio_scsi::stats();
-    (ata_transfers + virtio_transfers + scsi_requests, ata_irqs + virtio_irqs + scsi_irqs)
+    let (ahci_commands, ahci_irqs) = super::ahci::stats();
+    (
+        ata_transfers + virtio_transfers + scsi_requests + ahci_commands,
+        ata_irqs + virtio_irqs + scsi_irqs + ahci_irqs,
+    )
 }
 
 /// The space-separated names of the registered disks (`kern.disks`).
@@ -433,6 +452,10 @@ fn device_read(backend: Backend, ss: u64, lba: u64, buf: &mut [u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::read_disk_sectors(channel, drive, lba, buf).is_ok(),
         Backend::Atapi(channel, drive) => super::ata::atapi_read(channel, drive, lba, buf).is_ok(),
+        Backend::Ahci(unit) if unit.atapi() => {
+            super::scsi::read(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
+        }
+        Backend::Ahci(unit) => super::ahci::read(&unit, lba, ss as usize, buf).is_ok(),
         Backend::Scsi(unit) => {
             super::scsi::read(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
         }
@@ -446,6 +469,8 @@ fn device_write(backend: Backend, ss: u64, lba: u64, buf: &[u8]) -> bool {
     match backend {
         Backend::Ata(channel, drive) => super::ata::write_disk_sectors(channel, drive, lba, buf).is_ok(),
         Backend::Atapi(..) => false, // read-only
+        Backend::Ahci(unit) if unit.atapi() => false,
+        Backend::Ahci(unit) => super::ahci::write(&unit, lba, ss as usize, buf).is_ok(),
         Backend::Scsi(unit) => {
             super::scsi::write(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
         }

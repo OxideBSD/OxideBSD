@@ -6,6 +6,7 @@
 //! future PCI device), `usb` is the xHCI host-controller driver + HID boot-keyboard input path
 //! (this kernel's only input source on hardware with no PS/2 controller, e.g. a Surface Pro).
 
+pub mod ahci;
 pub mod ata;
 pub mod disk;
 pub mod dma;

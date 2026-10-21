@@ -228,6 +228,24 @@ if [ "${CD9660_TEST:-0}" = 1 ]; then
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device scsi-hd,drive=sd4k,bus=scsi0.0,scsi-id=2,logical_block_size=4096,physical_block_size=4096"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sd512,format=raw,file=target/images/cd9660/512.img"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device scsi-hd,drive=sd512,bus=scsi0.0,scsi-id=3"
+    # Two AHCI controllers (INSTALLER.md step 4): on the first, port 0 a 64 MiB disk with a GPT
+    # partition `satatest`, port 1 empty, port 2 rr.iso, port 4 a 130 GiB sparse disk (LBA48); on
+    # the second, port 5 an empty CD drive. Names by port: sata0.0 sata0.2 sata0.4 sata1.5.
+    rm -f target/images/cd9660/sata.img target/images/cd9660/satabig.img
+    truncate -s 32M target/images/cd9660/sata.part
+    target/host-tools/x86_64-unknown-linux-gnu/release/mkimg -s gpt -o target/images/cd9660/sata.img \
+        -p "fat32lba/satatest:=target/images/cd9660/sata.part"
+    truncate -s 64M target/images/cd9660/sata.img
+    truncate -s 130G target/images/cd9660/satabig.img
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ich9-ahci,id=ahci0 -device ich9-ahci,id=ahci1"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sata0,format=raw,file=target/images/cd9660/sata.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=sata0,bus=ahci0.0"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=satacd,media=cdrom,readonly=on,file=target/images/cd9660/rr.iso"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=satacd,bus=ahci0.2"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=satabig,format=raw,file=target/images/cd9660/satabig.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=satabig,bus=ahci0.4"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sataempty,media=cdrom"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=sataempty,bus=ahci1.5"
 fi
 if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
     # Two virtio-blk disks (virt0: a GPT with one partition labelled `extra`; virt1: blank) and,
