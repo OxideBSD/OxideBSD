@@ -10,7 +10,8 @@ This technique also speeds up development as it allows critical system component
 It also removes one of the key disadvantages of modularity, as it allows components to run at the same level as the kernel.
 
 Dependencies:
-A C compiler (gcc and/or clang)
+gcc (musl-gcc wraps the host GCC)
+clang, lld and the LLVM tools (llvm-ar, llvm-objcopy, ...): Limine's build uses them
 GNU make (for BusyBox)
 Cargo nightly
 QEMU (for testing in a VM), plus OVMF firmware for the default UEFI boot path
