@@ -17,9 +17,7 @@ limine_entry_point!(main);
 const SIZE: usize = 128 * 1024;
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    let (_mapper, frame_allocator) = oxidebsd::init(boot_info);
-    let offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
-    oxidebsd::memory::install_global_memory_state(frame_allocator, offset);
+    oxidebsd::init(boot_info);
 
     let a = GuardedStack::new(SIZE).expect("stack allocation failed");
     let top = a.top().as_u64();

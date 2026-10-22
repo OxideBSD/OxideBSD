@@ -46,6 +46,14 @@ CRASH=0
 cd /usr/tests/posix || exit 1
 
 echo "=== posix conformance pilot: running ==="
+# A failed test's own output (it names what it checked), indented, so a failure that doesn't
+# repeat in isolation can still be read from the log.
+show_output() {
+    while IFS= read -r line; do
+        echo "  | $line"
+    done </usr/tests/posix/run-out.txt
+}
+
 for rel in $(cat /usr/tests/posix/manifest.txt); do
     bin="/usr/tests/posix/bin/$rel"
 
@@ -95,10 +103,12 @@ for rel in $(cat /usr/tests/posix/manifest.txt); do
             ;;
         1)
             echo "FAIL: $rel"
+            show_output
             FAIL=$((FAIL + 1))
             ;;
         2)
             echo "UNRESOLVED: $rel"
+            show_output
             UNRESOLVED=$((UNRESOLVED + 1))
             ;;
         4)

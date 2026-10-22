@@ -65,7 +65,7 @@ fn sector_checks(mode: &str) {
 }
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    let (_mapper, mut frame_allocator) = oxidebsd::init(boot_info);
+    let (_, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
     ata::init();

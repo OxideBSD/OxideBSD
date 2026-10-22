@@ -196,11 +196,9 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 impl BootInfoFrameAllocator {
     /// `allocate_frame` without reclaiming from the page cache.
     fn allocate_unreclaimed(&mut self) -> Option<PhysFrame> {
-        // Reuse first. `free_list` fills through `deallocate_frame`, which runs during boot too
-        // (the buffer cache frees pages it evicts inside oxfs's `module_init`), before the global
-        // `PHYS_MEM_OFFSET` exists: the window is whichever is live, the loader's then.
+        // Reuse first.
         if let Some(frame) = self.free_list.take() {
-            let offset = crate::module::phys_mem_offset().expect("no physical-memory window to reuse a frame through");
+            let offset = phys_mem_offset();
             let next_ptr = (offset + frame.start_address().as_u64()).as_ptr::<u64>();
             // SAFETY: frame was previously handed to deallocate_frame, which wrote a real next-
             // pointer (or the NONE sentinel) into its first 8 bytes through this same window.
@@ -261,9 +259,7 @@ impl BootInfoFrameAllocator {
 /// frame address is 4 KiB-aligned, so its low 12 bits are always zero, `u64::MAX`'s never are).
 impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
-        // Whichever physical-memory window is live: the module loader's while a `module_init`
-        // runs (the buffer cache evicts and frees pages there), the global one after.
-        let offset = crate::module::phys_mem_offset().expect("no physical-memory window to free a frame through");
+        let offset = phys_mem_offset();
         let next_ptr = (offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
         let prev_head = self
             .free_list
@@ -421,11 +417,17 @@ pub extern "C" fn oxidebsd_physmem_bytes() -> u64 {
 static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 static PHYS_MEM_OFFSET: Mutex<Option<VirtAddr>> = Mutex::new(None);
 
-/// Must be called exactly once, after `oxidebsd::init`, before any code calls
-/// `with_frame_allocator`/`phys_mem_offset`.
-pub fn install_global_memory_state(frame_allocator: BootInfoFrameAllocator, offset: VirtAddr) {
-    *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+/// Called once by `oxidebsd::init` as it starts: where physical memory is mapped (the HHDM), for
+/// `phys_mem_offset`.
+pub(crate) fn install_phys_mem_offset(offset: VirtAddr) {
     *PHYS_MEM_OFFSET.lock() = Some(offset);
+}
+
+/// Called once by `oxidebsd::init` as it ends, before any module loads: hands the frame allocator
+/// to `with_frame_allocator` (moved, not copied: its state must stay singular). Boot code after it
+/// maps through `GlobalFrameAllocator`.
+pub(crate) fn install_frame_allocator(frame_allocator: BootInfoFrameAllocator) {
+    *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 }
 
 /// Runs `f` with exclusive access to the global frame allocator. Panics if
@@ -433,6 +435,48 @@ pub fn install_global_memory_state(frame_allocator: BootInfoFrameAllocator, offs
 pub fn with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R) -> R {
     let mut guard = FRAME_ALLOCATOR.lock();
     f(guard.as_mut().expect("frame allocator not yet installed"))
+}
+
+/// One frame (not zeroed) from the global frame allocator.
+pub fn allocate_frame() -> Option<PhysFrame<Size4KiB>> {
+    with_frame_allocator(|fa| fa.allocate_frame())
+}
+
+/// Gives back a frame `allocate_frame` returned.
+///
+/// # Safety
+///
+/// Nothing maps or uses `frame` any more.
+pub unsafe fn free_frame(frame: PhysFrame<Size4KiB>) {
+    // SAFETY: the caller vouches for `frame`.
+    with_frame_allocator(|fa| unsafe { fa.deallocate_frame(frame) })
+}
+
+/// The global frame allocator as an `x86_64` `FrameAllocator`, taking its lock for each frame:
+/// what `oxidebsd::init` hands back, for boot code that maps memory (drivers, the module loader).
+pub struct GlobalFrameAllocator;
+
+// SAFETY: frames come from the global allocator, which hands each out once.
+unsafe impl FrameAllocator<Size4KiB> for GlobalFrameAllocator {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        allocate_frame()
+    }
+}
+
+impl FrameDeallocator<Size4KiB> for GlobalFrameAllocator {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        // SAFETY: the caller vouches for `frame`.
+        unsafe { free_frame(frame) }
+    }
+}
+
+/// A mapper over the active level 4 table, for the kernel's half (the same in every address
+/// space). For boot code: one core, nothing else mapping kernel memory meanwhile.
+pub fn kernel_mapper() -> OffsetPageTable<'static> {
+    let offset = phys_mem_offset();
+    let (l4, _) = Cr3::read();
+    // SAFETY: CR3's level 4 table is live and reachable through the physical-memory window.
+    unsafe { OffsetPageTable::new(frame_to_page_table(l4, offset), offset) }
 }
 
 /// Whether the frame allocator is locked: never while a process sleeps (COW.md §4.4), which

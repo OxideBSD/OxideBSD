@@ -101,10 +101,11 @@ members = [
   "sys/modules/procctl",
   "sys/modules/vfork",
   "sys/modules/alloc_smoke",
+  "sys/modules/kthread_smoke",
   "sys/modules/vfs",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcd9660", "lib/libcertstore", "lib/libkern-mod", "lib/libmsdosfs", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
+exclude = ["lib/libcd9660", "lib/libcertstore", "lib/libkern-mod", "lib/libkthread", "lib/libmsdosfs", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
 
 [package]
 name = "oxidebsd"
@@ -142,6 +143,8 @@ chacha20 = { version = "0.10", default-features = false, features = ["cipher"] }
 oxfs_format = { path = "lib/liboxfs" }
 # The VFS's kernel/file system interface (VFS.md §3-§6), shared with file system modules.
 vfs_if = { path = "lib/libvfs" }
+# Kernel threads' and taskqueues' kernel/module interface (KTHREAD.md §7).
+kthread_if = { path = "lib/libkthread" }
 
 [build-dependencies]
 # The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.

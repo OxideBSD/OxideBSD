@@ -32,15 +32,14 @@ use qemu::{QemuExitCode, exit_qemu};
 
 /// Brings up the kernel: GDT/TSS, IDT, PIC + hardware interrupts, paging, and the heap.
 ///
-/// Returns the kernel's own page-table mapper and physical frame allocator so callers can keep
-/// using the *same* frame allocator afterward (e.g. to build further address spaces) — a second,
-/// separately-`init`'d `BootInfoFrameAllocator` would restart handing out frames from the start of
-/// the usable memory map, re-allocating ones the heap has already claimed.
+/// Installs the frame allocator as the global one (`memory::with_frame_allocator`) before it
+/// returns, so modules (`module::load`) and the kernel threads they start can allocate. Returns the
+/// kernel's page-table mapper and a handle on that allocator, for the drivers that map memory.
 pub fn init(
     boot_info: &'static BootInfo,
 ) -> (
     x86_64::structures::paging::OffsetPageTable<'static>,
-    memory::BootInfoFrameAllocator,
+    memory::GlobalFrameAllocator,
 ) {
     serial_println!("[boot] kernel initialization starting");
 
@@ -84,6 +83,7 @@ pub fn init(
     cpu::tsc::init();
 
     let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
+    memory::install_phys_mem_offset(phys_mem_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(boot_info.memory_map) };
 
@@ -114,9 +114,10 @@ pub fn init(
         cpu::entry::enable_switch();
     }
 
+    memory::install_frame_allocator(frame_allocator);
     serial_println!("[boot] kernel initialization complete");
 
-    (mapper, frame_allocator)
+    (mapper, memory::GlobalFrameAllocator)
 }
 
 pub trait Testable {

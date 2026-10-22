@@ -44,8 +44,7 @@ extern "C" fn alloc_stats_handler(which: u64, _arg1: u64, _arg2: u64, _arg3: u64
 }
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    let (mut mapper, mut frame_allocator) = oxidebsd::init(boot_info);
-    let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
+    oxidebsd::init(boot_info);
 
     // SYS_WRITE and the rest of the native ABI.
     const NATIVE_ABI_MOD: &[u8] = include_bytes!(env!("NATIVE_ABI_MOD_PATH"));
@@ -55,14 +54,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
         NATIVE_ABI_MOD,
         NATIVE_ABI_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
     // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
     const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
     const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
-    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // The module under test; it allocates in module_init too.
@@ -73,12 +70,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
         ALLOC_SMOKE_MOD,
         ALLOC_SMOKE_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the alloc_smoke module: {e:?}"));
 
-    oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 
     assert_eq!(

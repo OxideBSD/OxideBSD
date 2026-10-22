@@ -53,14 +53,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
         NATIVE_ABI_MOD,
         NATIVE_ABI_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
     // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
     const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
     const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
-    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // vfork(2) (COW.md §7), as at boot: BusyBox's spawn() and musl's vfork() call it.
@@ -71,8 +69,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         VFORK_MOD,
         VFORK_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
 
@@ -80,9 +76,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
     // The file system modules, as at boot: oxfs mounts the system image, then procfs and tmpfs.
-    oxidebsd::kernel_main::load_file_systems(&mut mapper, &mut frame_allocator);
+    oxidebsd::kernel_main::load_file_systems();
 
-    oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 
     assert_eq!(

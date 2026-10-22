@@ -95,14 +95,12 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         NATIVE_ABI_MOD,
         NATIVE_ABI_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
     // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
     const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
     const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
-    crate::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+    crate::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // The home for whatever POSIX/libc-surface syscalls BusyBox's applets need beyond what
@@ -117,8 +115,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         POSIX_COMPAT_MOD,
         POSIX_COMPAT_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
@@ -132,8 +128,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         SIGNAL_MOD,
         SIGNAL_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the signal module: {e:?}"));
 
@@ -147,8 +141,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         CLOCK_MOD,
         CLOCK_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
@@ -168,7 +160,7 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // their own pid 1, keep it read-write.
     crate::drivers::disk::set_root_readonly_at_boot();
 
-    load_file_systems(&mut mapper, &mut frame_allocator);
+    load_file_systems();
     let (transfers, irqs) = crate::drivers::disk::stats();
     serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
 
@@ -183,8 +175,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         SOCKET_MOD,
         SOCKET_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
@@ -196,8 +186,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         SYSCTL_MOD,
         SYSCTL_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
@@ -209,8 +197,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         PROCCTL_MOD,
         PROCCTL_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the procctl module: {e:?}"));
 
@@ -222,19 +208,11 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
         VFORK_MOD,
         VFORK_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
 
     crate::memory::wx::check_kernel(&mapper, "modules loaded");
 
-    // Modules are loaded; nothing else needs `frame_allocator`/`physical_memory_offset` as local
-    // values from here on -- hand them over to memory's global state (moving frame_allocator by
-    // value, not cloning it: BootInfoFrameAllocator's own bump-allocation state must stay singular,
-    // never tracked in two places at once) so process::spawn/do_fork_from_current/do_execve can
-    // reach them from arbitrary syscall contexts via memory::with_frame_allocator/phys_mem_offset.
-    crate::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
 
     // Registers fd 0/1/2 as real crate::fd entries (see that module's own doc comment for why
     // stdin/stdout/stderr moved out of being special-cased directly in sys_read/sys_write) --
@@ -267,10 +245,7 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
 /// (tmpfs, nullfs). The data
 /// disk must be attached first (`drivers::disk::init`). Test kernels call it too, so each loads
 /// the same set.
-pub fn load_file_systems(
-    mapper: &mut x86_64::structures::paging::OffsetPageTable<'static>,
-    frame_allocator: &mut crate::memory::BootInfoFrameAllocator,
-) {
+pub fn load_file_systems() {
     // The live filesystem (see CLAUDE.md's oxfs section) -- replaced the earlier FAT32 module,
     // since removed (superseded, no longer buildable or loaded).
     //
@@ -290,44 +265,42 @@ pub fn load_file_systems(
         OXFS_MOD,
         OXFS_PANIC_SYMBOL,
         true,
-        mapper,
-        frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the oxfs module: {e:?}"));
 
     // /proc (OxideBSD-doc VFS.md §8.3): mounted on /proc as soon as it registers.
     const PROCFS_MOD: &[u8] = include_bytes!(env!("PROCFS_MOD_PATH"));
     const PROCFS_PANIC_SYMBOL: &str = env!("PROCFS_MOD_PANIC_SYMBOL");
-    crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("procfs", PROCFS_MOD, PROCFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the procfs module: {e:?}"));
 
     // devfs (OxideBSD-doc DEVFS.md): mounted on /dev as soon as it registers.
     const DEVFS_MOD: &[u8] = include_bytes!(env!("DEVFS_MOD_PATH"));
     const DEVFS_PANIC_SYMBOL: &str = env!("DEVFS_MOD_PANIC_SYMBOL");
-    crate::module::load("devfs", DEVFS_MOD, DEVFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("devfs", DEVFS_MOD, DEVFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the devfs module: {e:?}"));
 
     const TMPFS_MOD: &[u8] = include_bytes!(env!("TMPFS_MOD_PATH"));
     const TMPFS_PANIC_SYMBOL: &str = env!("TMPFS_MOD_PANIC_SYMBOL");
-    crate::module::load("tmpfs", TMPFS_MOD, TMPFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("tmpfs", TMPFS_MOD, TMPFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the tmpfs module: {e:?}"));
 
     const NULLFS_MOD: &[u8] = include_bytes!(env!("NULLFS_MOD_PATH"));
     const NULLFS_PANIC_SYMBOL: &str = env!("NULLFS_MOD_PANIC_SYMBOL");
-    crate::module::load("nullfs", NULLFS_MOD, NULLFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("nullfs", NULLFS_MOD, NULLFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the nullfs module: {e:?}"));
 
     // FAT (VFS.md §9): the EFI system partition, memory cards. Not fatal on panic: a volume
     // other than the root, which the system runs without.
     const MSDOSFS_MOD: &[u8] = include_bytes!(env!("MSDOSFS_MOD_PATH"));
     const MSDOSFS_PANIC_SYMBOL: &str = env!("MSDOSFS_MOD_PANIC_SYMBOL");
-    crate::module::load("msdosfs", MSDOSFS_MOD, MSDOSFS_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("msdosfs", MSDOSFS_MOD, MSDOSFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the msdosfs module: {e:?}"));
 
     // ISO 9660 (INSTALLER.md §6): CDs, the install medium. Not fatal on panic either.
     const CD9660_MOD: &[u8] = include_bytes!(env!("CD9660_MOD_PATH"));
     const CD9660_PANIC_SYMBOL: &str = env!("CD9660_MOD_PANIC_SYMBOL");
-    crate::module::load("cd9660", CD9660_MOD, CD9660_PANIC_SYMBOL, false, mapper, frame_allocator)
+    crate::module::load("cd9660", CD9660_MOD, CD9660_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the cd9660 module: {e:?}"));
 }
 

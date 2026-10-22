@@ -30,7 +30,7 @@ use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, Size4KiB,
 };
 
-use crate::memory::BootInfoFrameAllocator;
+use crate::memory::GlobalFrameAllocator;
 use crate::process::elf::{read_u16, read_u32, read_u64};
 use crate::{serial_print, serial_println};
 
@@ -409,7 +409,7 @@ fn align_up(value: u64, align: u64) -> u64 {
 }
 
 /// Loads `object_bytes` (a merged, relocatable module object -- see `build.rs`'s
-/// `build_module_crate`), maps it into the kernel's own address space via `mapper`, resolves and
+/// `build_module_crate`), maps it into the kernel's own address space, resolves and
 /// applies its relocations, then calls its `module_init` entry point and returns whatever it
 /// returned. `panic_symbol` is the exact mangled name `build.rs` discovered for this specific
 /// module's merged panic-entry reference (empty string if the module's code never references
@@ -421,9 +421,8 @@ pub fn load(
     object_bytes: &[u8],
     panic_symbol: &str,
     fatal_on_panic: bool,
-    mapper: &mut OffsetPageTable<'static>,
-    frame_allocator: &mut BootInfoFrameAllocator,
 ) -> Result<i32, ModuleError> {
+    let mapper = &mut crate::memory::kernel_mapper();
     serial_println!(
         "[module] {}: loading ({} byte object)",
         name,
@@ -473,7 +472,7 @@ pub fn load(
     let base = allocate_region(region_size)?;
     // Writable and not executable while it's filled in and relocated; `protect_region` below sets
     // the final permissions before any of it runs.
-    map_region(base, region_size, data_flags(), mapper, frame_allocator)?;
+    map_region(base, region_size, data_flags(), mapper)?;
 
     // map_region zeroes every page it maps, which already satisfies SHT_NOBITS (.bss-equivalent)
     // sections; copy real (SHT_PROGBITS) section bytes in on top.
@@ -590,33 +589,16 @@ pub fn load(
     // #[unsafe(no_mangle)] pub extern "C" fn module_init() -> i32) matches this transmute.
     let module_init: extern "C" fn() -> i32 = unsafe { core::mem::transmute(init_addr) };
     set_current_module_fatal(fatal_on_panic);
-    // SAFETY: module loading is single-threaded and never re-entrant (one `load` call runs to
-    // completion, including its own `module_init`, before another can start) -- safe to stash raw
-    // pointers here for `oxidebsd_module_alloc_zeroed` (see its own doc comment) to use for
-    // exactly the duration of this one `module_init()` call, cleared immediately after.
-    unsafe {
-        CURRENT_LOAD_MAPPER = mapper;
-        CURRENT_LOAD_FRAME_ALLOCATOR = frame_allocator;
-    }
+    IN_MODULE_INIT.store(true, core::sync::atomic::Ordering::Relaxed);
     let result = module_init();
-    unsafe {
-        CURRENT_LOAD_MAPPER = core::ptr::null_mut();
-        CURRENT_LOAD_FRAME_ALLOCATOR = core::ptr::null_mut();
-    }
+    IN_MODULE_INIT.store(false, core::sync::atomic::Ordering::Relaxed);
     serial_println!("[module] {}: module_init returned {}", name, result);
 
     Ok(result)
 }
 
-/// Raw pointers to the currently-active mapper/frame_allocator, valid only for the duration of a
-/// module's own `module_init()` call (see `load`'s own call site, right above). Lets
-/// `oxidebsd_module_alloc_zeroed` -- an exported kernel API a module calls *from inside*
-/// `module_init` -- reach the same `allocate_region`/`map_region` machinery `load` itself already
-/// used for the module's own code/data, without threading them through `module_init`'s fixed,
-/// parameterless `extern "C" fn() -> i32` signature. Single-core, sequential module loading only
-/// -- never concurrent, never re-entrant.
-static mut CURRENT_LOAD_MAPPER: *mut OffsetPageTable<'static> = core::ptr::null_mut();
-static mut CURRENT_LOAD_FRAME_ALLOCATOR: *mut BootInfoFrameAllocator = core::ptr::null_mut();
+/// Whether a module's `module_init` is running: `oxidebsd_module_alloc_zeroed` is for it alone.
+static IN_MODULE_INIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Kernel API exposed to modules (resolved via `resolve_external_symbol`, called from a module's
 /// own `module_init`): hands back a fresh, zeroed, kernel-VA-mapped buffer of `size_bytes`, backed
@@ -630,33 +612,19 @@ static mut CURRENT_LOAD_FRAME_ALLOCATOR: *mut BootInfoFrameAllocator = core::ptr
 /// outside a module's own `module_init` -- the last case is a caller bug, not a real runtime
 /// condition).
 pub(crate) extern "C" fn oxidebsd_module_alloc_zeroed(size_bytes: u64) -> u64 {
-    // SAFETY: only ever non-null for the duration of some module's own `module_init`, on this
-    // same single core -- never concurrent, never re-entrant (see the statics' own doc comment).
-    let mapper = unsafe { CURRENT_LOAD_MAPPER.as_mut() };
-    let frame_allocator = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() };
-    let (Some(mapper), Some(frame_allocator)) = (mapper, frame_allocator) else {
+    if !IN_MODULE_INIT.load(core::sync::atomic::Ordering::Relaxed) {
         serial_println!("[module] oxidebsd_module_alloc_zeroed: called outside module_init");
         return 0;
-    };
+    }
     let region_size = align_up(size_bytes, PAGE_SIZE);
     let base = match allocate_data_region(region_size) {
         Ok(base) => base,
         Err(_) => return 0,
     };
-    match map_region(base, region_size, data_flags(), mapper, frame_allocator) {
+    match map_region(base, region_size, data_flags(), &mut crate::memory::kernel_mapper()) {
         Ok(()) => base,
         Err(_) => 0,
     }
-}
-
-/// Where physical memory is mapped (the HHDM): from the module loader's mapper while a
-/// `module_init` runs, else from the global memory state once it's installed.
-pub(crate) fn phys_mem_offset() -> Option<VirtAddr> {
-    // SAFETY: as `allocate_frame`.
-    if let Some(mapper) = unsafe { CURRENT_LOAD_MAPPER.as_ref() } {
-        return Some(mapper.phys_offset());
-    }
-    crate::memory::try_phys_mem_offset()
 }
 
 /// The code ranges of the modules whose calls are serialized by the VFS's giant lock
@@ -709,27 +677,12 @@ pub(crate) fn run_shutdown_hooks() {
     }
 }
 
-/// One frame (not zeroed) from whichever frame allocator is live: the module loader's while a
-/// `module_init` runs (the global one isn't installed until every module has loaded), else the
-/// global one. For drivers a module drives from inside its `module_init` (the memory disk, which
-/// oxfs formats there).
-pub(crate) fn allocate_frame() -> Option<x86_64::structures::paging::PhysFrame> {
-    use x86_64::structures::paging::FrameAllocator;
-    // SAFETY: non-null only for the duration of a `module_init`, on this same single core (see
-    // the static's own doc comment).
-    if let Some(frame_allocator) = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() } {
-        return frame_allocator.allocate_frame();
-    }
-    crate::memory::with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame())
-}
-
 /// Kernel API for modules: a zeroed page, as its address in the physical-memory window, for storage
 /// a module grows and shrinks at run time (oxfs's tmpfs blocks); `0` when memory is exhausted.
-/// Works inside `module_init` (the loader's frame allocator) and after (the global one). Freed
-/// with `oxidebsd_page_free`.
+/// Freed with `oxidebsd_page_free`.
 pub(crate) extern "C" fn oxidebsd_page_alloc() -> u64 {
-    let Some(offset) = phys_mem_offset() else { return 0 };
-    let Some(frame) = allocate_frame() else { return 0 };
+    let offset = crate::memory::phys_mem_offset();
+    let Some(frame) = crate::memory::allocate_frame() else { return 0 };
     let va = offset + frame.start_address().as_u64();
     // SAFETY: a frame just allocated, reached through the physical-memory window.
     unsafe { core::ptr::write_bytes(va.as_mut_ptr::<u8>(), 0, PAGE_SIZE as usize) };
@@ -761,25 +714,10 @@ pub(crate) extern "C" fn oxidebsd_tmpfs_page_alloc() -> u64 {
 
 /// Gives back a page `oxidebsd_page_alloc` returned.
 pub(crate) extern "C" fn oxidebsd_page_free(va: u64) {
-    let Some(offset) = phys_mem_offset() else { return };
+    let offset = crate::memory::phys_mem_offset();
     let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(va - offset.as_u64()));
     // SAFETY: the page came from `oxidebsd_page_alloc` and its module no longer uses it.
-    unsafe { free_frame(frame) };
-}
-
-/// Gives back a frame `allocate_frame` returned, to whichever frame allocator is live.
-///
-/// # Safety
-///
-/// Nothing maps or uses `frame` any more.
-pub(crate) unsafe fn free_frame(frame: x86_64::structures::paging::PhysFrame) {
-    use x86_64::structures::paging::FrameDeallocator;
-    // SAFETY: as `allocate_frame`; the caller vouches for `frame`.
-    if let Some(frame_allocator) = unsafe { CURRENT_LOAD_FRAME_ALLOCATOR.as_mut() } {
-        unsafe { frame_allocator.deallocate_frame(frame) };
-        return;
-    }
-    crate::memory::with_frame_allocator(|frame_allocator| unsafe { frame_allocator.deallocate_frame(frame) });
+    unsafe { crate::memory::free_frame(frame) };
 }
 
 /// The most modules allocation is charged to; a module loaded past it allocates uncharged.
@@ -1027,7 +965,6 @@ fn map_region(
     size: u64,
     flags: PageTableFlags,
     mapper: &mut OffsetPageTable<'static>,
-    frame_allocator: &mut BootInfoFrameAllocator,
 ) -> Result<(), ModuleError> {
     if size == 0 {
         return Ok(());
@@ -1037,10 +974,10 @@ fn map_region(
     // No USER_ACCESSIBLE: module code runs only in kernel context. `flags` must be writable: the
     // pages are zeroed (and, for a module, filled and relocated) through this mapping.
     for page in Page::range_inclusive(start_page, end_page) {
-        let frame = frame_allocator
+        let frame = GlobalFrameAllocator
             .allocate_frame()
             .ok_or(ModuleError::OutOfMemory)?;
-        // SAFETY: frame was just allocated (unused, per BootInfoFrameAllocator's contract), and
+        // SAFETY: frame was just allocated (unused, per the frame allocator's contract), and
         // page falls within this module's freshly bump-allocated, previously-unmapped region.
         unsafe {
             // `.ignore()`, not `.flush()`: same reasoning as `allocator::init_heap`'s own
@@ -1051,7 +988,7 @@ fn map_region(
             // page) -- `sys/modules/oxfs`'s own object crossed that threshold once its embedded
             // BusyBox roster grew to ~300 applets (see CLAUDE.md's BusyBox section).
             mapper
-                .map_to(page, frame, flags, frame_allocator)
+                .map_to(page, frame, flags, &mut GlobalFrameAllocator)
                 .map_err(|_| ModuleError::MappingFailed)?
                 .ignore();
         }
@@ -1298,6 +1235,16 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_current_tgid" => Some(crate::process::procfs::oxidebsd_current_tgid as *const () as u64),
         "oxidebsd_proc_exists" => Some(crate::process::oxidebsd_proc_exists as *const () as u64),
         "oxidebsd_proc_pid_at" => Some(crate::process::oxidebsd_proc_pid_at as *const () as u64),
+        "oxidebsd_kthread_add" => Some(crate::kern::kern_kthread::oxidebsd_kthread_add as *const () as u64),
+        "oxidebsd_kthread_exit" => Some(crate::kern::kern_kthread::oxidebsd_kthread_exit as *const () as u64),
+        "oxidebsd_kthread_yield" => Some(crate::kern::kern_kthread::oxidebsd_kthread_yield as *const () as u64),
+        "oxidebsd_tsleep" => Some(crate::kern::kern_kthread::oxidebsd_tsleep as *const () as u64),
+        "oxidebsd_wakeup" => Some(crate::kern::kern_kthread::oxidebsd_wakeup as *const () as u64),
+        "oxidebsd_wakeup_one" => Some(crate::kern::kern_kthread::oxidebsd_wakeup_one as *const () as u64),
+        "oxidebsd_taskqueue_enqueue" => {
+            Some(crate::kern::subr_taskqueue::oxidebsd_taskqueue_enqueue as *const () as u64)
+        }
+        "oxidebsd_taskqueue_drain" => Some(crate::kern::subr_taskqueue::oxidebsd_taskqueue_drain as *const () as u64),
         "oxidebsd_proc_kthread_at" => Some(crate::process::oxidebsd_proc_kthread_at as *const () as u64),
         "oxidebsd_proc_map" => Some(crate::process::procfs::oxidebsd_proc_map as *const () as u64),
         "oxidebsd_proc_stat_line" => {

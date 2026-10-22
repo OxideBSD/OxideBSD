@@ -6,7 +6,7 @@
 //! `TASKQUEUE_THREAD` is the system's queue, run by one kernel thread, `taskq`, started once pid 1
 //! exists (`start_system`, from `scheduler::start`): tasks queued before then wait for it.
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
@@ -14,22 +14,8 @@ use x86_64::instructions::interrupts::without_interrupts;
 use super::kern_kthread::kthread_add;
 use super::kern_synch::{tsleep, wakeup};
 
-/// A task: `func(arg, pending)`, and its place in a queue. Its owner keeps it alive for as long as
-/// it may be queued (a `static`, usually). `#[repr(C)]`: modules share it (§7).
-#[repr(C)]
-pub struct Task {
-    func: fn(usize, u32),
-    arg: usize,
-    /// Enqueues not yet run: 0 while the task isn't queued.
-    pending: AtomicU32,
-    next: AtomicPtr<Task>,
-}
-
-impl Task {
-    pub const fn new(func: fn(usize, u32), arg: usize) -> Task {
-        Task { func, arg, pending: AtomicU32::new(0), next: AtomicPtr::new(core::ptr::null_mut()) }
-    }
-}
+/// The task structure, shared with modules (§7): `kthread_if::Task`.
+pub use kthread_if::{Task, TaskFn};
 
 /// A queue's tasks, first to run first, and the one running.
 struct Queued {
@@ -109,7 +95,7 @@ pub fn drain(queue: &'static Taskqueue, task: &'static Task) {
 }
 
 /// A queue's thread: runs its tasks in order, sleeping while there are none.
-fn run(queue: usize) {
+extern "C" fn run(queue: usize) {
     // SAFETY: `start_threads` passes a `&'static Taskqueue`.
     let queue: &'static Taskqueue = unsafe { &*(queue as *const Taskqueue) };
     loop {
@@ -163,4 +149,16 @@ pub fn start_system() {
     STARTED.call_once(|| {
         start_threads(&TASKQUEUE_THREAD, 1).expect("taskqueue: no memory for the taskq thread");
     });
+}
+
+/// `oxidebsd_taskqueue_enqueue` (§7.1): `enqueue` on the system's queue, for modules.
+pub(crate) extern "C" fn oxidebsd_taskqueue_enqueue(task: *const Task) {
+    // SAFETY: a module's task lives as long as the module, which is never unloaded (§7.2).
+    enqueue(&TASKQUEUE_THREAD, unsafe { &*task });
+}
+
+/// `oxidebsd_taskqueue_drain` (§7.1): `drain` on the system's queue, for modules.
+pub(crate) extern "C" fn oxidebsd_taskqueue_drain(task: *const Task) {
+    // SAFETY: as `oxidebsd_taskqueue_enqueue`.
+    drain(&TASKQUEUE_THREAD, unsafe { &*task });
 }

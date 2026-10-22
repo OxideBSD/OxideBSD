@@ -452,6 +452,7 @@ fn main() {
     build_module_crate("vfork", "VFORK", &[]);
     build_module_crate("vfs", "VFS", &[]);
     build_module_crate("alloc_smoke", "ALLOC_SMOKE", &[]);
+    build_module_crate("kthread_smoke", "KTHREAD_SMOKE", &[]);
 
     // ring3-smoke is a real, already-working fork+execve+wait target -- see CLAUDE.md's
     // process/scheduler section. Also embedded into oxfs below.

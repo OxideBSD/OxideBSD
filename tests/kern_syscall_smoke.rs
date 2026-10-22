@@ -52,7 +52,7 @@ mod kthreads {
     }
 
     /// 0: sleeps until `waker` sets the flag and wakes it.
-    fn sleeper(_: usize) {
+    extern "C" fn sleeper(_: usize) {
         let mut woken = 0;
         while !FLAG.load(Ordering::Relaxed) {
             if tsleep(chan(&FLAG), None) == Slept::Woken {
@@ -63,7 +63,7 @@ mod kthreads {
     }
 
     /// 1: sets the flag after a while, and wakes the sleeper.
-    fn waker(_: usize) {
+    extern "C" fn waker(_: usize) {
         pause(5);
         FLAG.store(true, Ordering::Relaxed);
         wakeup(chan(&FLAG));
@@ -71,19 +71,19 @@ mod kthreads {
     }
 
     /// 2: a timeout of 3 ticks times out, after 3 ticks.
-    fn timeout(_: usize) {
+    extern "C" fn timeout(_: usize) {
         let t0 = ticks();
         let slept = tsleep(chan(&TIMEOUT_CHAN), Some(3));
         result(2, slept == Slept::TimedOut && ticks() - t0 >= 3);
     }
 
-    fn one_sleeper(_: usize) {
+    extern "C" fn one_sleeper(_: usize) {
         tsleep(chan(&ONE), None);
         ONE.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 3, 4: `wakeup_one` wakes one of the two sleepers, then the other.
-    fn one_waker(_: usize) {
+    extern "C" fn one_waker(_: usize) {
         pause(3);
         wakeup_one(chan(&ONE));
         pause(3);
@@ -94,14 +94,14 @@ mod kthreads {
     }
 
     /// 5: yielding comes back.
-    fn yielder(_: usize) {
+    extern "C" fn yielder(_: usize) {
         kthread_yield();
         kthread_yield();
         result(5, true);
     }
 
     /// 6: runs 150 ms without sleeping: the scheduler logs it ("[kthread] hog ran").
-    fn hog(_: usize) {
+    extern "C" fn hog(_: usize) {
         let until = oxidebsd::cpu::tsc::now() + oxidebsd::cpu::tsc::ms_to_cycles(150);
         while oxidebsd::cpu::tsc::now() < until {
             core::hint::spin_loop();
@@ -110,13 +110,13 @@ mod kthreads {
     }
 
     /// 7: ends itself with `kthread_exit` (8: and is gone afterwards).
-    fn exiter(_: usize) {
+    extern "C" fn exiter(_: usize) {
         result(7, true);
         kthread_exit();
     }
 
     /// Sleeps for good: `kthread.c` tries to signal and renice it.
-    fn forever(_: usize) {
+    extern "C" fn forever(_: usize) {
         loop {
             tsleep(chan(&NEVER_CHAN), None);
         }
@@ -136,10 +136,10 @@ mod kthreads {
     /// 9: a task enqueued three times before it runs runs once, told of all three.
     static COALESCED: Task = Task::new(coalesced, 0);
     static COALESCED_SEEN: AtomicU32 = AtomicU32::new(0);
-    fn coalesced(_: usize, pending: u32) {
+    extern "C" fn coalesced(_: usize, pending: u32) {
         COALESCED_SEEN.fetch_add(pending << 8 | 1, Ordering::Relaxed);
     }
-    fn coalescer(_: usize) {
+    extern "C" fn coalescer(_: usize) {
         for _ in 0..3 {
             tq::enqueue(&TASKQUEUE_THREAD, &COALESCED);
         }
@@ -154,7 +154,7 @@ mod kthreads {
     static FROM_IRQ: Task = Task::new(from_irq, 0);
     static FROM_IRQ_SEEN: AtomicU32 = AtomicU32::new(0);
     static IRQ_ARMED: AtomicBool = AtomicBool::new(false);
-    fn from_irq(_: usize, pending: u32) {
+    extern "C" fn from_irq(_: usize, pending: u32) {
         FROM_IRQ_SEEN.fetch_add(pending, Ordering::Relaxed);
     }
     fn irq13() {
@@ -162,7 +162,7 @@ mod kthreads {
             tq::enqueue(&TASKQUEUE_THREAD, &FROM_IRQ);
         }
     }
-    fn irq_raiser(_: usize) {
+    extern "C" fn irq_raiser(_: usize) {
         const _: () = assert!(oxidebsd::cpu::pic::PIC_1_OFFSET + 13 == 45);
         oxidebsd::cpu::interrupts::register_irq_handler(13, irq13);
         IRQ_ARMED.store(true, Ordering::Relaxed);
@@ -176,12 +176,12 @@ mod kthreads {
     /// 11: a task enqueued again while it runs runs again.
     static AGAIN: Task = Task::new(again, 0);
     static AGAIN_RUNS: AtomicU32 = AtomicU32::new(0);
-    fn again(_: usize, pending: u32) {
+    extern "C" fn again(_: usize, pending: u32) {
         if AGAIN_RUNS.fetch_add(pending, Ordering::Relaxed) == 0 {
             tq::enqueue(&TASKQUEUE_THREAD, &AGAIN);
         }
     }
-    fn againer(_: usize) {
+    extern "C" fn againer(_: usize) {
         tq::enqueue(&TASKQUEUE_THREAD, &AGAIN);
         wait_for(|| AGAIN_RUNS.load(Ordering::Relaxed) >= 2);
         pause(5);
@@ -191,11 +191,11 @@ mod kthreads {
     /// 12: `drain` returns only once a task that sleeps has finished.
     static SLOW: Task = Task::new(slow, 0);
     static SLOW_DONE: AtomicBool = AtomicBool::new(false);
-    fn slow(_: usize, _: u32) {
+    extern "C" fn slow(_: usize, _: u32) {
         pause(5);
         SLOW_DONE.store(true, Ordering::Relaxed);
     }
-    fn drainer(_: usize) {
+    extern "C" fn drainer(_: usize) {
         tq::enqueue(&TASKQUEUE_THREAD, &SLOW);
         tq::drain(&TASKQUEUE_THREAD, &SLOW);
         result(12, SLOW_DONE.load(Ordering::Relaxed));
@@ -204,10 +204,10 @@ mod kthreads {
     /// 13: a queue of one's own, with two threads of its own, runs its tasks.
     static OWN: Task = Task::new(own, 0);
     static OWN_RAN_ON: AtomicU64 = AtomicU64::new(0);
-    fn own(_: usize, _: u32) {
+    extern "C" fn own(_: usize, _: u32) {
         OWN_RAN_ON.store(oxidebsd::process::scheduler::current_pid(), Ordering::Relaxed);
     }
-    fn owner(_: usize) {
+    extern "C" fn owner(_: usize) {
         let queue = tq::create("tq-test");
         let ok = tq::start_threads(queue, 2).is_ok();
         tq::enqueue(queue, &OWN);
@@ -218,7 +218,7 @@ mod kthreads {
     }
 
     /// Waits for the others (up to 10 s), then gives the verdict.
-    fn judge(_: usize) {
+    extern "C" fn judge(_: usize) {
         let all = (1 << CHECKS) - 1;
         for _ in 0..1000 {
             pause(1);
@@ -232,7 +232,7 @@ mod kthreads {
     }
 
     pub fn start() {
-        let add = |f: fn(usize), name| kthread_add(f, 0, name).unwrap_or_else(|e| panic!("kthread_add {name}: {e}"));
+        let add = |f: extern "C" fn(usize), name| kthread_add(f, 0, name).unwrap_or_else(|e| panic!("kthread_add {name}: {e}"));
         add(sleeper, "sleeper");
         add(waker, "waker");
         add(timeout, "timeout");
@@ -294,14 +294,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
         NATIVE_ABI_MOD,
         NATIVE_ABI_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the native_abi module: {e:?}"));
     // close, lseek, fstat, ioctl, ftruncate, fsync, fdatasync (VFS.md §6.4).
     const VFS_MOD: &[u8] = include_bytes!(env!("VFS_MOD_PATH"));
     const VFS_PANIC_SYMBOL: &str = env!("VFS_MOD_PANIC_SYMBOL");
-    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false, &mut mapper, &mut frame_allocator)
+    oxidebsd::module::load("vfs", VFS_MOD, VFS_PANIC_SYMBOL, false)
         .unwrap_or_else(|e| panic!("failed to load the vfs module: {e:?}"));
 
     // vfork(2) (COW.md §7), as at boot: BusyBox's spawn() and musl's vfork() call it.
@@ -312,8 +310,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         VFORK_MOD,
         VFORK_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the vfork module: {e:?}"));
 
@@ -326,8 +322,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         SIGNAL_MOD,
         SIGNAL_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the signal module: {e:?}"));
 
@@ -339,8 +333,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         POSIX_COMPAT_MOD,
         POSIX_COMPAT_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the posix_compat module: {e:?}"));
 
@@ -352,8 +344,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         CLOCK_MOD,
         CLOCK_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the clock module: {e:?}"));
 
@@ -361,7 +351,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     oxidebsd::drivers::disk::init(&mut frame_allocator, &mut mapper, physical_memory_offset);
 
     // The file system modules, as at boot: oxfs mounts the system image, then procfs and tmpfs.
-    oxidebsd::kernel_main::load_file_systems(&mut mapper, &mut frame_allocator);
+    oxidebsd::kernel_main::load_file_systems();
 
     // Local sockets (/dev/log) and poll(2), syslogd's loop.
     const SOCKET_MOD: &[u8] = include_bytes!(env!("SOCKET_MOD_PATH"));
@@ -371,8 +361,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
         SOCKET_MOD,
         SOCKET_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the socket module: {e:?}"));
 
@@ -384,12 +372,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
         SYSCTL_MOD,
         SYSCTL_PANIC_SYMBOL,
         false,
-        &mut mapper,
-        &mut frame_allocator,
     )
     .unwrap_or_else(|e| panic!("failed to load the sysctl module: {e:?}"));
 
-    oxidebsd::memory::install_global_memory_state(frame_allocator, physical_memory_offset);
     oxidebsd::fs::fd::init();
 
     assert_eq!(
@@ -408,6 +393,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
     // After pid 1, which keeps its number.
     assert_eq!(oxidebsd_register_syscall(SYS_TEST_KTHREAD, test_kthread_handler), 0, "SYS_TEST_KTHREAD registration failed");
     kthreads::start();
+    // A module's own kernel threads and tasks (KTHREAD.md §7), started from its module_init;
+    // `regress/kern-smoke/kthread.c` reads its verdict.
+    const KTHREAD_SMOKE_MOD: &[u8] = include_bytes!(env!("KTHREAD_SMOKE_MOD_PATH"));
+    const KTHREAD_SMOKE_PANIC_SYMBOL: &str = env!("KTHREAD_SMOKE_MOD_PANIC_SYMBOL");
+    oxidebsd::module::load("kthread_smoke", KTHREAD_SMOKE_MOD, KTHREAD_SMOKE_PANIC_SYMBOL, false)
+        .unwrap_or_else(|e| panic!("failed to load the kthread_smoke module: {e:?}"));
 
     oxidebsd::process::scheduler::start(pid1)
 }

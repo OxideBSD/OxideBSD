@@ -87,7 +87,7 @@ pub(crate) fn root() -> Option<u32> {
     if root >= 0 {
         return Some(root as u32);
     }
-    let offset = crate::module::phys_mem_offset()?;
+    let offset = crate::memory::try_phys_mem_offset()?;
     crate::drivers::disk::init_memory(offset);
     let root = ROOT.load(Ordering::Relaxed);
     (root >= 0).then_some(root as u32)

@@ -1,0 +1,12 @@
+[package]
+name = "kthread_if"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# Kernel threads' and taskqueues' interface between the kernel and modules (OxideBSD-doc
+# KTHREAD.md §7): struct task and the kernel's exports. The kernel and the modules that use kernel
+# threads depend on it, so neither side duplicates the task structure. No dependencies; its own
+# workspace, like lib/libvfs.
+[workspace]

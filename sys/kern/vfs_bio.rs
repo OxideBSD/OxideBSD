@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB,
 };
 
 use crate::kern::vfs_bdev::{self, SECTOR};
@@ -155,19 +155,9 @@ fn cache() -> &'static mut Cache {
     })
 }
 
-/// A page-table view of the active level-4 table, with frames from whichever allocator is live
-/// (`module::allocate_frame`: the loader's during a `module_init`, the global one after).
-struct Frames;
-
-// SAFETY: hands out frames nothing else uses.
-unsafe impl FrameAllocator<Size4KiB> for Frames {
-    fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        crate::module::allocate_frame()
-    }
-}
-
+/// A page-table view of the active level-4 table.
 fn mapper() -> Option<OffsetPageTable<'static>> {
-    let offset = crate::module::phys_mem_offset()?;
+    let offset = crate::memory::try_phys_mem_offset()?;
     let (l4, _) = x86_64::registers::control::Cr3::read();
     // SAFETY: CR3's level-4 table is live and reachable through the physical-memory window; only
     // the buffer window's entries are touched through this view, on one core.
@@ -300,13 +290,13 @@ impl Cache {
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | crate::cpu::nx::no_execute();
             for p in have..want {
                 let page = Page::<Size4KiB>::containing_address(VirtAddr::new(base + p as u64 * PAGE));
-                let Some(frame) = crate::module::allocate_frame() else { return false };
+                let Some(frame) = crate::memory::allocate_frame() else { return false };
                 // SAFETY: this page of the slot is unmapped (only `pages` of it are mapped).
-                match unsafe { mapper.map_to(page, frame, flags, &mut Frames) } {
+                match unsafe { mapper.map_to(page, frame, flags, &mut crate::memory::GlobalFrameAllocator) } {
                     Ok(flush) => flush.ignore(), // never mapped since its last unmap's flush
                     Err(_) => {
                         // SAFETY: never mapped.
-                        unsafe { crate::module::free_frame(frame) };
+                        unsafe { crate::memory::free_frame(frame) };
                         return false;
                     }
                 }
@@ -319,7 +309,7 @@ impl Cache {
                 if let Ok((frame, flush)) = mapper.unmap(page) {
                     flush.flush();
                     // SAFETY: the buffer's only mapping, just removed.
-                    unsafe { crate::module::free_frame(frame) };
+                    unsafe { crate::memory::free_frame(frame) };
                 }
                 self.pages -= 1;
             }

@@ -80,7 +80,7 @@ pub fn write_sectors(lba: u64, buf: &[u8]) -> bool {
         let at = lba + i as u64;
         let Some(slot) = disk.frames.get_mut((at / 8) as usize) else { return false };
         if *slot == 0 {
-            let Some(frame) = crate::module::allocate_frame() else { return false };
+            let Some(frame) = crate::memory::allocate_frame() else { return false };
             *slot = frame.start_address().as_u64();
             // SAFETY: a frame just allocated, reached through the HHDM.
             unsafe { core::ptr::write_bytes((offset + *slot).as_mut_ptr::<u8>(), 0, BLOCK) };
@@ -101,7 +101,7 @@ pub fn write_blocks(start_block: u64, buf: &[u8]) -> bool {
     for (i, chunk) in buf.chunks(BLOCK).enumerate() {
         let Some(slot) = disk.frames.get_mut(start_block as usize + i) else { return false };
         if *slot == 0 {
-            let Some(frame) = crate::module::allocate_frame() else { return false };
+            let Some(frame) = crate::memory::allocate_frame() else { return false };
             *slot = frame.start_address().as_u64();
         }
         // SAFETY: as in `read_blocks`; nothing else maps this frame.

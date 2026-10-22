@@ -28,7 +28,7 @@ const ECHO_ID: u16 = 0x1234;
 const ECHO_SEQ: u16 = 1;
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    let (_mapper, mut frame_allocator) = oxidebsd::init(boot_info);
+    let (_, mut frame_allocator) = oxidebsd::init(boot_info);
     let physical_memory_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
 
     rtl8139::init(&mut frame_allocator, physical_memory_offset);

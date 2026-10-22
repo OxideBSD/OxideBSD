@@ -170,8 +170,9 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
 
 - `memory::init` walks `CR3` + HHDM offset; call once.
 - `BootInfoFrameAllocator` is built **before the heap exists**: no heap allocation inside it. Its
-  free list is intrusive (stored in the freed frames). Code that can run inside a `module_init`
-  (frames freed or mapped at boot) uses `module::phys_mem_offset`, not `memory::phys_mem_offset`.
+  free list is intrusive (stored in the freed frames). `oxidebsd::init` makes it the global one
+  before returning (modules load after); boot code maps with the `memory::GlobalFrameAllocator`
+  handle it returns, which locks per frame.
 - Fresh mappings use `.ignore()` not `.flush()`.
 - Heap at fixed `allocator::HEAP_START` (L4 slot 386), size scales with RAM (clamped). **Nothing
   kernel-only may be mapped in the user range** `[VM_MINUSER, VM_MAXUSER)` (`memory/usercopy.rs`,

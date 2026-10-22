@@ -266,6 +266,17 @@ name = "kmod-alloc-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "kthread_if"
+version = "0.1.0"
+
+[[package]]
+name = "kthread_smoke"
+version = "0.1.0"
+dependencies = [
+ "kthread_if",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -413,6 +424,7 @@ name = "oxidebsd"
 version = "0.3.0-dev"
 dependencies = [
  "chacha20",
+ "kthread_if",
  "libcertstore",
  "limine",
  "linked_list_allocator",
