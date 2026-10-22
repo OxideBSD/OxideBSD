@@ -4,7 +4,7 @@
 //! runs once, told how many enqueues it absorbed; one enqueued again while it runs runs again.
 //!
 //! `TASKQUEUE_THREAD` is the system's queue, run by one kernel thread, `taskq`, started once pid 1
-//! exists (`start_system`): tasks queued before then wait for it.
+//! exists (`start_system`, from `scheduler::start`): tasks queued before then wait for it.
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 

@@ -89,6 +89,18 @@ check "ps -o header runs to the end" same "$($PS -o 'pid=a, b' -p 1 | head -n 1 
 check "ps -o header takes the rest of the argument" same "$($PS -o pid=,ppid= -p 1 | head -n 1 | tr -d ' ')" ",ppid="
 check "ps -o all-empty headers print none" same "$($PS -o pid= -o comm= -p 1 | wc -l | tr -d ' ')" 1
 check "ps -o several times adds up" same "$(words $($PS -o pid -o ppid -p 1 | head -n 1))" "PID PPID"
+# The kernel process and its threads (KTHREAD.md §8).
+check "ps -ax shows the kernel process" matches "$($PS -ax -o pid= -o command=)" '^ *0 \[kernel\]$'
+check "ps -axH shows the taskq kernel thread" matches "$($PS -axH -o pid= -o command=)" '^ *0 \[kernel/taskq\]$'
+check "ps -axH has no lone [kernel]" not matches "$($PS -axH -o command=)" '^\[kernel\]$'
+check "/proc/0/stat is the kernel's" matches "$(cat /proc/0/stat)" '^0 \(kernel\) [RS] 0 0 0 '
+ktid=$(ls /proc/0/task | head -n 1)
+check "/proc/0/task lists kernel threads" matches "$ktid" '^[0-9]+$'
+check "a kernel thread's stat names it" matches "$(cat /proc/0/task/$ktid/stat 2>&1)" "^$ktid \\("
+check "/proc hides a kernel thread's id" not [ -e /proc/$ktid ]
+check "/proc doesn't list a kernel thread's id" not matches "$(ls /proc)" "^$ktid\$"
+check "pgrep passes the kernel over" status_is 1 $PGREP -x kernel
+check "pgrep -S finds the kernel" same "$($PGREP -S -x kernel)" 0
 check "ps -O adds after the pid" same "$(words $($PS -O ppid,nice -p 1 | head -n 1))" "PID PPID NI TT STAT TIME COMMAND"
 check "ps -j's columns" same "$(words $($PS -j -p 1 | head -n 1))" "USER PID PPID PGID SID JOBC STAT TT TIME COMMAND"
 check "ps -l's columns" same "$(words $($PS -l -p 1 | head -n 1))" "UID PID PPID C PRI NI VSZ RSS MWCHAN STAT TT TIME COMMAND"

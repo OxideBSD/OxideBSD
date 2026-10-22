@@ -409,6 +409,9 @@ fn wait_for_ready() -> Pid {
 /// `process::spawn`'d). Never returns — same one-way shape `usermode::jump_to_usermode` always
 /// had (and which this function reaches indirectly, via `spawn_trampoline_inner`).
 pub fn start(first_pid: Pid) -> ! {
+    // The system taskqueue's thread (OxideBSD-doc `KTHREAD.md` §6.4), in every kernel, test ones
+    // too: here pid 1 has its number already.
+    crate::kern::subr_taskqueue::start_system();
     serial_println!("[boot] scheduler starting: switching to pid {}", first_pid);
     without_interrupts(|| {
         let next_rsp = activate_and_prepare(first_pid);

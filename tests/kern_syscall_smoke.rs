@@ -122,6 +122,17 @@ mod kthreads {
         }
     }
 
+    /// Sleeps a tick at a time until `done` holds, for up to a second: the taskq thread may be
+    /// running another test's task (`slow` sleeps 5 ticks), so a fixed pause would be a race.
+    fn wait_for(done: impl Fn() -> bool) {
+        for _ in 0..100 {
+            if done() {
+                return;
+            }
+            pause(1);
+        }
+    }
+
     /// 9: a task enqueued three times before it runs runs once, told of all three.
     static COALESCED: Task = Task::new(coalesced, 0);
     static COALESCED_SEEN: AtomicU32 = AtomicU32::new(0);
@@ -132,6 +143,7 @@ mod kthreads {
         for _ in 0..3 {
             tq::enqueue(&TASKQUEUE_THREAD, &COALESCED);
         }
+        wait_for(|| COALESCED_SEEN.load(Ordering::Relaxed) != 0);
         pause(5);
         // One run (low byte 1) with pending 3.
         result(9, COALESCED_SEEN.load(Ordering::Relaxed) == 3 << 8 | 1);
@@ -156,6 +168,7 @@ mod kthreads {
         IRQ_ARMED.store(true, Ordering::Relaxed);
         // SAFETY: vector 45 is IRQ 13's stub; its handlers are ours.
         unsafe { core::arch::asm!("int 45") };
+        wait_for(|| FROM_IRQ_SEEN.load(Ordering::Relaxed) != 0);
         pause(5);
         result(10, FROM_IRQ_SEEN.load(Ordering::Relaxed) == 1);
     }
@@ -170,6 +183,7 @@ mod kthreads {
     }
     fn againer(_: usize) {
         tq::enqueue(&TASKQUEUE_THREAD, &AGAIN);
+        wait_for(|| AGAIN_RUNS.load(Ordering::Relaxed) >= 2);
         pause(5);
         result(11, AGAIN_RUNS.load(Ordering::Relaxed) == 2);
     }
@@ -229,7 +243,6 @@ mod kthreads {
         add(hog, "hog");
         EXITER.store(add(exiter, "exiter"), Ordering::Relaxed);
         SLEEPER.store(add(forever, "forever"), Ordering::Relaxed);
-        tq::start_system();
         add(coalescer, "coalescer");
         add(irq_raiser, "irq-raiser");
         add(againer, "againer");

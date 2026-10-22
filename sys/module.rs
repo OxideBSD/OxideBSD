@@ -1298,6 +1298,7 @@ fn resolve_external_symbol(name: &str, panic_symbol: &str) -> Option<u64> {
         "oxidebsd_current_tgid" => Some(crate::process::procfs::oxidebsd_current_tgid as *const () as u64),
         "oxidebsd_proc_exists" => Some(crate::process::oxidebsd_proc_exists as *const () as u64),
         "oxidebsd_proc_pid_at" => Some(crate::process::oxidebsd_proc_pid_at as *const () as u64),
+        "oxidebsd_proc_kthread_at" => Some(crate::process::oxidebsd_proc_kthread_at as *const () as u64),
         "oxidebsd_proc_map" => Some(crate::process::procfs::oxidebsd_proc_map as *const () as u64),
         "oxidebsd_proc_stat_line" => {
             Some(crate::process::oxidebsd_proc_stat_line as *const () as u64)

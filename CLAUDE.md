@@ -325,6 +325,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - Private futexes key on `(tgid, addr)`; shared ones on physical address only for `SHARED_LEAF`
   pages (a private page's frame changes at its COW copy).
 - Orphans reparent to pid 1.
+- **Kernel threads** (`OxideBSD-doc/KTHREAD.md`, `kern_kthread`, `kern_synch::tsleep`,
+  `subr_taskqueue`) are table entries with tgid 0 (`process::is_kernel_thread`), never leaders: a new
+  walk or by-id call on the table must decide what it does with them (EPERM, skip, `/proc/0`).
 - Kernel stack floor 128 KiB.
 
 ## Signals, ttys, time

@@ -62,29 +62,60 @@ fn sees(cred: &identity::Cred, p: &Process) -> bool {
     cred.may_see(&[p.shared.lock().cred.ruid])
 }
 
+/// In a `pid` argument of the accessors below, names kernel thread `pid & !KTHREAD_BIT`
+/// (procfs's `/proc/0/task/<tid>`).
+const KTHREAD_BIT: u64 = 1 << 32;
+
+/// What an accessor's `pid` names, if the caller sees it (OxideBSD-doc `KTHREAD.md` §8.1): with
+/// `KTHREAD_BIT`, that kernel thread; pid 0, the kernel process, which its first kernel thread
+/// stands for; any other pid, that process or user thread -- never a kernel thread, whose ids
+/// `/proc` doesn't show.
+fn lookup<'a>(table: &'a BTreeMap<Pid, Box<Process>>, cred: &identity::Cred, pid: u64) -> Option<&'a Process> {
+    let p = if pid & KTHREAD_BIT != 0 {
+        table.get(&(pid & !KTHREAD_BIT)).filter(|p| is_kernel_thread(p))?
+    } else if pid == KERNEL_TGID {
+        table.values().find(|p| is_kernel_thread(p))?
+    } else {
+        table.get(&pid).filter(|p| !is_kernel_thread(p))?
+    };
+    sees(cred, p).then_some(p)
+}
+
+/// The id an accessor's `pid` is shown as: the kernel thread's for `KTHREAD_BIT`.
+fn shown_pid(pid: u64) -> u64 {
+    pid & !KTHREAD_BIT
+}
+
 /// Exposed to `sys/modules/oxfs` for its `/proc` directory listing -- `1`/`0` rather than `bool` to
 /// stay a plain FFI scalar, same convention `oxidebsd_register_syscall`'s own return already uses.
 pub(crate) extern "C" fn oxidebsd_proc_exists(pid: u64) -> i32 {
     let cred = identity::current_cred();
-    if PROCESS_TABLE.lock().get(&pid).is_some_and(|p| sees(&cred, p)) {
-        1
-    } else {
-        0
-    }
+    lookup(&PROCESS_TABLE.lock(), &cred, pid).is_some() as i32
 }
 
-/// The `index`-th live pid in ascending order (`BTreeMap` iteration is already sorted), `-1` once
-/// `index` is past the end -- lets `sys/modules/oxfs` enumerate `/proc`'s own directory listing without
-/// a "how many pids" call of its own (just loop until `-1`).
+/// The `index`-th pid `/proc` lists, ascending: the kernel process (0) first, then every process
+/// and user thread (`BTreeMap` iteration is already sorted); `-1` once `index` is past the end
+/// -- lets procfs enumerate `/proc` without a "how many pids" call of its own.
 pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
+    let cred = identity::current_cred();
+    let table = PROCESS_TABLE.lock();
+    let kernel = lookup(&table, &cred, KERNEL_TGID).map(|_| KERNEL_TGID);
+    kernel
+        .into_iter()
+        .chain(table.iter().filter(|(_, p)| !is_kernel_thread(p) && sees(&cred, p)).map(|(&pid, _)| pid))
+        .nth(index as usize)
+        .map_or(-1, |pid| pid as i64)
+}
+
+/// The `index`-th kernel thread's id, ascending (`/proc/0/task`), `-1` past the end.
+pub(crate) extern "C" fn oxidebsd_proc_kthread_at(index: u64) -> i64 {
     let cred = identity::current_cred();
     PROCESS_TABLE
         .lock()
         .iter()
-        .filter(|(_, p)| sees(&cred, p))
+        .filter(|(_, p)| is_kernel_thread(p) && sees(&cred, p))
         .nth(index as usize)
-        .map(|(&pid, _)| pid as i64)
-        .unwrap_or(-1)
+        .map_or(-1, |(&tid, _)| tid as i64)
 }
 
 /// Formats a real `/proc/[pid]/stat` line (`pid (comm) state ppid pgrp session ...`, all ~52
@@ -95,16 +126,24 @@ pub(crate) extern "C" fn oxidebsd_proc_pid_at(index: u64) -> i64 {
 pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
+    let kernel = pid == KERNEL_TGID;
+    let pid = shown_pid(pid);
     let ppid = proc.parent.unwrap_or(0);
     let pgid = proc.pgid;
     let sid = proc.sid;
     let brk = proc.address_space.as_ref().map_or(0, |space| space.vm().brk.as_u64());
     let blocked = proc.blocked_signals;
-    let state = state_char(proc.state);
-    let comm = proc.comm.clone();
+    let kthreads = || table.values().filter(|p| is_kernel_thread(p));
+    // The kernel process is running if any of its threads is, else asleep.
+    let state = if kernel {
+        if kthreads().any(|p| matches!(p.state, ProcState::Ready | ProcState::Running)) { b'R' } else { b'S' }
+    } else {
+        state_char(proc.state)
+    };
+    let comm = if kernel { b"kernel".to_vec() } else { proc.comm.clone() };
     let start = proc.start_ticks;
     let vsize = proc.address_space.as_ref().map_or(0, |space| space.vm().map.size());
     let rss = proc.address_space.as_ref().map_or(0, |space| {
@@ -119,8 +158,12 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
     });
     let threads = table.values().filter(|p| p.tgid == proc.tgid && !matches!(p.state, ProcState::Zombie(_))).count();
     let (minflt, majflt) = (proc.minflt, proc.majflt);
-    // Linux's PF_EXITING for a thread that has exited.
-    let flags: i64 = if matches!(proc.state, ProcState::Zombie(_)) { 0x4 } else { 0 };
+    // Linux's PF_EXITING for a thread that has exited, and PF_KTHREAD for the kernel's (FreeBSD's
+    // P_SYSTEM: pgrep passes them over without -S).
+    let mut flags: i64 = if matches!(proc.state, ProcState::Zombie(_)) { 0x4 } else { 0 };
+    if is_kernel_thread(proc) {
+        flags |= 0x0020_0000;
+    }
     // A process-directed signal is pending on whichever thread was chosen to take it: a thread
     // group's leader reports every thread's, as Linux's shared pending set.
     let pending = if pid as Pid == proc.tgid {
@@ -138,7 +181,13 @@ pub(crate) extern "C" fn oxidebsd_proc_stat_line(pid: u64, buf_ptr: *mut u8, buf
             _ => (i, c | 1 << (sig - 1)),
         })
     };
-    let (utime, stime) = (proc.cpu_ticks.saturating_sub(proc.sys_ticks), proc.sys_ticks);
+    // The kernel process's times are its threads'.
+    let (cpu, sys) = if kernel {
+        kthreads().fold((0, 0), |(c, s), p| (c + p.cpu_ticks, s + p.sys_ticks))
+    } else {
+        (proc.cpu_ticks, proc.sys_ticks)
+    };
+    let (utime, stime) = (cpu.saturating_sub(sys), sys);
     let (cutime, cstime) = (proc.child_cpu_ticks.saturating_sub(proc.child_sys_ticks), proc.child_sys_ticks);
     // proc(5)'s priority: 20 + nice for a time-sharing thread, -1 - rank for a real-time one.
     let rt = super::sched_4bsd::key(proc) < super::sched_4bsd::REALTIME_KEYS;
@@ -217,7 +266,7 @@ pub(crate) extern "C" fn oxidebsd_proc_map(pid: u64, linux: u64, buf_ptr: *mut u
     use super::vm_map::{PROT_EXEC, PROT_READ, PROT_WRITE, VmKind};
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
     let Some(space) = proc.address_space.as_ref() else {
@@ -301,7 +350,7 @@ pub(crate) extern "C" fn oxidebsd_current_tgid() -> u64 {
 pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
     copy_into(&proc.cmdline, buf_ptr, buf_cap)
@@ -313,7 +362,7 @@ pub(crate) extern "C" fn oxidebsd_proc_cmdline(pid: u64, buf_ptr: *mut u8, buf_c
 pub(crate) extern "C" fn oxidebsd_proc_environ(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
     let owner = {
@@ -331,7 +380,7 @@ pub(crate) extern "C" fn oxidebsd_proc_environ(pid: u64, buf_ptr: *mut u8, buf_c
 pub(crate) extern "C" fn oxidebsd_proc_wchan(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
     let name: &[u8] = match proc.state {
@@ -371,7 +420,7 @@ pub(crate) extern "C" fn oxidebsd_proc_wchan(pid: u64, buf_ptr: *mut u8, buf_cap
 pub(crate) extern "C" fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
     let adj = proc.shared.lock().oom_adj;
@@ -390,14 +439,16 @@ pub(crate) extern "C" fn oxidebsd_proc_oom_adj(pid: u64, buf_ptr: *mut u8, buf_c
 pub(crate) extern "C" fn oxidebsd_proc_status(pid: u64, buf_ptr: *mut u8, buf_cap: u64) -> i64 {
     let cred = identity::current_cred();
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid).filter(|p| sees(&cred, p)) else {
+    let Some(proc) = lookup(&table, &cred, pid) else {
         return -1;
     };
+    let kernel = pid == KERNEL_TGID;
+    let pid = shown_pid(pid);
     let ppid = proc.parent.unwrap_or(0);
 
     let mut out = Vec::new();
     out.extend_from_slice(b"Name:\t");
-    out.extend_from_slice(&proc.comm);
+    out.extend_from_slice(if kernel { b"kernel".as_slice() } else { &proc.comm });
     out.push(b'\n');
     out.extend_from_slice(b"State:\t");
     out.extend_from_slice(match proc.state {

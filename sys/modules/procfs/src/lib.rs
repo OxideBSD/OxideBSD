@@ -10,6 +10,8 @@
 //! - `/proc/self`: a link to the caller's pid.
 //! - `/proc/<pid>/{stat,cmdline,status,oom_adj,map,maps,environ,wchan}`, `/proc/<pid>/fd/<n>` (links to what each fd
 //!   names), `/proc/<pid>/task/<pid>/{stat,cmdline,status}` (one task per process).
+//! - `/proc/0`: the kernel process (OxideBSD-doc `KTHREAD.md` §8.1), whose `task/<tid>` are its
+//!   kernel threads; their own ids aren't listed in `/proc`, nor found there.
 #![no_std]
 
 extern crate alloc;
@@ -29,6 +31,7 @@ unsafe extern "C" {
     fn oxidebsd_current_tgid() -> u64;
     fn oxidebsd_proc_exists(pid: u64) -> i32;
     fn oxidebsd_proc_pid_at(index: u64) -> i64;
+    fn oxidebsd_proc_kthread_at(index: u64) -> i64;
     fn oxidebsd_fd_at(pid: u64, index: u64) -> i64;
     fn oxidebsd_real_fd_of_pid(pid: u64, fd: u64) -> i64;
     fn oxidebsd_fd_link(pid: u64, fd: u64, buf: *mut u8, cap: u64) -> i64;
@@ -69,7 +72,13 @@ enum Node {
     TaskFile(u32, Leaf),
     FdDir(u32),
     FdLink(u32, u32),
+    /// `/proc/0/task/<tid>`: a kernel thread.
+    KThread(u32),
+    KThreadFile(u32, Leaf),
 }
+
+/// The kernel's accessors take a kernel thread's id with this bit (`sys/process/procfs.rs`).
+const KTHREAD_BIT: u64 = 1 << 32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SysFile {
@@ -131,6 +140,8 @@ impl Node {
             Node::TaskFile(p, l) => enc(8, p, l as u64),
             Node::FdDir(p) => enc(9, p, 0),
             Node::FdLink(p, fd) => enc(10, p, fd as u64),
+            Node::KThread(t) => enc(11, t, 0),
+            Node::KThreadFile(t, l) => enc(12, t, l as u64),
         }
     }
 
@@ -149,13 +160,17 @@ impl Node {
             8 => Node::TaskFile(pid, leaf(sub)?),
             9 => Node::FdDir(pid),
             10 => Node::FdLink(pid, sub as u32),
+            11 => Node::KThread(pid),
+            12 => Node::KThreadFile(pid, leaf(sub)?),
             _ => return None,
         })
     }
 
     fn vtype(self) -> VType {
         match self {
-            Node::Root | Node::PidDir(_) | Node::TaskDir(_) | Node::TaskPid(_) | Node::FdDir(_) => VDIR,
+            Node::Root | Node::PidDir(_) | Node::TaskDir(_) | Node::TaskPid(_) | Node::FdDir(_) | Node::KThread(_) => {
+                VDIR
+            }
             Node::SelfLink | Node::FdLink(..) => VLNK,
             _ => VREG,
         }
@@ -175,6 +190,7 @@ impl Node {
         match self {
             // SAFETY: kernel exports, called as declared.
             Node::FdLink(p, fd) => (unsafe { oxidebsd_real_fd_of_pid(p as u64, fd as u64) }) >= 0,
+            Node::KThread(t) | Node::KThreadFile(t, _) => (unsafe { oxidebsd_proc_exists(t as u64 | KTHREAD_BIT) }) != 0,
             n => n.pid().is_none_or(|p| unsafe { oxidebsd_proc_exists(p as u64) } != 0),
         }
     }
@@ -185,6 +201,8 @@ impl Node {
             Node::TaskPid(p) => Node::TaskDir(p),
             Node::TaskFile(p, _) => Node::TaskPid(p),
             Node::FdLink(p, _) => Node::FdDir(p),
+            Node::KThread(_) => Node::TaskDir(0),
+            Node::KThreadFile(t, _) => Node::KThread(t),
             _ => Node::Root,
         }
     }
@@ -227,10 +245,15 @@ fn child(dir: Node, name: &[u8]) -> Option<Node> {
             b"task" => Node::TaskDir(p),
             _ => Node::PidFile(p, PID_LEAVES.iter().find(|(_, n)| *n == name)?.0),
         },
+        Node::TaskDir(0) => Node::KThread(parse_number(name)?),
         Node::TaskDir(p) => (parse_number(name)? == p).then_some(Node::TaskPid(p))?,
         Node::TaskPid(p) => {
             let leaf = PID_LEAVES.iter().find(|(_, n)| *n == name)?.0;
             (leaf != Leaf::OomAdj).then_some(Node::TaskFile(p, leaf))?
+        }
+        Node::KThread(t) => {
+            let leaf = PID_LEAVES.iter().find(|(_, n)| *n == name)?.0;
+            (leaf != Leaf::OomAdj).then_some(Node::KThreadFile(t, leaf))?
         }
         Node::FdDir(p) => Node::FdLink(p, parse_number(name)?),
         _ => return None,
@@ -258,8 +281,14 @@ fn nth_entry(dir: Node, n: usize) -> Option<(Vec<u8>, Node)> {
             5 => Some((b"task".to_vec(), Node::TaskDir(p))),
             _ => None,
         },
+        Node::TaskDir(0) => {
+            // SAFETY: kernel export.
+            let tid = unsafe { oxidebsd_proc_kthread_at(n as u64) };
+            (tid >= 0).then(|| (decimal(tid as u64), Node::KThread(tid as u32)))
+        }
         Node::TaskDir(p) => (n == 0).then(|| (decimal(p as u64), Node::TaskPid(p))),
         Node::TaskPid(p) => (n < 3).then(|| (PID_LEAVES[n].1.to_vec(), Node::TaskFile(p, PID_LEAVES[n].0))),
+        Node::KThread(t) => (n < 3).then(|| (PID_LEAVES[n].1.to_vec(), Node::KThreadFile(t, PID_LEAVES[n].0))),
         Node::FdDir(p) => {
             // SAFETY: kernel export.
             let fd = unsafe { oxidebsd_fd_at(p as u64, n as u64) };
@@ -293,19 +322,19 @@ fn render(mut fill: impl FnMut(*mut u8, u64) -> i64) -> Result<Vec<u8>, i32> {
 }
 
 fn contents(node: Node) -> Result<Vec<u8>, i32> {
-    let leaf = |pid: u32, leaf: Leaf| {
+    let leaf = |pid: u64, leaf: Leaf| {
         render(|buf, cap| {
             // SAFETY: kernel exports, with this module's buffer.
             let n = unsafe {
                 match leaf {
-                    Leaf::Stat => oxidebsd_proc_stat_line(pid as u64, buf, cap),
-                    Leaf::Cmdline => oxidebsd_proc_cmdline(pid as u64, buf, cap),
-                    Leaf::Status => oxidebsd_proc_status(pid as u64, buf, cap),
-                    Leaf::OomAdj => oxidebsd_proc_oom_adj(pid as u64, buf, cap),
-                    Leaf::Map => oxidebsd_proc_map(pid as u64, 0, buf, cap),
-                    Leaf::Maps => oxidebsd_proc_map(pid as u64, 1, buf, cap),
-                    Leaf::Environ => oxidebsd_proc_environ(pid as u64, buf, cap),
-                    Leaf::Wchan => oxidebsd_proc_wchan(pid as u64, buf, cap),
+                    Leaf::Stat => oxidebsd_proc_stat_line(pid, buf, cap),
+                    Leaf::Cmdline => oxidebsd_proc_cmdline(pid, buf, cap),
+                    Leaf::Status => oxidebsd_proc_status(pid, buf, cap),
+                    Leaf::OomAdj => oxidebsd_proc_oom_adj(pid, buf, cap),
+                    Leaf::Map => oxidebsd_proc_map(pid, 0, buf, cap),
+                    Leaf::Maps => oxidebsd_proc_map(pid, 1, buf, cap),
+                    Leaf::Environ => oxidebsd_proc_environ(pid, buf, cap),
+                    Leaf::Wchan => oxidebsd_proc_wchan(pid, buf, cap),
                 }
             };
             match n {
@@ -327,7 +356,8 @@ fn contents(node: Node) -> Result<Vec<u8>, i32> {
                 SysFile::InitDeaths => oxidebsd_proc_initdeaths(buf, cap),
             }
         }),
-        Node::PidFile(p, l) | Node::TaskFile(p, l) => leaf(p, l),
+        Node::PidFile(p, l) | Node::TaskFile(p, l) => leaf(p as u64, l),
+        Node::KThreadFile(t, l) => leaf(t as u64 | KTHREAD_BIT, l),
         _ => Err(EINVAL),
     }
 }

@@ -14,6 +14,10 @@
 //! CPU, `-v` by memory), `-o` gives the columns (`keyword[=header]`), `-O` adds columns after the
 //! pid. The leading `-` may be left out (`ps ax`), and a trailing pid works as `-p`.
 //!
+//! The kernel process, pid 0, is `[kernel]`; `-H` shows each of its threads instead, as
+//! `[kernel/<name>]` (`/proc/0/task`, OxideBSD-doc `KTHREAD.md` §8.2). A user thread has a `/proc`
+//! entry, so a line, of its own already.
+//!
 //! Everything comes from `/proc` (see `kinfo.rs`). What OxideBSD's `/proc` doesn't tell (wait
 //! channels, job-control counts, page-ins, ...) prints as `-`. `%cpu` is the CPU time over the
 //! time since the process started (the kernel keeps no decaying average); `STAT`'s `I` (idle for
@@ -488,6 +492,32 @@ fn field(c: &Col, p: &Proc, cx: &mut Ctx, rss: &mut Option<u64>) -> String {
     }
 }
 
+/// `-H`'s lines for the kernel process: one per kernel thread (`/proc/0/task/<tid>`), as FreeBSD
+/// shows them, pid 0 and `kernel/<name>`; the one line if there's no such directory (a Linux host).
+fn kernel_threads(kernel: &Proc) -> Vec<Proc> {
+    let Ok(dir) = std::fs::read_dir("/proc/0/task") else { return vec![kernel.clone()] };
+    let mut tids: Vec<u32> = dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect();
+    tids.sort_unstable();
+    tids.into_iter()
+        .filter_map(|tid| {
+            let stat = std::fs::read(format!("/proc/0/task/{tid}/stat")).ok()?;
+            let t = kinfo::parse_stat(&String::from_utf8_lossy(&stat))?;
+            Some(Proc {
+                comm: format!("kernel/{}", t.comm),
+                state: t.state,
+                flags: t.flags,
+                utime: t.utime,
+                stime: t.stime,
+                priority: t.priority,
+                nice: t.nice,
+                nlwp: t.nlwp,
+                start: t.start,
+                ..kernel.clone()
+            })
+        })
+        .collect()
+}
+
 /// A comma- or blank-separated list (several `-p` and friends add up).
 fn items(arg: &str) -> impl Iterator<Item = &str> {
     arg.split([',', ' ', '\t']).filter(|s| !s.is_empty())
@@ -533,6 +563,7 @@ fn main() -> ExitCode {
     let mut comm_only = false;
     let mut env = false;
     let mut child_times = false;
+    let mut threads = false;
     let mut status = ExitCode::SUCCESS;
 
     let mut i = 0;
@@ -637,7 +668,10 @@ fn main() -> ExitCode {
                     None
                 }
                 'f' => None, // swapped-out processes: there's no swap.
-                'H' => None, // threads: one per process.
+                'H' => {
+                    threads = true;
+                    None
+                }
                 'j' => Some(JFMT),
                 'L' => return list_keywords(),
                 'l' => Some(LFMT),
@@ -751,13 +785,16 @@ fn main() -> ExitCode {
     }
     let xkeep = xkeep.unwrap_or(xkeep_implied);
 
-    let procs = match kinfo::all() {
+    let mut procs = match kinfo::all() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ps: /proc: {}", kinfo::strerror(&e));
             return ExitCode::from(1);
         }
     };
+    if threads {
+        procs = procs.into_iter().flat_map(|p| if p.pid == 0 { kernel_threads(&p) } else { vec![p] }).collect();
+    }
     // SAFETY: getuid has no preconditions.
     let me = unsafe { libc::getuid() };
     let nsel = sel.count();
