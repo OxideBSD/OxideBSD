@@ -1588,28 +1588,18 @@ fn build_std_oxidebsd_userland_bins(
     // cache) was deleted by hand to force a genuinely fresh build.rs invocation. Suspected but
     // unconfirmed cause: `external/mit/rust/library` contains a *nested* submodule
     // (`library/backtrace`, its own separate `.git` boundary) that may confuse cargo's recursive
-    // directory-change scan. Watching the submodule's own git ref file directly (updates on every
-    // commit, unlike `.git/modules/.../HEAD` itself which only changes on branch switch) is a
-    // more reliable second signal, kept alongside the directory watch rather than replacing it.
-    // (This ref-file path is real internal git bookkeeping keyed by this submodule's original
-    // `external/mit/rust` registration, not the current working-tree path -- git doesn't relocate
-    // `.git/modules/<name>` on a `git mv`-based submodule move, so it deliberately stays as-is.)
+    // directory-change scan. Watching the submodule's own git state too (`submodule_head_files`)
+    // is a more reliable second signal, kept alongside the directory watch rather than replacing
+    // it.
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(manifest_dir)
             .join("external/mit/rust/library")
             .display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        // Real internal git bookkeeping keyed by this submodule's original `third_party/rust`
-        // registration, not its current `external/mit/rust` working-tree path -- git does not
-        // relocate `.git/modules/<name>` on a `git mv`-based submodule move (confirmed live:
-        // `external/mit/rust/.git`'s own gitdir pointer still resolves through this exact path).
-        Path::new(manifest_dir)
-            .join(".git/modules/third_party/rust/refs/heads/oxidebsd")
-            .display()
-    );
+    for path in submodule_head_files(&Path::new(manifest_dir).join("external/mit/rust")) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let rust_sysroot = build_oxidebsd_rust_sysroot();
     let wrapper = write_oxidebsd_rustc_wrapper(&rust_sysroot);
@@ -5674,4 +5664,32 @@ fn write_syscall_names() {
     if std::fs::read_to_string(&path).ok().as_deref() != Some(out.as_str()) {
         std::fs::write(&path, out).expect("writing syscall_names.rs");
     }
+}
+
+/// The files that change when submodule `dir` moves to another commit: its git directory's `HEAD`
+/// (a commit id when detached, as a fresh clone checks submodules out) and, when `HEAD` names a
+/// branch, that branch's ref. Where the git directory lives depends on the clone (the `gitdir:`
+/// line in `dir/.git`; an older clone keeps it under the submodule's old name), so it's read, not
+/// assumed: a watched path that doesn't exist makes every build dirty. Only existing files are
+/// returned.
+fn submodule_head_files(dir: &Path) -> Vec<PathBuf> {
+    let dot_git = dir.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        match std::fs::read_to_string(&dot_git).ok().as_deref().map(str::trim).and_then(|t| t.strip_prefix("gitdir:")) {
+            Some(rel) => dir.join(rel.trim()),
+            None => return Vec::new(),
+        }
+    };
+    let head = git_dir.join("HEAD");
+    let Ok(text) = std::fs::read_to_string(&head) else { return Vec::new() };
+    let mut files = vec![head];
+    if let Some(branch) = text.trim().strip_prefix("ref:") {
+        let branch_ref = git_dir.join(branch.trim());
+        if branch_ref.is_file() {
+            files.push(branch_ref);
+        }
+    }
+    files
 }
