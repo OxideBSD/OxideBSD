@@ -478,14 +478,24 @@ fn identify_words(p: &ChannelPorts) -> Option<[u16; 256]> {
     Some(words)
 }
 
-/// The model string in identify words 27-46, two characters per word, high byte first.
+/// The model string in identify words 27-46.
 pub(super) fn model_of(words: &[u16; 256]) -> String {
-    let model: String = words[27..47]
+    ident_string(&words[27..47])
+}
+
+/// The serial number in identify words 10-19.
+pub(super) fn serial_of(words: &[u16; 256]) -> String {
+    ident_string(&words[10..20])
+}
+
+/// An identify string: two characters per word, high byte first, padded with spaces.
+fn ident_string(words: &[u16]) -> String {
+    let s: String = words
         .iter()
         .flat_map(|w| [(w >> 8) as u8, *w as u8])
         .map(|b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' })
         .collect();
-    String::from(model.trim())
+    String::from(s.trim())
 }
 
 /// Probes all four legacy channel/drive combinations via `IDENTIFY`, logging each. Never panics on

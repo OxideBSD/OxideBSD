@@ -522,7 +522,7 @@ pub(crate) fn reroot_target(spec: &[u8]) -> Result<(&'static VfsConf, u64, Vec<u
 
 /// Unmounts `mp` whatever holds it, the root included: its descriptors go to deadfs and its
 /// vnodes are doomed (FreeBSD's forced unmount), then the type writes it out and lets it go.
-fn force_unmount(mp: *mut Mount) {
+pub(crate) fn force_unmount(mp: *mut Mount) {
     crate::fs::fd::revoke_where(|_, vp| vp.is_some_and(|vp| unsafe { (*vp).v_mount } == mp));
     crate::kern::vfs_subr::vflush(mp);
     crate::kern::vfs_subr::vgone_all(mp);

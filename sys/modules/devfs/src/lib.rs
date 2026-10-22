@@ -287,7 +287,10 @@ fn sync(mp: *mut Mount) {
         return;
     }
     m.generation = generation;
-    let mut registered: Vec<(u32, u32)> = Vec::new();
+    // Every registered device first, then the stale nodes pruned, then the missing ones added: a
+    // device gone and another registered under its name (a disk's GPT label, plugged in again)
+    // would otherwise find the old node still there, and lose its name when it's pruned.
+    let mut entries: Vec<RawDevEntry> = Vec::new();
     let mut index = 0;
     loop {
         let mut e = RawDevEntry { name: [0; 64], name_len: 0, major: 0, minor: 0, uid: 0, gid: 0, mode: 0 };
@@ -296,9 +299,21 @@ fn sync(mp: *mut Mount) {
             break;
         }
         index += 1;
-        if registered.try_reserve(1).is_ok() {
-            registered.push((e.major, e.minor));
+        if entries.try_reserve(1).is_err() {
+            // Without the whole list, pruning could take nodes still registered: wait for the next.
+            m.generation = 0;
+            return;
         }
+        entries.push(e);
+    }
+    let mut registered: Vec<(u32, u32)> = Vec::new();
+    if registered.try_reserve(entries.len()).is_err() {
+        m.generation = 0;
+        return;
+    }
+    registered.extend(entries.iter().map(|e| (e.major, e.minor)));
+    prune(mp, m.root, &registered, 0);
+    for e in &entries {
         if m.hidden.contains(&(e.major, e.minor)) {
             continue;
         }
@@ -327,7 +342,6 @@ fn sync(mp: *mut Mount) {
             free_node(n);
         }
     }
-    prune(mp, m.root, &registered, 0);
 }
 
 /// Removes the nodes under `dir` of devices no longer registered.

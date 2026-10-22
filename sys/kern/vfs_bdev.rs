@@ -9,8 +9,9 @@
 //! raw writes to any device overlapping it are refused then (`EPERM`), since they would go around
 //! its cache (RAM_FLOOR.md §3.4.3, first for the root only).
 //!
-//! Handles are indices into `BDEVS`, which only grows: devices are found at boot, and when a CD's
-//! disc changes (`retire` the old partitions').
+//! Handles are indices into `BDEVS`, which only grows: devices are found at boot, when a CD's
+//! disc changes (`retire` the old partitions') and when a drive is plugged in (`retire` a pulled
+//! one's).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, Ordering};
@@ -61,6 +62,11 @@ pub(crate) fn retire(handle: u32) {
         b.retired = true;
         b.sectors = 0;
     }
+}
+
+/// Whether device `handle` is gone (`retire`).
+pub(crate) fn retired(handle: u32) -> bool {
+    BDEVS.lock().get(handle as usize).is_none_or(|b| b.retired)
 }
 
 /// Device `handle` (a CD drive's whole disc) now has `sectors` sectors.

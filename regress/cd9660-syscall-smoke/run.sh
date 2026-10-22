@@ -179,6 +179,39 @@ check "... and can't be written to" not sh -c 'printf x | dd of=/dev/sata0.2 con
 umount $A
 check "the empty AHCI drive doesn't mount" not mount -t cd9660 /dev/sata1.5 $A 2>/dev/null
 
+# --- AHCI hot plug (INSTALLER.md §5.3) ----------------------------------------------------------
+# QEMU can't hot plug AHCI: debug.disk.unplug pulls sata0.0 out in software. Its port's task retires
+# it (the mount on it unmounted by force, descriptors open on it failing), then finds the drive
+# still there and registers it again under the same name.
+logged() { dmesg | grep -qF "$1"; }
+attached() { dmesg | grep -cF "[disk] sata0.0: attached"; }
+check "sata0.0 mounted before the pull" mount -t msdosfs /dev/gpt/satatest $A
+exec 3<> $A/hello.txt 4< /dev/sata0.0p1
+check "debug.disk.unplug pulls it" sh -c 'sysctl debug.disk.unplug=sata0.0 > /dev/null'
+n=0
+while [ "$(attached)" = 0 ] && [ $n -lt 30 ]; do
+	sleep 1
+	n=$((n + 1))
+done
+check "the kernel logged it detached" logged "[disk] sata0.0: detached"
+check "... its file system unmounted by force" logged "[disk] sata0.0: $A unmounted by force"
+check "... gone from the mount list" not grep -q " $A msdosfs " /proc/mounts
+check "a file open on it reads nothing (deadfs)" is "$(cat <&3)" ""
+check "... and can't be written" not sh -c 'printf x | dd >&3 2>/dev/null'
+check "its raw device open fails" not dd bs=512 count=1 <&4 > /dev/null 2>&1
+exec 3<&- 4<&-
+check "it came back, attached again" is "$(attached)" 1
+check "... the same name in kern.disks" sh -c 'sysctl -n kern.disks | grep -qw sata0.0'
+check "... its partition's nodes again" [ -c /dev/gpt/satatest ]
+check "... its file system mounts, the file still on it" sh -c "mount -t msdosfs /dev/gpt/satatest $A && [ \"\$(cat $A/hello.txt)\" = on-sata ]"
+umount $A
+check "unplugging a disk not on AHCI is refused" not sysctl debug.disk.unplug=virt0 2>/dev/null
+check "... and an unknown one" not sysctl debug.disk.unplug=nonesuch 2>/dev/null
+check "kern.disk.root_lost is panic by default" is "$(sysctl -n kern.disk.root_lost)" panic
+check "... takes eio" sh -c 'sysctl kern.disk.root_lost=eio > /dev/null && [ "$(sysctl -n kern.disk.root_lost)" = eio ]'
+sysctl kern.disk.root_lost=panic > /dev/null
+check "... and nothing else" not sysctl kern.disk.root_lost=maybe 2>/dev/null
+
 # --- No disc ----------------------------------------------------------------------------------
 check "the empty drive doesn't mount" not mount -t cd9660 /dev/ide3 /tmp/cd/empty 2>/dev/null
 check "an unknown option is refused" not mount -t cd9660 -o bogus /dev/ide0 $R 2>/dev/null

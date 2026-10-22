@@ -22,6 +22,11 @@
 //! 2048, INSTALLER.md §5.4) is translated here, partial sectors read whole (and written back
 //! whole).
 //!
+//! A drive pulled out of a running system (AHCI hot plug, INSTALLER.md §5.3) is retired: its
+//! file systems unmounted by force, its devices gone, its entry kept (gone) for a drive plugged
+//! into the same place to take back with the same name. The root's going panics, unless
+//! `kern.disk.root_lost` is `eio`.
+//!
 //! File systems reach their devices through `kern::vfs_bdev` and the buffer cache
 //! (`kern::vfs_bio`); this file finds the disks and serves the raw `/dev` nodes.
 
@@ -88,6 +93,10 @@ struct Disk {
     /// Its own sector size in bytes, a multiple of 512.
     sector_size: u32,
     model: String,
+    /// Its serial number, where the driver reads one (AHCI's, to tell a drive swapped in).
+    serial: String,
+    /// Plugged in: `false` once retired, until a drive comes back to the same place.
+    present: bool,
     /// Its device numbers' major and unit (minor `unit << 8`), and the whole disk's block device.
     major: u32,
     unit: u32,
@@ -98,10 +107,13 @@ struct Disk {
 }
 
 /// Every disk, in registration order: a disk's index here is its number for `kern::vfs_bdev`.
-/// Grow-only.
+/// Grow-only: a retired disk's entry stays, not `present`.
 static DISKS: Mutex<Vec<Disk>> = Mutex::new(Vec::new());
 /// Whether oxfs should mount the root read-only at boot (`set_root_readonly_at_boot`).
 static ROOT_READONLY_AT_BOOT: AtomicBool = AtomicBool::new(false);
+/// `kern.disk.root_lost`: the root's drive going leaves the root failing with `EIO` (`true`)
+/// instead of panicking.
+pub static ROOT_LOST_EIO: AtomicBool = AtomicBool::new(false);
 
 /// Device numbers (Linux's majors, `OxideBSD-doc/DEVFS.md` §3.5), one major per driver: minor
 /// `unit << 8` for a whole disk, `unit << 8 | N` for its partition N.
@@ -118,7 +130,8 @@ static NEXT_LABEL_MINOR: AtomicU32 = AtomicU32::new(0);
 /// file's (`fs::fd`).
 static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, u32>> = Mutex::new(alloc::collections::BTreeMap::new());
 
-/// Adds a disk to the registry; its index.
+/// Adds a disk to the registry, or gives a retired one's entry of the same name (the same place)
+/// to it; its index.
 fn register(
     name: String,
     backend: Backend,
@@ -130,7 +143,24 @@ fn register(
     unit: u32,
 ) -> u32 {
     let mut disks = DISKS.lock();
-    let disk = Disk { name: name.clone(), backend, kind, sectors, sector_size, model, major, unit, whole: 0, parts: Vec::new() };
+    let disk = Disk {
+        name: name.clone(),
+        backend,
+        kind,
+        sectors,
+        sector_size,
+        model,
+        serial: String::new(),
+        present: true,
+        major,
+        unit,
+        whole: 0,
+        parts: Vec::new(),
+    };
+    if let Some(i) = disks.iter().position(|d| !d.present && d.name == name) {
+        disks[i] = disk;
+        return i as u32;
+    }
     disks.push(disk);
     let index = (disks.len() - 1) as u32;
     drop(disks);
@@ -168,13 +198,7 @@ pub fn init(
         unit += 1;
     }
     for f in super::ahci::init(frame_allocator, mapper, phys_mem_offset) {
-        let (name, number, backend) = (f.unit.name(), f.unit.number(), Backend::Ahci(f.unit));
-        if f.unit.atapi() {
-            found.push(register_cd(name, backend, f.model, SATA_MAJOR, number));
-        } else {
-            let sectors = f.sectors * (f.sector_size as u64 / 512);
-            found.push(register(name, backend, Kind::Disk, sectors, f.sector_size, f.model, SATA_MAJOR, number));
-        }
+        found.push(register_ahci(f));
     }
     let mut unit = 0;
     for f in super::virtio_scsi::init(frame_allocator, mapper, phys_mem_offset) {
@@ -216,6 +240,117 @@ pub fn init(
             );
             init_memory(phys_mem_offset);
         }
+    }
+}
+
+/// Registers an AHCI drive; its index.
+fn register_ahci(f: super::ahci::Found) -> u32 {
+    let (name, number, backend) = (f.unit.name(), f.unit.number(), Backend::Ahci(f.unit));
+    let disk = if f.unit.atapi() {
+        register_cd(name, backend, f.model, SATA_MAJOR, number)
+    } else {
+        let sectors = f.sectors * (f.sector_size as u64 / 512);
+        register(name, backend, Kind::Disk, sectors, f.sector_size, f.model, SATA_MAJOR, number)
+    };
+    DISKS.lock()[disk as usize].serial = f.serial;
+    disk
+}
+
+/// A drive plugged into a running system: registered with its partitions and `/dev` nodes, as at
+/// boot. The caller holds the giant lock (its partition table is read).
+pub(crate) fn hot_attach(f: super::ahci::Found) {
+    let disk = register_ahci(f);
+    attach(disk, &mut Vec::new());
+    let d = &DISKS.lock()[disk as usize];
+    serial_println!(
+        "[disk] {}: attached, {} \"{}\"{}",
+        d.name,
+        d.kind.name(),
+        d.model,
+        if d.kind == Kind::Cd { String::new() } else { alloc::format!(", {} MiB", d.sectors / 2048) }
+    );
+}
+
+/// The registered (present) drives on AHCI controller `c`'s port `port`, behind a multiplier or
+/// not: `(disk, unit)` each.
+pub(crate) fn ahci_drives(c: u8, port: u8) -> Vec<(u32, super::ahci::Unit)> {
+    let disks = DISKS.lock();
+    let mut drives = Vec::new();
+    for (i, d) in disks.iter().enumerate() {
+        if let Backend::Ahci(unit) = d.backend
+            && d.present
+            && unit.place().0 == c
+            && unit.place().1 == port
+        {
+            drives.push((i as u32, unit));
+        }
+    }
+    drives
+}
+
+/// What AHCI drive `disk` said it was when it registered, for `ahci::same_drive`.
+pub(crate) fn ahci_identity(disk: u32) -> Option<super::ahci::Found> {
+    let disks = DISKS.lock();
+    let d = disks.get(disk as usize).filter(|d| d.present)?;
+    let Backend::Ahci(unit) = d.backend else { return None };
+    let sectors = if d.kind == Kind::Cd { 0 } else { d.sectors / (d.sector_size as u64 / 512) };
+    Some(super::ahci::Found { unit, model: d.model.clone(), serial: d.serial.clone(), sectors, sector_size: d.sector_size })
+}
+
+/// Disk `disk` was pulled out: it's marked gone first (so the forced unmounts' writes fail at
+/// once, not after a command timeout each), then every file system on its devices is unmounted by
+/// force -- the root's going panics, or with `kern.disk.root_lost=eio` leaves the root failing
+/// with `EIO` -- and its devices and `/dev` nodes go; open raw descriptors fail with `EIO`. The
+/// caller holds the giant lock.
+pub(crate) fn retire(disk: u32) {
+    use crate::kern::{vfs_bdev, vfs_bio, vfs_mount};
+    let (name, whole, parts, major, minor) = {
+        let mut disks = DISKS.lock();
+        let Some(d) = disks.get_mut(disk as usize).filter(|d| d.present) else { return };
+        d.present = false;
+        (d.name.clone(), d.whole, core::mem::take(&mut d.parts), d.major, d.unit << 8)
+    };
+    let handles: Vec<u32> = core::iter::once(whole).chain(parts.iter().map(|&(h, _, _)| h)).collect();
+    for mp in vfs_mount::mounts() {
+        // SAFETY: a mounted mount.
+        let (dev, root) = unsafe { ((*mp).mnt_dev, (*mp).mnt_flag & vfs_if::MNT_ROOTFS != 0) };
+        if !handles.iter().any(|&h| h as u64 == dev) {
+            continue;
+        }
+        if root {
+            if !ROOT_LOST_EIO.load(Ordering::Relaxed) {
+                panic!("root device {} is gone", name);
+            }
+            serial_println!("[disk] {}: the root's drive is gone -- the root fails with EIO from now on", name);
+            continue;
+        }
+        // SAFETY: as above.
+        let on = unsafe { String::from(String::from_utf8_lossy(&(*mp).mnt_onname).trim_end_matches('\0')) };
+        vfs_mount::force_unmount(mp);
+        serial_println!("[disk] {}: {} unmounted by force", name, on);
+    }
+    for &h in &handles {
+        vfs_bio::binvalall(h);
+        vfs_bdev::retire(h);
+    }
+    for &(_, major, minor) in &parts {
+        let _ = crate::fs::devfs::destroy_dev(major, minor);
+    }
+    let _ = crate::fs::devfs::destroy_dev(major, minor);
+    serial_println!("[disk] {}: detached", name);
+}
+
+/// `debug.disk.unplug`: pulls disk `name` out in software, as if unplugged, and then looks at its
+/// place again (so a drive still there comes back, with the same name). AHCI drives only.
+pub fn simulate_unplug(name: &str) -> Result<(), i64> {
+    let backend = DISKS.lock().iter().find(|d| d.present && d.name == name).map(|d| d.backend);
+    match backend {
+        Some(Backend::Ahci(unit)) => {
+            super::ahci::simulate_unplug(&unit);
+            Ok(())
+        }
+        Some(_) => Err(crate::syscall::ENOTSUP as i64),
+        None => Err(crate::syscall::ENOENT as i64),
     }
 }
 
@@ -351,7 +486,8 @@ pub(crate) fn mounted(handle: u32, mounted: bool) {
     let Some((_, _, disk)) = crate::kern::vfs_bdev::extent(handle) else { return };
     let (backend, whole, parts) = {
         let disks = DISKS.lock();
-        let Some(d) = disks.get(disk as usize).filter(|d| d.kind == Kind::Cd) else { return };
+        // A drive pulled out has no tray to unlock (`retire` unmounts what was on it).
+        let Some(d) = disks.get(disk as usize).filter(|d| d.kind == Kind::Cd && d.present) else { return };
         (d.backend, d.whole, d.parts.clone())
     };
     let still = core::iter::once(whole)
@@ -425,14 +561,14 @@ pub fn stats() -> (u64, u64) {
 /// The space-separated names of the registered disks (`kern.disks`).
 pub fn names() -> String {
     let disks = DISKS.lock();
-    let names: Vec<&str> = disks.iter().map(|d| d.name.as_str()).collect();
+    let names: Vec<&str> = disks.iter().filter(|d| d.present).map(|d| d.name.as_str()).collect();
     names.join(" ")
 }
 
 /// Disk `disk`'s `(kind, size in bytes, sector size, model)` (`kern.disk.<name>`).
 pub fn describe(disk: u32) -> Option<(&'static str, u64, u32, String)> {
     let disks = DISKS.lock();
-    let d = disks.get(disk as usize)?;
+    let d = disks.get(disk as usize).filter(|d| d.present)?;
     Some((d.kind.name(), d.sectors * 512, d.sector_size, d.model.clone()))
 }
 
@@ -441,10 +577,10 @@ fn is_memory(disk: u32) -> bool {
     DISKS.lock().get(disk as usize).is_some_and(|d| d.kind == Kind::Memory)
 }
 
-/// Disk `disk`'s driver and sector size. The registry's lock is dropped before any I/O: a
-/// transfer may sleep.
+/// Disk `disk`'s driver and sector size, while it's plugged in. The registry's lock is dropped
+/// before any I/O: a transfer may sleep.
 fn backend(disk: u32) -> Option<(Backend, u64)> {
-    DISKS.lock().get(disk as usize).map(|d| (d.backend, d.sector_size as u64))
+    DISKS.lock().get(disk as usize).filter(|d| d.present).map(|d| (d.backend, d.sector_size as u64))
 }
 
 /// Reads whole device sectors (of `ss` bytes) from device sector `lba`.
@@ -551,6 +687,9 @@ fn overlaps_mounted(handle: u32) -> bool {
 /// read-write: the writes would go around its cache (RAM_FLOOR.md
 /// §3.4.3). `fsck_oxfs` writes the root while it's read-only.
 extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
+    // A disk driver's lock may be held by a process asleep under the giant lock (an oxfs
+    // transfer): take that first, or spin on the driver's lock with the sleeper never run again.
+    let _giant = crate::fs::fslock::Giant::enter();
     const O_ACCMODE: u64 = 3;
     media_check(major as u32, minor as u32);
     let Some(handle) = crate::kern::vfs_bdev::find(major as u32, minor as u32) else {
@@ -600,6 +739,9 @@ extern "C" fn raw_sync(_real_fd: u64, _data_only: u64) -> i64 {
 /// Reads from the device at the descriptor's position (or `pread`'s offset), the whole sectors it
 /// covers, stopping at the device's end. Uncached, as FreeBSD's raw devices are.
 extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
+    // A disk driver's lock may be held by a process asleep under the giant lock (an oxfs
+    // transfer): take that first, or spin on the driver's lock with the sleeper never run again.
+    let _giant = crate::fs::fslock::Giant::enter();
     use crate::kern::vfs_bdev;
     // SAFETY: the fd layer passes the live transfer of this call.
     let uio = unsafe { &mut *uio };
@@ -609,6 +751,9 @@ extern "C" fn raw_read(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, _flag
     let Some((_, sectors, _)) = vfs_bdev::extent(handle) else {
         return -(crate::syscall::EBADF as i64);
     };
+    if vfs_bdev::retired(handle) {
+        return -(crate::syscall::EIO as i64); // its drive was pulled out, or its disc changed
+    }
     // Seekable: the uio is always at an offset (FOF_OFFSET or FOF_NEXTOFF).
     let offset = uio.offset();
     let len = uio.resid().min((sectors * vfs_bdev::SECTOR).saturating_sub(offset));
@@ -638,6 +783,9 @@ fn covering_sectors(offset: u64, len: u64) -> (u64, u64) {
 /// patched and written back, stopping at the device's end. Refused again if a file system
 /// mounted the device (or one overlapping it) read-write since the open.
 extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, _flags: u64) -> i64 {
+    // A disk driver's lock may be held by a process asleep under the giant lock (an oxfs
+    // transfer): take that first, or spin on the driver's lock with the sleeper never run again.
+    let _giant = crate::fs::fslock::Giant::enter();
     use crate::kern::vfs_bdev;
     // SAFETY: the fd layer passes the live transfer of this call.
     let uio = unsafe { &mut *uio };
@@ -650,6 +798,9 @@ extern "C" fn raw_write(real_fd: u64, uio: *mut crate::kern::subr_uio::Uio, _fla
     let Some((_, sectors, _)) = vfs_bdev::extent(handle) else {
         return -(crate::syscall::EBADF as i64);
     };
+    if vfs_bdev::retired(handle) {
+        return -(crate::syscall::EIO as i64); // its drive was pulled out, or its disc changed
+    }
     let offset = uio.offset();
     let len = uio.resid().min((sectors * vfs_bdev::SECTOR).saturating_sub(offset));
     if len == 0 {

@@ -383,6 +383,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `unit << 8 | partition`. SCSI commands live in `drivers::scsi` over a `Transport`. The block
   layer is 512-byte; `disk` translates for 2048 (CD) / 4096 sectors. Root from fsconf.
   `no-ata` protects real hardware from being formatted.
+- **Take the giant lock before a disk driver's lock** (raw devices and AHCI's hot plug task do): a
+  transfer under the giant lock sleeps holding the driver's spin lock, and anything spinning on it
+  then never lets the sleeper run. AHCI hot plug retires a drive (`drivers::disk::retire`: gone
+  first, then forced unmounts); `debug.disk.unplug=<name>` does it in software.
 - rtl8139 DMA is 32-bit: `rtl8139::init` must run before big allocations.
 
 ## Porting (musl, BusyBox, std, C/C++)

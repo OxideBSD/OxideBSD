@@ -20,8 +20,13 @@
 //! (command-based switching: one drive at a time, which is all one command at a time needs).
 //! QEMU emulates no multiplier: that path is untested.
 //!
-//! No hot plug yet: a drive plugged in after boot isn't seen (INSTALLER.md §11, after kernel
-//! threads).
+//! Hot plug (INSTALLER.md §5.3): once the boot probe is done, a port's connection changes
+//! (`PxIS.PCS`, `PxIS.PRCS`) and a port multiplier's asynchronous notifications (a Set Device Bits
+//! FIS from its control port) interrupt; the handler enqueues the port's task (`hotplug`) on
+//! `taskqueue_thread`, which lets the link settle, then registers what arrived and retires what
+//! went (`drivers::disk`). The task holds the giant lock (`fslock`) before it takes a controller's
+//! lock -- a process asleep in `issue` holds both -- and never sleeps holding a controller's
+//! alone.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -34,6 +39,7 @@ use x86_64::{PhysAddr, VirtAddr};
 use super::dma::DmaBuffer;
 use super::scsi::{Data, ScsiError, Transport};
 use crate::cpu::tsc;
+use crate::kern::subr_taskqueue::{self, TASKQUEUE_THREAD, Task};
 use crate::serial_println;
 
 /// PCI: mass storage, SATA, AHCI 1.0 interface; the registers are BAR 5 (`ABAR`).
@@ -54,6 +60,7 @@ const HBA_CAP2: u64 = 0x24;
 const HBA_BOHC: u64 = 0x28;
 
 const CAP_S64A: u32 = 1 << 31;
+const CAP_SSNTF: u32 = 1 << 29;
 const CAP_SSS: u32 = 1 << 27;
 const CAP_SCLO: u32 = 1 << 24;
 const CAP_SPM: u32 = 1 << 17;
@@ -78,6 +85,7 @@ const PX_SSTS: u64 = 0x28;
 const PX_SCTL: u64 = 0x2C;
 const PX_SERR: u64 = 0x30;
 const PX_CI: u64 = 0x38;
+const PX_SNTF: u64 = 0x3C;
 
 const CMD_ST: u32 = 1 << 0;
 const CMD_SUD: u32 = 1 << 1;
@@ -95,6 +103,16 @@ const IS_ERRORS: u32 = (1 << 30) | (1 << 29) | (1 << 28) | (1 << 27);
 /// `PxIE`: the FISes that complete a command (D2H register, PIO setup, DMA setup, set device
 /// bits), and the errors.
 const IE_COMPLETION: u32 = 0x0F | IS_ERRORS;
+/// `PxIS`: a Set Device Bits FIS came (a multiplier's notification among them).
+const IS_SDBS: u32 = 1 << 3;
+/// `PxIS` and `PxIE`: port connect change, PhyRdy change -- hot plug.
+const IS_PCS: u32 = 1 << 6;
+const IS_PRCS: u32 = 1 << 22;
+const IE_HOTPLUG: u32 = IS_PCS | IS_PRCS;
+/// `PxSERR.DIAG`: PhyRdy changed (`N`), a device exchanged (`X`); `PCS`/`PRCS` stay set (and the
+/// level-triggered interrupt asserted) until they're cleared.
+const SERR_DIAG_N: u32 = 1 << 16;
+const SERR_DIAG_X: u32 = 1 << 26;
 
 const TFD_ERR: u32 = 1 << 0;
 const TFD_DRQ: u32 = 1 << 3;
@@ -142,13 +160,22 @@ const GSCR_PORTS: u16 = 2;
 const PSCR_SSTATUS: u16 = 0;
 const PSCR_SERROR: u16 = 1;
 const PSCR_SCONTROL: u16 = 2;
+/// `GSCR[32]`: the device ports whose `PSCR[1]` has a bit `GSCR[33]` selects; `GSCR[64]`/`[96]`:
+/// the features the multiplier has and has enabled, bit 3 asynchronous notification.
+const GSCR_ERROR: u16 = 32;
+const GSCR_ERROR_EN: u16 = 33;
+const GSCR_FEATURES: u16 = 64;
+const GSCR_FEATURES_EN: u16 = 96;
+const FEATURE_NOTIFY: u32 = 1 << 3;
 
 // Each port's page: its command list (32 headers of 32 bytes; slot 0 used), its received FISes,
 // and slot 0's command table (the command FIS, the ATAPI command, one PRD entry).
 const CL_AT: usize = 0x000;
 const RFIS_AT: usize = 0x400;
-/// The last D2H register FIS, in the received-FIS area.
+/// The last D2H register FIS, in the received-FIS area, and the last Set Device Bits FIS (byte 1:
+/// bit 7 its notification bit, bits 0-3 the multiplier port it came from).
 const RFIS_D2H: usize = RFIS_AT + 0x40;
+const RFIS_SDB: usize = RFIS_AT + 0x58;
 const CT_AT: usize = 0x800;
 const CT_ACMD: usize = 0x40;
 const CT_PRDT: usize = 0x80;
@@ -160,6 +187,8 @@ const TIMEOUT_MS: u64 = 10_000;
 const READY_MS: u64 = 10_000;
 const MAX_CONTROLLERS: usize = 8;
 const MAX_PORTS: usize = 32;
+/// How long a hot plugged link gets to settle before the port task looks at it, in ticks (500 ms).
+const SETTLE_TICKS: u64 = 50;
 /// The ATAPI command: every SCSI command an optical drive takes fits in 12 bytes.
 const PACKET_LEN: usize = 12;
 const SCSI_REQUEST_SENSE: u8 = 0x03;
@@ -182,6 +211,8 @@ struct Controller {
     /// Each implemented port's page (command list, received FISes, command table).
     pages: [Option<DmaBuffer>; MAX_PORTS],
     buffer: DmaBuffer,
+    /// It has its interrupt: hot plug is on (polling controllers don't see it).
+    irq: bool,
 }
 
 /// The controllers, set once by `init`.
@@ -192,8 +223,37 @@ static ABARS: [AtomicU64; MAX_CONTROLLERS] = [const { AtomicU64::new(0) }; MAX_C
 /// (and acknowledged it).
 static EVENTS: [[AtomicU32; MAX_PORTS]; MAX_CONTROLLERS] =
     [const { [const { AtomicU32::new(0) }; MAX_PORTS] }; MAX_CONTROLLERS];
+/// Each controller's `CAP`, and each port's received-FIS area, for the interrupt handler.
+static CAPS: [AtomicU32; MAX_CONTROLLERS] = [const { AtomicU32::new(0) }; MAX_CONTROLLERS];
+static RFIS: [[AtomicU64; MAX_PORTS]; MAX_CONTROLLERS] =
+    [const { [const { AtomicU64::new(0) }; MAX_PORTS] }; MAX_CONTROLLERS];
+/// Each controller's ports with a port multiplier on them.
+static MULTIPLIERS: [AtomicU32; MAX_CONTROLLERS] = [const { AtomicU32::new(0) }; MAX_CONTROLLERS];
+/// Each controller's ports whose drives the port task retires before it looks
+/// (`simulate_unplug`).
+static UNPLUG: [AtomicU32; MAX_CONTROLLERS] = [const { AtomicU32::new(0) }; MAX_CONTROLLERS];
+/// Each port's hot plug task, controller-major (argument: its index here).
+static TASKS: [Task; MAX_CONTROLLERS * MAX_PORTS] = port_tasks();
+
+const fn port_tasks() -> [Task; MAX_CONTROLLERS * MAX_PORTS] {
+    let mut tasks = [const { Task::new(hotplug, 0) }; MAX_CONTROLLERS * MAX_PORTS];
+    let mut i = 0;
+    while i < tasks.len() {
+        tasks[i] = Task::new(hotplug, i);
+        i += 1;
+    }
+    tasks
+}
+
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static IRQS: AtomicU64 = AtomicU64::new(0);
+/// The boot probe is done: what's found from now on is hot plugged (the log says so).
+static PROBED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The probe's log prefix: the boot log's, or hot plug's.
+fn tag() -> &'static str {
+    if PROBED.load(Ordering::Relaxed) { "[ahci]" } else { "[boot] ahci:" }
+}
 
 /// `(commands, completion interrupts)` so far.
 pub fn stats() -> (u64, u64) {
@@ -229,7 +289,17 @@ fn irq_handler() {
             if pending & 1 << port != 0 {
                 let status = mmio_read(regs, port_reg(port, PX_IS));
                 EVENTS[c][port as usize].fetch_or(status, Ordering::Relaxed);
+                let mut changed = status & IE_HOTPLUG != 0;
+                if changed {
+                    mmio_write(regs, port_reg(port, PX_SERR), SERR_DIAG_N | SERR_DIAG_X);
+                }
                 mmio_write(regs, port_reg(port, PX_IS), status);
+                if status & IS_SDBS != 0 && MULTIPLIERS[c].load(Ordering::Relaxed) & 1 << port != 0 {
+                    changed |= multiplier_notified(c, port, regs);
+                }
+                if changed {
+                    subr_taskqueue::enqueue(&TASKQUEUE_THREAD, &TASKS[c * MAX_PORTS + port as usize]);
+                }
             }
         }
         mmio_write(regs, HBA_IS, pending);
@@ -239,6 +309,30 @@ fn irq_handler() {
         IRQS.fetch_add(1, Ordering::Relaxed);
         super::dma::wake_disk_waiters(&mut crate::process::table().lock());
     }
+}
+
+/// Whether the multiplier on `port` of controller `c` sent a notification (its control port's
+/// Set Device Bits FIS with the notification bit), which this clears: from `PxSNTF` with
+/// `CAP.SSNTF`, else from the received FIS.
+fn multiplier_notified(c: usize, port: u8, regs: u64) -> bool {
+    if CAPS[c].load(Ordering::Relaxed) & CAP_SSNTF != 0 {
+        let sntf = mmio_read(regs, port_reg(port, PX_SNTF));
+        mmio_write(regs, port_reg(port, PX_SNTF), sntf);
+        return sntf & 1 << PMP_CONTROL != 0;
+    }
+    let rfis = RFIS[c][port as usize].load(Ordering::Relaxed);
+    if rfis == 0 {
+        return false;
+    }
+    let flags = (rfis + (RFIS_SDB - RFIS_AT) as u64 + 1) as *mut u8;
+    // SAFETY: byte 1 of the port's received Set Device Bits FIS, in its own page.
+    let v = unsafe { flags.read_volatile() };
+    if v & 0x80 == 0 {
+        return false;
+    }
+    // SAFETY: as above.
+    unsafe { flags.write_volatile(v & 0x7F) };
+    v & 0x0F == PMP_CONTROL
 }
 
 /// Polls `cond` until it holds, for up to `ms`.
@@ -289,6 +383,11 @@ impl Unit {
         self.atapi
     }
 
+    /// Where it's plugged in: controller, port, multiplier port.
+    pub fn place(&self) -> (u8, u8, Option<u8>) {
+        (self.controller, self.port, self.pmp)
+    }
+
     /// Blocks of `block_size` bytes one command moves at most: the bounce buffer's worth, and 256
     /// for the 28-bit commands.
     pub fn max_blocks(&self, block_size: usize) -> usize {
@@ -310,6 +409,7 @@ fn controller(index: u8) -> Option<&'static Mutex<Controller>> {
 pub struct Found {
     pub unit: Unit,
     pub model: String,
+    pub serial: String,
     pub sectors: u64,
     pub sector_size: u32,
 }
@@ -464,8 +564,27 @@ impl Controller {
             && poll(1000, || self.pread(port, PX_SSTS) & 0xF == DET_PRESENT)
     }
 
-    /// Gives `port` its page, resets its link, and starts it if a drive answers; whether one did.
+    /// Gives `port` its page, resets its link, and starts it if a drive answers and comes ready
+    /// (spinning: the boot probe's way); whether one did.
     fn bring_up(&self, port: u8) -> bool {
+        if !self.link_up(port) {
+            return false;
+        }
+        if !poll(READY_MS, || self.ready(port)) {
+            serial_println!("{} sata{}.{}: the drive stays busy -- not used", tag(), self.index, port);
+            return false;
+        }
+        true
+    }
+
+    /// The drive on `port` is ready for a command: neither busy nor waiting for data.
+    fn ready(&self, port: u8) -> bool {
+        self.pread(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0
+    }
+
+    /// Gives `port` its page and resets its link, hot plug's interrupts off (`arm_hotplug` puts
+    /// them back); whether a drive's link came up.
+    fn link_up(&self, port: u8) -> bool {
         let Some(page) = &self.pages[port as usize] else { return false };
         self.stop(port, true);
         let base = page.phys.as_u64();
@@ -485,11 +604,23 @@ impl Controller {
             return false;
         }
         self.pwrite(port, PX_SERR, u32::MAX);
-        if !poll(READY_MS, || self.pread(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0) {
-            serial_println!("[boot] ahci: sata{}.{}: the drive stays busy -- not used", self.index, port);
-            return false;
-        }
         true
+    }
+
+    /// Turns `port`'s hot plug interrupts on, the changes so far (the driver's own resets')
+    /// forgotten. A controller without its interrupt has none.
+    fn arm_hotplug(&self, port: u8) {
+        if !self.irq || self.pages[port as usize].is_none() {
+            return;
+        }
+        self.pwrite(port, PX_SERR, u32::MAX);
+        self.pwrite(port, PX_IS, u32::MAX);
+        self.pwrite(port, PX_IE, IE_COMPLETION | IE_HOTPLUG);
+    }
+
+    /// Whether `port`'s link is up with a device on it.
+    fn link_present(&self, port: u8) -> bool {
+        self.pread(port, PX_SSTS) & 0xF == DET_PRESENT
     }
 
     /// A soft reset of the drive at multiplier port `pmp` (or the multiplier itself, at
@@ -545,20 +676,38 @@ impl Controller {
         let mut found = Vec::new();
         let Some(n) = self.pm_read(port, PMP_CONTROL, GSCR_PORTS) else { return found };
         for m in 0..(n & 0xF).min(PMP_MAX_PORTS) as u8 {
-            self.pm_write(port, m, PSCR_SCONTROL, 0x301);
-            delay_ms(2);
-            self.pm_write(port, m, PSCR_SCONTROL, 0x300);
-            let det = || self.pm_read(port, m, PSCR_SSTATUS).map_or(0, |s| s & 0xF);
-            if !poll(20, || det() != 0) || !poll(1000, || det() == DET_PRESENT) {
-                continue;
-            }
-            self.pm_write(port, m, PSCR_SERROR, u32::MAX);
-            self.pwrite(port, PX_SERR, u32::MAX);
-            if let Some(sig) = self.soft_reset(port, m) {
+            if let Some(sig) = self.multiplier_port(port, m) {
                 found.push((m, sig));
             }
         }
         found
+    }
+
+    /// Resets the link of the multiplier's device port `m` and, if a drive comes up on it, soft
+    /// resets the drive; its signature.
+    fn multiplier_port(&self, port: u8, m: u8) -> Option<u32> {
+        self.pm_write(port, m, PSCR_SCONTROL, 0x301);
+        delay_ms(2);
+        self.pm_write(port, m, PSCR_SCONTROL, 0x300);
+        let det = || self.pm_read(port, m, PSCR_SSTATUS).map_or(0, |s| s & 0xF);
+        if !poll(20, || det() != 0) || !poll(1000, || det() == DET_PRESENT) {
+            return None;
+        }
+        self.pm_write(port, m, PSCR_SERROR, u32::MAX);
+        self.pwrite(port, PX_SERR, u32::MAX);
+        self.soft_reset(port, m)
+    }
+
+    /// Asks the multiplier on `port` to notify the host of its device ports' PhyRdy changes
+    /// (asynchronous notification, `GSCR[96]` bit 3, for `PSCR[1]`'s `DIAG.N`); whether it will.
+    fn multiplier_notify(&self, port: u8) -> bool {
+        let Some(features) = self.pm_read(port, PMP_CONTROL, GSCR_FEATURES) else { return false };
+        if features & FEATURE_NOTIFY == 0 {
+            return false;
+        }
+        let enabled = self.pm_read(port, PMP_CONTROL, GSCR_FEATURES_EN).unwrap_or(0);
+        self.pm_write(port, PMP_CONTROL, GSCR_ERROR_EN, SERR_DIAG_N)
+            && self.pm_write(port, PMP_CONTROL, GSCR_FEATURES_EN, enabled | FEATURE_NOTIFY)
     }
 
     /// `IDENTIFY (PACKET) DEVICE` of the drive at multiplier port `pmp`.
@@ -581,19 +730,45 @@ impl Controller {
     /// drive, logged; `None` (logged) for anything else.
     fn probe(&self, port: u8, pmp: Option<u8>, sig: u32) -> Option<Found> {
         let atapi = sig == SIG_ATAPI;
-        let mut unit = Unit { controller: self.index as u8, port, pmp, atapi, lba48: false };
-        let name = unit.name();
-        let Some(words) = self.identify(port, unit.pm_port(), atapi) else {
-            serial_println!("[boot] ahci: {}: signature {:#010x}, no answer to IDENTIFY -- not used", name, sig);
+        let name = Unit { controller: self.index as u8, port, pmp, atapi, lba48: false }.name();
+        let Some(words) = self.identify(port, pmp.unwrap_or(0), atapi) else {
+            serial_println!("{} {}: signature {:#010x}, no answer to IDENTIFY -- not used", tag(), name, sig);
             return None;
         };
-        let model = super::ata::model_of(&words);
-        if atapi {
-            if pmp.is_none() {
-                self.pwrite(port, PX_CMD, self.pread(port, PX_CMD) | CMD_ATAPI);
+        if atapi && pmp.is_none() {
+            self.pwrite(port, PX_CMD, self.pread(port, PX_CMD) | CMD_ATAPI);
+        }
+        let found = self.identity(port, pmp, atapi, &words);
+        match &found {
+            Ok(f) if atapi => {
+                serial_println!("{} {}: CD drive \"{}\"", tag(), name, f.model);
             }
-            serial_println!("[boot] ahci: {}: CD drive \"{}\"", name, model);
-            return Some(Found { unit, model, sectors: 0, sector_size: 2048 });
+            Ok(f) => {
+                serial_println!(
+                    "{} {}: disk \"{}\", {} MiB{}{}",
+                    tag(),
+                    name,
+                    f.model,
+                    f.sectors * f.sector_size as u64 >> 20,
+                    if f.unit.lba48 { ", LBA48" } else { "" },
+                    if f.sector_size != 512 { alloc::format!(", {}-byte sectors", f.sector_size) } else { String::new() }
+                );
+            }
+            Err(size) => {
+                serial_println!("{} {}: sectors of {} bytes aren't driven -- not used", tag(), name, size);
+            }
+        }
+        found.ok()
+    }
+
+    /// The drive `IDENTIFY (PACKET) DEVICE` answered `words` for, at multiplier port `pmp` of
+    /// `port`; `Err` with its sector size if that isn't one driven.
+    fn identity(&self, port: u8, pmp: Option<u8>, atapi: bool, words: &[u16; 256]) -> Result<Found, u32> {
+        let mut unit = Unit { controller: self.index as u8, port, pmp, atapi, lba48: false };
+        let model = super::ata::model_of(words);
+        let serial = super::ata::serial_of(words);
+        if atapi {
+            return Ok(Found { unit, model, serial, sectors: 0, sector_size: 2048 });
         }
         unit.lba48 = words[83] & 1 << 10 != 0;
         let sectors = if unit.lba48 {
@@ -609,18 +784,20 @@ impl Controller {
             512
         };
         if !(512..=4096).contains(&sector_size) || !sector_size.is_power_of_two() {
-            serial_println!("[boot] ahci: {}: sectors of {} bytes aren't driven -- not used", name, sector_size);
-            return None;
+            return Err(sector_size);
         }
-        serial_println!(
-            "[boot] ahci: {}: disk \"{}\", {} MiB{}{}",
-            name,
-            model,
-            sectors * sector_size as u64 >> 20,
-            if unit.lba48 { ", LBA48" } else { "" },
-            if sector_size != 512 { alloc::format!(", {sector_size}-byte sectors") } else { String::new() }
-        );
-        Some(Found { unit, model, sectors, sector_size })
+        Ok(Found { unit, model, serial, sectors, sector_size })
+    }
+
+    /// Whether the drive at `unit` is still the one `was` describes: it answers `IDENTIFY` with
+    /// the same model, serial number and size.
+    fn same_drive(&self, unit: &Unit, was: &Found) -> bool {
+        let Some(words) = self.identify(unit.port, unit.pm_port(), unit.atapi) else { return false };
+        self.identity(unit.port, unit.pmp, unit.atapi, &words).is_ok_and(|now| {
+            now.model == was.model
+                && now.serial == was.serial
+                && (unit.atapi || (now.sectors == was.sectors && now.sector_size == was.sector_size))
+        })
     }
 
     /// The disk at `unit`'s `count` sectors at `lba`, by DMA through the bounce buffer: read into
@@ -767,10 +944,14 @@ pub fn init(
         }
         if let Some(c) = start(pci, controllers.len(), frame_allocator, mapper, phys_mem_offset) {
             found.extend(probe_ports(&c));
+            for port in 0..MAX_PORTS as u8 {
+                c.arm_hotplug(port);
+            }
             controllers.push(Mutex::new(c));
         }
     }
     CONTROLLERS.call_once(|| controllers);
+    PROBED.store(true, Ordering::Relaxed);
     found
 }
 
@@ -823,11 +1004,17 @@ fn start(
             }
         }
     }
-    let c = Controller { index: n, regs, cap, pages, buffer };
-
-    // The interrupt before the ports are probed: the probe's commands complete by it.
+    for (port, page) in pages.iter().enumerate() {
+        if let Some(page) = page {
+            RFIS[n][port].store(page.virt.as_u64() + RFIS_AT as u64, Ordering::Relaxed);
+        }
+    }
+    CAPS[n].store(cap, Ordering::Relaxed);
     let irq = pci.interrupt_line;
     let irq_ok = (3..16).contains(&irq);
+    let c = Controller { index: n, regs, cap, pages, buffer, irq: irq_ok };
+
+    // The interrupt before the ports are probed: the probe's commands complete by it.
     ABARS[n].store(regs.as_u64(), Ordering::Release);
     w(HBA_IS, u32::MAX);
     if irq_ok {
@@ -861,31 +1048,173 @@ fn start(
 fn probe_ports(c: &Controller) -> Vec<Found> {
     let mut found = Vec::new();
     for port in 0..MAX_PORTS as u8 {
-        if c.pages[port as usize].is_none() || !c.bring_up(port) {
-            continue;
+        if c.pages[port as usize].is_some() && c.bring_up(port) {
+            found.extend(c.probe_port(port));
         }
-        if c.cap & CAP_SPM == 0 {
-            c.start(port);
-            found.extend(c.probe(port, None, c.pread(port, PX_SIG)));
-            continue;
+    }
+    found
+}
+
+impl Controller {
+    /// Probes what answers on `port`, its link up and the drive ready: a drive, or a port
+    /// multiplier and the drives behind it.
+    fn probe_port(&self, port: u8) -> Vec<Found> {
+        let mut found = Vec::new();
+        MULTIPLIERS[self.index].fetch_and(!(1 << port), Ordering::Relaxed);
+        if self.cap & CAP_SPM == 0 {
+            self.start(port);
+            found.extend(self.probe(port, None, self.pread(port, PX_SIG)));
+            return found;
         }
         // A soft reset to the multiplier's control port: a multiplier answers with its
         // signature, a drive with its own (PMA may only change while the port is stopped).
-        c.pwrite(port, PX_CMD, c.pread(port, PX_CMD) | CMD_PMA);
-        c.start(port);
-        let sig = c.soft_reset(port, PMP_CONTROL);
+        self.pwrite(port, PX_CMD, self.pread(port, PX_CMD) | CMD_PMA);
+        self.start(port);
+        let sig = self.soft_reset(port, PMP_CONTROL);
         if sig == Some(SIG_PMP) {
-            let drives = c.multiplier_ports(port);
-            serial_println!("[boot] ahci: sata{}.{}: port multiplier, {} drives", c.index, port, drives.len());
-            for (m, sig) in drives {
-                found.extend(c.probe(port, Some(m), sig));
+            let drives = self.multiplier_ports(port);
+            let notify = self.irq && self.multiplier_notify(port);
+            if notify {
+                MULTIPLIERS[self.index].fetch_or(1 << port, Ordering::Relaxed);
             }
-            continue;
+            serial_println!(
+                "{} sata{}.{}: port multiplier, {} drives{}",
+                tag(),
+                self.index,
+                port,
+                drives.len(),
+                if notify { "" } else { " (no notification: drives plugged into it later aren't seen)" }
+            );
+            for (m, sig) in drives {
+                found.extend(self.probe(port, Some(m), sig));
+            }
+            return found;
         }
-        c.stop(port, false);
-        c.pwrite(port, PX_CMD, c.pread(port, PX_CMD) & !CMD_PMA);
-        c.start(port);
-        found.extend(c.probe(port, None, sig.unwrap_or_else(|| c.pread(port, PX_SIG))));
+        self.stop(port, false);
+        self.pwrite(port, PX_CMD, self.pread(port, PX_CMD) & !CMD_PMA);
+        self.start(port);
+        found.extend(self.probe(port, None, sig.unwrap_or_else(|| self.pread(port, PX_SIG))));
+        found
     }
-    found
+}
+
+/// Runs `f` on controller `c`, holding the giant lock and then its lock (the module doc's order).
+fn locked<R>(c: &Mutex<Controller>, f: impl FnOnce(&Controller) -> R) -> R {
+    let _giant = crate::fs::fslock::Giant::enter();
+    f(&c.lock())
+}
+
+/// Hands each drive found to the disk registry (the giant lock held: it reads their partitions).
+fn attach(found: Vec<Found>) {
+    let _giant = crate::fs::fslock::Giant::enter();
+    for f in found {
+        super::disk::hot_attach(f);
+    }
+}
+
+/// Retires the registered drives at controller `c` port `port`: all of them with `m` `None`, else
+/// the one at multiplier port `m` (`Some(None)`: the one plugged into the port itself).
+fn retire(c: u8, port: u8, m: Option<Option<u8>>) {
+    let _giant = crate::fs::fslock::Giant::enter();
+    for (disk, unit) in super::disk::ahci_drives(c, port) {
+        if m.is_none_or(|m| unit.place().2 == m) {
+            super::disk::retire(disk);
+        }
+    }
+}
+
+/// A port's hot plug task (`TASKS`; `arg` is `controller * MAX_PORTS + port`), run on
+/// `taskqueue_thread`: once the link settles, a port with no link has its drives retired; one with
+/// a multiplier on it has the multiplier's changed ports looked at; one with a drive registered has
+/// it identified again (a different drive is the old one's retiring and the new one's arriving;
+/// the same one, nothing); an empty one with a link is brought up and probed as at boot, sleeping
+/// while the drive comes ready.
+extern "C" fn hotplug(arg: usize, _pending: u32) {
+    let (index, port) = (arg / MAX_PORTS, (arg % MAX_PORTS) as u8);
+    let Some(c) = controller(index as u8) else { return };
+    let unplug = UNPLUG[index].fetch_and(!(1 << port), Ordering::Relaxed) & 1 << port != 0;
+    if unplug {
+        // Everything on the port goes, a multiplier's drives too: the port is probed whole again.
+        MULTIPLIERS[index].fetch_and(!(1 << port), Ordering::Relaxed);
+        retire(index as u8, port, None);
+    } else {
+        crate::kern::kern_synch::pause(SETTLE_TICKS);
+    }
+    if !locked(c, |c| c.link_present(port)) {
+        MULTIPLIERS[index].fetch_and(!(1 << port), Ordering::Relaxed);
+        retire(index as u8, port, None);
+        return;
+    }
+    if MULTIPLIERS[index].load(Ordering::Relaxed) & 1 << port != 0 {
+        multiplier_changed(c, index as u8, port);
+        return;
+    }
+    let drives = super::disk::ahci_drives(index as u8, port);
+    if let Some((disk, unit)) = drives.first() {
+        let Some(was) = super::disk::ahci_identity(*disk) else { return };
+        if locked(c, |c| c.same_drive(unit, &was)) {
+            return;
+        }
+        retire(index as u8, port, None);
+    }
+    if !locked(c, |c| c.link_up(port)) {
+        locked(c, |c| c.arm_hotplug(port));
+        return;
+    }
+    let deadline = tsc::now() + tsc::ms_to_cycles(READY_MS);
+    while !locked(c, |c| c.ready(port)) {
+        if tsc::now() >= deadline {
+            serial_println!("[ahci] sata{}.{}: the drive stays busy -- not used", index, port);
+            locked(c, |c| c.arm_hotplug(port));
+            return;
+        }
+        crate::kern::kern_synch::pause(1);
+    }
+    let found = locked(c, |c| {
+        let found = c.probe_port(port);
+        c.arm_hotplug(port);
+        found
+    });
+    attach(found);
+    // A change while the port's interrupts were off: look again.
+    if !locked(c, |c| c.link_present(port)) {
+        subr_taskqueue::enqueue(&TASKQUEUE_THREAD, &TASKS[arg]);
+    }
+}
+
+/// The multiplier on `port` notified a change: each device port it says changed (`GSCR[32]`) has
+/// its `PSCR[1]` cleared, then its drive retired if its link went, identified again if it stayed
+/// (a different one replaces it), or probed if one arrived.
+fn multiplier_changed(c: &Mutex<Controller>, index: u8, port: u8) {
+    let changed: Vec<(u8, bool)> = locked(c, |c| {
+        let bits = c.pm_read(port, PMP_CONTROL, GSCR_ERROR).unwrap_or(0);
+        (0..PMP_MAX_PORTS as u8)
+            .filter(|m| bits & 1 << m != 0)
+            .map(|m| {
+                c.pm_write(port, m, PSCR_SERROR, u32::MAX);
+                (m, c.pm_read(port, m, PSCR_SSTATUS).is_some_and(|s| s & 0xF == DET_PRESENT))
+            })
+            .collect()
+    });
+    for (m, up) in changed {
+        let drive = super::disk::ahci_drives(index, port).into_iter().find(|(_, u)| u.place().2 == Some(m));
+        if let Some((disk, unit)) = drive {
+            let same = up && super::disk::ahci_identity(disk).is_some_and(|was| locked(c, |c| c.same_drive(&unit, &was)));
+            if same {
+                continue;
+            }
+            retire(index, port, Some(Some(m)));
+        }
+        if up {
+            let found = locked(c, |c| c.multiplier_port(port, m).and_then(|sig| c.probe(port, Some(m), sig)));
+            attach(found.into_iter().collect());
+        }
+    }
+}
+
+/// Pulls the drives on `unit`'s port out in software (`debug.disk.unplug`): its task retires
+/// them, then finds the port as it is -- the drives still there -- and registers them again.
+pub fn simulate_unplug(unit: &Unit) {
+    UNPLUG[unit.controller as usize].fetch_or(1 << unit.port, Ordering::Relaxed);
+    subr_taskqueue::enqueue(&TASKQUEUE_THREAD, &TASKS[unit.controller as usize * MAX_PORTS + unit.port as usize]);
 }

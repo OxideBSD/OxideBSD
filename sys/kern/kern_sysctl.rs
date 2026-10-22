@@ -195,6 +195,17 @@ const IPPROTO_IP: i32 = 0;
 const ENETUNREACH: i64 = 101;
 
 /// A string being set: the bytes up to the first NUL.
+/// `kern.disk.root_lost`: `panic` or `eio`; `None` for anything else.
+fn set_root_lost(value: &[u8]) -> Option<()> {
+    let eio = match value {
+        b"panic" => false,
+        b"eio" => true,
+        _ => return None,
+    };
+    crate::drivers::disk::ROOT_LOST_EIO.store(eio, core::sync::atomic::Ordering::Relaxed);
+    Some(())
+}
+
 pub(crate) fn new_string(new: &[u8]) -> &[u8] {
     let end = new.iter().position(|&b| b == 0).unwrap_or(new.len());
     &new[..end]
@@ -284,6 +295,7 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
         "kern.maxfilesperproc" => {
             parsed.filter(|v| (16..=1_000_000).contains(v)).map(|v| *MAXFILESPERPROC.lock() = v as i32)
         }
+        "kern.disk.root_lost" => set_root_lost(value.as_bytes()),
         "kern.tty.pty_max" => parsed
             .filter(|v| (1..=4096).contains(v))
             .map(|v| crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed)),
@@ -931,6 +943,22 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             }),
         },
     );
+    // INSTALLER.md §5.3: hot plug's removal path, without a screwdriver.
+    let debug_disk = add_node(t, &debug, None, "disk", "Disk debugging");
+    add_leaf(
+        t,
+        &debug_disk,
+        Leaf {
+            number: None,
+            name: "unplug",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RW,
+            descr: "Write an AHCI disk's name to pull it out in software; its port is then probed again",
+            get: || string(b""),
+            set: Some(|new| crate::drivers::disk::simulate_unplug(core::str::from_utf8(new_string(new)).map_err(|_| EINVAL as i64)?)),
+        },
+    );
     // The read-only page cache (`memory::pagecache`, PAGECACHE.md §4).
     let pagecache = add_node(t, &vm, None, "pagecache", "Read-only file page cache");
     // Page counts are `u_int`, like `vm.stats.vm.*`; hits and misses count up forever, `u_long`.
@@ -1034,7 +1062,22 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             set: None,
         },
     );
-    add_node(t, &kern, None, "disk", "Each disk the kernel drives");
+    let disk = add_node(t, &kern, None, "disk", "Each disk the kernel drives");
+    // INSTALLER.md §5.3: what the root's drive going does.
+    add_leaf(
+        t,
+        &disk,
+        Leaf {
+            number: None,
+            name: "root_lost",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RW | CTLFLAG_TUN,
+            descr: "When the root's drive goes: panic, or eio (the root stays, failing with EIO)",
+            get: || string(if crate::drivers::disk::ROOT_LOST_EIO.load(core::sync::atomic::Ordering::Relaxed) { b"eio" } else { b"panic" }),
+            set: Some(|new| set_root_lost(new_string(new)).ok_or(EINVAL as i64)),
+        },
+    );
     for (index, name) in crate::drivers::disk::names().split(' ').filter(|n| !n.is_empty()).enumerate() {
         add_disk_leaves(t, name, index as u32);
     }
