@@ -46,11 +46,11 @@ pub fn yesno(value: &str) -> Option<bool> {
 }
 
 fn out(s: &str) {
-    let _ = sys::write_all(1, s.as_bytes());
+    let _ = sys::write_all(1, &crate::printf::to_bytes(&s));
 }
 
 fn report(sh: &Shell, level: &str, message: &str) {
-    let _ = sys::write_all(2, format!("{}: {level}: {message}\n", sh.arg0).as_bytes());
+    let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{}: {level}: {message}\n", sh.arg0)));
 }
 
 fn is_yes(sh: &Shell, var: &str) -> bool {
@@ -85,7 +85,7 @@ fn assignments_only(item: &ListItem) -> Option<&SimpleCommand> {
 /// Loads one `rc.conf`-format file into the shell's variables (§4.6).
 pub fn load_conf_file(sh: &mut Shell, path: &str) {
     let text = match std::fs::read(path) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Ok(b) => crate::printf::from_bytes(&b),
         Err(e) => return report(sh, "WARNING", &format!("{path}: {}", sys::strerror(&e))),
     };
     let items = match crate::parse::parse_lines(&text) {
@@ -343,7 +343,7 @@ fn run_rc_command(sh: &mut Shell, args: &[String]) -> Exec {
         if !action.is_empty() {
             report(sh, "ERROR", &format!("unknown directive '{action}'."));
         }
-        let _ = sys::write_all(2, format!("Usage: {} [fast|force|one|quiet]({})\n", sh.arg0, keywords.join("|")).as_bytes());
+        let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("Usage: {} [fast|force|one|quiet]({})\n", sh.arg0, keywords.join("|"))));
         return Ok(1);
     }
 
@@ -396,7 +396,7 @@ fn run_rc_command(sh: &mut Shell, args: &[String]) -> Exec {
         "start" => {
             if !fast && !pids.is_empty() {
                 if !quiet {
-                    let _ = sys::write_all(2, format!("{name} already running? (pid={pid_list}).\n").as_bytes());
+                    let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{name} already running? (pid={pid_list}).\n")));
                 }
                 return Ok(1);
             }
@@ -439,7 +439,7 @@ fn run_rc_command(sh: &mut Shell, args: &[String]) -> Exec {
             if pids.is_empty() {
                 if !quiet {
                     let hint = pidfile.as_ref().map(|p| format!(" (check {p})")).unwrap_or_default();
-                    let _ = sys::write_all(2, format!("{name} not running?{hint}.\n").as_bytes());
+                    let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{name} not running?{hint}.\n")));
                 }
                 return Ok(1);
             }

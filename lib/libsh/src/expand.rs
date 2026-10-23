@@ -397,7 +397,7 @@ impl Shell {
                 let status = sys::wait_pid(pid).unwrap_or(1);
                 self.status = status;
                 self.subst_status = Some(status);
-                let mut s = String::from_utf8_lossy(&bytes).into_owned();
+                let mut s = crate::printf::from_bytes(&bytes);
                 while s.ends_with('\n') {
                     s.pop();
                 }

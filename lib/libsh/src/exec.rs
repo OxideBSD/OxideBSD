@@ -486,7 +486,7 @@ impl Shell {
         words.extend(fields.iter().map(|f| quote(f)));
         line.push_str(&words.join(" "));
         line.push('\n');
-        let _ = sys::write_all(2, line.as_bytes());
+        let _ = sys::write_all(2, &crate::printf::to_bytes(&line));
     }
 
     /// Runs `f` with `assigns` in effect (exported) and `redirs` applied, then undoes both.
@@ -608,7 +608,7 @@ impl Shell {
     /// Runs `path` as a script in this (already forked) process, as a fresh shell would.
     fn run_script_in_place(&mut self, path: &str, fields: &[String]) -> ! {
         let source = match std::fs::read(path) {
-            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Ok(b) => crate::printf::from_bytes(&b),
             Err(e) => {
                 self.error(&format!("{path}: {e}"));
                 sys::exit_child(126);
@@ -747,14 +747,14 @@ impl Shell {
     fn heredoc_fd(&mut self, text: &str) -> Result<Fd, String> {
         let (r, w) = sys::pipe().map_err(|e| format!("cannot create pipe: {e}"))?;
         if text.len() <= HEREDOC_INLINE_MAX {
-            let _ = sys::write_all(w, text.as_bytes());
+            let _ = sys::write_all(w, &crate::printf::to_bytes(&text));
             sys::close(w);
             return Ok(r);
         }
         match sys::fork() {
             Ok(0) => {
                 sys::close(r);
-                let _ = sys::write_all(w, text.as_bytes());
+                let _ = sys::write_all(w, &crate::printf::to_bytes(&text));
                 sys::exit_child(0);
             }
             Ok(pid) => {

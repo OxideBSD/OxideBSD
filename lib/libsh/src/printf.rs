@@ -55,24 +55,79 @@ pub fn push_escaped(out: &mut String, s: &str, echo_style: bool) -> bool {
     false
 }
 
-/// Bytes >= 0x80 from octal escapes are kept as Latin-1 characters; output converts them back.
-fn push_byte(out: &mut String, b: u8) {
-    out.push(b as char);
+/// Bytes from 0x80 on that aren't part of UTF-8 text -- from an octal escape (`\\374`), or input
+/// that isn't UTF-8 -- live in the shell's strings as these private-use characters,
+/// U+10FF80..U+10FFFF, so a raw byte is never mistaken for the character of the same number (the
+/// byte `\\374` for `ü`); `to_bytes` turns them back into the bytes.
+const RAW_BASE: u32 = 0x10_FF00;
+
+/// Byte `b` as the shell keeps it: ASCII as itself, from 0x80 a raw byte (`RAW_BASE`).
+pub fn raw_byte(b: u8) -> char {
+    if b < 0x80 { b as char } else { char::from_u32(RAW_BASE + b as u32).unwrap() }
 }
 
-/// Converts a string built with `push_byte` back to raw bytes.
+fn push_byte(out: &mut String, b: u8) {
+    out.push(raw_byte(b));
+}
+
+/// A string's bytes as they leave the shell: UTF-8, but a raw byte (`raw_byte`) as itself.
 pub fn to_bytes(s: &str) -> Vec<u8> {
-    // Characters U+0080..U+00FF came from single bytes; everything else is UTF-8 text.
     let mut v = Vec::with_capacity(s.len());
     for c in s.chars() {
-        if (0x80..0x100).contains(&(c as u32)) {
-            v.push(c as u8);
-        } else {
-            let mut buf = [0u8; 4];
-            v.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        match (c as u32).checked_sub(RAW_BASE) {
+            Some(b @ 0x80..=0xff) => v.push(b as u8),
+            _ => v.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes()),
         }
     }
     v
+}
+
+/// `bytes` as the shell keeps them: UTF-8 decoded, each byte that isn't part of a UTF-8 character
+/// a raw byte; with each character, the offset of its first byte. Lossless: `to_bytes` gives the
+/// bytes back.
+pub fn decode(bytes: &[u8]) -> Vec<(usize, char)> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match std::str::from_utf8(&bytes[at..]) {
+            Ok(rest) => {
+                out.extend(rest.char_indices().map(|(i, c)| (at + i, c)));
+                break;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                // SAFETY: `from_utf8` vouched for the first `good` bytes.
+                let valid = unsafe { std::str::from_utf8_unchecked(&bytes[at..at + good]) };
+                out.extend(valid.char_indices().map(|(i, c)| (at + i, c)));
+                at += good;
+                let bad = e.error_len().unwrap_or(bytes.len() - at);
+                out.extend((0..bad).map(|i| (at + i, raw_byte(bytes[at + i]))));
+                at += bad;
+            }
+        }
+    }
+    out
+}
+
+/// `decode`'s characters, as a string.
+pub fn from_bytes(bytes: &[u8]) -> String {
+    decode(bytes).into_iter().map(|(_, c)| c).collect()
+}
+
+#[cfg(test)]
+mod bytes_tests {
+    use super::*;
+
+    #[test]
+    fn round_trips() {
+        for bytes in [&b"plain"[..], "ü é ß".as_bytes(), b"\xfc\xff raw", b"half \xc3", b"\xc3\xbc\xc3"] {
+            assert_eq!(to_bytes(&from_bytes(bytes)), bytes);
+        }
+        assert_eq!(from_bytes("ü".as_bytes()), "ü");
+        assert_eq!(to_bytes("ü"), "ü".as_bytes(), "a character is UTF-8, never one byte");
+        assert_eq!(to_bytes(&raw_byte(0xfc).to_string()), [0xfc]);
+        assert_eq!(decode(b"a\xffb").iter().map(|&(i, _)| i).collect::<Vec<_>>(), [0, 1, 2]);
+    }
 }
 
 struct Spec {

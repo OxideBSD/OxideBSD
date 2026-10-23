@@ -12,8 +12,11 @@ fn check(r: i32) -> io::Result<i32> {
     if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
+/// `s` as a C string, for a system call: its bytes as they leave the shell (`printf::to_bytes`).
 pub fn cstr(s: &str) -> CString {
-    CString::new(s.as_bytes()).unwrap_or_else(|_| CString::new(s.replace('\0', "")).unwrap())
+    let mut bytes = crate::printf::to_bytes(s);
+    bytes.retain(|&b| b != 0);
+    CString::new(bytes).unwrap()
 }
 
 pub fn write_all(fd: Fd, mut bytes: &[u8]) -> io::Result<()> {

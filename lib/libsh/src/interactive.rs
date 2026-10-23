@@ -132,7 +132,7 @@ impl Shell {
 
     fn source_if_exists(&mut self, path: &str) {
         let Ok(bytes) = std::fs::read(path) else { return };
-        match parse::parse(&String::from_utf8_lossy(&bytes)) {
+        match parse::parse(&crate::printf::from_bytes(&bytes)) {
             Ok(list) => {
                 if let Err(Flow::Exit(s)) = self.run_list(&list) {
                     self.status = s;

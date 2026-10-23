@@ -251,7 +251,7 @@ impl Shell {
 
     /// Prints `prog: message` to standard error.
     pub fn error(&self, message: &str) {
-        let _ = sys::write_all(2, format!("{}: {message}\n", self.arg0).as_bytes());
+        let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{}: {message}\n", self.arg0)));
     }
 
     /// Adds regular built-in `name` (XCU 2.14's regular kind: found after functions, its
@@ -394,7 +394,7 @@ pub fn main(args: Vec<String>) -> i32 {
 }
 
 fn refuse_interactive(prog: &str) -> i32 {
-    let _ = sys::write_all(2, format!("{prog}: interactive mode is not supported\n").as_bytes());
+    let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{prog}: interactive mode is not supported\n")));
     2
 }
 
@@ -441,7 +441,7 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
                 *f = on;
                 monitor_set |= c == 'm';
             } else {
-                let _ = sys::write_all(2, format!("{prog}: illegal option -{c}\n").as_bytes());
+                let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{prog}: illegal option -{c}\n")));
                 return 2;
             }
         }
@@ -450,16 +450,16 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
     let rest = &args[i.min(args.len())..];
     let (source, arg0, positional) = if command_string {
         let Some(cmd) = rest.first() else {
-            let _ = sys::write_all(2, format!("{prog}: -c requires an argument\n").as_bytes());
+            let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{prog}: -c requires an argument\n")));
             return 2;
         };
         let arg0 = rest.get(1).cloned().unwrap_or_else(|| prog.clone());
         (cmd.clone(), arg0, rest.iter().skip(2).cloned().collect())
     } else if let Some(script) = rest.first() {
         match std::fs::read(script) {
-            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), script.clone(), rest[1..].to_vec()),
+            Ok(bytes) => (crate::printf::from_bytes(&bytes), script.clone(), rest[1..].to_vec()),
             Err(e) => {
-                let _ = sys::write_all(2, format!("{prog}: cannot open {script}: {e}\n").as_bytes());
+                let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{prog}: cannot open {script}: {e}\n")));
                 return 127;
             }
         }
@@ -476,9 +476,9 @@ pub fn main_with(args: Vec<String>, interactive: Interactive) -> i32 {
             return sh.run_interactive();
         }
         match sys::read_to_end(0) {
-            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), prog.clone(), Vec::new()),
+            Ok(bytes) => (crate::printf::from_bytes(&bytes), prog.clone(), Vec::new()),
             Err(e) => {
-                let _ = sys::write_all(2, format!("{prog}: reading standard input: {e}\n").as_bytes());
+                let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("{prog}: reading standard input: {e}\n")));
                 return 2;
             }
         }

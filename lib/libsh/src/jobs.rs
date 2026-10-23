@@ -172,7 +172,7 @@ impl Shell {
                 self.jobs.retain(|j| j.id != id);
                 self.jobs.push(job);
                 self.touch_job(id);
-                let _ = sys::write_all(2, line.as_bytes());
+                let _ = sys::write_all(2, &crate::printf::to_bytes(&line));
                 128 + sig
             }
             JobState::Running => 0,
@@ -196,7 +196,7 @@ impl Shell {
         self.jobs.push(Job { id, pgid, procs: pids.into_iter().map(|p| (p, ProcState::Running)).collect(), text, notified: true });
         self.touch_job(id);
         if self.interactive {
-            let _ = sys::write_all(2, format!("[{id}] {last}\n").as_bytes());
+            let _ = sys::write_all(2, &crate::printf::to_bytes(&format!("[{id}] {last}\n")));
         }
     }
 
@@ -237,7 +237,7 @@ impl Shell {
         self.jobs.retain(|j| !done.contains(&j.id));
         self.job_order.retain(|i| !done.contains(i));
         if !out.is_empty() {
-            let _ = sys::write_all(2, out.as_bytes());
+            let _ = sys::write_all(2, &crate::printf::to_bytes(&out));
         }
     }
 
@@ -372,7 +372,7 @@ pub fn jobs(sh: &mut Shell, args: &[String]) -> Exec {
         }
         job.notified = true;
     }
-    let _ = sys::write_all(1, out.as_bytes());
+    let _ = sys::write_all(1, &crate::printf::to_bytes(&out));
     Ok(0)
 }
 
@@ -389,7 +389,7 @@ pub fn fg(sh: &mut Shell, args: &[String]) -> Exec {
     };
     let pos = sh.jobs.iter().position(|j| j.id == id).unwrap();
     let mut job = sh.jobs.remove(pos);
-    let _ = sys::write_all(1, format!("{}\n", job.text).as_bytes());
+    let _ = sys::write_all(1, &crate::printf::to_bytes(&format!("{}\n", job.text)));
     sh.give_terminal(job.pgid);
     let _ = sys::kill(-job.pgid, libc::SIGCONT);
     for p in job.procs.iter_mut() {
@@ -426,7 +426,7 @@ pub fn bg(sh: &mut Shell, args: &[String]) -> Exec {
             }
         }
         let mark = if Some(id) == current { '+' } else { ' ' };
-        let _ = sys::write_all(1, format!("[{id}]{mark} {} &\n", job.text).as_bytes());
+        let _ = sys::write_all(1, &crate::printf::to_bytes(&format!("[{id}]{mark} {} &\n", job.text)));
     }
     Ok(status)
 }

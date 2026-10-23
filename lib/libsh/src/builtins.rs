@@ -69,7 +69,7 @@ pub fn names() -> Vec<&'static str> {
 }
 
 fn out(s: &str) {
-    let _ = sys::write_all(1, s.as_bytes());
+    let _ = sys::write_all(1, &crate::printf::to_bytes(s));
 }
 
 /// A special built-in's usage error: fatal (XCU 2.8.1).
@@ -107,7 +107,7 @@ fn dot(sh: &mut Shell, args: &[String]) -> Exec {
         }
     };
     let source = match std::fs::read(&path) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Ok(b) => crate::printf::from_bytes(&b),
         Err(e) => return fatal(sh, &format!(".: cannot open {path}: {}", sys::strerror(&e))),
     };
     let list = match crate::parse(&source) {
@@ -690,13 +690,8 @@ fn read(sh: &mut Shell, args: &[String]) -> Exec {
             }
         }
     }
-    let line: Vec<(char, bool)> = bytes.iter().enumerate().map(|(i, &b)| (b as char, escaped_at.contains(&i))).collect();
-    let line: Vec<(char, bool)> = if bytes.is_ascii() {
-        line
-    } else {
-        // Non-ASCII input: decode as UTF-8 (escape positions are only meaningful for ASCII).
-        String::from_utf8_lossy(&bytes).chars().map(|c| (c, false)).collect()
-    };
+    let line: Vec<(char, bool)> =
+        crate::printf::decode(&bytes).into_iter().map(|(i, c)| (c, escaped_at.contains(&i))).collect();
     let ifs = sh.ifs();
     let fields = split_read(&line, &ifs, names.len());
     for (k, name) in names.iter().enumerate() {
