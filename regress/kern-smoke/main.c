@@ -57,6 +57,7 @@ static int child_exit_ok(int (*fn)(void))
 #include "proc.c"
 #include "inet.c"
 #include "kthread.c"
+#include "devctl.c"
 
 static const struct {
 	const char *name;
@@ -72,6 +73,8 @@ static const struct {
 	{ "proc", proc_main },
 	{ "inet", inet_main },
 	{ "kthread", kthread_main },
+	{ "devctl", devctl_main },
+	{ "devctl-dump", devctl_dump_main },
 };
 
 int main(int argc, char **argv)

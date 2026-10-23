@@ -185,6 +185,24 @@ check "the empty AHCI drive doesn't mount" not mount -t cd9660 /dev/sata1.5 $A 2
 # still there and registers it again under the same name.
 logged() { dmesg | grep -qF "$1"; }
 attached() { dmesg | grep -cF "[disk] sata0.0: attached"; }
+# Device events (DEVD.md §3.3): what /dev/devctl has queued since boot, then since the pull.
+EV=/tmp/cd9660-events
+# The number of the first line starting with $1; whether $1's comes before $2's.
+at() { grep -n "^$1" $EV | sed -n '1s/:.*//p'; }
+before() {
+	_a=$(at "$1")
+	_b=$(at "$2")
+	[ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" -lt "$_b" ] && return 0
+	echo "  lines '$_a' and '$_b' of:"
+	sed 's/^/    /' $EV
+	return 1
+}
+/usr/tests/kern/kern-smoke devctl-dump > $EV
+check "devctl: boot's AHCI disk attached, with its place" grep -q "^attach disk name=sata0.0 bus=ahci model='QEMU HARDDISK' kind=disk sectors=131072 sector_size=512 controller=0 port=0\$" $EV
+check "... before its nodes" before "attach disk name=sata0.0 " "create dev name=gpt/satatest "
+check "devctl: a CD drive's disc at boot" before "create dev name=ide0 " "media cd name=ide0 state=inserted sectors=11480\$"
+check "... before the disc's partitions" before "media cd name=ide0 " "create dev name=ide0s1 "
+check "... and none for an empty drive" not grep -q "^media cd name=ide3 " $EV
 check "sata0.0 mounted before the pull" mount -t msdosfs /dev/gpt/satatest $A
 exec 3<> $A/hello.txt 4< /dev/sata0.0p1
 check "debug.disk.unplug pulls it" sh -c 'sysctl debug.disk.unplug=sata0.0 > /dev/null'
@@ -201,6 +219,10 @@ check "... and can't be written" not sh -c 'printf x | dd >&3 2>/dev/null'
 check "its raw device open fails" not dd bs=512 count=1 <&4 > /dev/null 2>&1
 exec 3<&- 4<&-
 check "it came back, attached again" is "$(attached)" 1
+/usr/tests/kern/kern-smoke devctl-dump > $EV
+check "devctl: its nodes destroyed" before "destroy dev name=gpt/satatest " "detach disk name=sata0.0 bus=ahci\$"
+check "... then it detached" before "detach disk name=sata0.0 " "attach disk name=sata0.0 bus=ahci "
+check "... then attached again, then its nodes" before "attach disk name=sata0.0 " "create dev name=sata0.0p1 major=251 minor=3841\$"
 check "... the same name in kern.disks" sh -c 'sysctl -n kern.disks | grep -qw sata0.0'
 check "... its partition's nodes again" [ -c /dev/gpt/satatest ]
 check "... its file system mounts, the file still on it" sh -c "mount -t msdosfs /dev/gpt/satatest $A && [ \"\$(cat $A/hello.txt)\" = on-sata ]"

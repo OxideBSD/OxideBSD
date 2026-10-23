@@ -375,6 +375,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - `/dev` is devfs (`OxideBSD-doc/DEVFS.md`): built every boot from the kernel's device registry
   (`sys/fs/devfs.rs`). **A new device registers with `make_dev`/`oxidebsd_make_dev`**, never by
   seeding a node; every device node opens through `oxidebsd_dev_open` by number.
+- Device events (`OxideBSD-doc/DEVD.md`, `/dev/devctl`): `kern::subr_devctl::event(verb, class)
+  .field(..).post()`; `make_dev`/`destroy_dev` and the disk registry already post theirs. Never post
+  from an interrupt handler or under the process table's lock (it wakes the reader through it).
 - A new installed file goes in `distrib/install.mtree`, and its set in `distrib/sets/lists/*`
   (the build fails on an unlisted path). Modes: `0755` only for ELFs and `#!` scripts (the
   default).

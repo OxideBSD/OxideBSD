@@ -95,6 +95,7 @@ pub fn init(
     drivers::null::init();
     drivers::fbdev::init();
     kern::subr_msgbuf::init();
+    kern::subr_devctl::init();
     memory::kstack::reserve_window(&mut mapper, &mut frame_allocator);
     kern::vfs_bio::reserve_window(&mut mapper, &mut frame_allocator);
     #[cfg(feature = "multiboot2")]

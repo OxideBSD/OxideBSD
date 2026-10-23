@@ -1,6 +1,7 @@
 //! The kernel proper, in the BSDs' sense: the socket layer and local sockets (`uipc_*`) and the
 //! sysctl tree (`kern_sysctl`), the load average and sleep/wakeup (`kern_synch`), kernel threads
-//! (`kern_kthread`) and taskqueues (`subr_taskqueue`), the message buffer (`subr_msgbuf`).
+//! (`kern_kthread`) and taskqueues (`subr_taskqueue`), the message buffer (`subr_msgbuf`) and
+//! device events (`subr_devctl`).
 
 pub mod fsconf;
 pub mod kern_core;
@@ -9,6 +10,7 @@ pub mod kern_kthread;
 pub mod kern_procctl;
 pub mod kern_synch;
 pub mod kern_sysctl;
+pub mod subr_devctl;
 pub mod subr_msgbuf;
 pub mod subr_taskqueue;
 pub mod subr_uio;

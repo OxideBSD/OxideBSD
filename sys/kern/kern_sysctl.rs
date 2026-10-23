@@ -278,6 +278,9 @@ pub(crate) fn maxfilesperproc() -> usize {
     if set > 0 { set as usize } else { maxfiles() / 10 * 9 }
 }
 
+/// `kern.devctl.queue`'s greatest value.
+const DEVCTL_QUEUE_LIMIT: i32 = 65536;
+
 /// Sets boot tunable `name` from the kernel command line's `name=value` (`SYSCTL.md` §6): before
 /// the heap exists, so no allocation. An unknown name or a value out of range is logged and
 /// ignored.
@@ -296,6 +299,9 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
             parsed.filter(|v| (16..=1_000_000).contains(v)).map(|v| *MAXFILESPERPROC.lock() = v as i32)
         }
         "kern.disk.root_lost" => set_root_lost(value.as_bytes()),
+        "kern.devctl.queue" => parsed
+            .filter(|v| (crate::kern::subr_devctl::MIN_QUEUE as u64..=DEVCTL_QUEUE_LIMIT as u64).contains(v))
+            .map(|v| crate::kern::subr_devctl::QUEUE_MAX.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
         "kern.tty.pty_max" => parsed
             .filter(|v| (1..=4096).contains(v))
             .map(|v| crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed)),
@@ -921,6 +927,43 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
                 crate::tty::pty::PTY_MAX.store(v as u32, core::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }),
+        },
+    );
+    // Device events (DEVD.md §4.3).
+    let devctl = add_node(t, &kern, None, "devctl", "Device events (/dev/devctl)");
+    add_leaf(
+        t,
+        &devctl,
+        Leaf {
+            number: None,
+            name: "queue",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW | CTLFLAG_TUN,
+            descr: "Device events held for /dev/devctl's reader",
+            get: || int(crate::kern::subr_devctl::QUEUE_MAX.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                if !(crate::kern::subr_devctl::MIN_QUEUE as i32..=DEVCTL_QUEUE_LIMIT).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                crate::kern::subr_devctl::QUEUE_MAX.store(v as usize, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        },
+    );
+    add_leaf(
+        t,
+        &devctl,
+        Leaf {
+            number: None,
+            name: "dropped",
+            kind: CTLTYPE_ULONG,
+            fmt: "LU",
+            flags: CTLFLAG_RD,
+            descr: "Device events dropped because the queue was full",
+            get: || ulong(crate::kern::subr_devctl::DROPPED.load(core::sync::atomic::Ordering::Relaxed)),
+            set: None,
         },
     );
     // INIT.md §9: kill pid 1 with a signal, to exercise the kernel's restart of init.

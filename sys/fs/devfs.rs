@@ -3,8 +3,8 @@
 //! the kernel register here (`make_dev`), modules through `oxidebsd_make_dev`; the devfs module
 //! (`sys/modules/devfs`), the file system on `/dev`, builds its views from the table
 //! (`oxidebsd_dev_entry`, `oxidebsd_dev_generation`), and the kernel opens every device node, in
-//! devfs or not, through `oxidebsd_dev_open`. FreeBSD's
-//! `make_dev(9)`, much reduced.
+//! devfs or not, through `oxidebsd_dev_open`. Each registration and removal is also a device event
+//! (`create dev`, `destroy dev`: `kern::subr_devctl`). FreeBSD's `make_dev(9)`, much reduced.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -46,6 +46,8 @@ pub fn make_dev(name: &str, major: u32, minor: u32, uid: u32, gid: u32, mode: u1
     }
     devs.push(Dev { name: String::from(name), major, minor, uid, gid, mode: mode & 0o7777, open });
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    drop(devs);
+    dev_event("create", name, major, minor);
     Ok(())
 }
 
@@ -55,9 +57,16 @@ pub fn destroy_dev(major: u32, minor: u32) -> Result<(), i64> {
     let Some(i) = devs.iter().position(|d| (d.major, d.minor) == (major, minor)) else {
         return Err(crate::syscall::ENXIO as i64);
     };
-    devs.remove(i);
+    let dev = devs.remove(i);
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    drop(devs);
+    dev_event("destroy", &dev.name, major, minor);
     Ok(())
+}
+
+/// `create dev` / `destroy dev` (`DEVD.md` §3.3).
+fn dev_event(verb: &str, name: &str, major: u32, minor: u32) {
+    crate::kern::subr_devctl::event(verb, "dev").field("name", name).field("major", major).field("minor", minor).post();
 }
 
 /// `oxidebsd_make_dev(name_ptr, name_len, major, minor, owner, mode, open)`: `owner` is

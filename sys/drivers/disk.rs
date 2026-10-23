@@ -41,6 +41,7 @@ use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 
 use super::ata::{Channel, Drive};
 use super::part::Partition;
+use crate::kern::subr_devctl as devctl;
 use crate::serial_println;
 
 /// Which driver serves a disk, and which of its devices it is.
@@ -71,6 +72,19 @@ pub enum Kind {
     Disk,
     Cd,
     Memory,
+}
+
+impl Backend {
+    /// Its bus, for device events (`DEVD.md` §3.3).
+    fn bus(self) -> &'static str {
+        match self {
+            Backend::Ata(..) | Backend::Atapi(..) => "ata",
+            Backend::Ahci(_) => "ahci",
+            Backend::Virtio(_) => "virtio_blk",
+            Backend::Scsi(_) => "virtio_scsi",
+            Backend::Memory => "md",
+        }
+    }
 }
 
 impl Kind {
@@ -304,11 +318,11 @@ pub(crate) fn ahci_identity(disk: u32) -> Option<super::ahci::Found> {
 /// caller holds the giant lock.
 pub(crate) fn retire(disk: u32) {
     use crate::kern::{vfs_bdev, vfs_bio, vfs_mount};
-    let (name, whole, parts, major, minor) = {
+    let (name, whole, parts, major, minor, bus) = {
         let mut disks = DISKS.lock();
         let Some(d) = disks.get_mut(disk as usize).filter(|d| d.present) else { return };
         d.present = false;
-        (d.name.clone(), d.whole, core::mem::take(&mut d.parts), d.major, d.unit << 8)
+        (d.name.clone(), d.whole, core::mem::take(&mut d.parts), d.major, d.unit << 8, d.backend.bus())
     };
     let handles: Vec<u32> = core::iter::once(whole).chain(parts.iter().map(|&(h, _, _)| h)).collect();
     for mp in vfs_mount::mounts() {
@@ -322,6 +336,7 @@ pub(crate) fn retire(disk: u32) {
                 panic!("root device {} is gone", name);
             }
             serial_println!("[disk] {}: the root's drive is gone -- the root fails with EIO from now on", name);
+            devctl::event("lost", "root").field("name", &name).field("policy", "eio").post();
             continue;
         }
         // SAFETY: as above.
@@ -338,6 +353,7 @@ pub(crate) fn retire(disk: u32) {
     }
     let _ = crate::fs::devfs::destroy_dev(major, minor);
     serial_println!("[disk] {}: detached", name);
+    devctl::event("detach", "disk").field("name", &name).field("bus", bus).post();
 }
 
 /// `debug.disk.unplug`: pulls disk `name` out in software, as if unplugged, and then looks at its
@@ -365,14 +381,43 @@ struct Found {
 /// (`attach_partitions`), adding them to `parts`.
 fn attach(disk: u32, parts: &mut Vec<Found>) {
     use crate::kern::vfs_bdev;
-    let (name, major, minor, sectors) = {
+    let (name, major, minor, sectors, kind, event) = {
         let d = &DISKS.lock()[disk as usize];
-        (d.name.clone(), d.major, d.unit << 8, d.sectors)
+        let mut event = devctl::event("attach", "disk")
+            .field("name", &d.name)
+            .field("bus", d.backend.bus())
+            .field("model", &d.model)
+            .field("kind", d.kind.name())
+            .field("sectors", d.sectors)
+            .field("sector_size", d.sector_size);
+        if let Backend::Ahci(unit) = d.backend {
+            let (controller, port, pmp) = unit.place();
+            event = event.field("controller", controller).field("port", port);
+            if let Some(pmp) = pmp {
+                event = event.field("pmp", pmp);
+            }
+        }
+        (d.name.clone(), d.major, d.unit << 8, d.sectors, d.kind, event)
     };
+    // DEVD.md §3.3: the drive, then its nodes.
+    event.post();
     let whole = vfs_bdev::register(&name, major, minor, 0, sectors, disk);
     DISKS.lock()[disk as usize].whole = whole;
     let _ = crate::fs::devfs::make_dev(&name, major, minor, 0, 0, 0o600, raw_open);
+    if kind == Kind::Cd && sectors != 0 {
+        media_event(&name, sectors);
+    }
     attach_partitions(disk, parts);
+}
+
+/// `media cd`: a disc of `sectors` found in drive `name`, or (0) its disc gone.
+fn media_event(name: &str, sectors: u64) {
+    let event = devctl::event("media", "cd").field("name", name);
+    if sectors == 0 {
+        event.field("state", "ejected").post();
+    } else {
+        event.field("state", "inserted").field("sectors", sectors).post();
+    }
 }
 
 /// Registers a CD drive, empty or with a disc: its size now, checked again at each open
@@ -476,6 +521,13 @@ pub(crate) fn media_check(major: u32, minor: u32) {
         serial_println!("[disk] {}: no disc", name);
     } else {
         serial_println!("[disk] {}: disc of {} MiB", name, sectors / 2048);
+    }
+    // A disc swapped for another goes, then the new one comes.
+    if old_sectors != 0 {
+        media_event(&name, 0);
+    }
+    if sectors != 0 {
+        media_event(&name, sectors);
     }
     attach_partitions(disk, &mut Vec::new());
 }
