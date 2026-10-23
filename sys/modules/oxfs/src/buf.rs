@@ -1,12 +1,11 @@
 //! oxfs's blocks through the kernel's buffer cache (kernel tree: `kern::vfs_bio`, OxideBSD-doc
-//! `VFS.md` §7.4), on the root's block device. Every disk block oxfs touches -- superblock aside,
+//! `VFS.md` §7.4), on a mount's block device (every function takes it, `dev`). Every disk block oxfs touches -- superblock aside,
 //! read and written straight through the device -- goes through here by its *device* block number,
 //! 4 KiB each: data blocks, the inode file, directories, index blocks and the block-used bitmap.
 //!
 //! `write` puts a block on the disk before returning (structural metadata, RAM_FLOOR.md §3.3.1);
 //! `store` leaves it dirty, tagged with what it is (`Kind`), for a later flush (a regular file's
-//! data, index blocks and inode record, §3.3.2). While the filesystem is being formatted
-//! (`write_through` false) even `write` only stores, and `flush_all` writes everything at the end.
+//! data, index blocks and inode record, §3.3.2).
 //!
 //! **Ordering (§3.3.3): a pointer never reaches the disk before what it points at.** The cache asks
 //! oxfs before it writes any dirty block (`pre_write`, oxfs's hook): before an inode-file block,
@@ -80,17 +79,7 @@ fn tag(kind: Kind) -> u64 {
     }
 }
 
-/// The mounted file system's block device (`NODEV` while none is), and whether `write` reaches
-/// the disk (false while formatting).
-static mut DEV: u64 = vfs_if::NODEV;
-static mut WRITE_THROUGH: bool = false;
-
-fn dev() -> u64 {
-    // SAFETY: set by `attach`/`detach` at mount and unmount, single-core and serialized.
-    unsafe { DEV }
-}
-
-/// The cache's pre-write hook for oxfs's device: writes what the block tagged `tag` points at.
+/// The cache's pre-write hook for an oxfs device: writes what the block tagged `tag` points at.
 extern "C" fn pre_write(dev: u64, _blkno: u64, tag: u64) -> i64 {
     let owner = tag & 0xffff_ffff;
     match tag & KIND {
@@ -112,52 +101,36 @@ extern "C" fn pre_write(dev: u64, _blkno: u64, tag: u64) -> i64 {
     }
 }
 
-/// Takes block device `dev` (the mount's, `MountArgs::dev`) and gives the cache oxfs's ordering
+/// Takes block device `dev` (a mount's, `MountArgs::dev`) and gives the cache oxfs's ordering
 /// for it.
 pub fn attach(dev: u64) {
-    // SAFETY: at mount, single-core and serialized; FFI call to a kernel-exported function.
-    unsafe {
-        DEV = dev;
-        oxidebsd_bio_set_hook(dev, pre_write);
-    }
+    // SAFETY: FFI call to a kernel-exported function.
+    unsafe { oxidebsd_bio_set_hook(dev, pre_write) };
 }
 
-/// Lets the device go at unmount: its blocks leave the cache (written first, if dirty), so the
+/// Lets device `dev` go at unmount: its blocks leave the cache (written first, if dirty), so the
 /// next mount of it (or fsck_oxfs, around the cache) reads the disk.
-pub fn detach() {
-    if !present() {
-        return;
-    }
-    flush_all();
-    invalidate_all();
-    // SAFETY: as `attach`.
-    unsafe { DEV = vfs_if::NODEV };
-}
-
-/// Whether a device is attached.
-pub fn present() -> bool {
-    dev() != vfs_if::NODEV
+pub fn detach(dev: u64) {
+    flush_all(dev);
+    invalidate_all(dev);
 }
 
 /// The device's size in oxfs blocks.
-pub fn device_blocks() -> u64 {
-    if !present() {
-        return 0;
-    }
+pub fn device_blocks(dev: u64) -> u64 {
     // SAFETY: FFI call to a kernel-exported function.
-    unsafe { oxidebsd_bdev_sectors(dev()) / SECTORS }
+    unsafe { oxidebsd_bdev_sectors(dev) / SECTORS }
 }
 
 /// Reads device block `block` straight from the disk, around the cache (the superblock).
-pub fn read_direct(block: u32, out: &mut [u8; BLOCK_SIZE]) -> bool {
+pub fn read_direct(dev: u64, block: u32, out: &mut [u8; BLOCK_SIZE]) -> bool {
     // SAFETY: FFI call; `out` holds one block.
-    unsafe { oxidebsd_bdev_read(dev(), block as u64 * SECTORS, SECTORS, out.as_mut_ptr()) == 0 }
+    unsafe { oxidebsd_bdev_read(dev, block as u64 * SECTORS, SECTORS, out.as_mut_ptr()) == 0 }
 }
 
 /// Writes device block `block` straight to the disk, durably, around the cache (the superblock).
-pub fn write_direct(block: u32, data: &[u8; BLOCK_SIZE]) -> bool {
+pub fn write_direct(dev: u64, block: u32, data: &[u8; BLOCK_SIZE]) -> bool {
     // SAFETY: FFI call; `data` holds one block.
-    unsafe { oxidebsd_bdev_write(dev(), block as u64 * SECTORS, SECTORS, data.as_ptr()) == 0 }
+    unsafe { oxidebsd_bdev_write(dev, block as u64 * SECTORS, SECTORS, data.as_ptr()) == 0 }
 }
 
 /// Whether the cache is mostly dirty: the writer should flush (back-pressure, §3.2.5).
@@ -166,22 +139,15 @@ pub fn mostly_dirty() -> bool {
     unsafe { oxidebsd_bmostly_dirty() != 0 }
 }
 
-/// From now on, `write` reaches the disk before returning (until now, during a format, it only
-/// stores).
-pub fn set_write_through(on: bool) {
-    // SAFETY: single-core, syscall-serialized.
-    unsafe { WRITE_THROUGH = on };
-}
-
 fn block_bytes(b: u64) -> &'static mut [u8; BLOCK_SIZE] {
     // SAFETY: the kernel maps a held 4 KiB buffer's whole block at this address.
     unsafe { &mut *(oxidebsd_bdata(b) as *mut [u8; BLOCK_SIZE]) }
 }
 
 /// Runs `f` on device block `block`'s contents. `f` must not use the cache.
-pub fn with<R>(block: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
+pub fn with<R>(dev: u64, block: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
     // SAFETY: FFI call to a kernel-exported function.
-    let b = unsafe { oxidebsd_bread(dev(), block as u64 * SECTORS, BLOCK_SIZE as u64, READ_AHEAD) };
+    let b = unsafe { oxidebsd_bread(dev, block as u64 * SECTORS, BLOCK_SIZE as u64, READ_AHEAD) };
     if b < 0 {
         log("[oxfs] cache: read failed\n");
         return f(&[0; BLOCK_SIZE]);
@@ -193,14 +159,14 @@ pub fn with<R>(block: u32, f: impl FnOnce(&[u8; BLOCK_SIZE]) -> R) -> R {
 }
 
 /// A copy of device block `block`.
-pub fn read(block: u32) -> [u8; BLOCK_SIZE] {
-    with(block, |b| *b)
+pub fn read(dev: u64, block: u32) -> [u8; BLOCK_SIZE] {
+    with(dev, block, |b| *b)
 }
 
 /// The cache's buffer for `block`, held, filled with `data`.
-fn put(block: u32, data: &[u8; BLOCK_SIZE]) -> Option<u64> {
+fn put(dev: u64, block: u32, data: &[u8; BLOCK_SIZE]) -> Option<u64> {
     // SAFETY: FFI call to a kernel-exported function.
-    let b = unsafe { oxidebsd_getblk(dev(), block as u64 * SECTORS, BLOCK_SIZE as u64) };
+    let b = unsafe { oxidebsd_getblk(dev, block as u64 * SECTORS, BLOCK_SIZE as u64) };
     if b < 0 {
         log("[oxfs] cache: no buffer\n");
         return None;
@@ -210,67 +176,61 @@ fn put(block: u32, data: &[u8; BLOCK_SIZE]) -> Option<u64> {
 }
 
 /// Writes device block `block` (`kind` says what it is) to the disk before returning, after
-/// anything it points at. While formatting, only stores it.
-pub fn write(block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
-    let Some(b) = put(block, data) else { return };
-    // SAFETY: FFI calls; `b` is held and handed back.
-    unsafe {
-        if WRITE_THROUGH {
-            if oxidebsd_bwrite(b, tag(kind)) != 0 {
-                log("[oxfs] cache: write failed\n");
-            }
-        } else {
-            oxidebsd_bdwrite(b, tag(kind));
-        }
+/// anything it points at.
+pub fn write(dev: u64, block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
+    let Some(b) = put(dev, block, data) else { return };
+    // SAFETY: FFI call; `b` is held and handed back.
+    if unsafe { oxidebsd_bwrite(b, tag(kind)) } != 0 {
+        log("[oxfs] cache: write failed\n");
     }
 }
 
 /// Stores `data` as device block `block`, dirty, for a later flush (§3.3.2).
-pub fn store(block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
-    let Some(b) = put(block, data) else { return };
+pub fn store(dev: u64, block: u32, data: &[u8; BLOCK_SIZE], kind: Kind) {
+    let Some(b) = put(dev, block, data) else { return };
     // SAFETY: FFI call; `b` is held and handed back.
     unsafe { oxidebsd_bdwrite(b, tag(kind)) };
 }
 
 /// Drops device block `block` from the cache without writing it: the block was freed.
-pub fn discard(block: u32) {
+pub fn discard(dev: u64, block: u32) {
     // SAFETY: FFI call to a kernel-exported function.
-    unsafe { oxidebsd_binval(dev(), block as u64 * SECTORS) };
+    unsafe { oxidebsd_binval(dev, block as u64 * SECTORS) };
 }
 
 /// Drops the dirty data and index blocks of file `owner` without writing them: it's being freed.
-pub fn discard_owned(owner: u32) {
+pub fn discard_owned(dev: u64, owner: u32) {
     // SAFETY: FFI calls to kernel-exported functions.
     unsafe {
-        oxidebsd_bdiscard(dev(), ALL, DATA | owner as u64);
-        oxidebsd_bdiscard(dev(), ALL, INDEX | owner as u64);
+        oxidebsd_bdiscard(dev, ALL, DATA | owner as u64);
+        oxidebsd_bdiscard(dev, ALL, INDEX | owner as u64);
     }
 }
 
 /// `fsync(2)` of file `owner`: its data, its index blocks, then its inode-file block.
-pub fn flush_file(owner: u32) {
+pub fn flush_file(dev: u64, owner: u32) {
     let first = owner - owner % INODES_PER_BLOCK;
     // SAFETY: FFI calls to kernel-exported functions.
     unsafe {
-        oxidebsd_bflush(dev(), ALL, DATA | owner as u64);
-        oxidebsd_bflush(dev(), ALL, INDEX | owner as u64);
-        oxidebsd_bflush(dev(), ALL, INODES | first as u64);
+        oxidebsd_bflush(dev, ALL, DATA | owner as u64);
+        oxidebsd_bflush(dev, ALL, INDEX | owner as u64);
+        oxidebsd_bflush(dev, ALL, INODES | first as u64);
     }
 }
 
 /// Writes every dirty block: data first, then index blocks, then inode-file blocks, then the rest.
-pub fn flush_all() {
+pub fn flush_all(dev: u64) {
     // SAFETY: FFI calls to kernel-exported functions.
     unsafe {
-        oxidebsd_bflush(dev(), KIND, DATA);
-        oxidebsd_bflush(dev(), KIND, INDEX);
-        oxidebsd_bflush(dev(), KIND, INODES);
-        oxidebsd_bflush(dev(), 0, 0);
+        oxidebsd_bflush(dev, KIND, DATA);
+        oxidebsd_bflush(dev, KIND, INDEX);
+        oxidebsd_bflush(dev, KIND, INODES);
+        oxidebsd_bflush(dev, 0, 0);
     }
 }
 
 /// Forgets every cached block (dirty ones included): the disk changed underneath the cache.
-pub fn invalidate_all() {
+pub fn invalidate_all(dev: u64) {
     // SAFETY: FFI call to a kernel-exported function.
-    unsafe { oxidebsd_binvalall(dev()) };
+    unsafe { oxidebsd_binvalall(dev) };
 }

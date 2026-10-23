@@ -1,7 +1,7 @@
 //! oxfs as a VFS type (OxideBSD-doc `VFS.md` §4-§5). A vnode's file ID is the inode number; the
 //! kernel does path lookup and the system calls, and these are the operations it asks for.
 
-use alloc::vec::Vec;
+use alloc::boxed::Box;
 use core::ptr;
 
 use oxfs_format::*;
@@ -16,16 +16,10 @@ const VFS_EFAULT: i32 = 14;
 const VFS_ENOTDIR: i32 = 20;
 const VFS_EISDIR: i32 = 21;
 const VFS_EINVAL: i32 = 22;
+const VFS_ENOMEM: i32 = 12;
 const VFS_ENOSPC: i32 = 28;
 const VFS_EMLINK: i32 = 31;
 const VFS_ENOTEMPTY: i32 = 39;
-
-/// What a mount of oxfs is. The kernel allocates it zeroed with the mount.
-#[repr(C)]
-struct OxMount {
-    /// The inode the mount's root is.
-    root: u32,
-}
 
 macro_rules! vfsconf {
     ($name:ident, $str:literal, $ops:ident, $flags:expr) => {
@@ -34,7 +28,7 @@ macro_rules! vfsconf {
             name_len: $str.len(),
             ops: &$ops,
             vops: &OXFS_VOPS,
-            mnt_data_size: core::mem::size_of::<OxMount>(),
+            mnt_data_size: core::mem::size_of::<*mut Fs>(),
             v_data_size: 0,
             flags: $flags,
         };
@@ -81,39 +75,56 @@ static OXFS_VOPS: VopVector = VopVector {
     ..VopVector::DEFAULT
 };
 
-/// Every mount of these types, for `inode_busy`.
-static mut MOUNTS: Vec<*mut Mount> = Vec::new();
-
-fn our_mounts() -> &'static mut Vec<*mut Mount> {
-    // SAFETY: under the VFS's giant lock, as every call into this module.
-    unsafe { &mut *ptr::addr_of_mut!(MOUNTS) }
-}
-
 /// The root mount (the disk's), once mounted.
 static mut ROOT_MOUNT: *mut Mount = ptr::null_mut();
 
 pub(crate) fn root_mount() -> *mut Mount {
-    // SAFETY: written once, at mount, before any process runs.
+    // SAFETY: written at the root's mount and unmount, under the giant lock.
     unsafe { *ptr::addr_of!(ROOT_MOUNT) }
 }
 
-/// Whether a vnode of inode `n`, on any mount, is in use: a file's storage stays until none is.
-pub(crate) fn inode_busy(n: u32) -> bool {
+fn set_root_mount(mp: *mut Mount) {
+    // SAFETY: as `root_mount`.
+    unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = mp };
+}
+
+/// Whether a vnode of inode `n` on mount `mp` is in use: a file's storage stays until none is.
+pub(crate) fn inode_busy(mp: *mut Mount, n: u32) -> bool {
     // SAFETY: kernel export, called as declared.
-    our_mounts().iter().any(|&mp| unsafe { oxidebsd_vfs_fileid_busy(mp, n as u64) } != 0)
+    unsafe { oxidebsd_vfs_fileid_busy(mp, n as u64) != 0 }
 }
 
-/// Inode `n`'s storage is gone and its number free: no mount may keep a vnode of it.
-pub(crate) fn inode_freed(n: u32) {
-    for &mp in our_mounts().iter() {
-        // SAFETY: kernel export.
-        unsafe { oxidebsd_vfs_recycle(mp, n as u64) };
+/// Inode `n`'s storage on mount `mp` is gone and its number free: no vnode of it may stay.
+pub(crate) fn inode_freed(mp: *mut Mount, n: u32) {
+    // SAFETY: kernel export.
+    unsafe { oxidebsd_vfs_recycle(mp, n as u64) };
+}
+
+/// Mount `mp`'s file system.
+pub(crate) fn fs(mp: *mut Mount) -> &'static mut Fs {
+    // SAFETY: `mnt_data` holds the pointer `oxfs_vfs_mount` stored, live until unmount; every call
+    // into this module holds the giant lock.
+    unsafe { &mut **((*mp).mnt_data as *mut *mut Fs) }
+}
+
+/// The file system vnode `vp` is on.
+fn fs_of(vp: *mut Vnode) -> &'static mut Fs {
+    fs(mount_of(vp))
+}
+
+/// `Box::new` that fails instead of ending the call.
+fn try_box<T>(v: T) -> Option<Box<T>> {
+    let layout = core::alloc::Layout::new::<T>();
+    // SAFETY: `T` is never zero-sized here; a non-null result is fresh memory for one `T`, which
+    // the `Box` then owns, as `Box::new` would.
+    unsafe {
+        let p = alloc::alloc::alloc(layout) as *mut T;
+        if p.is_null() {
+            return None;
+        }
+        p.write(v);
+        Some(Box::from_raw(p))
     }
-}
-
-fn oxmount(mp: *mut Mount) -> &'static mut OxMount {
-    // SAFETY: the kernel allocated `mnt_data` with `size_of::<OxMount>()` bytes for this type.
-    unsafe { &mut *((*mp).mnt_data as *mut OxMount) }
 }
 
 fn inode_of(vp: *mut Vnode) -> u32 {
@@ -141,16 +152,11 @@ fn err(e: OxfsError) -> i32 {
     (-errno_for(e)) as i32
 }
 
-fn registered(mp: *mut Mount) {
-    our_mounts().push(mp);
-}
-
 // --- vfsops ----------------------------------------------------------------------------------
 
 /// Mounts the oxfs on the device the kernel hands it (`MountArgs::dev`): the superblock, the
-/// layout, the free counts. One at a time (oxfs has one partition's worth of global state), as the
-/// root; unmounted, another partition may be mounted (the root switch, RAM_FLOOR.md §5.1). With
-/// `MNT_UPDATE`, changes the root between read-only and read-write (`remount_root`).
+/// layout, the free counts, into a new `Fs` of its own. With `MNT_UPDATE`, changes a mount between
+/// read-only and read-write (`Fs::remount`).
 extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
     // SAFETY: the kernel filled the mount's flags.
     let flags = unsafe { (*mp).mnt_flag };
@@ -159,89 +165,102 @@ extern "C" fn oxfs_vfs_mount(mp: *mut Mount, args: *const MountArgs) -> i32 {
         return VFS_EINVAL;
     }
     if flags & MNT_UPDATE != 0 {
-        return match remount_root(flags & MNT_RDONLY != 0) {
+        return match fs(mp).remount(flags & MNT_RDONLY != 0) {
             0 => 0,
             e => (-e) as i32,
         };
     }
-    if !root_mount().is_null() {
-        return VFS_EINVAL;
-    }
-    // The root file system is the disk's oxfs partition, made by newfs_oxfs(8) or installed from
-    // a system image; the kernel never formats one (`OxideBSD-doc/RAM_FLOOR.md` §4.2.1).
+    let root = flags & MNT_ROOTFS != 0;
+    // A file system is made by newfs_oxfs(8) or installed from a system image; the kernel never
+    // formats one (`OxideBSD-doc/RAM_FLOOR.md` §4.2.1).
     // SAFETY: the kernel's arguments.
     let dev = unsafe { (*args).dev };
     if dev == vfs_if::NODEV {
-        log("[oxfs] no root file system: no disk (and the memory disk is empty)\n");
+        log(if root {
+            "[oxfs] no root file system: no disk (and the memory disk is empty)\n"
+        } else {
+            "[oxfs] mount: no device\n"
+        });
         return VFS_ENXIO;
     }
+    let Some(b) = try_box(Fs::new(dev, mp, root)) else { return VFS_ENOMEM };
+    let p = Box::into_raw(b);
+    // SAFETY: `mnt_data` is the size of the pointer (`OXFS_VFSCONF`).
+    unsafe { *((*mp).mnt_data as *mut *mut Fs) = p };
+    let fs = fs(mp);
     buf::attach(dev);
-    if !mount_from_disk() {
-        log("[oxfs] no root file system: the root partition holds no oxfs of this version (make one with newfs_oxfs(8), or install a system image)\n");
-        buf::detach();
-        forget_mounted();
+    if !fs.mount_from_disk() {
+        log(if root {
+            "[oxfs] no root file system: the root partition holds no oxfs of this version (make one with newfs_oxfs(8), or install a system image)\n"
+        } else {
+            "[oxfs] mount: the device holds no oxfs of this version\n"
+        });
+        buf::detach(dev);
+        // SAFETY: made above, never shared.
+        unsafe {
+            drop(Box::from_raw(p));
+            *((*mp).mnt_data as *mut *mut Fs) = ptr::null_mut();
+        }
         return VFS_EINVAL;
     }
-    // SAFETY: before any process runs; nothing else reads it yet.
-    unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = mp };
-    *oxmount(mp) = OxMount { root: ROOT_INODE };
-    registered(mp);
-    // Mounting leaves PERSISTENCE_READY false through its own reads (see that flag's own doc
-    // comment) -- flipped here, once, right before real syscalls become reachable, so every write
-    // a running process makes from this point on is persisted immediately.
-    set_persistence_ready(true);
-    buf::set_write_through(true);
     let rdonly = flags & MNT_RDONLY != 0;
-    set_root_rdonly(rdonly);
+    fs.set_rdonly(rdonly);
     if rdonly {
-        log("[oxfs] root mounted read-only\n");
+        log(if root { "[oxfs] root mounted read-only\n" } else { "[oxfs] mounted read-only\n" });
     } else {
-        // Mounted: not clean on the disk until an orderly shutdown says so (§3.4.1).
-        set_clean(false);
-        write_superblock();
-        sweep_unnamed_inodes();
+        // Mounted: not clean on the disk until an unmount says so (§3.4.1).
+        fs.clean = false;
+        fs.write_superblock();
+        fs.sweep_unnamed_inodes();
     }
-    // `/dev` is devfs's mount point; the kernel mounts devfs there.
-    ensure_dir(ROOT_INODE, b"dev");
+    if root {
+        set_root_mount(mp);
+        // `/dev` is devfs's mount point; the kernel mounts devfs there.
+        fs.ensure_dir(ROOT_INODE, b"dev");
+    }
     0
 }
 
-/// The disk's at shutdown (`vfs_unmountall`): everything delayed is written, and the file system
-/// marked clean (§3.4.1). Not called on a panic or a fault.
+/// An unmount, or the root's at shutdown (`vfs_unmountall`): everything delayed is written, and
+/// the file system marked clean (§3.4.1). Not called on a panic or a fault.
 extern "C" fn oxfs_vfs_unmount(mp: *mut Mount, _flags: u64) -> i32 {
-    our_mounts().retain(|&m| m != mp);
-    if !root_rdonly() {
-        buf::flush_all();
-        set_clean(true);
-        write_superblock();
+    let fs = fs(mp);
+    if !fs.rdonly {
+        buf::flush_all(fs.dev);
+        fs.clean = true;
+        fs.write_superblock();
         log("[oxfs] filesystem synced and marked clean\n");
     }
-    // Everything of it goes: another partition may be mounted next (the root switch).
-    buf::detach();
-    forget_mounted();
-    // SAFETY: single-core, serialized; the kernel has reclaimed every vnode of `mp`.
-    unsafe { *ptr::addr_of_mut!(ROOT_MOUNT) = ptr::null_mut() };
+    buf::detach(fs.dev);
+    if root_mount() == mp {
+        set_root_mount(ptr::null_mut());
+    }
+    // SAFETY: the kernel has reclaimed every vnode of `mp`; nothing refers to its `Fs` now.
+    unsafe {
+        drop(Box::from_raw(*((*mp).mnt_data as *mut *mut Fs)));
+        *((*mp).mnt_data as *mut *mut Fs) = ptr::null_mut();
+    }
     0
 }
 
 extern "C" fn oxfs_vfs_root(mp: *mut Mount, vpp: *mut *mut Vnode) -> i32 {
-    oxfs_vfs_vget(mp, oxmount(mp).root as u64, vpp)
+    oxfs_vfs_vget(mp, ROOT_INODE as u64, vpp)
 }
 
-/// The disk's counts.
-extern "C" fn oxfs_vfs_statfs(_mp: *mut Mount, sbp: *mut Statfs) -> i32 {
-    let (blocks_lo, blocks_hi) = (0, disk_blocks());
-    let free_blocks: u64 = (0..bitmap_blocks()).map(|i| *free_count(i) as u64).sum();
+/// The file system's counts.
+extern "C" fn oxfs_vfs_statfs(mp: *mut Mount, sbp: *mut Statfs) -> i32 {
+    let fs = fs(mp);
+    let free_blocks: u64 = fs.free_counts.iter().map(|&c| c as u64).sum();
     // The table grows into free blocks, so each free block is `INODES_PER_BLOCK` inodes to come
     // (as ZFS reports it): the count is an estimate that shrinks as data fills the pool.
-    let table = inode_table();
+    let table = fs.inodes;
     let free_inodes = table.free as u64 + free_blocks * INODES_PER_BLOCK as u64;
     let used_inodes = (table.count - table.free) as u64;
     // SAFETY: the kernel passes its own record.
     let sb = unsafe { &mut *sbp };
     sb.f_bsize = BLOCK_SIZE as u64;
     sb.f_iosize = BLOCK_SIZE as u64;
-    sb.f_blocks = (blocks_hi - blocks_lo) as u64;
+    sb.f_blocks = fs.data_blocks as u64;
     sb.f_bfree = free_blocks;
     sb.f_bavail = free_blocks;
     sb.f_files = used_inodes + free_inodes;
@@ -251,8 +270,8 @@ extern "C" fn oxfs_vfs_statfs(_mp: *mut Mount, sbp: *mut Statfs) -> i32 {
     0
 }
 
-extern "C" fn oxfs_vfs_sync(_mp: *mut Mount, _waitfor: i32) -> i32 {
-    buf::flush_all();
+extern "C" fn oxfs_vfs_sync(mp: *mut Mount, _waitfor: i32) -> i32 {
+    buf::flush_all(fs(mp).dev);
     0
 }
 
@@ -277,7 +296,7 @@ extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -
             *vpp = vp;
             return 0;
         }
-        let inode = read_inode(fileid as u32);
+        let inode = fs(mp).read_inode(fileid as u32);
         if inode.kind == InodeKind::Free {
             return VFS_EIO;
         }
@@ -289,7 +308,7 @@ extern "C" fn oxfs_vfs_vget(mp: *mut Mount, fileid: u64, vpp: *mut *mut Vnode) -
         if inode.kind == InodeKind::Device {
             (*vp).v_rdev = inode.rdev as u64;
         }
-        if fileid == oxmount(mp).root as u64 {
+        if fileid == ROOT_INODE as u64 {
             (*vp).v_flag |= VV_ROOT;
         }
         oxidebsd_vfs_hash_insert(vp);
@@ -305,14 +324,15 @@ fn vget(mp: *mut Mount, n: u32, vpp: *mut *mut Vnode) -> i32 {
 // --- Names ---------------------------------------------------------------------------------------
 
 extern "C" fn oxfs_vop_lookup(dvp: *mut Vnode, cnp: *const ComponentName, vpp: *mut *mut Vnode) -> i32 {
+    let fs = fs_of(dvp);
     let dir = inode_of(dvp);
-    if read_inode(dir).kind != InodeKind::Dir {
+    if fs.read_inode(dir).kind != InodeKind::Dir {
         return VFS_ENOTDIR;
     }
     // SAFETY: the kernel's component.
     let dotdot = unsafe { (*cnp).cn_flags } & ISDOTDOT != 0;
     let name: &[u8] = if dotdot { b".." } else { name_of(cnp) };
-    match dir_lookup(dir, name) {
+    match fs.dir_lookup(dir, name) {
         Some(n) => vget(mount_of(dvp), n, vpp),
         None => VFS_ENOENT,
     }
@@ -328,23 +348,24 @@ fn new_node(
     fill: impl FnOnce(u32, &mut Inode) -> Result<(), i32>,
     vpp: *mut *mut Vnode,
 ) -> i32 {
+    let fs = fs_of(dvp);
     let parent = inode_of(dvp);
     let cred = cred_of(cnp);
-    let Some(n) = alloc_inode_in(parent) else { return VFS_ENOSPC };
+    let Some(n) = fs.alloc_inode() else { return VFS_ENOSPC };
     let mut inode = fresh_inode(kind);
     inode.uid = cred.cr_uid;
-    inode.gid = new_entry_gid(parent);
+    inode.gid = fs.new_entry_gid(parent);
     inode.mode = mode as u16;
     if let Err(e) = fill(n, &mut inode) {
         return e;
     }
-    write_inode(n, inode);
+    fs.write_inode(n, inode);
     if kind == InodeKind::Dir
-        && (dir_insert(n, b".", n).is_err() || dir_insert(n, b"..", parent).is_err())
+        && (fs.dir_insert(n, b".", n).is_err() || fs.dir_insert(n, b"..", parent).is_err())
     {
         return VFS_ENOSPC;
     }
-    if let Err(e) = dir_insert(parent, name_of(cnp), n) {
+    if let Err(e) = fs.dir_insert(parent, name_of(cnp), n) {
         return err(e);
     }
     vget(mount_of(dvp), n, vpp)
@@ -390,62 +411,66 @@ extern "C" fn oxfs_vop_symlink(
     target: *const u8,
     target_len: usize,
 ) -> i32 {
+    let fs = fs_of(dvp);
     // SAFETY: the kernel's buffer, live for the call.
     let target = unsafe { core::slice::from_raw_parts(target, target_len) };
     let parent = inode_of(dvp);
     let cred = cred_of(cnp);
-    let Some(n) = alloc_inode_in(parent) else { return VFS_ENOSPC };
+    let Some(n) = fs.alloc_inode() else { return VFS_ENOSPC };
     let mut inode = fresh_inode(InodeKind::Symlink);
     inode.uid = cred.cr_uid;
-    inode.gid = new_entry_gid(parent);
-    write_inode(n, inode);
-    if !write_inode_data(n, target) {
+    inode.gid = fs.new_entry_gid(parent);
+    fs.write_inode(n, inode);
+    if !fs.write_inode_data(n, target) {
         return VFS_EIO;
     }
-    if let Err(e) = dir_insert(parent, name_of(cnp), n) {
+    if let Err(e) = fs.dir_insert(parent, name_of(cnp), n) {
         return err(e);
     }
     vget(mount_of(dvp), n, vpp)
 }
 
 extern "C" fn oxfs_vop_remove(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    let fs = fs_of(dvp);
     let (parent, target) = (inode_of(dvp), inode_of(vp));
-    if let Err(e) = dir_remove(parent, name_of(cnp)) {
+    if let Err(e) = fs.dir_remove(parent, name_of(cnp)) {
         return err(e);
     }
-    let mut inode = read_inode(target);
+    let mut inode = fs.read_inode(target);
     inode.nlink = inode.nlink.saturating_sub(1);
-    write_inode(target, inode);
-    maybe_release(target);
+    fs.write_inode(target, inode);
+    fs.maybe_release(target);
     0
 }
 
 extern "C" fn oxfs_vop_rmdir(dvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    let fs = fs_of(dvp);
     let (parent, target) = (inode_of(dvp), inode_of(vp));
-    if dir_entry_count(target) > 2 {
+    if fs.dir_entry_count(target) > 2 {
         return VFS_ENOTEMPTY;
     }
-    if let Err(e) = dir_remove(parent, name_of(cnp)) {
+    if let Err(e) = fs.dir_remove(parent, name_of(cnp)) {
         return err(e);
     }
-    let mut dir = read_inode(target);
+    let mut dir = fs.read_inode(target);
     dir.nlink = 0;
-    write_inode(target, dir);
-    maybe_release(target);
+    fs.write_inode(target, dir);
+    fs.maybe_release(target);
     0
 }
 
 extern "C" fn oxfs_vop_link(tdvp: *mut Vnode, vp: *mut Vnode, cnp: *const ComponentName) -> i32 {
+    let fs = fs_of(tdvp);
     let (parent, n) = (inode_of(tdvp), inode_of(vp));
-    let mut inode = read_inode(n);
+    let mut inode = fs.read_inode(n);
     if inode.nlink == u16::MAX {
         return VFS_EMLINK;
     }
-    if let Err(e) = dir_insert(parent, name_of(cnp), n) {
+    if let Err(e) = fs.dir_insert(parent, name_of(cnp), n) {
         return err(e);
     }
     inode.nlink += 1;
-    write_inode(n, inode);
+    fs.write_inode(n, inode);
     0
 }
 
@@ -457,54 +482,56 @@ extern "C" fn oxfs_vop_rename(
     tvp: *mut Vnode,
     tcnp: *const ComponentName,
 ) -> i32 {
+    let fs = fs_of(fdvp);
     let (old_parent, target, new_parent) = (inode_of(fdvp), inode_of(fvp), inode_of(tdvp));
     let (old_leaf, new_leaf) = (name_of(fcnp), name_of(tcnp));
-    let is_dir = read_inode(target).kind == InodeKind::Dir;
+    let is_dir = fs.read_inode(target).kind == InodeKind::Dir;
     let existing = if tvp.is_null() { None } else { Some(inode_of(tvp)) };
     if let Some(existing) = existing {
-        let existing_is_dir = read_inode(existing).kind == InodeKind::Dir;
-        if existing_is_dir && dir_entry_count(existing) > 2 {
+        let existing_is_dir = fs.read_inode(existing).kind == InodeKind::Dir;
+        if existing_is_dir && fs.dir_entry_count(existing) > 2 {
             return VFS_ENOTEMPTY;
         }
-        let _ = dir_remove(new_parent, new_leaf);
-        let mut replaced = read_inode(existing);
+        let _ = fs.dir_remove(new_parent, new_leaf);
+        let mut replaced = fs.read_inode(existing);
         replaced.nlink = if existing_is_dir { 0 } else { replaced.nlink.saturating_sub(1) };
-        write_inode(existing, replaced);
+        fs.write_inode(existing, replaced);
     }
-    if dir_remove(old_parent, old_leaf).is_err() {
+    if fs.dir_remove(old_parent, old_leaf).is_err() {
         return VFS_EIO;
     }
-    if let Err(e) = dir_insert(new_parent, new_leaf, target) {
-        let _ = dir_insert(old_parent, old_leaf, target);
+    if let Err(e) = fs.dir_insert(new_parent, new_leaf, target) {
+        let _ = fs.dir_insert(old_parent, old_leaf, target);
         return err(e);
     }
     if is_dir && new_parent != old_parent {
-        let _ = dir_remove(target, b"..");
-        if let Err(e) = dir_insert(target, b"..", new_parent) {
+        let _ = fs.dir_remove(target, b"..");
+        if let Err(e) = fs.dir_insert(target, b"..", new_parent) {
             return err(e);
         }
     }
     if let Some(existing) = existing {
-        maybe_release(existing);
+        fs.maybe_release(existing);
     }
     0
 }
 
 extern "C" fn oxfs_vop_readdir(vp: *mut Vnode, uio: u64, _cred: *const Ucred, eofflag: *mut i32) -> i64 {
+    let fs = fs_of(vp);
     let dir = inode_of(vp);
     // SAFETY: kernel exports, called as declared.
     let mut cursor = unsafe { oxidebsd_uio_offset(uio) } as usize;
     let mut record = [0u8; dirent_reclen(NAME_MAX)];
     let mut written = 0i64;
     let mut eof = true;
-    while let Some((child, name, name_len)) = dir_nth_used_record(dir, cursor) {
+    while let Some((child, name, name_len)) = fs.dir_nth_used_record(dir, cursor) {
         let name = &name[..name_len as usize];
         let reclen = dirent_reclen(name.len());
         if uio_resid(uio) < reclen {
             eof = false;
             break;
         }
-        let c = read_inode(child);
+        let c = fs.read_inode(child);
         let dtype = vtype_to_dt(vtype_of(c.kind, c.device_char));
         dirent_encode(&mut record, child as u64, (cursor + 1) as i64, dtype, name);
         match uio_out(uio, &record[..reclen]) {
@@ -527,9 +554,10 @@ extern "C" fn oxfs_vop_readdir(vp: *mut Vnode, uio: u64, _cred: *const Ucred, eo
 }
 
 extern "C" fn oxfs_vop_readlink(vp: *mut Vnode, uio: u64, _cred: *const Ucred) -> i64 {
+    let fs = fs_of(vp);
     let mut target = [0u8; OXFS_PATH_MAX];
     let cap = uio_resid(uio).min(target.len());
-    let n = read_inode_at(inode_of(vp), 0, &mut target[..cap]);
+    let n = fs.read_inode_at(inode_of(vp), 0, &mut target[..cap]);
     match uio_out(uio, &target[..n]) {
         Ok(n) => n as i64,
         Err(e) => e,
@@ -539,9 +567,10 @@ extern "C" fn oxfs_vop_readlink(vp: *mut Vnode, uio: u64, _cred: *const Ucred) -
 // --- Attributes and contents --------------------------------------------------------------------
 
 extern "C" fn oxfs_vop_getattr(vp: *mut Vnode, vap: *mut Vattr) -> i32 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
-    let st = inode_stat(n);
-    let inode = read_inode(n);
+    let st = fs.inode_stat(n);
+    let inode = fs.read_inode(n);
     let t = |sec: i64| Timespec { tv_sec: sec, tv_nsec: 0 };
     // SAFETY: the kernel's record.
     let va = unsafe { &mut *vap };
@@ -571,19 +600,20 @@ extern "C" fn oxfs_vop_getattr(vp: *mut Vnode, vap: *mut Vattr) -> i32 {
 
 /// Applies the fields of `vap` that aren't `VNOVAL`; the kernel checked permission.
 extern "C" fn oxfs_vop_setattr(vp: *mut Vnode, vap: *const Vattr, _cred: *const Ucred) -> i32 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
     let va = vattr(vap);
     // SAFETY: kernel export.
     let now = unsafe { oxidebsd_unix_time() };
     if va.va_size != VNOVAL {
-        if read_inode(n).kind == InodeKind::Dir {
+        if fs.read_inode(n).kind == InodeKind::Dir {
             return VFS_EISDIR;
         }
-        if !resize_inode_data(n, va.va_size as usize) {
+        if !fs.resize_inode_data(n, va.va_size as usize) {
             return VFS_ENOSPC;
         }
     }
-    let mut inode = read_inode(n);
+    let mut inode = fs.read_inode(n);
     let mut changed = false;
     if va.va_mode != VNOVAL as u32 {
         inode.mode = (va.va_mode & 0o7777) as u16;
@@ -607,19 +637,20 @@ extern "C" fn oxfs_vop_setattr(vp: *mut Vnode, vap: *const Vattr, _cred: *const 
     }
     if changed {
         inode.ctime = now;
-        write_inode(n, inode);
+        fs.write_inode(n, inode);
     }
     0
 }
 
 extern "C" fn oxfs_vop_read(vp: *mut Vnode, uio: u64, _ioflag: u32, _cred: *const Ucred) -> i64 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
     // SAFETY: kernel export.
     let offset = unsafe { oxidebsd_uio_offset(uio) } as usize;
-    match read_inode_uio(n, offset, uio) {
+    match fs.read_inode_uio(n, offset, uio) {
         Ok(moved) => {
             if moved > 0 {
-                touch_atime(n);
+                fs.touch_atime(n);
             }
             moved as i64
         }
@@ -628,10 +659,11 @@ extern "C" fn oxfs_vop_read(vp: *mut Vnode, uio: u64, _ioflag: u32, _cred: *cons
 }
 
 extern "C" fn oxfs_vop_write(vp: *mut Vnode, uio: u64, ioflag: u32, cred: *const Ucred) -> i64 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
     if ioflag & IO_APPEND != 0 {
         // SAFETY: kernel export.
-        unsafe { oxidebsd_uio_set_offset(uio, read_inode(n).size) };
+        unsafe { oxidebsd_uio_set_offset(uio, fs.read_inode(n).size) };
     }
     if uio_resid(uio) == 0 {
         return 0;
@@ -640,46 +672,50 @@ extern "C" fn oxfs_vop_write(vp: *mut Vnode, uio: u64, ioflag: u32, cred: *const
     // the BSDs do it), so a writable set-ID program can't be swapped for another.
     // SAFETY: the kernel's credentials.
     if unsafe { (*cred).cr_uid } != 0 {
-        let mut inode = read_inode(n);
+        let mut inode = fs.read_inode(n);
         if inode.mode & SETID_BITS != 0 {
             inode.mode &= !SETID_BITS;
-            write_inode(n, inode);
+            fs.write_inode(n, inode);
         }
     }
     // SAFETY: kernel export.
     let offset = unsafe { oxidebsd_uio_offset(uio) } as usize;
-    uio_ret(write_inode_uio(n, offset, uio))
+    uio_ret(fs.write_inode_uio(n, offset, uio))
 }
 
 extern "C" fn oxfs_vop_fsync(vp: *mut Vnode, _waitfor: i32, _data_only: u32) -> i32 {
-    sync_file(inode_of(vp));
+    let fs = fs_of(vp);
+    fs.sync_file(inode_of(vp));
     0
 }
 
 /// The last use of the file went: an unlinked file's storage goes now.
 extern "C" fn oxfs_vop_inactive(vp: *mut Vnode) -> i32 {
-    maybe_release(inode_of(vp));
+    let fs = fs_of(vp);
+    fs.maybe_release(inode_of(vp));
     0
 }
 
 extern "C" fn oxfs_vop_allocate(vp: *mut Vnode, offset: u64, len: u64) -> i32 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
     let target = offset.saturating_add(len) as usize;
-    if read_inode(n).size as usize >= target {
+    if fs.read_inode(n).size as usize >= target {
         return 0;
     }
-    if resize_inode_data(n, target) { 0 } else { VFS_ENOSPC }
+    if fs.resize_inode_data(n, target) { 0 } else { VFS_ENOSPC }
 }
 
 /// File block `lblkno` to its sector on the disk, and how many blocks after it follow contiguously
 /// (`DEMANDPAGE.md` §5.1): the page cache fills mapped pages from the device with it. A block past
 /// the end has none (a hole).
 extern "C" fn oxfs_vop_bmap(vp: *mut Vnode, lblkno: u64, bnp: *mut u64, runp: *mut u64) -> i32 {
+    let fs = fs_of(vp);
     let n = inode_of(vp);
-    let record = read_inode(n);
+    let record = fs.read_inode(n);
     let device = |index: usize| -> Option<u64> {
-        let block = inode_block_at(&record, index)?;
-        Some(data_block_offset() as u64 + block as u64)
+        let block = fs.inode_block_at(&record, index)?;
+        Some(fs.data_block_offset as u64 + block as u64)
     };
     let (bn, run) = match device(lblkno as usize) {
         Some(first) => {
