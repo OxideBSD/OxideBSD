@@ -1,5 +1,7 @@
 //! OxideBSD's shell core: the POSIX Shell Command Language, shared by `/sbin/init_sh` (with the
-//! init dialect) and `/bin/sh` (with the interactive shell). See `INIT_SH.md` in OxideBSD-doc.
+//! init dialect) and `/bin/sh` (with the interactive shell), and embedded by programs that take a
+//! shell script as their configuration (devd: `Shell::add_builtin`, `Shell::source`). See
+//! `INIT_SH.md` in OxideBSD-doc.
 
 pub mod arith;
 pub mod ast;
@@ -21,7 +23,7 @@ mod test;
 mod unparse;
 
 pub use parse::{ParseError, parse};
-pub use shell::{Interactive, Shell, main, main_with};
+pub use shell::{AddedBuiltin, Exec, Flow, Interactive, Shell, main, main_with};
 
 /// Whether this build accepts the init dialect (INIT_SH.md §4) -- `/sbin/init_sh` only.
 pub const INIT_DIALECT: bool = cfg!(feature = "init-dialect");

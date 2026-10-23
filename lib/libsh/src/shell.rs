@@ -84,6 +84,10 @@ pub enum Flow {
 
 pub type Exec = Result<i32, Flow>;
 
+/// A built-in a program embedding the shell adds (`Shell::add_builtin`): called with the shell
+/// and the command's fields, the name first, like the shell's own.
+pub type AddedBuiltin = Rc<dyn Fn(&mut Shell, &[String]) -> Exec>;
+
 /// Signals caught by a `trap` action, not yet run.
 pub(crate) static PENDING_SIGNALS: AtomicU64 = AtomicU64::new(0);
 
@@ -137,6 +141,8 @@ pub struct Shell {
     pub job_order: Vec<usize>,
     /// The command line being run, which names any job it starts.
     pub current_text: String,
+    /// Built-ins the embedding program added, by name (`add_builtin`).
+    added: HashMap<String, AddedBuiltin>,
 }
 
 impl Shell {
@@ -168,6 +174,7 @@ impl Shell {
             jobs: Vec::new(),
             job_order: Vec::new(),
             current_text: String::new(),
+            added: HashMap::new(),
         };
         for (k, v) in std::env::vars_os() {
             let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else { continue };
@@ -245,6 +252,48 @@ impl Shell {
     /// Prints `prog: message` to standard error.
     pub fn error(&self, message: &str) {
         let _ = sys::write_all(2, format!("{}: {message}\n", self.arg0).as_bytes());
+    }
+
+    /// Adds regular built-in `name` (XCU 2.14's regular kind: found after functions, its
+    /// assignments not kept), for a program that embeds the shell: devd's `on` (OxideBSD-doc
+    /// `DEVD.md` §5.2). It replaces a regular built-in of that name, the shell's own or an added
+    /// one; a special built-in's name, or one that isn't a shell name, is refused.
+    pub fn add_builtin(&mut self, name: &str, f: impl Fn(&mut Shell, &[String]) -> Exec + 'static) -> Result<(), String> {
+        if crate::builtins::lookup_special(name).is_some() {
+            return Err(format!("{name}: a special built-in"));
+        }
+        if name.is_empty() || name.contains(|c: char| c.is_whitespace() || "|&;<>()$`\\\"'=/".contains(c)) {
+            return Err(format!("{name}: not a built-in's name"));
+        }
+        self.added.insert(name.to_string(), Rc::new(f));
+        Ok(())
+    }
+
+    /// The added built-in `name`, if there is one.
+    pub(crate) fn added_builtin(&self, name: &str) -> Option<AddedBuiltin> {
+        self.added.get(name).cloned()
+    }
+
+    /// The added built-ins' names, for completion.
+    pub(crate) fn added_names(&self) -> impl Iterator<Item = &String> {
+        self.added.keys()
+    }
+
+    /// Runs `source` in this shell as `.` runs a file: its functions and variables stay, `return`
+    /// ends it, and the `EXIT` trap doesn't run (the caller keeps the shell). A syntax error runs
+    /// none of it and is returned, with its line, for the caller to report.
+    pub fn source(&mut self, source: &str) -> Result<Exec, crate::ParseError> {
+        let list = crate::parse(source)?;
+        if self.opts.noexec {
+            return Ok(Ok(0));
+        }
+        self.return_depth += 1;
+        let r = self.run_list(&list);
+        self.return_depth -= 1;
+        Ok(match r {
+            Err(Flow::Return(s)) => Ok(s),
+            other => other,
+        })
     }
 
     /// Runs a complete script. Parse errors are status 2.

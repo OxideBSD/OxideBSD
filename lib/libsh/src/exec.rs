@@ -467,6 +467,9 @@ impl Shell {
             return self.with_temp_assigns(&assigns, &sc.redirects, |sh| sh.call_function(&body, &fields));
         }
 
+        if let Some(b) = self.added_builtin(name) {
+            return self.with_temp_assigns(&assigns, &sc.redirects, |sh| b(sh, &fields));
+        }
         if let Some(b) = builtins::lookup_regular(name) {
             return self.with_temp_assigns(&assigns, &sc.redirects, |sh| b(sh, &fields));
         }
@@ -787,7 +790,7 @@ impl Shell {
             Some("special shell builtin")
         } else if self.functions.contains_key(name) {
             Some("function")
-        } else if builtins::lookup_regular(name).is_some() {
+        } else if self.added_builtin(name).is_some() || builtins::lookup_regular(name).is_some() {
             Some("shell builtin")
         } else {
             None
@@ -797,6 +800,9 @@ impl Shell {
     /// Runs a built-in or external command by fields, bypassing functions (`command`).
     pub(crate) fn run_fields_no_functions(&mut self, fields: &[String]) -> Exec {
         let name = fields[0].as_str();
+        if let Some(b) = self.added_builtin(name) {
+            return b(self, fields);
+        }
         let b: Option<Builtin> = builtins::lookup_special(name).or_else(|| builtins::lookup_regular(name));
         if let Some(b) = b {
             // Under `command`, a special built-in's errors don't end the shell.

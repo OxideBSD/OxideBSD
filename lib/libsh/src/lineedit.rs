@@ -659,6 +659,7 @@ fn display_name(c: &str) -> &str {
 
 fn command_candidates(sh: &Shell, prefix: &str) -> Vec<String> {
     let mut out: Vec<String> = crate::builtins::names().into_iter().filter(|n| n.starts_with(prefix)).map(String::from).collect();
+    out.extend(sh.added_names().filter(|n| n.starts_with(prefix)).cloned());
     out.extend(sh.functions.keys().filter(|n| n.starts_with(prefix)).cloned());
     for kw in ["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in"] {
         if kw.starts_with(prefix) && !prefix.is_empty() {
