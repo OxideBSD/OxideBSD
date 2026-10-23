@@ -532,6 +532,56 @@ pub(crate) fn media_check(major: u32, minor: u32) {
     attach_partitions(disk, &mut Vec::new());
 }
 
+/// `kern.disk.cd_poll`: seconds between looks for a changed disc in each idle CD drive, 0 for
+/// never (OxideBSD-doc `DEVD.md` §5.8, FreeBSD's `kern.cam.cd.poll_period`); stored directly as a
+/// boot tunable, before there's a thread to wake.
+pub(crate) static CD_POLL_SECS: AtomicU32 = AtomicU32::new(3);
+
+pub fn cd_poll() -> u32 {
+    CD_POLL_SECS.load(Ordering::Relaxed)
+}
+
+/// Sets `kern.disk.cd_poll`; `cdpoll` starts its wait over.
+pub fn set_cd_poll(secs: u32) {
+    CD_POLL_SECS.store(secs, Ordering::Relaxed);
+    crate::kern::kern_synch::wakeup(cd_poll_chan());
+}
+
+fn cd_poll_chan() -> usize {
+    &CD_POLL_SECS as *const AtomicU32 as usize
+}
+
+/// Starts `cdpoll`, the kernel thread that looks (with `taskq`, once pid 1 exists).
+pub fn start_cd_poll() {
+    if crate::kern::kern_kthread::kthread_add(cd_poll_thread, 0, "cdpoll").is_err() {
+        serial_println!("[boot] disk: no memory for cdpoll: a CD's disc is looked for only when it's opened");
+    }
+}
+
+/// `cdpoll`: every `kern.disk.cd_poll` seconds, `media_check` on each CD drive (which leaves one
+/// with anything mounted alone), so a disc put in or taken out makes its `media cd` event with
+/// nothing opening the drive.
+extern "C" fn cd_poll_thread(_: usize) {
+    use crate::kern::kern_synch::{Slept, tsleep};
+    loop {
+        let secs = cd_poll();
+        if secs == 0 {
+            tsleep(cd_poll_chan(), None);
+            continue;
+        }
+        if tsleep(cd_poll_chan(), Some(secs as u64 * crate::cpu::pit::TIMER_HZ as u64)) != Slept::TimedOut {
+            continue;
+        }
+        let drives: Vec<(u32, u32)> =
+            DISKS.lock().iter().filter(|d| d.kind == Kind::Cd && d.present).map(|d| (d.major, d.unit << 8)).collect();
+        for (major, minor) in drives {
+            // The giant lock before the driver's, as an open takes them.
+            let _giant = crate::fs::fslock::Giant::enter();
+            media_check(major, minor);
+        }
+    }
+}
+
 /// A file system mounted (`true`) or unmounted device `handle` (called once the mount list says
 /// so): a CD drive's tray is locked while anything on it is mounted.
 pub(crate) fn mounted(handle: u32, mounted: bool) {

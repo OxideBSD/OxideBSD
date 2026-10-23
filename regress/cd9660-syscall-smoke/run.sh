@@ -234,6 +234,95 @@ check "... takes eio" sh -c 'sysctl kern.disk.root_lost=eio > /dev/null && [ "$(
 sysctl kern.disk.root_lost=panic > /dev/null
 check "... and nothing else" not sysctl kern.disk.root_lost=maybe 2>/dev/null
 
+# --- devd (DEVD.md §5) ------------------------------------------------------------------------
+# devd in the foreground (-d: its log on stderr) with test rules, through a pty node's events and
+# sata0.0's pull and return, while a devd.pipe client follows the same events.
+D=/tmp/devd
+mkdir -p $D
+cat > $D/test.conf <<'EOF'
+L=/tmp/devd/log
+note() { echo "$*" >> $L; }
+on attach disk 'note attach $name $bus $kind controller=$controller' bus=ahci
+on detach disk 'note detach $name'
+on attach disk 'note not-ahci $name' bus!=ahci
+on '*' dev 'note node $verb $name' 'name=pts/*'
+on create dev 'note env $(printenv name)' 'name=pts/*'
+on destroy dev 'note second-rule; exit 3' 'name=pts/*'
+on destroy dev 'note after-exit' 'name=pts/*'
+EOF
+logged_by() { grep -q "$2" "$1"; }
+# Up to 20 s for "$@" to hold.
+waitfor() {
+	_n=0
+	while ! "$@" && [ $_n -lt 20 ]; do
+		sleep 1
+		_n=$((_n + 1))
+	done
+	"$@"
+}
+lineof() { grep -n "$2" "$1" | sed -n '1s/:.*//p'; }
+in_order() {
+	_a=$(lineof "$1" "$2")
+	_b=$(lineof "$1" "$3")
+	[ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" -lt "$_b" ] && return 0
+	sed 's/^/    /' "$1"
+	return 1
+}
+check "devd -n passes the stock devd.conf" devd -n
+check "... and the test rules" devd -n -f $D/test.conf
+printf 'on a b c\nif then :; fi\n' > $D/bad.conf
+check "... and fails a file that doesn't parse, saying where" sh -c "! devd -n -f $D/bad.conf 2> $D/bad.err && grep -q 'bad.conf: line 2' $D/bad.err"
+check "kern.disk.cd_poll is 3 s" is "$(sysctl -n kern.disk.cd_poll)" 3
+check "... takes 0" sh -c 'sysctl kern.disk.cd_poll=0 > /dev/null && [ "$(sysctl -n kern.disk.cd_poll)" = 0 ]'
+check "... and not -1" not sysctl kern.disk.cd_poll=-1 2>/dev/null
+sysctl kern.disk.cd_poll=3 > /dev/null
+devd -d -t 5 -f $D/test.conf 2> $D/stderr &
+devd_pid=$!
+check "devd starts, its socket made" waitfor [ -S /var/run/devd.pipe ]
+check "... and its pid file" waitfor sh -c "[ \"\$(cat /var/run/devd.pid 2>/dev/null)\" = $devd_pid ]"
+check "a second devd won't start" not devd -d -f $D/test.conf 2>/dev/null
+check "... nor can anything else read /dev/devctl" not /usr/tests/kern/kern-smoke devctl-dump > /dev/null 2>&1
+/usr/tests/kern/kern-smoke pty-cycle > /dev/null
+check "a pts node's events run its rules" waitfor logged_by $D/log "^second-rule"
+pts=$(sed -n 's/^node create \(pts\/[0-9]*\)$/\1/p' $D/log)
+check "... with \$verb and \$name set" in_order $D/log "^node create $pts\$" "^node destroy $pts\$"
+check "... and exported" logged_by $D/log "^env $pts\$"
+check "... each matching rule in turn, exit ending them" sh -c "grep -q ^second-rule $D/log && ! grep -q ^after-exit\$ $D/log"
+check "... the status logged" logged_by $D/stderr "exited 3 for \`destroy dev name=$pts"
+/usr/tests/kern/kern-smoke devd-pipe > $D/pipe &
+client=$!
+check "a devd.pipe client connects" waitfor logged_by $D/pipe "^connected"
+sysctl debug.disk.unplug=sata0.0 > /dev/null
+wait $client
+check "devd ran sata0.0's detach rule, then its attach rule" waitfor in_order $D/log "^detach sata0.0\$" "^attach sata0.0 ahci disk controller=0\$"
+check "... and no rule its conditions exclude" not grep -q "^not-ahci" $D/log
+check "the client got the pull and the return, in order" in_order $D/pipe "^destroy dev name=gpt/satatest " "^detach disk name=sata0.0 bus=ahci\$"
+check "... in order" in_order $D/pipe "^detach disk name=sata0.0 " "^attach disk name=sata0.0 bus=ahci "
+check "... and nothing from before it connected" not grep -q "name=pts/" $D/pipe
+echo "on create dev 'note reloaded \$name' 'name=pts/*'" >> $D/test.conf
+kill -HUP $devd_pid
+sleep 1
+/usr/tests/kern/kern-smoke pty-cycle > /dev/null
+check "SIGHUP reloads the rules" waitfor logged_by $D/log "^reloaded pts/"
+check "... once each" is "$(grep -c '^node create' $D/log)" 2
+kill -TERM $devd_pid
+wait $devd_pid
+check "SIGTERM ends devd, removing its socket" not [ -e /var/run/devd.pipe ]
+check "... and its pid file" not [ -e /var/run/devd.pid ]
+cat > $D/slow.conf <<'EOF'
+on create dev 'sleep 60' 'name=pts/*'
+on destroy dev 'echo next >> /tmp/devd/slow' 'name=pts/*'
+EOF
+devd -d -t 1 -f $D/slow.conf 2> $D/slow.err &
+devd_pid=$!
+waitfor [ -S /var/run/devd.pipe ]
+/usr/tests/kern/kern-smoke pty-cycle > /dev/null
+check "a handler past -t is killed" waitfor logged_by $D/slow.err "still running after 1 s: killed"
+check "... and the next event handled" waitfor [ -s $D/slow ]
+check "... its sleep gone with its process group" not pgrep -x sleep
+kill -TERM $devd_pid
+wait $devd_pid
+
 # --- No disc ----------------------------------------------------------------------------------
 check "the empty drive doesn't mount" not mount -t cd9660 /dev/ide3 /tmp/cd/empty 2>/dev/null
 check "an unknown option is refused" not mount -t cd9660 -o bogus /dev/ide0 $R 2>/dev/null

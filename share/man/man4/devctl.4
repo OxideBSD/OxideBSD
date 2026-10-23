@@ -1,0 +1,172 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt DEVCTL 4
+.Os OxideBSD
+.Sh NAME
+.Nm devctl
+.Nd device event device
+.Sh SYNOPSIS
+.Pa /dev/devctl
+.Sh DESCRIPTION
+The kernel reports each change to the system's devices as an event: a disk
+attached or detached, a
+.Pa /dev
+node made or removed, a CD's disc found or gone, the root's drive lost.
+Each event is one line of text,
+.Pp
+.Dl Ar verb class Op Ar name Ns = Ns Ar value ...
+.Pp
+ended by a newline.
+Verbs, classes and field names are lower-case words.
+A value of only letters, digits and
+.Ql _./:+-,@%
+is written bare; any other is written in single quotes, as
+.Xr sh 1
+quotes it, with an embedded single quote written as
+.Ql \(aq\e\(aq\(aq .
+A control character in a value is written
+.Ql \&? ,
+so a device's own strings, such as a drive's model name, can neither end a
+line nor add fields to it.
+.Pp
+The events are:
+.Bl -tag -width Ds
+.It Li attach disk Va name bus model kind sectors sector_size
+A disk or CD drive was found, at boot or plugged in.
+.Va bus
+is
+.Li ahci ,
+.Li ata ,
+.Li virtio_blk ,
+.Li virtio_scsi
+or
+.Li md ;
+.Va kind
+is
+.Li disk
+or
+.Li cd ;
+.Va sectors
+counts 512-byte sectors (0 for an empty CD drive) and
+.Va sector_size
+is the drive's own.
+An AHCI drive also has
+.Va controller
+and
+.Va port ,
+and
+.Va pmp
+behind a port multiplier.
+.It Li detach disk Va name bus
+A drive was pulled out, after its file systems were unmounted.
+.It Li create dev Va name major minor
+A
+.Pa /dev
+node was made;
+.Va name
+is relative to
+.Pa /dev .
+.It Li destroy dev Va name major minor
+A
+.Pa /dev
+node was removed.
+.It Li media cd Va name Li state=inserted Va sectors
+A disc was found in CD drive
+.Va name .
+.It Li media cd Va name Li state=ejected
+CD drive
+.Va name Ns 's
+disc is gone.
+.It Li lost root Va name Li policy=eio
+The root file system's drive went, and the system keeps running
+.Po
+.Va kern.disk.root_lost
+is
+.Li eio
+.Pc .
+.It Li lost devctl Va count
+.Va count
+events were dropped before this one.
+.El
+.Pp
+When a drive is attached its
+.Li attach disk
+line comes first, then the whole disk's
+.Li create dev ,
+then, for a CD drive with a disc,
+.Li media cd state=inserted ,
+then each partition's
+.Li create dev .
+When it is detached the
+.Li destroy dev
+lines come first, then
+.Li detach disk .
+A reader ignores verbs, classes and fields it does not know: more come with
+new drivers.
+.Pp
+The kernel queues events from boot, whether or not the device is open, so a
+reader sees the drives found at boot as if they had just been plugged in.
+The queue holds
+.Va kern.devctl.queue
+lines (256 by default, at least 16); when it is full the oldest is dropped and
+counted in
+.Va kern.devctl.dropped ,
+and the next line read is
+.Li lost devctl count= Ns Ar n .
+.Pp
+The character device
+.Pa /dev/devctl ,
+number 7, 1, owned by root with mode 0600, reads the queue, normally for
+.Xr devd 8 .
+Only one descriptor may have it open at a time, and only for reading.
+A
+.Xr read 2
+takes as many bytes off the queue as fit, a line that does not fit given in
+part and finished by the next read; closing the device drops the rest of
+such a line, so the next reader starts on a whole one.
+With the queue empty a read waits for an event, or fails with
+.Er EAGAIN
+if the descriptor is non-blocking; a signal interrupts the wait.
+.Xr poll 2
+reports the descriptor readable while the queue holds anything.
+Events that come while nobody has the device open wait in the queue.
+.Sh FILES
+.Bl -tag -width /dev/devctl -compact
+.It Pa /dev/devctl
+.El
+.Sh EXAMPLES
+A drive plugged into the third port of the first AHCI controller:
+.Bd -literal -offset indent
+attach disk name=sata0.2 bus=ahci model='WDC WD10EZEX-08W' kind=disk sectors=1953525168 sector_size=512 controller=0 port=2
+create dev name=sata0.2 major=251 minor=512
+create dev name=sata0.2p1 major=251 minor=513
+.Ed
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EBUSY
+.Xr open 2 :
+another descriptor has the device open.
+.It Bq Er EACCES
+.Xr open 2 :
+the device was opened for writing.
+.It Bq Er EAGAIN
+.Xr read 2 :
+no event is queued and the descriptor is non-blocking.
+.El
+.Sh SEE ALSO
+.Xr devfs 4 ,
+.Xr devd.conf 5 ,
+.Xr devd 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+A
+.Pa /dev/devctl
+device first appeared in
+.Fx 5.0 .
+OxideBSD's events are its own: shell-quoted
+.Ar verb class name Ns = Ns Ar value
+lines instead of FreeBSD's
+.Ql !system=
+and
+.Ql +device
+forms.

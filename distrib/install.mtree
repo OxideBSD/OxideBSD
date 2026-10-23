@@ -17,6 +17,7 @@
 . type=dir
 ./boot type=dir
 ./boot/efi type=dir
+./cdrom type=dir
 ./bin type=dir
 ./sbin type=dir
 ./lost+found type=dir mode=0700
@@ -324,11 +325,14 @@
 ./etc/rc.d/newsyslog type=file src=etc/rc.d/newsyslog
 ./etc/rc.d/syslogd type=file src=etc/rc.d/syslogd
 ./etc/rc.d/cron type=file src=etc/rc.d/cron
+./etc/rc.d/devd type=file src=etc/rc.d/devd
 ./etc/rc.d/update type=file src=etc/rc.d/update
 ./etc/rc.d/adjkerntz type=file src=etc/rc.d/adjkerntz
 ./etc/rc.d/mountcritlocal type=file src=etc/rc.d/mountcritlocal
 ./etc/sysctl.conf type=file src=etc/sysctl.conf
 ./etc/devfs.conf type=file src=etc/devfs.conf
+./etc/devd.conf type=file src=etc/devd.conf
+./etc/devd type=dir
 ./etc/syslog.conf type=file src=etc/syslog.conf
 ./etc/syslog.d type=dir
 ./etc/newsyslog.conf type=file src=etc/newsyslog.conf
@@ -382,6 +386,7 @@
 ./sbin/init type=file src=artifact:OXFS_INIT_ELF_PATH
 ./sbin/init_sh type=file src=artifact:OXFS_INIT_SH_ELF_PATH
 ./sbin/rcorder type=file src=artifact:OXFS_RCORDER_ELF_PATH
+./sbin/devd type=file src=artifact:OXFS_DEVD_ELF_PATH
 ./sbin/reboot type=file src=artifact:OXFS_REBOOT_ELF_PATH
 ./sbin/halt type=file hardlink=./sbin/reboot
 ./sbin/poweroff type=file hardlink=./sbin/reboot
@@ -487,6 +492,7 @@
 ./usr/share/man/man3/sysctlnametomib.3 type=file hardlink=./usr/share/man/man3/sysctl.3
 ./usr/share/man/man4 type=dir
 ./usr/share/man/man4/devfs.4 type=file src=share/man/man4/devfs.4
+./usr/share/man/man4/devctl.4 type=file src=share/man/man4/devctl.4
 ./usr/share/man/man4/klog.4 type=file src=share/man/man4/klog.4
 ./usr/share/man/man4/pts.4 type=file src=share/man/man4/pts.4
 ./usr/share/man/man4/unix.4 type=file src=share/man/man4/unix.4
@@ -494,6 +500,7 @@
 ./usr/share/man/man5/cd9660.5 type=file src=share/man/man5/cd9660.5
 ./usr/share/man/man5/devfs.5 type=file src=share/man/man5/devfs.5
 ./usr/share/man/man5/devfs.conf.5 type=file src=share/man/man5/devfs.conf.5
+./usr/share/man/man5/devd.conf.5 type=file src=share/man/man5/devd.conf.5
 ./usr/share/man/man5/fsconf.5 type=file src=share/man/man5/fsconf.5
 ./usr/share/man/man5/group.5 type=file src=share/man/man5/group.5
 ./usr/share/man/man5/usermgmt.conf.5 type=file src=share/man/man5/usermgmt.conf.5
@@ -557,6 +564,7 @@
 ./usr/share/man/man8/sysctl.8 type=file src=share/man/man8/sysctl.8
 ./usr/share/man/man8/syslogd.8 type=file src=share/man/man8/syslogd.8
 ./usr/share/man/man8/cron.8 type=file src=share/man/man8/cron.8
+./usr/share/man/man8/devd.8 type=file src=share/man/man8/devd.8
 ./usr/share/man/man8/mount.8 type=file src=share/man/man8/mount.8
 ./usr/share/man/man8/mount_nullfs.8 type=file hardlink=./usr/share/man/man8/mount.8
 ./usr/share/man/man8/mount_tmpfs.8 type=file hardlink=./usr/share/man/man8/mount.8

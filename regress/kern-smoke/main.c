@@ -75,6 +75,8 @@ static const struct {
 	{ "kthread", kthread_main },
 	{ "devctl", devctl_main },
 	{ "devctl-dump", devctl_dump_main },
+	{ "devd-pipe", devd_pipe_main },
+	{ "pty-cycle", pty_cycle_main },
 };
 
 int main(int argc, char **argv)

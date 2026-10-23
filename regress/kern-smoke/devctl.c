@@ -4,9 +4,12 @@
  * read-only, reads lines whole or in part, blocks until an event comes (and poll says so), fails
  * with EAGAIN under O_NONBLOCK, keeps its queue across a close, and with a full queue drops the
  * oldest lines and says how many. A pseudo-terminal's pts node makes an event pair on demand.
- * `kern-smoke devctl-dump` prints what is queued, for other tests' scripts.
+ * `kern-smoke devctl-dump` prints what is queued, for other tests' scripts; `kern-smoke devd-pipe`
+ * follows devd's socket (DEVD.md §5.5) through an AHCI drive's pull and return, and `kern-smoke
+ * pty-cycle` makes one pts node's create and destroy events.
  */
 #include <poll.h>
+#include <sys/un.h>
 
 static const char *devctl = "/dev/devctl";
 
@@ -187,4 +190,46 @@ static void devctl_dump_main(void)
 	devctl_drain(fd, buf, sizeof buf);
 	fputs(buf, stdout);
 	close(fd);
+}
+
+/*
+ * Connects to /var/run/devd.pipe, prints `connected`, then what devd sends, until the line that
+ * ends sata0.0's return (its label's node made again after an `attach disk`), or 30 s.
+ */
+static void devd_pipe_main(void)
+{
+	static char buf[1 << 16];
+	struct sockaddr_un sun = { .sun_family = AF_UNIX };
+	strcpy(sun.sun_path, "/var/run/devd.pipe");
+	int s = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (s < 0 || connect(s, (struct sockaddr *)&sun, sizeof sun) != 0) {
+		perror("devd-pipe: connect");
+		failures++;
+		return;
+	}
+	printf("connected\n");
+	fflush(stdout);
+	size_t total = 0;
+	for (int waited = 0; waited < 300 && total < sizeof buf - 1;) {
+		struct pollfd p = { s, POLLIN, 0 };
+		if (poll(&p, 1, 100) != 1) {
+			waited++;
+			continue;
+		}
+		ssize_t n = read(s, buf + total, sizeof buf - 1 - total);
+		if (n <= 0)
+			break;
+		total += n;
+		buf[total] = 0;
+		char *attach = strstr(buf, "\nattach disk name=sata0.0 ");
+		if (attach && strstr(attach, "\ncreate dev name=gpt/satatest "))
+			break;
+	}
+	fputs(buf, stdout);
+	close(s);
+}
+
+static void pty_cycle_main(void)
+{
+	pty_events(1);
 }

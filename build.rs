@@ -564,6 +564,8 @@ fn main() {
     // /sbin/rcorder links libsh too, for service blocks (INIT_SH.md §6).
     let rcorder_elf_path =
         build_static_std_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
+    // /sbin/devd runs its configuration in a libsh shell (DEVD.md §5.2).
+    let devd_elf_path = build_static_std_crate("sbin/devd", "OXFS_DEVD_ELF_PATH", &musl_sysroot);
     let reboot_elf_path =
         build_static_std_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
@@ -945,6 +947,7 @@ fn main() {
         ("OXFS_SH_ELF_PATH", sh_elf_path.to_str().unwrap()),
         ("OXFS_INIT_SH_ELF_PATH", init_sh_elf_path.to_str().unwrap()),
         ("OXFS_RCORDER_ELF_PATH", rcorder_elf_path.to_str().unwrap()),
+        ("OXFS_DEVD_ELF_PATH", devd_elf_path.to_str().unwrap()),
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         ("OXFS_SBIN_SYSCTL_ELF_PATH", sysctl_elf_path.to_str().unwrap()),

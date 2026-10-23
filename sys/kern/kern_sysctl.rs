@@ -278,6 +278,8 @@ pub(crate) fn maxfilesperproc() -> usize {
     if set > 0 { set as usize } else { maxfiles() / 10 * 9 }
 }
 
+/// `kern.disk.cd_poll`'s greatest value: a day.
+const CD_POLL_LIMIT: i32 = 86400;
 /// `kern.devctl.queue`'s greatest value.
 const DEVCTL_QUEUE_LIMIT: i32 = 65536;
 
@@ -299,6 +301,9 @@ pub(crate) fn set_tunable(name: &str, value: &str) {
             parsed.filter(|v| (16..=1_000_000).contains(v)).map(|v| *MAXFILESPERPROC.lock() = v as i32)
         }
         "kern.disk.root_lost" => set_root_lost(value.as_bytes()),
+        "kern.disk.cd_poll" => parsed
+            .filter(|&v| v <= CD_POLL_LIMIT as u64)
+            .map(|v| crate::drivers::disk::CD_POLL_SECS.store(v as u32, core::sync::atomic::Ordering::Relaxed)),
         "kern.devctl.queue" => parsed
             .filter(|v| (crate::kern::subr_devctl::MIN_QUEUE as u64..=DEVCTL_QUEUE_LIMIT as u64).contains(v))
             .map(|v| crate::kern::subr_devctl::QUEUE_MAX.store(v as usize, core::sync::atomic::Ordering::Relaxed)),
@@ -1119,6 +1124,28 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             descr: "When the root's drive goes: panic, or eio (the root stays, failing with EIO)",
             get: || string(if crate::drivers::disk::ROOT_LOST_EIO.load(core::sync::atomic::Ordering::Relaxed) { b"eio" } else { b"panic" }),
             set: Some(|new| set_root_lost(new_string(new)).ok_or(EINVAL as i64)),
+        },
+    );
+    // DEVD.md §5.8.
+    add_leaf(
+        t,
+        &disk,
+        Leaf {
+            number: None,
+            name: "cd_poll",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW | CTLFLAG_TUN,
+            descr: "Seconds between looks for a changed disc in each idle CD drive (0: only at open)",
+            get: || int(crate::drivers::disk::cd_poll() as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                if !(0..=CD_POLL_LIMIT).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                crate::drivers::disk::set_cd_poll(v as u32);
+                Ok(())
+            }),
         },
     );
     for (index, name) in crate::drivers::disk::names().split(' ').filter(|n| !n.is_empty()).enumerate() {

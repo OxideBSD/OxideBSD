@@ -1,0 +1,133 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt DEVD.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm devd.conf
+.Nd device event rules
+.Sh SYNOPSIS
+.Ic on Ar verb class handler Oo Ar name Ns = Ns Ar pattern | name Ns != Ns Ar pattern ... Oc
+.Sh DESCRIPTION
+.Xr devd 8 Ns 's
+configuration is a script in the language of
+.Xr sh 1 ,
+run when
+.Nm devd
+starts by a shell built into it: functions, variables,
+.Ic case ,
+.Ic \&.
+and everything else sh has are there.
+.Pa /etc/devd.conf
+runs first, then every
+.Pa *.conf
+file in
+.Pa /etc/devd
+and then in
+.Pa /usr/local/etc/devd ,
+in lexical order, all in the one shell: a later file may call an earlier one's
+functions.
+.Ic exit
+ends the file it is in.
+.Pp
+The shell has one command more:
+.Bl -tag -width Ds
+.It Ic on Ar verb class handler Oo Ar name Ns = Ns Ar pattern | name Ns != Ns Ar pattern ... Oc
+Adds a rule.
+An event, as
+.Xr devctl 4
+describes them, matches it when its verb matches
+.Ar verb ,
+its class
+.Ar class ,
+and every condition holds:
+.Ar name Ns = Ns Ar pattern
+when the event has field
+.Ar name
+and its value matches
+.Ar pattern ,
+.Ar name Ns != Ns Ar pattern
+when it has no such field or the value doesn't match.
+.Ar verb ,
+.Ar class
+and each
+.Ar pattern
+are patterns as
+.Ic case
+reads them
+.Po
+.Ql * ,
+.Ql \&? ,
+.Ql [...] ;
+a backslash makes the next character plain
+.Pc ,
+so quote them to keep the shell from expanding them as file names.
+.Ar handler
+is shell text, run as
+.Ic eval
+runs it: a function's name, or a command line in quotes.
+.El
+.Pp
+For each event, every rule it matches runs, in the order
+.Ic on
+added them, in a child process of
+.Nm devd
+in which the variables
+.Va verb ,
+.Va class
+and one for each of the event's fields
+.Po
+.Va name ,
+.Va bus ,
+.Va model ...
+.Pc
+hold its values, exported to the commands the handler runs.
+The values are the device's, never shell text: a handler that quotes them
+.Pq Ql \&"$model\&"
+is safe from anything a device reports.
+.Sh FILES
+.Bl -tag -width /usr/local/etc/devd/*.conf -compact
+.It Pa /etc/devd.conf
+.It Pa /etc/devd/*.conf
+.It Pa /usr/local/etc/devd/*.conf
+.El
+.Sh EXAMPLES
+The stock
+.Pa /etc/devd.conf
+logs each drive attached or detached:
+.Bd -literal -offset indent
+on attach disk 'logger -t devd "disk $name attached: $model ($bus, $kind)"'
+on detach disk 'logger -t devd "disk $name detached"'
+.Ed
+.Pp
+and mounts a CD's disc, read-only, on the first
+.Pa /cdrom/disk Ns Ar N
+nothing is mounted on:
+.Bd -literal -offset indent
+cd_mount()
+{
+	grep -q "^/dev/$name " /proc/mounts && return 0
+	_n=0
+	while grep -q " /cdrom/disk$_n " /proc/mounts; do
+		_n=$((_n + 1))
+	done
+	mkdir -p "/cdrom/disk$_n" &&
+	mount -t cd9660 -o ro "/dev/$name" "/cdrom/disk$_n"
+}
+on media cd cd_mount state=inserted
+.Ed
+.Pp
+Every event but the
+.Pa /dev
+nodes', to the log:
+.Bd -literal -offset indent
+on '*' '*' 'logger -t devd "$verb $class $name"' class!=dev
+.Ed
+.Pp
+Only drives on AHCI controllers other than the first:
+.Bd -literal -offset indent
+on attach disk sata_drive bus=ahci 'controller!=0'
+.Ed
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr devctl 4 ,
+.Xr devd 8

@@ -1,0 +1,34 @@
+#!/sbin/init_sh
+#
+# PROVIDE: devd
+# REQUIRE: FILESYSTEMS syslogd
+# BEFORE: SERVERS
+# KEYWORD: shutdown
+#
+# The device event daemon (DEVD.md §5). It starts once /var/run is cleaned and syslogd is up;
+# the kernel holds the events of boot until it reads them, so its rules see boot's drives too.
+
+. /etc/rc.subr
+
+name="devd"
+desc="Device event daemon"
+rcvar="devd_enable"
+command="/sbin/${name}"
+pidfile="/var/run/${name}.pid"
+extra_commands="reload"
+reload_cmd="devd_reload"
+
+# SIGHUP: re-read devd.conf and /etc/devd/*.conf.
+devd_reload()
+{
+	_pid=$(check_pidfile $pidfile $command)
+	if [ -z "$_pid" ]; then
+		echo "$name not running? (check $pidfile)." >&2
+		return 1
+	fi
+	echo "Reloading $name config files."
+	kill -HUP $_pid
+}
+
+load_rc_config $name
+run_rc_command "$1"

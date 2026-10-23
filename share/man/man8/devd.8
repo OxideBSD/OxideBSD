@@ -1,0 +1,151 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt DEVD 8
+.Os OxideBSD
+.Sh NAME
+.Nm devd
+.Nd device event daemon
+.Sh SYNOPSIS
+.Nm
+.Op Fl dn
+.Op Fl f Ar file
+.Op Fl t Ar timeout
+.Sh DESCRIPTION
+The
+.Nm
+daemon reads the kernel's device events from
+.Xr devctl 4
+and runs the commands its configuration gives for them: mounting a CD's disc
+when one is put in, logging a drive plugged in or pulled out.
+It is started at boot by
+.Pa /etc/rc.d/devd
+when
+.Va devd_enable
+is
+.Dq YES
+in
+.Xr rc.conf 5 .
+The kernel keeps the events of boot until
+.Nm
+reads them, so its rules see the drives found at boot as if they had just been
+plugged in.
+.Pp
+The configuration is a shell script, described in
+.Xr devd.conf 5 :
+.Pa /etc/devd.conf ,
+then every
+.Pa *.conf
+file in
+.Pa /etc/devd
+and then in
+.Pa /usr/local/etc/devd ,
+in lexical order, all run by one shell built into
+.Nm .
+Its
+.Ic on
+command adds a rule.
+A file that does not parse is reported and skipped; the others still load.
+.Pp
+For each event,
+.Nm
+first writes its line to every client of
+.Pa /var/run/devd.pipe ,
+then finds the rules it matches.
+If any match, a child process sets the shell variables
+.Va verb ,
+.Va class
+and one for each of the event's fields, exports them, and runs each matching
+rule's handler in turn.
+.Nm
+waits for the child before it reads the next event, so handlers run in the
+order the events happened; a handler that should not hold the next event up
+runs its commands in the background
+.Pq Ql & .
+Nothing a handler changes, such as a variable or the directory, outlives its
+child.
+A handler that exits with a non-zero status is logged with its event.
+.Pp
+.Pa /var/run/devd.pipe
+is a
+.Xr unix 4
+stream socket that anyone may connect to, for programs that follow the events
+as they happen: a client reads lines from it as from
+.Pa /dev/devctl .
+A client gets each event line read after it connected, none from before.
+One that falls behind, so that a line can't be written to it at once, is
+disconnected.
+What clients send is discarded.
+.Pp
+.Nm
+logs to
+.Xr syslogd 8
+with the
+.Li daemon
+facility.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl d
+Stay in the foreground, and log each event and the rules it matched to the
+standard error too.
+.It Fl f Ar file
+Read only
+.Ar file
+as the configuration.
+.It Fl n
+Check the configuration and exit: status 0 if every file loaded without a
+problem, 1 otherwise, with each problem on the standard error.
+.It Fl t Ar timeout
+A handler's child still running after
+.Ar timeout
+seconds is killed, with its process group, and
+.Nm
+goes on to the next event.
+The default is 30; 0 sets no limit.
+.El
+.Sh SIGNALS
+.Bl -tag -width SIGTERM
+.It Dv SIGHUP
+Load the configuration again, into a new shell.
+.It Dv SIGTERM , Dv SIGINT
+Remove the socket and the pid file, and exit.
+.El
+.Sh FILES
+.Bl -tag -width /usr/local/etc/devd/*.conf -compact
+.It Pa /dev/devctl
+the kernel's events
+.It Pa /etc/devd.conf
+the configuration
+.It Pa /etc/devd/*.conf
+local rules
+.It Pa /usr/local/etc/devd/*.conf
+packages' rules
+.It Pa /var/run/devd.pipe
+the event socket
+.It Pa /var/run/devd.pid
+the running daemon's process id
+.El
+.Sh EXIT STATUS
+.Nm
+runs until a signal ends it, then exits 0; it exits 1 if it can't start:
+another
+.Nm
+is running
+.Po
+.Pa /dev/devctl
+is open
+.Pc ,
+or the socket or pid file can't be made.
+.Sh SEE ALSO
+.Xr sh 1 ,
+.Xr devctl 4 ,
+.Xr devd.conf 5 ,
+.Xr rc.conf 5 ,
+.Xr syslogd 8
+.Sh HISTORY
+A
+.Nm
+daemon first appeared in
+.Fx 5.0 .
+OxideBSD's takes a shell script as its configuration where FreeBSD's has a
+language of its own.
