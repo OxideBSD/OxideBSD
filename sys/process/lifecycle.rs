@@ -71,7 +71,7 @@ pub fn spawn_boot(
 /// A process with no program yet, as pid `pid` (FreeBSD's process 1 before `start_init`): its
 /// first switch-in runs `init::start_in_context`, which reads the program from the root file
 /// system in this process's own context -- a live process, so the read may sleep on the disk --
-/// and loads it (`load_into_current`). Until then its address space has only the kernel's half.
+/// and loads it (`load_program_into_current`). Until then its address space has only the kernel's half.
 pub(crate) fn spawn_unloaded(pid: Pid, name: &[u8], console: bool) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
     let address_space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
@@ -84,24 +84,28 @@ pub(crate) fn spawn_unloaded(pid: Pid, name: &[u8], console: bool) -> Result<Pid
     spawn_finish(address_space, kernel_stack, Some(pid), zero, zero, zero, None, &[name], &[], console)
 }
 
-/// Gives the calling process, started by `spawn_unloaded`, its program: builds the image in a
-/// new address space, switches to it and drops the empty one. Returns where to enter user mode:
-/// the entry point and the initial stack pointer.
-pub(crate) fn load_into_current(
-    elf_bytes: &[u8],
-    argv: &[&[u8]],
-    envp: &[&[u8]],
-) -> Result<(VirtAddr, VirtAddr), SpawnError> {
+/// Gives the calling process, started by `spawn_unloaded`, the program at `path` on the root file
+/// system: builds the image in a new address space, switches to it and drops the empty one.
+/// Returns where to enter user mode: the entry point and the initial stack pointer. The program is
+/// mapped from its file, as `execve` maps one (demand paging, `DEMANDPAGE.md`), never read whole
+/// into the kernel's heap: pid 1 on the install medium is the 3 MB `rescue` (INSTALLER.md §4.3).
+/// `ENOEXEC` for a script or anything but a static ELF.
+pub(crate) fn load_program_into_current(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> Result<(VirtAddr, VirtAddr), u64> {
+    let file = open_exec_file(path)?;
+    if file.head.starts_with(b"#!") {
+        return Err(ENOEXEC);
+    }
+    let mut elf = Elf::parse_file(&file.head, file.size, file.content).map_err(|_| ENOEXEC)?;
     let pid = scheduler::current_pid();
     let phys_offset = memory::phys_mem_offset();
-    let space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa))
-        .map_err(|()| SpawnError::OutOfMemory)?;
-    let (brk, entry, initial_rsp) = match load_image(&space, elf_bytes, argv, envp) {
+    let space = with_frame_allocator(|fa| AddressSpace::new_excluding_user(phys_offset, fa)).map_err(|()| ENOMEM)?;
+    elf.cache = exec_cache_entry(&file, &space);
+    let (brk, entry, initial_rsp) = match load_image(&space, &elf, argv, envp) {
         Ok(l) => l,
         Err(e) => {
             // SAFETY: never activated.
             with_frame_allocator(|fa| unsafe { space.teardown(phys_offset, fa) });
-            return Err(e);
+            return Err(if matches!(e, SpawnError::OutOfMemory) { ENOMEM } else { ENOEXEC });
         }
     };
     {
@@ -112,7 +116,7 @@ pub(crate) fn load_into_current(
     let arg0 = argv.first().copied().unwrap_or(b"(init)");
     let old = {
         let mut table = PROCESS_TABLE.lock();
-        let me = table.get_mut(&pid).expect("load_into_current: caller missing from the table");
+        let me = table.get_mut(&pid).expect("load_program_into_current: caller missing from the table");
         me.entry_point = entry;
         me.user_stack_top = initial_rsp;
         me.comm = basename(arg0.strip_prefix(b"-").unwrap_or(arg0)).to_vec();
@@ -140,7 +144,7 @@ fn spawn_into(
     console: bool,
 ) -> Result<Pid, SpawnError> {
     let phys_offset = memory::phys_mem_offset();
-    let loaded = load_image(&address_space, elf_bytes, argv, envp);
+    let loaded = Elf::parse(elf_bytes).map_err(SpawnError::Elf).and_then(|elf| load_image(&address_space, &elf, argv, envp));
     let (brk, entry, initial_rsp) = match loaded {
         Ok(l) => l,
         Err(e) => {
@@ -161,7 +165,7 @@ fn spawn_into(
 /// stack pointer.
 fn load_image(
     address_space: &AddressSpace,
-    elf_bytes: &[u8],
+    elf: &Elf,
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<(VirtAddr, VirtAddr, VirtAddr), SpawnError> {
@@ -170,13 +174,12 @@ fn load_image(
     // address_space's own (not-yet-active) level 4 table right now.
     let mut mapper = unsafe { address_space.mapper(phys_offset) };
 
-    let elf = Elf::parse(elf_bytes).map_err(SpawnError::Elf)?;
     if !matches!(elf.interpreter(), Ok(None)) {
         return Err(SpawnError::NeedsInterpreter);
     }
     // A static PIE (ET_DYN) gets a randomized bias, as in do_execve; a fixed-address ET_EXEC none.
     let bias = if elf.is_dynamic() { crate::process::aslr::pick_bias() } else { 0 };
-    let entry = elf::load(&elf, &mut mapper, phys_offset, bias).map_err(SpawnError::Elf)?;
+    let entry = elf::load(elf, &mut mapper, phys_offset, bias).map_err(SpawnError::Elf)?;
 
     let stack_top = VirtAddr::new(USER_STACK_TOP);
     let mapped_pages =
@@ -184,11 +187,11 @@ fn load_image(
     crate::process::fault_trampoline::map(&mut mapper, phys_offset).map_err(|()| SpawnError::OutOfMemory)?;
     {
         let mut vm = address_space.vm();
-        crate::process::mm::record_segments(&mut vm, &elf, bias);
+        crate::process::mm::record_segments(&mut vm, elf, bias);
         crate::process::mm::record_exec_tail(&mut vm, elf.exec_stack());
     }
     let initial_rsp = crate::process::user_stack::build(
-        &elf,
+        elf,
         argv,
         envp,
         stack_top,
@@ -1237,28 +1240,6 @@ fn kernel_open_path(path: &[u8]) -> Result<u64, u64> {
 /// its path (a top-level `execve` target, or a `#!`/`PT_INTERP` interpreter parsed out of a file).
 fn open_exec_file(path: &[u8]) -> Result<ExecFile, u64> {
     read_exec_head_and_release(kernel_open_path(path)?)
-}
-
-/// A whole program, read from the root file system by path, for the kernel to start as pid 1
-/// (`init::start`; FreeBSD execs it inside process 1, `start_init`). The buffer is the caller's,
-/// dropped once the image is mapped. `ENOEXEC` for anything but a non-empty oxfs file.
-pub(crate) fn read_program(path: &[u8]) -> Result<Vec<u8>, u64> {
-    let handle = kernel_open_path(path)?;
-    let read = || -> Result<Vec<u8>, u64> {
-        let content = crate::fs::fd::content_id_of_handle(handle).ok_or(ENOEXEC)?;
-        let size = u64::try_from(crate::fs::fd::content_size(content)).map_err(|_| ENOEXEC)?;
-        if size == 0 {
-            return Err(ENOEXEC);
-        }
-        let mut image = alloc::vec![0u8; size as usize];
-        if crate::fs::fd::content_read(content, 0, image.as_mut_ptr() as u64, size) != size as i64 {
-            return Err(EIO);
-        }
-        Ok(image)
-    };
-    let result = read();
-    crate::fs::fd::release(handle);
-    result
 }
 
 /// `open_exec_file`, but opened through `SYS_OPENAT` with the caller's own `RawAtPath` --
@@ -2657,7 +2638,7 @@ pub(crate) fn set_current_dir_vnode(cwd: bool, vp: *mut vfs_if::Vnode) {
 extern "C" fn spawn_trampoline_inner() -> ! {
     let pid = scheduler::current_pid();
     if let Some((entry, stack_top)) = super::init::start_in_context(pid) {
-        // SAFETY: `load_into_current` activated the program's address space just now.
+        // SAFETY: `load_program_into_current` activated the program's address space just now.
         unsafe { crate::process::usermode::jump_to_usermode(entry, stack_top) }
     }
     let (entry, stack_top) = {

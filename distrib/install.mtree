@@ -326,6 +326,7 @@
 ./etc/rc.d/syslogd type=file src=etc/rc.d/syslogd
 ./etc/rc.d/cron type=file src=etc/rc.d/cron
 ./etc/rc.d/devd type=file src=etc/rc.d/devd
+./etc/rc.d/wsconsctl type=file src=etc/rc.d/wsconsctl
 ./etc/rc.d/update type=file src=etc/rc.d/update
 ./etc/rc.d/adjkerntz type=file src=etc/rc.d/adjkerntz
 ./etc/rc.d/mountcritlocal type=file src=etc/rc.d/mountcritlocal
@@ -333,6 +334,7 @@
 ./etc/devfs.conf type=file src=etc/devfs.conf
 ./etc/devd.conf type=file src=etc/devd.conf
 ./etc/devd type=dir
+./etc/wsconsctl.conf type=file src=etc/wsconsctl.conf
 ./etc/syslog.conf type=file src=etc/syslog.conf
 ./etc/syslog.d type=dir
 ./etc/newsyslog.conf type=file src=etc/newsyslog.conf
@@ -387,6 +389,8 @@
 ./sbin/init_sh type=file src=artifact:OXFS_INIT_SH_ELF_PATH
 ./sbin/rcorder type=file src=artifact:OXFS_RCORDER_ELF_PATH
 ./sbin/devd type=file src=artifact:OXFS_DEVD_ELF_PATH
+./sbin/wsconsctl type=file src=artifact:OXFS_WSCONSCTL_ELF_PATH
+./sbin/gpart type=file src=artifact:OXFS_GPART_ELF_PATH
 ./sbin/reboot type=file src=artifact:OXFS_REBOOT_ELF_PATH
 ./sbin/halt type=file hardlink=./sbin/reboot
 ./sbin/poweroff type=file hardlink=./sbin/reboot
@@ -501,6 +505,7 @@
 ./usr/share/man/man5/devfs.5 type=file src=share/man/man5/devfs.5
 ./usr/share/man/man5/devfs.conf.5 type=file src=share/man/man5/devfs.conf.5
 ./usr/share/man/man5/devd.conf.5 type=file src=share/man/man5/devd.conf.5
+./usr/share/man/man5/wsconsctl.conf.5 type=file src=share/man/man5/wsconsctl.conf.5
 ./usr/share/man/man5/fsconf.5 type=file src=share/man/man5/fsconf.5
 ./usr/share/man/man5/group.5 type=file src=share/man/man5/group.5
 ./usr/share/man/man5/usermgmt.conf.5 type=file src=share/man/man5/usermgmt.conf.5
@@ -567,6 +572,8 @@
 ./usr/share/man/man8/devd.8 type=file src=share/man/man8/devd.8
 ./usr/share/man/man8/installer.8 type=file src=share/man/man8/installer.8
 ./usr/share/man/man8/rescue.8 type=file src=share/man/man8/rescue.8
+./usr/share/man/man8/wsconsctl.8 type=file src=share/man/man8/wsconsctl.8
+./usr/share/man/man8/gpart.8 type=file src=share/man/man8/gpart.8
 ./usr/share/man/man8/mount.8 type=file src=share/man/man8/mount.8
 ./usr/share/man/man8/mount_nullfs.8 type=file hardlink=./usr/share/man/man8/mount.8
 ./usr/share/man/man8/mount_tmpfs.8 type=file hardlink=./usr/share/man/man8/mount.8

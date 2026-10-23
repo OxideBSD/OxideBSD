@@ -1,5 +1,6 @@
 //! Partition tables (`OxideBSD-doc/RAM_FLOOR.md` §3.4.5): reading a disk's GPT, or its MBR when it
-//! has no GPT. The kernel never writes one (RAM_FLOOR.md §4.2.1): mkimg(1) does.
+//! has no GPT, through `lib/libpart` (INSTALLER.md §8.1). The kernel never writes one (RAM_FLOOR.md
+//! §4.2.1): mkimg(1), gpart(8) and the installer do.
 //!
 //! A table counts in its disk's own sectors (512 bytes, or 4096 on a "4Kn" disk; a CD's hybrid
 //! image counts 512, as it does written to a USB stick); `read` returns partitions in 512-byte
@@ -10,10 +11,6 @@
 
 use alloc::vec::Vec;
 
-use oxfs_format::{OXFS_MBR_TYPE, OXFS_TYPE_GUID};
-
-/// An MBR entry of this type covers a GPT disk (the protective MBR).
-const MBR_GPT_PROTECTIVE: u8 = 0xEE;
 const SECTOR: usize = 512;
 
 /// Which table a partition came from (and so how it's named).
@@ -49,119 +46,29 @@ impl Partition {
     }
 }
 
-/// The partitions in `head`, the disk's first 34 sectors of `sector` bytes (MBR, GPT header and
-/// entries): the GPT's if there is a valid one, else the MBR's primary entries. Empty for a disk
-/// with neither. Positions in 512-byte sectors.
-pub fn read(head: &[u8], sector: usize) -> Vec<Partition> {
-    if !sector.is_power_of_two() || sector < SECTOR || head.len() < sector * 34 || head[510..512] != [0x55, 0xAA] {
-        return Vec::new();
-    }
+/// The partitions in `head`, the first sectors of a disk of `disk_sectors` sectors of `sector`
+/// bytes (at least `libpart::head_and_tail_sectors`' first number of them): the GPT's if there
+/// is a valid one, else the MBR's primary entries (`libpart::parse`). Empty for a disk with
+/// neither. Positions in 512-byte sectors.
+pub fn read(head: &[u8], sector: usize, disk_sectors: u64) -> Vec<Partition> {
+    let Some(table) = part::parse(head, &[], sector as u32, disk_sectors) else { return Vec::new() };
     let scale = (sector / SECTOR) as u64;
-    let mut parts = read_scaled(head, sector);
-    parts.retain_mut(|p| {
-        p.first_lba = match p.first_lba.checked_mul(scale) {
-            Some(n) => n,
-            None => return false,
-        };
-        p.sectors = match p.sectors.checked_mul(scale) {
-            Some(n) => n,
-            None => return false,
-        };
-        true
-    });
-    parts
-}
-
-/// `read`'s partitions, in the disk's own sectors.
-fn read_scaled(head: &[u8], sector: usize) -> Vec<Partition> {
-    let mbr_types: Vec<u8> = (0..4).map(|i| head[446 + i * 16 + 4]).collect();
-    if mbr_types.contains(&MBR_GPT_PROTECTIVE)
-        && let Some(gpt) = read_gpt(head, sector)
-    {
-        return gpt;
-    }
-    (0..4)
-        .filter_map(|i| {
-            let e = &head[446 + i * 16..446 + i * 16 + 16];
-            let kind = e[4];
-            let first = u32::from_le_bytes(e[8..12].try_into().unwrap()) as u64;
-            let sectors = u32::from_le_bytes(e[12..16].try_into().unwrap()) as u64;
-            (kind != 0 && kind != MBR_GPT_PROTECTIVE && sectors > 0).then_some(Partition {
-                scheme: Scheme::Mbr,
-                index: i as u32 + 1,
-                first_lba: first,
-                sectors,
-                oxfs: kind == OXFS_MBR_TYPE,
-                label: None,
+    let scheme = match table.scheme {
+        part::Scheme::Gpt => Scheme::Gpt,
+        part::Scheme::Mbr => Scheme::Mbr,
+    };
+    table
+        .entries
+        .into_iter()
+        .filter_map(|e| {
+            Some(Partition {
+                scheme,
+                index: e.index,
+                first_lba: e.first.checked_mul(scale)?,
+                sectors: e.sectors.checked_mul(scale)?,
+                oxfs: e.kind() == part::Kind::Oxfs,
+                label: (scheme == Scheme::Gpt && !e.label.is_empty() && !e.label.contains('/')).then_some(e.label),
             })
         })
         .collect()
-}
-
-/// The GPT's used entries, if the header at LBA 1 is valid (signature, header CRC, entries CRC)
-/// and its entries lie within `head`.
-fn read_gpt(head: &[u8], sector: usize) -> Option<Vec<Partition>> {
-    let h = &head[sector..sector + SECTOR];
-    if &h[0..8] != b"EFI PART" {
-        return None;
-    }
-    let header_size = u32::from_le_bytes(h[12..16].try_into().unwrap()) as usize;
-    if !(92..=SECTOR).contains(&header_size) {
-        return None;
-    }
-    let mut copy = h[..header_size].to_vec();
-    copy[16..20].fill(0);
-    if crc32(&copy) != u32::from_le_bytes(h[16..20].try_into().unwrap()) {
-        return None;
-    }
-    let entries_lba = u64::from_le_bytes(h[72..80].try_into().unwrap()) as usize;
-    let count = u32::from_le_bytes(h[80..84].try_into().unwrap()) as usize;
-    let size = u32::from_le_bytes(h[84..88].try_into().unwrap()) as usize;
-    let start = entries_lba.checked_mul(sector)?;
-    let end = start.checked_add(count.checked_mul(size)?)?;
-    if size < 128 || end > head.len() {
-        return None;
-    }
-    let entries = &head[start..end];
-    if crc32(entries) != u32::from_le_bytes(h[88..92].try_into().unwrap()) {
-        return None;
-    }
-    Some(
-        entries
-            .chunks(size)
-            .enumerate()
-            .filter(|(_, e)| e[0..16] != [0u8; 16])
-            .map(|(i, e)| {
-                let first = u64::from_le_bytes(e[32..40].try_into().unwrap());
-                let last = u64::from_le_bytes(e[40..48].try_into().unwrap());
-                let units = e[56..128.min(e.len())]
-                    .chunks(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .take_while(|&u| u != 0);
-                let label: alloc::string::String =
-                    char::decode_utf16(units).map(|c| c.unwrap_or('?')).collect();
-                Partition {
-                    scheme: Scheme::Gpt,
-                    index: i as u32 + 1,
-                    first_lba: first,
-                    sectors: last.saturating_sub(first) + 1,
-                    oxfs: e[0..16] == OXFS_TYPE_GUID,
-                    label: (!label.is_empty() && !label.contains('/')).then_some(label),
-                }
-            })
-            .collect(),
-    )
-}
-
-
-/// CRC-32 (IEEE 802.3, reflected), as GPT uses.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
 }

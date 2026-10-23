@@ -1,0 +1,6 @@
+# Typed once the shell says type-2-now (tests/install_boot.serial): with the German layout, the keys
+# at US z, y and [ are y, z and ü.
+sendkey z
+sendkey y
+sendkey bracket_left
+sendkey ret

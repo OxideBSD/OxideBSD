@@ -121,6 +121,9 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   `POSIX_PILOT_CANARY_ONLY=1` runs the curated regression subset. When the supervisor excludes a
   file for a stall, verify it in isolation: it often blames an innocent neighbour. Current numbers
   live in `OxideBSD-doc/POSIX_COMPLIANCE_CHECKLIST.md`, never in this file.
+- **libsh keeps raw bytes as private-use characters** (`printf::raw_byte`): bytes become strings
+  through `printf::from_bytes`, and leave through `printf::to_bytes` (or `sys::cstr`), never
+  `from_utf8_lossy`/`as_bytes`, or `ü` and the byte `\374` get confused.
 - `lib/libsh` is a host workspace: `cargo test` there diffs `tests/diff/*.sh` against `dash`.
   `tests/sh_syscall_smoke.rs` runs the same corpus on target against checked-in `*.expected`
   (regenerate with dash when a script changes).
@@ -390,6 +393,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `unit << 8 | partition`. SCSI commands live in `drivers::scsi` over a `Transport`. The block
   layer is 512-byte; `disk` translates for 2048 (CD) / 4096 sectors. Root from fsconf.
   `no-ata` protects real hardware from being formatted.
+- **Partition tables are `lib/libpart`'s** (the kernel's reader, mkimg, gpart, the installer): never
+  parse or write GPT/MBR by hand. A changed table is reread on `DIOCRESCAN` or a whole disk's
+  last writer closing it (`drivers::disk::rescan`), deferred while a partition is in use.
 - **Take the giant lock before a disk driver's lock** (raw devices and AHCI's hot plug task do): a
   transfer under the giant lock sleeps holding the driver's spin lock, and anything spinning on it
   then never lets the sleeper run. AHCI hot plug retires a drive (`drivers::disk::retire`: gone

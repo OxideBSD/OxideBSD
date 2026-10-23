@@ -1,0 +1,32 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt WSCONSCTL.CONF 5
+.Os OxideBSD
+.Sh NAME
+.Nm wsconsctl.conf
+.Nd console settings made at boot
+.Sh DESCRIPTION
+At boot,
+.Pa /etc/rc.d/wsconsctl
+runs
+.Xr wsconsctl 8
+once for each line of
+.Pa /etc/wsconsctl.conf :
+a
+.Ar name Ns = Ns Ar value
+setting, as
+.Nm wsconsctl
+takes it.
+Empty lines and lines starting with
+.Ql #
+are skipped, as is anything after the first word of a line.
+.Sh FILES
+.Bl -tag -width /etc/wsconsctl.conf -compact
+.It Pa /etc/wsconsctl.conf
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+keyboard.encoding=de		# a German keyboard
+.Ed
+.Sh SEE ALSO
+.Xr wsconsctl 8

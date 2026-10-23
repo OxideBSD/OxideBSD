@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use pc_keyboard::layouts::Us104Key;
+use pc_keyboard::layouts::{AnyLayout, Azerty, Colemak, De105Key, Dvorak104Key, FiSe105Key, Jis109Key, No105Key, Uk105Key, Us104Key};
 use pc_keyboard::{DecodedKey, HandleControl, KeyCode, PS2Keyboard, ScancodeSet1};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
@@ -94,11 +94,50 @@ fn irq(line: u8, from_user: bool) {
 // MapLettersToUnicode (not Ignore) so Ctrl+<letter> decodes to the corresponding C0 control code
 // (Ctrl+C => 0x03, Ctrl+D => 0x04, etc.) instead of being silently dropped to the plain letter --
 // the terminal's line discipline gives them their meaning (`crate::tty`).
-static KEYBOARD: Mutex<PS2Keyboard<Us104Key, ScancodeSet1>> = Mutex::new(PS2Keyboard::new(
+static KEYBOARD: Mutex<PS2Keyboard<AnyLayout, ScancodeSet1>> = Mutex::new(PS2Keyboard::new(
     ScancodeSet1::new(),
-    Us104Key,
+    AnyLayout::Us104Key(Us104Key),
     HandleControl::MapLettersToUnicode,
 ));
+
+/// The keyboard layouts (`INSTALLER.md` §7), by NetBSD's and OpenBSD's encoding names, for PS/2
+/// and USB keyboards alike (USB's keys are fed through `KEYBOARD` too).
+const ENCODINGS: [(&str, fn() -> AnyLayout); 10] = [
+    ("us", || AnyLayout::Us104Key(Us104Key)),
+    ("uk", || AnyLayout::Uk105Key(Uk105Key)),
+    ("de", || AnyLayout::De105Key(De105Key)),
+    ("fr", || AnyLayout::Azerty(Azerty)),
+    ("us.dvorak", || AnyLayout::Dvorak104Key(Dvorak104Key)),
+    ("us.colemak", || AnyLayout::Colemak(Colemak)),
+    ("jp", || AnyLayout::Jis109Key(Jis109Key)),
+    ("no", || AnyLayout::No105Key(No105Key)),
+    ("fi", || AnyLayout::FiSe105Key(FiSe105Key)),
+    ("sv", || AnyLayout::FiSe105Key(FiSe105Key)),
+];
+
+/// `ENCODINGS`' index of the layout in use.
+static ENCODING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The keyboard layout's name (`wsconsctl keyboard.encoding`).
+pub fn keyboard_encoding() -> &'static str {
+    ENCODINGS[ENCODING.load(Ordering::Relaxed)].0
+}
+
+/// Every layout's name, for `wsconsctl` to list.
+pub fn keyboard_encodings() -> impl Iterator<Item = &'static str> {
+    ENCODINGS.iter().map(|(n, _)| *n)
+}
+
+/// Switches the keyboard to layout `name`; `false` if there's none of that name. Keys held down
+/// and the modifiers' state start afresh.
+pub fn set_keyboard_encoding(name: &str) -> bool {
+    let Some(i) = ENCODINGS.iter().position(|(n, _)| *n == name) else { return false };
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        *KEYBOARD.lock() = PS2Keyboard::new(ScancodeSet1::new(), ENCODINGS[i].1(), HandleControl::MapLettersToUnicode);
+    });
+    ENCODING.store(i, Ordering::Relaxed);
+    true
+}
 
 pub fn init_idt() {
     serial_println!(
@@ -944,11 +983,11 @@ fn console_key_sequence(code: KeyCode, key: &DecodedKey) -> Option<&'static [u8]
     Some(seq)
 }
 
-/// One decoded key, as input to the console terminal. Echo, `^C`/`^Z` and line editing are the
-/// terminal's line discipline (`crate::tty`). Non-ASCII is dropped: a US layout doesn't produce it.
+/// One decoded key, as input to the console terminal, in UTF-8. Echo, `^C`/`^Z` and line editing
+/// are the terminal's line discipline (`crate::tty`).
 fn handle_decoded_key(key: DecodedKey) -> bool {
     match key {
-        DecodedKey::Unicode(character) if character.is_ascii() => crate::tty::console::keyboard(&[character as u8]),
+        DecodedKey::Unicode(character) => crate::tty::console::keyboard(character.encode_utf8(&mut [0; 4]).as_bytes()),
         // Modifier and lock keys, and anything else with no byte to deliver.
         _ => false,
     }

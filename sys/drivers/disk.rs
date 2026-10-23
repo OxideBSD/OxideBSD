@@ -116,8 +116,13 @@ struct Disk {
     unit: u32,
     whole: u32,
     /// The block devices and `/dev` nodes (`major`, `minor`) of its partitions and their labels,
-    /// replaced when a CD's disc changes (`media_check`).
+    /// replaced when a CD's disc changes (`media_check`) or its table does (`rescan`).
     parts: Vec<(u32, u32, u32)>,
+    /// The table they were made from: each partition's number, extent and label (`rescan` makes
+    /// them again only when it changed).
+    table: Vec<(u32, u64, u64, Option<String>)>,
+    /// A reread `rescan` found busy: tried again when a mount or open partition of it goes.
+    rescan_pending: bool,
 }
 
 /// Every disk, in registration order: a disk's index here is its number for `kern::vfs_bdev`.
@@ -143,6 +148,9 @@ static NEXT_LABEL_MINOR: AtomicU32 = AtomicU32::new(0);
 /// Open raw devices: `real_fd -> block device handle` (`kern::vfs_bdev`). The offset is the
 /// file's (`fs::fd`).
 static RAW_OPEN: Mutex<alloc::collections::BTreeMap<u64, u32>> = Mutex::new(alloc::collections::BTreeMap::new());
+/// Those of them open for writing: when the last writer of a whole disk closes it, its table is
+/// read again (`rescan`), as FreeBSD's GEOM retastes a provider.
+static RAW_WRITERS: Mutex<alloc::collections::BTreeSet<u64>> = Mutex::new(alloc::collections::BTreeSet::new());
 
 /// Adds a disk to the registry, or gives a retired one's entry of the same name (the same place)
 /// to it; its index.
@@ -170,6 +178,8 @@ fn register(
         unit,
         whole: 0,
         parts: Vec::new(),
+        table: Vec::new(),
+        rescan_pending: false,
     };
     if let Some(i) = disks.iter().position(|d| !d.present && d.name == name) {
         disks[i] = disk;
@@ -448,6 +458,59 @@ fn cd_capacity(backend: Backend) -> ((u64, u32), bool) {
     (capacity, changed)
 }
 
+/// Disk `disk`'s partitions, from a table counting in `table_sector`-byte sectors, the disk being
+/// `sectors` 512-byte sectors long; none if its first sectors can't be read.
+fn read_table(disk: u32, table_sector: usize, sectors: u64) -> Vec<super::part::Partition> {
+    let (n, _) = part::head_and_tail_sectors(table_sector as u32);
+    let mut head = alloc::vec![0u8; n as usize * table_sector];
+    let disk_sectors = sectors / (table_sector as u64 / 512);
+    if read_sectors(disk, 0, &mut head) { super::part::read(&head, table_sector, disk_sectors) } else { Vec::new() }
+}
+
+/// What `rescan` compares: each partition's number, extent and label.
+fn signature(table: &[super::part::Partition]) -> Vec<(u32, u64, u64, Option<String>)> {
+    table.iter().map(|p| (p.index, p.first_lba, p.sectors, p.label.clone())).collect()
+}
+
+/// `DIOCRESCAN`, or the last writer of disk `disk`'s whole-disk node closing it: reads its table
+/// again and, if it changed, remakes its partitions' devices and `/dev` nodes (their `destroy`
+/// and `create` events posted), as boot made them. `Ok(false)` if it hadn't changed; `EBUSY` if
+/// the disk or a partition of it is mounted or open, and then tried again once the last of those
+/// goes (`retry_rescan`); `ENOTTY` for a CD (its disc's table is `media_check`'s) or a memory
+/// disk. The caller holds the giant lock.
+pub(crate) fn rescan(disk: u32) -> Result<bool, u64> {
+    use crate::kern::vfs_bdev;
+    let (kind, whole, parts, sector_size, sectors) = {
+        let disks = DISKS.lock();
+        let d = disks.get(disk as usize).filter(|d| d.present).ok_or(crate::syscall::ENXIO)?;
+        (d.kind, d.whole, d.parts.clone(), d.sector_size, d.sectors)
+    };
+    if kind != Kind::Disk {
+        return Err(crate::syscall::ENOTTY);
+    }
+    let open: Vec<u32> = RAW_OPEN.lock().values().copied().collect();
+    let busy = core::iter::once(whole).chain(parts.iter().map(|&(h, _, _)| h)).any(|h| crate::kern::vfs_mount::dev_in_use(h as u64))
+        || parts.iter().any(|&(h, _, _)| open.contains(&h));
+    if busy {
+        DISKS.lock()[disk as usize].rescan_pending = true;
+        return Err(crate::syscall::EBUSY);
+    }
+    DISKS.lock()[disk as usize].rescan_pending = false;
+    let table = read_table(disk, sector_size as usize, sectors);
+    if signature(&table) == DISKS.lock()[disk as usize].table {
+        return Ok(false);
+    }
+    for &(handle, major, minor) in &parts {
+        vfs_bdev::retire(handle);
+        let _ = crate::fs::devfs::destroy_dev(major, minor);
+    }
+    DISKS.lock()[disk as usize].parts.clear();
+    let name = DISKS.lock()[disk as usize].name.clone();
+    serial_println!("[disk] {}: partition table changed", name);
+    attach_partitions(disk, &mut Vec::new());
+    Ok(true)
+}
+
 /// Reads disk `disk`'s partition table and registers each partition's block device and raw `/dev`
 /// node (and its label's), adding them to `parts`. A disk's table counts in its own sectors; a
 /// CD's is read as a USB stick's would be: a hybrid image's MBR or GPT counts 512-byte sectors.
@@ -459,8 +522,8 @@ fn attach_partitions(disk: u32, parts: &mut Vec<Found>) {
         (d.name.clone(), d.major, d.unit << 8, d.sectors, table_sector)
     };
     let mut nodes = Vec::new();
-    let mut head = alloc::vec![0u8; 34 * table_sector];
-    let table = if read_sectors(disk, 0, &mut head) { super::part::read(&head, table_sector) } else { Vec::new() };
+    let table = read_table(disk, table_sector, sectors);
+    DISKS.lock()[disk as usize].table = signature(&table);
     for p in table {
         if p.index > 0xff || p.first_lba.checked_add(p.sectors).is_none_or(|end| end > sectors) {
             serial_println!("[boot] disk: {}: partition {} lies outside the disk -- ignored", name, p.index);
@@ -585,9 +648,21 @@ extern "C" fn cd_poll_thread(_: usize) {
     }
 }
 
+/// Device `handle` was unmounted, or a raw descriptor on it closed: a reread its disk's table was
+/// waiting for runs now, if nothing else of the disk is in use. The caller holds the giant lock.
+fn retry_rescan(handle: u32) {
+    let Some((_, _, disk)) = crate::kern::vfs_bdev::extent(handle) else { return };
+    if DISKS.lock().get(disk as usize).is_some_and(|d| d.rescan_pending) {
+        let _ = rescan(disk);
+    }
+}
+
 /// A file system mounted (`true`) or unmounted device `handle` (called once the mount list says
 /// so): a CD drive's tray is locked while anything on it is mounted.
 pub(crate) fn mounted(handle: u32, mounted: bool) {
+    if !mounted {
+        retry_rescan(handle);
+    }
     let Some((_, _, disk)) = crate::kern::vfs_bdev::extent(handle) else { return };
     let (backend, whole, parts) = {
         let disks = DISKS.lock();
@@ -837,6 +912,9 @@ extern "C" fn raw_open(major: u64, minor: u64, flags: u64) -> i64 {
     }
     let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
     RAW_OPEN.lock().insert(real_fd, handle);
+    if flags & O_ACCMODE != 0 {
+        RAW_WRITERS.lock().insert(real_fd);
+    }
     crate::fs::fd::finstall(real_fd, &RAW_OPS, 0, crate::fs::fd::open_flag(flags), crate::fs::fd::FdKind::Module)
 }
 
@@ -959,10 +1037,26 @@ pub const DIOCGSECTORSIZE: u64 = 0x8004_6480;
 /// can lay a filesystem out over it. `_IOR('d', 129, i64)`.
 pub const DIOCGMEDIASIZE: u64 = 0x8008_6481;
 
+/// `DIOCRESCAN`: on a whole disk's node open for writing, reads its partition table again
+/// (`rescan`): `1` if its partitions changed, `0` if not. OxideBSD's own, `_IO('d', 130)`; FreeBSD's
+/// GEOM rereads on a writer's close, which happens here too.
+pub const DIOCRESCAN: u64 = 0x6482;
+
 /// The disk requests `ioctl(2)` answers on a raw device descriptor; `None` when `real_fd` isn't
 /// one or `request` isn't a disk request, so `sys_ioctl` goes on to the others.
 pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> {
     use crate::memory::usercopy::{UserPtr, copyout_val};
+    if request == DIOCRESCAN {
+        let handle = RAW_OPEN.lock().get(&real_fd).copied()?;
+        if !RAW_WRITERS.lock().contains(&real_fd) {
+            return Some(Err(crate::syscall::EBADF));
+        }
+        let Some(disk) = DISKS.lock().iter().position(|d| d.present && d.whole == handle) else {
+            return Some(Err(crate::syscall::EINVAL)); // a partition's node, not the disk's
+        };
+        let _giant = crate::fs::fslock::Giant::enter();
+        return Some(rescan(disk as u32).map(u64::from));
+    }
     if request != DIOCGSECTORSIZE && request != DIOCGMEDIASIZE {
         return None;
     }
@@ -976,7 +1070,26 @@ pub fn ioctl(real_fd: u64, request: u64, argp: u64) -> Option<Result<u64, u64>> 
     })
 }
 
+/// Closes a raw device; the last writer of a whole disk closing it rereads its table (`rescan`;
+/// a busy disk keeps its partitions as they are).
 extern "C" fn raw_close(real_fd: u64) -> i64 {
-    RAW_OPEN.lock().remove(&real_fd);
+    let Some(handle) = RAW_OPEN.lock().remove(&real_fd) else { return 0 };
+    if !RAW_WRITERS.lock().remove(&real_fd) {
+        let _giant = crate::fs::fslock::Giant::enter();
+        retry_rescan(handle);
+        return 0;
+    }
+    let still_written = {
+        let open = RAW_OPEN.lock();
+        RAW_WRITERS.lock().iter().any(|fd| open.get(fd) == Some(&handle))
+    };
+    let whole_of = DISKS.lock().iter().position(|d| d.present && d.kind == Kind::Disk && d.whole == handle);
+    let _giant = crate::fs::fslock::Giant::enter();
+    match (still_written, whole_of) {
+        (false, Some(disk)) => {
+            let _ = rescan(disk as u32);
+        }
+        _ => retry_rescan(handle),
+    }
     0
 }

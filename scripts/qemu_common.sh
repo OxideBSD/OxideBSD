@@ -85,6 +85,13 @@ fi
 if [ -n "${OXIDEBSD_QEMU_MONITOR:-}" ]; then
     set -- "$@" -monitor "tcp:127.0.0.1:${OXIDEBSD_QEMU_MONITOR},server,nowait"
 fi
+# A test's monitor commands (qemu_runner.sh's QEMU_MONITOR_INPUT: `sendkey` for real key
+# presses), on a Unix socket of the test's own, sent once the log shows $QEMU_MONITOR_INPUT_AFTER.
+monitor_socket=""
+if [ -n "${QEMU_MONITOR_INPUT:-}" ]; then
+    monitor_socket=$(mktemp -u target/qemu_monitor.XXXXXX)
+    set -- "$@" -monitor "unix:$monitor_socket,server,nowait"
+fi
 
 # Real emulated xHCI controller + USB keyboard, opt-in only -- see sys/drivers/usb's own module
 # doc comment. Off by default: QEMU's default i440fx machine already wires up a PS/2 keyboard, so
@@ -195,10 +202,10 @@ qemu_common_run_test_and_translate_exit() {
     # from a FIFO this script holds open, and the file goes in once the log shows
     # $QEMU_SERIAL_INPUT_AFTER. Otherwise a background QEMU's stdin is /dev/null: no input.
     serial_fifo=""
+    trap 'rm -f ${serial_fifo:+"$serial_fifo"} ${monitor_socket:+"$monitor_socket"}' EXIT
     if [ -n "${QEMU_SERIAL_INPUT:-}" ]; then
         serial_fifo=$(mktemp -u target/qemu_serial_in.XXXXXX)
         mkfifo "$serial_fifo"
-        trap 'rm -f "$serial_fifo"' EXIT
         qemu-system-x86_64 "$@" <"$serial_fifo" &
         exec 3>"$serial_fifo"
     else
@@ -252,6 +259,12 @@ qemu_common_run_test_and_translate_exit() {
             grep -aqF "$QEMU_SERIAL_INPUT_AFTER" "${QEMU_SERIAL_LOG:-/dev/null}"; then
             cat "$QEMU_SERIAL_INPUT" >&3
             serial_sent=1
+        fi
+        if [ -n "$monitor_socket" ] && [ "${monitor_sent:-0}" = 0 ] &&
+            grep -aqF "$QEMU_MONITOR_INPUT_AFTER" "${QEMU_SERIAL_LOG:-/dev/null}"; then
+            python3 "$REPO_ROOT/scripts/qemu_monitor_send.py" "$monitor_socket" "$QEMU_MONITOR_INPUT" ||
+                echo "qemu_common.sh: sending the monitor commands failed" >&2
+            monitor_sent=1
         fi
         if [ "$stall_secs" -gt 0 ] && [ "$quiet" -ge "$stall_secs" ]; then
             echo "qemu_common.sh: HUNG: no serial output for ${stall_secs}s, killing QEMU (pid $qemu_pid; OXIDEBSD_TEST_STALL_SECS)" >&2

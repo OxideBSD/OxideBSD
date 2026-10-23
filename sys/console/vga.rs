@@ -230,6 +230,12 @@ struct Writer {
     sgr_bold: bool,
     sgr_reverse: bool,
     sgr_underline: bool,
+    /// `SGR 11` (`smacs` in the `linux` terminfo entry) until `SGR 10`: bytes are drawn as the
+    /// font's glyphs, as they are, ncurses' line-drawing characters among them.
+    raw_glyphs: bool,
+    /// A UTF-8 character begun: its bits so far, and how many continuation bytes are to come.
+    utf8_char: u32,
+    utf8_left: u8,
     esc_state: EscState,
     csi_params: [u16; MAX_CSI_PARAMS],
     csi_param_count: usize,
@@ -567,6 +573,8 @@ impl Writer {
                 49 => self.sgr_bg = Color::Black,
                 n @ 90..=97 => self.sgr_fg = Color::from_ansi_bright(n - 90),
                 n @ 100..=107 => self.sgr_bg = Color::from_ansi_bright(n - 100),
+                10 => self.raw_glyphs = false,
+                11 => self.raw_glyphs = true,
                 _ => {}
             }
         }
@@ -773,16 +781,41 @@ impl Writer {
         self.write_bytes(s.as_bytes());
     }
 
+    /// Writes bytes: ASCII and escape sequences, UTF-8 (each character drawn as its code page 437
+    /// glyph, `■` for one the font lacks or for a malformed sequence), or after `SGR 11` the
+    /// font's glyphs by number.
     fn write_bytes(&mut self, bytes: &[u8]) {
         for &byte in bytes {
+            if self.esc_state != EscState::Ground {
+                self.write_byte(byte);
+                continue;
+            }
+            if self.utf8_left > 0 {
+                if byte & 0xc0 == 0x80 {
+                    self.utf8_char = self.utf8_char << 6 | (byte & 0x3f) as u32;
+                    self.utf8_left -= 1;
+                    if self.utf8_left == 0 {
+                        let glyph = char::from_u32(self.utf8_char).map_or(PLACEHOLDER, cp437_glyph);
+                        self.put_char(glyph);
+                    }
+                    continue;
+                }
+                // Cut short: the placeholder for what came, then this byte afresh.
+                self.utf8_left = 0;
+                self.put_char(PLACEHOLDER);
+            }
             match byte {
-                // Printable ASCII, the control characters `write_byte` gives meaning to
-                // (newline, carriage return, tab, backspace, DEL), and ESC (0x1b) -- every CSI
-                // parameter/intermediate/final byte is itself printable ASCII, so ESC is the only
-                // addition an escape sequence needs here.
-                0x20..=0x7e | b'\n' | b'\r' | b'\t' | 0x08 | 0x7f | 0x1b => self.write_byte(byte),
-                // Anything else isn't representable in code page 437; show a placeholder.
-                _ => self.write_byte(0xfe),
+                // The control characters `write_byte` gives meaning to (newline, carriage
+                // return, tab, backspace, DEL) and ESC (0x1b) -- every CSI parameter/
+                // intermediate/final byte is itself printable ASCII, so ESC is the only addition
+                // an escape sequence needs here.
+                b'\n' | b'\r' | b'\t' | 0x08 | 0x7f | 0x1b => self.write_byte(byte),
+                _ if self.raw_glyphs => self.put_char(byte),
+                0x20..=0x7e => self.write_byte(byte),
+                0xc2..=0xdf => (self.utf8_char, self.utf8_left) = ((byte & 0x1f) as u32, 1),
+                0xe0..=0xef => (self.utf8_char, self.utf8_left) = ((byte & 0x0f) as u32, 2),
+                0xf0..=0xf4 => (self.utf8_char, self.utf8_left) = ((byte & 0x07) as u32, 3),
+                _ => self.put_char(PLACEHOLDER),
             }
         }
         self.sync_hw_cursor();
@@ -982,6 +1015,36 @@ fn real_grid_size() -> (usize, usize) {
     }
 }
 
+/// The glyph shown for a character the font lacks: `■`.
+const PLACEHOLDER: u8 = 0xfe;
+
+/// Code page 437's upper half, the glyphs of the console's font from 0x80 on, by character.
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å', //
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ', //
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»', //
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐', //
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧', //
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀', //
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩', //
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}', //
+];
+
+/// The font's glyph for `c` (UTF-8 output, `write_bytes`): ASCII as itself, code page 437's
+/// characters as theirs, a few look-alikes, else the placeholder.
+fn cp437_glyph(c: char) -> u8 {
+    if c.is_ascii() && !c.is_ascii_control() {
+        return c as u8;
+    }
+    let c = match c {
+        'β' => 'ß',
+        'μ' => 'µ',
+        'Ø' | 'ø' | '€' => return PLACEHOLDER,
+        c => c,
+    };
+    CP437_HIGH.iter().position(|&g| g == c).map_or(PLACEHOLDER, |i| 0x80 + i as u8)
+}
+
 #[allow(clippy::deref_addrof)] // false positive: `&raw mut` + deref avoids a deny-by-default
 // direct `&mut` to a mutable static (edition 2024 `static_mut_refs`), see the field's own comment
 static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
@@ -998,6 +1061,9 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
         sgr_bold: false,
         sgr_reverse: false,
         sgr_underline: false,
+        raw_glyphs: false,
+        utf8_char: 0,
+        utf8_left: 0,
         esc_state: EscState::Ground,
         csi_params: [0; MAX_CSI_PARAMS],
         csi_param_count: 0,

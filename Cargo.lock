@@ -287,6 +287,13 @@ name = "libcertstore"
 version = "0.1.0"
 
 [[package]]
+name = "libpart"
+version = "0.1.0"
+dependencies = [
+ "oxfs_format",
+]
+
+[[package]]
 name = "limine"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -426,6 +433,7 @@ dependencies = [
  "chacha20",
  "kthread_if",
  "libcertstore",
+ "libpart",
  "limine",
  "linked_list_allocator",
  "mtree",

@@ -29,7 +29,7 @@
 //! an image is reproducible. Zero blocks of a partition image are skipped, so the output stays
 //! as sparse as its inputs.
 
-use oxfs_format::{OXFS_MBR_TYPE, OXFS_TYPE_GUID, guid_bytes};
+use part::{Kind, Table, TypeCode};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::FileExt;
@@ -39,18 +39,8 @@ use std::process::ExitCode;
 const SECTOR: u64 = 512;
 /// Partitions start on this boundary, in 512-byte sectors (1 MiB).
 const ALIGN: u64 = 2048;
-const GPT_ENTRIES: u64 = 128;
-const GPT_ENTRY_SIZE: u64 = 128;
-/// The entry array's bytes (16 KiB): a whole number of sectors of every size `-S` takes.
-const GPT_ENTRY_BYTES: u64 = GPT_ENTRIES * GPT_ENTRY_SIZE;
-/// The EFI system partition's type, `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`.
-const EFI_TYPE_GUID: [u8; 16] = guid_bytes(0xC12A_7328, 0xF81F, 0x11D2, [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B]);
-const EFI_MBR_TYPE: u8 = 0xEF;
-/// A Microsoft basic data partition's type (a FAT volume other than the ESP),
-/// `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`.
-const MS_BASIC_DATA_GUID: [u8; 16] = guid_bytes(0xEBD0_A0A2, 0xB9E5, 0x4433, [0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7]);
-/// A BIOS boot partition's type, `21686148-6449-6E6F-744E-656564454649` ("Hah!IdontNeedEFI").
-const BIOS_TYPE_GUID: [u8; 16] = *b"Hah!IdontNeedEFI";
+/// The GPT entry array's bytes (16 KiB): a whole number of sectors of every size `-S` takes.
+const GPT_ENTRY_BYTES: u64 = 128 * 128;
 /// Where Limine's boot sector keeps stage 2's byte offset.
 const STAGE2_LOC_OFFSET: usize = 0x1a4;
 /// Stage 2's place on an MBR disk: after the boot sector, and a multiple of every sector size.
@@ -79,21 +69,22 @@ enum PartType {
 }
 
 impl PartType {
-    fn guid(self) -> [u8; 16] {
-        match self {
-            PartType::Oxfs => OXFS_TYPE_GUID,
-            PartType::Efi => EFI_TYPE_GUID,
-            PartType::Bios => BIOS_TYPE_GUID,
-            PartType::Fat(_) => MS_BASIC_DATA_GUID,
-        }
+    /// Its type as `scheme`'s table stores it (libpart's names, but each FAT type its own on MBR).
+    fn code(self, scheme: part::Scheme) -> TypeCode {
+        let kind = match self {
+            PartType::Oxfs => Kind::Oxfs,
+            PartType::Efi => Kind::Efi,
+            PartType::Bios => Kind::BiosBoot,
+            PartType::Fat(t) if scheme == part::Scheme::Mbr => return TypeCode::Mbr(t),
+            PartType::Fat(_) => Kind::MsBasicData,
+        };
+        kind.code(scheme).expect("a bios partition is refused on MBR")
     }
 
-    fn mbr(self) -> u8 {
-        match self {
-            PartType::Oxfs => OXFS_MBR_TYPE,
-            PartType::Efi => EFI_MBR_TYPE,
-            PartType::Bios => unreachable!("refused on MBR"),
-            PartType::Fat(t) => t,
+    fn guid(self) -> [u8; 16] {
+        match self.code(part::Scheme::Gpt) {
+            TypeCode::Gpt(g) => g,
+            TypeCode::Mbr(_) => unreachable!(),
         }
     }
 }
@@ -149,100 +140,6 @@ fn parse_part(s: &str) -> Result<Part, String> {
     Ok(Part { kind, label: label.to_string(), file, sectors: bytes.div_ceil(4096) * 8, first: 0 })
 }
 
-/// CRC-32 (IEEE 802.3, reflected), as GPT uses.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
-/// A version 4 (random-shaped) GUID from `seed`: FNV-1a over it, stretched to 16 bytes.
-fn derived_guid(seed: &[u8]) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    for (half, chunk) in out.chunks_mut(8).enumerate() {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ half as u64;
-        for &b in seed {
-            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01B3);
-        }
-        chunk.copy_from_slice(&h.to_le_bytes());
-    }
-    out[7] = (out[7] & 0x0F) | 0x40;
-    out[8] = (out[8] & 0x3F) | 0x80;
-    out
-}
-
-/// The GPT of a disk of `total` sectors of `ss` bytes: its first `2 + entry sectors` sectors
-/// (protective MBR, header, entries) and its last `entry sectors + 1` (backup entries and header).
-/// Partition positions are converted from 512-byte sectors to the disk's.
-fn gpt(total: u64, parts: &[Part], ss: u64) -> (Vec<u8>, Vec<u8>) {
-    let scale = ss / SECTOR;
-    let entry_sectors = GPT_ENTRY_BYTES / ss;
-    let layout: Vec<u8> = parts
-        .iter()
-        .flat_map(|p| [&p.kind.guid()[..], p.label.as_bytes(), &p.first.to_le_bytes(), &p.sectors.to_le_bytes()].concat())
-        .chain(total.to_le_bytes())
-        .collect();
-    let disk_guid = derived_guid(&[b"disk".as_slice(), &layout].concat());
-    let mut entries = vec![0u8; (GPT_ENTRIES * GPT_ENTRY_SIZE) as usize];
-    for (i, p) in parts.iter().enumerate() {
-        let e = &mut entries[i * GPT_ENTRY_SIZE as usize..(i + 1) * GPT_ENTRY_SIZE as usize];
-        e[0..16].copy_from_slice(&p.kind.guid());
-        e[16..32].copy_from_slice(&derived_guid(&[&layout[..], &(i as u64).to_le_bytes()].concat()));
-        e[32..40].copy_from_slice(&(p.first / scale).to_le_bytes());
-        e[40..48].copy_from_slice(&((p.first + p.sectors) / scale - 1).to_le_bytes());
-        for (j, unit) in p.label.encode_utf16().enumerate() {
-            e[56 + j * 2..58 + j * 2].copy_from_slice(&unit.to_le_bytes());
-        }
-    }
-    let entries_crc = crc32(&entries);
-    let last_usable = total - 2 - entry_sectors;
-    let header = |this: u64, other: u64, entries_lba: u64| -> Vec<u8> {
-        let mut h = vec![0u8; ss as usize];
-        h[0..8].copy_from_slice(b"EFI PART");
-        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
-        h[12..16].copy_from_slice(&92u32.to_le_bytes());
-        h[24..32].copy_from_slice(&this.to_le_bytes());
-        h[32..40].copy_from_slice(&other.to_le_bytes());
-        h[40..48].copy_from_slice(&(2 + entry_sectors).to_le_bytes());
-        h[48..56].copy_from_slice(&last_usable.to_le_bytes());
-        h[56..72].copy_from_slice(&disk_guid);
-        h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
-        h[80..84].copy_from_slice(&(GPT_ENTRIES as u32).to_le_bytes());
-        h[84..88].copy_from_slice(&(GPT_ENTRY_SIZE as u32).to_le_bytes());
-        h[88..92].copy_from_slice(&entries_crc.to_le_bytes());
-        let crc = crc32(&h[..92]);
-        h[16..20].copy_from_slice(&crc.to_le_bytes());
-        h
-    };
-    let mut head = vec![0u8; (ss * (2 + entry_sectors)) as usize];
-    // The protective MBR: one 0xEE entry over the disk (capped at 32 bits).
-    mbr_entry(&mut head, 0, 0xEE, 1, total - 1);
-    head[ss as usize..2 * ss as usize].copy_from_slice(&header(1, total - 1, 2));
-    head[2 * ss as usize..].copy_from_slice(&entries);
-    let mut tail = vec![0u8; (ss * (entry_sectors + 1)) as usize];
-    tail[..entries.len()].copy_from_slice(&entries);
-    tail[entries.len()..].copy_from_slice(&header(total - 1, 1, total - 1 - entry_sectors));
-    (head, tail)
-}
-
-/// Writes MBR entry `i` of sector 0 in `sector0` (LBA fields only; CHS saturated), and the
-/// signature.
-fn mbr_entry(sector0: &mut [u8], i: usize, kind: u8, first: u64, sectors: u64) {
-    let e = &mut sector0[446 + i * 16..462 + i * 16];
-    e[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
-    e[4] = kind;
-    e[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
-    e[8..12].copy_from_slice(&(first.min(u32::MAX as u64) as u32).to_le_bytes());
-    e[12..16].copy_from_slice(&(sectors.min(u32::MAX as u64) as u32).to_le_bytes());
-    sector0[510] = 0x55;
-    sector0[511] = 0xAA;
-}
-
 /// `-b`: Limine's boot sector over sector 0 (its timestamp, bytes 218-223, and the partition
 /// table, 440-509, kept), stage 2 at `stage2_loc`, and that offset in the boot sector.
 fn install_bootcode(disk: &File, scheme: Scheme, parts: &[Part], code: &[u8]) -> Result<(), String> {
@@ -278,6 +175,29 @@ fn install_bootcode(disk: &File, scheme: Scheme, parts: &[Part], code: &[u8]) ->
     disk.write_all_at(stage2, loc).map_err(|e| e.to_string())
 }
 
+/// The table of a disk of `total` sectors of `ss` bytes holding `parts` (laid out in 512-byte
+/// sectors). A GPT's disk and partition GUIDs are derived from the layout, so the same
+/// partitions give the same disk.
+fn table(scheme: Scheme, total: u64, parts: &[Part], ss: u64) -> Result<Table, String> {
+    let scale = ss / SECTOR;
+    let layout: Vec<u8> = parts
+        .iter()
+        .flat_map(|p| [&p.kind.guid()[..], p.label.as_bytes(), &p.first.to_le_bytes(), &p.sectors.to_le_bytes()].concat())
+        .chain(total.to_le_bytes())
+        .collect();
+    let s = match scheme {
+        Scheme::Gpt => part::Scheme::Gpt,
+        Scheme::Mbr => part::Scheme::Mbr,
+    };
+    let disk_guid = if s == part::Scheme::Gpt { part::guid_from(&[b"disk".as_slice(), &layout].concat()) } else { [0; 16] };
+    let mut t = Table::new(s, ss as u32, total, disk_guid).map_err(|e| e.to_string())?;
+    for (i, p) in parts.iter().enumerate() {
+        let guid = if s == part::Scheme::Gpt { part::guid_from(&[&layout[..], &(i as u64).to_le_bytes()].concat()) } else { [0; 16] };
+        t.add(p.kind.code(s), &p.label, Some(p.first / scale), Some(p.sectors / scale), guid).map_err(|e| e.to_string())?;
+    }
+    Ok(t)
+}
+
 fn run(scheme: Scheme, out: &str, ss: u64, capacity: u64, bootcode: Option<&[u8]>, mut parts: Vec<Part>) -> Result<(), String> {
     if bootcode.is_some() && ss != SECTOR {
         return Err("-b needs 512-byte sectors".into());
@@ -310,19 +230,8 @@ fn run(scheme: Scheme, out: &str, ss: u64, capacity: u64, bootcode: Option<&[u8]
         .map_err(|e| format!("{out}: {e}"))?;
     disk.set_len(total * ss).map_err(|e| format!("{out}: {e}"))?;
     let io = |e: std::io::Error| format!("{out}: {e}");
-    match scheme {
-        Scheme::Gpt => {
-            let (head, tail) = gpt(total, &parts, ss);
-            disk.write_all_at(&head, 0).map_err(io)?;
-            disk.write_all_at(&tail, (total * ss) - tail.len() as u64).map_err(io)?;
-        }
-        Scheme::Mbr => {
-            let mut sector0 = vec![0u8; SECTOR as usize];
-            for (i, p) in parts.iter().enumerate() {
-                mbr_entry(&mut sector0, i, p.kind.mbr(), p.first / scale, p.sectors / scale);
-            }
-            disk.write_all_at(&sector0, 0).map_err(io)?;
-        }
+    for (lba, bytes) in table(scheme, total, &parts, ss)?.write() {
+        disk.write_all_at(&bytes, lba * ss).map_err(io)?;
     }
     if let Some(code) = bootcode {
         install_bootcode(&disk, scheme, &parts, code).map_err(|e| format!("{out}: {e}"))?;

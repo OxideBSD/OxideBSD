@@ -99,6 +99,10 @@ mod sbin_route;
 mod sbin_sysctl;
 #[path = "../../sbin/umount/src/main.rs"]
 mod sbin_umount;
+#[path = "../../sbin/gpart/src/main.rs"]
+mod sbin_gpart;
+#[path = "../../sbin/wsconsctl/src/main.rs"]
+mod sbin_wsconsctl;
 
 /// The tools, by name, and their `main`s.
 const TOOLS: &[(&str, fn() -> ExitCode)] = &[
@@ -149,6 +153,8 @@ const TOOLS: &[(&str, fn() -> ExitCode)] = &[
     ("route", || sbin_route::main().report()),
     ("sysctl", || sbin_sysctl::main().report()),
     ("umount", || sbin_umount::main().report()),
+    ("gpart", || sbin_gpart::main().report()),
+    ("wsconsctl", || sbin_wsconsctl::main().report()),
 ];
 
 fn main() -> ExitCode {

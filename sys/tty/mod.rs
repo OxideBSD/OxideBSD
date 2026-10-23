@@ -29,6 +29,8 @@ pub const IXON: u32 = 0o2000;
 pub const IXANY: u32 = 0o4000;
 pub const IXOFF: u32 = 0o10000;
 pub const IMAXBEL: u32 = 0o20000;
+/// Input is UTF-8: erasing takes a whole character (Linux's and FreeBSD's `IUTF8`).
+pub const IUTF8: u32 = 0o40000;
 
 pub const OPOST: u32 = 0o1;
 pub const ONLCR: u32 = 0o4;
@@ -137,7 +139,7 @@ pub const fn default_termios(speed: u32) -> RawTermios {
     cc[VWERASE] = ctrl(b'w');
     cc[VLNEXT] = ctrl(b'v');
     RawTermios {
-        c_iflag: BRKINT | ICRNL | IMAXBEL | IXON | IXANY,
+        c_iflag: BRKINT | ICRNL | IMAXBEL | IXON | IXANY | IUTF8,
         c_oflag: OPOST | ONLCR,
         c_cflag: CREAD | CS8 | HUPCL | speed,
         c_lflag: ECHO | ICANON | ISIG | IEXTEN | ECHOE | ECHOKE | ECHOCTL,
@@ -410,6 +412,11 @@ impl Tty {
                     out.push(b);
                     self.column += 1;
                 }
+                // A UTF-8 character's first byte takes a column; the rest take none.
+                0xc2..=0xf4 if self.termios.c_iflag & IUTF8 != 0 => {
+                    out.push(b);
+                    self.column += 1;
+                }
                 _ => out.push(b),
             }
         }
@@ -447,9 +454,16 @@ impl Tty {
         }
         let width = if b == b'\t' {
             // Recompute where the tab started from the rest of the line.
+            let utf8 = self.termios.c_iflag & IUTF8 != 0;
             let mut col = 0usize;
             for &c in &self.canon {
-                col = if c == b'\t' { col + 8 - col % 8 } else { col + 1 };
+                col = if c == b'\t' {
+                    col + 8 - col % 8
+                } else if utf8 && c & 0xc0 == 0x80 {
+                    col
+                } else {
+                    col + 1
+                };
             }
             let before = self.column.saturating_sub(col);
             before.max(1)
@@ -461,6 +475,21 @@ impl Tty {
         for _ in 0..width {
             self.echo_str(b"\x08 \x08", fx);
         }
+    }
+
+    /// Takes the pending line's last character off: a byte, or with `IUTF8` a whole UTF-8
+    /// sequence. Its first byte, for `erase_echo`.
+    fn pop_char(&mut self) -> Option<u8> {
+        let mut b = self.canon.pop()?;
+        if self.termios.c_iflag & IUTF8 != 0 {
+            while b & 0xc0 == 0x80 {
+                match self.canon.pop() {
+                    Some(lead) => b = lead,
+                    None => break,
+                }
+            }
+        }
+        Some(b)
     }
 
     fn flush_input(&mut self) {
@@ -555,7 +584,7 @@ impl Tty {
                 return;
             }
             if is(VERASE, b) {
-                if let Some(c) = self.canon.pop() {
+                if let Some(c) = self.pop_char() {
                     self.erase_echo(c, fx);
                 }
                 return;
@@ -566,14 +595,14 @@ impl Tty {
                     self.erase_echo(c, fx);
                 }
                 while self.canon.last().is_some_and(|c| !c.is_ascii_whitespace()) {
-                    let c = self.canon.pop().unwrap();
+                    let c = self.pop_char().unwrap();
                     self.erase_echo(c, fx);
                 }
                 return;
             }
             if is(VKILL, b) {
                 if l & ECHO != 0 && l & ECHOKE != 0 && l & ECHOE != 0 {
-                    while let Some(c) = self.canon.pop() {
+                    while let Some(c) = self.pop_char() {
                         self.erase_echo(c, fx);
                     }
                 } else {
@@ -1403,6 +1432,11 @@ const TIOCSWINSZ: u64 = 0x5414;
 const FIONREAD: u64 = 0x541B;
 const TIOCNOTTY: u64 = 0x5422;
 const TIOCGSID: u64 = 0x5429;
+/// OxideBSD's console keyboard requests (`wsconsctl keyboard.encoding`, INSTALLER.md §7.2), on
+/// `ttyv0` only: the layout's name, NUL-terminated in `KBD_NAME` bytes. Setting it is root's.
+const KBDIOC_GETENCODING: u64 = 0x6f78_4b01;
+const KBDIOC_SETENCODING: u64 = 0x6f78_4b02;
+const KBD_NAME: usize = 32;
 
 /// `FileOps::ioctl` for a terminal: the terminal requests (TTY.md §5.6). An unknown one is logged
 /// and `ENOTTY`.
@@ -1466,6 +1500,23 @@ fn ioctl(real_fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
         TIOCOUTQ => {
             copyout_val(&0i32, UserPtr::new(argp))?;
             Ok(0)
+        }
+        KBDIOC_GETENCODING | KBDIOC_SETENCODING if tty != TTYV0 => Err(ENOTTY),
+        KBDIOC_GETENCODING => {
+            let mut name = [0u8; KBD_NAME];
+            let current = crate::cpu::interrupts::keyboard_encoding().as_bytes();
+            name[..current.len()].copy_from_slice(current);
+            copyout_val(&name, UserPtr::new(argp))?;
+            Ok(0)
+        }
+        KBDIOC_SETENCODING => {
+            if !crate::process::identity::current_cred().privileged() {
+                return Err(crate::syscall::EPERM);
+            }
+            let name: [u8; KBD_NAME] = copyin_val(UserPtr::new(argp))?;
+            let len = name.iter().position(|&b| b == 0).ok_or(EINVAL)?;
+            let name = core::str::from_utf8(&name[..len]).map_err(|_| EINVAL)?;
+            if crate::cpu::interrupts::set_keyboard_encoding(name) { Ok(0) } else { Err(EINVAL) }
         }
         TCSBRK => Ok(0),
         TCFLSH => flush(tty, argp).map(|()| 0),

@@ -566,6 +566,10 @@ fn main() {
         build_static_std_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
     // /sbin/devd runs its configuration in a libsh shell (DEVD.md §5.2).
     let devd_elf_path = build_static_std_crate("sbin/devd", "OXFS_DEVD_ELF_PATH", &musl_sysroot);
+    // The console's settings (INSTALLER.md §7) and partition tables (§8), over lib/libpart.
+    let wsconsctl_elf_path = build_static_std_crate("sbin/wsconsctl", "OXFS_WSCONSCTL_ELF_PATH", &musl_sysroot);
+    println!("cargo:rerun-if-changed={}", Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libpart/src").display());
+    let gpart_elf_path = build_static_std_crate("sbin/gpart", "OXFS_GPART_ELF_PATH", &musl_sysroot);
     // The install medium's tools, crunched into one program (INSTALLER.md §4.3).
     let rescue_elf_path = build_static_std_crate("rescue", "OXFS_RESCUE_ELF_PATH", &musl_sysroot);
     let reboot_elf_path =
@@ -962,6 +966,8 @@ fn main() {
         ("OXFS_DEVD_ELF_PATH", devd_elf_path.to_str().unwrap()),
         ("OXFS_INSTALLER_ELF_PATH", installer_elf_path.to_str().unwrap()),
         ("OXFS_RESCUE_ELF_PATH", rescue_elf_path.to_str().unwrap()),
+        ("OXFS_WSCONSCTL_ELF_PATH", wsconsctl_elf_path.to_str().unwrap()),
+        ("OXFS_GPART_ELF_PATH", gpart_elf_path.to_str().unwrap()),
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         ("OXFS_SBIN_SYSCTL_ELF_PATH", sysctl_elf_path.to_str().unwrap()),

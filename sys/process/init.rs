@@ -129,10 +129,9 @@ pub(crate) fn start_in_context(pid: Pid) -> Option<(VirtAddr, VirtAddr)> {
     }
     let (program, restart, boot) = PENDING.lock().take()?;
     let try_one = |path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>]| -> Result<(VirtAddr, VirtAddr), alloc::string::String> {
-        let image = lifecycle::read_program(path).map_err(|e| alloc::format!("errno {e}"))?;
         let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
         let envp: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
-        lifecycle::load_into_current(&image, &argv, &envp).map_err(|e| alloc::format!("{e:?}"))
+        lifecycle::load_program_into_current(path, &argv, &envp).map_err(|e| alloc::format!("errno {e}"))
     };
     for path in &program.paths {
         match try_one(path, &program.argv(path, restart), &program.envp(path)) {

@@ -1,0 +1,33 @@
+#!/sbin/init_sh
+#
+# PROVIDE: wsconsctl
+# REQUIRE: devfs
+# BEFORE: LOGIN
+#
+# Applies /etc/wsconsctl.conf to the console (INSTALLER.md §7.2): each line a `name=value`
+# wsconsctl(8) takes, such as keyboard.encoding=de.
+
+. /etc/rc.subr
+
+name="wsconsctl"
+desc="Apply /etc/wsconsctl.conf to the console"
+start_cmd="wsconsctl_start"
+stop_cmd=":"
+
+wsconsctl_start()
+{
+	[ -r /etc/wsconsctl.conf ] || return 0
+	_status=0
+	while read -r _setting _rest; do
+		case "$_setting" in
+		''|\#*)
+			continue
+			;;
+		esac
+		wsconsctl "$_setting" > /dev/null || _status=1
+	done < /etc/wsconsctl.conf
+	return $_status
+}
+
+load_rc_config $name
+run_rc_command "$1"

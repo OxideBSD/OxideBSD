@@ -10,6 +10,7 @@ publish = false
 libc = "0.2"
 flate = { path = "../lib/libz" }
 fstab = { path = "../lib/libfstab" }
+libpart = { path = "../lib/libpart" }
 libsh = { path = "../lib/libsh", features = ["init-dialect"] }
 mode = { path = "../lib/libmode" }
 msdosfs_format = { path = "../lib/libmsdosfs" }

@@ -1,0 +1,85 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt WSCONSCTL 8
+.Os OxideBSD
+.Sh NAME
+.Nm wsconsctl
+.Nd show and set the console's settings
+.Sh SYNOPSIS
+.Nm
+.Op Fl n
+.Op Fl a | Ar name ...
+.Nm
+.Op Fl n
+.Ar name Ns = Ns Ar value ...
+.Sh DESCRIPTION
+.Nm
+shows or changes the settings of the system console.
+With a
+.Ar name
+it prints
+.Ar name Ns = Ns Ar value ;
+with
+.Ar name Ns = Ns Ar value
+it changes the setting, which only root may do, and prints
+.Ar name Li -> Ar value .
+With no operand, or
+.Fl a ,
+it prints every setting.
+.Fl n
+prints values alone.
+.Pp
+The settings are:
+.Bl -tag -width Ds
+.It Va keyboard.encoding
+The keyboard's layout, for PS/2 and USB keyboards alike:
+.Bl -tag -width us.colemak -compact
+.It Li us
+US English (the default)
+.It Li uk
+UK English
+.It Li de
+German
+.It Li fr
+French AZERTY
+.It Li us.dvorak
+Dvorak
+.It Li us.colemak
+Colemak
+.It Li jp
+Japanese 109-key
+.It Li no
+Norwegian
+.It Li fi , Li sv
+Finnish and Swedish
+.El
+Keys held down when the layout changes are forgotten.
+The console terminal receives what the keys type as UTF-8, and shows the
+characters its font has; the rest it shows as
+.Ql \(sq .
+.El
+.Pp
+.Pa /etc/rc.d/wsconsctl
+applies
+.Xr wsconsctl.conf 5
+at boot.
+.Sh FILES
+.Bl -tag -width /etc/wsconsctl.conf -compact
+.It Pa /dev/ttyv0
+the console, whose requests these are
+.It Pa /etc/wsconsctl.conf
+the settings made at boot
+.El
+.Sh EXIT STATUS
+0 if every setting was shown or set, 1 otherwise.
+.Sh EXAMPLES
+A German keyboard:
+.Dl wsconsctl keyboard.encoding=de
+.Sh SEE ALSO
+.Xr wsconsctl.conf 5
+.Sh HISTORY
+A
+.Nm
+command first appeared in
+.Nx 1.4 .
+OxideBSD's takes NetBSD's and OpenBSD's names for the settings it has.

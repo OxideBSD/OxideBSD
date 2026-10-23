@@ -1,0 +1,16 @@
+[package]
+name = "libpart"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "part"
+
+# Partition tables (INSTALLER.md §8.1): the kernel (reading), mkimg(1), gpart(8) and the
+# installer. no_std with alloc; its own workspace, testable on the host, like lib/liboxfs.
+[dependencies]
+oxfs_format = { path = "../liboxfs" }
+
+[workspace]

@@ -105,7 +105,7 @@ members = [
   "sys/modules/vfs",
 ]
 # Its own workspace, for host tests; the root package uses it only as a build-dependency.
-exclude = ["lib/libcd9660", "lib/libcertstore", "lib/libkern-mod", "lib/libkthread", "lib/libmsdosfs", "lib/liboxfs", "lib/libmtree", "lib/libvfs"]
+exclude = ["lib/libcd9660", "lib/libcertstore", "lib/libkern-mod", "lib/libkthread", "lib/libmsdosfs", "lib/liboxfs", "lib/libpart", "lib/libmtree", "lib/libvfs"]
 
 [package]
 name = "oxidebsd"
@@ -145,6 +145,8 @@ oxfs_format = { path = "lib/liboxfs" }
 vfs_if = { path = "lib/libvfs" }
 # Kernel threads' and taskqueues' kernel/module interface (KTHREAD.md §7).
 kthread_if = { path = "lib/libkthread" }
+# Partition tables (INSTALLER.md §8.1, drivers::part).
+libpart = { path = "lib/libpart" }
 # zstd decoding, for the install medium's compressed mfsroot (INSTALLER.md §4.3, drivers::md).
 ruzstd = { version = "0.9", default-features = false }
 

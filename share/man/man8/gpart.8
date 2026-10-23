@@ -1,0 +1,181 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt GPART 8
+.Os OxideBSD
+.Sh NAME
+.Nm gpart
+.Nd show and change disks' partition tables
+.Sh SYNOPSIS
+.Nm
+.Cm show
+.Op Fl l
+.Op Ar geom ...
+.Nm
+.Cm create
+.Fl s Cm gpt | mbr
+.Ar geom
+.Nm
+.Cm destroy
+.Op Fl F
+.Ar geom
+.Nm
+.Cm add
+.Fl t Ar type
+.Op Fl b Ar start
+.Op Fl s Ar size
+.Op Fl l Ar label
+.Ar geom
+.Nm
+.Cm delete
+.Fl i Ar index
+.Ar geom
+.Nm
+.Cm resize
+.Fl i Ar index
+.Op Fl s Ar size
+.Ar geom
+.Nm
+.Cm modify
+.Fl i Ar index
+.Op Fl l Ar label
+.Op Fl t Ar type
+.Ar geom
+.Nm
+.Cm set | unset
+.Fl a Cm active
+.Fl i Ar index
+.Ar geom
+.Sh DESCRIPTION
+.Nm
+reads and writes the partition tables of disks: GPT, with its backup header
+and entries at the disk's end, and MBR's four primary partitions.
+A
+.Ar geom
+is a disk's name, such as
+.Li ide0
+or
+.Pa /dev/sata0.2 ,
+or a disk image file (512-byte sectors).
+Partitions are named after their disk:
+.Li ide0p2
+on GPT,
+.Li ide0s2
+on MBR; a GPT partition's label also names it,
+.Pa /dev/gpt/ Ns Ar label .
+.Pp
+Each change is written at once.
+The kernel then reads the table again and makes the partitions'
+.Pa /dev
+nodes anew; while a partition of the disk is mounted or open, the old ones stay
+until it is let go, and
+.Nm
+says so.
+.Pp
+A
+.Ar start
+or
+.Ar size
+is a number of sectors, or of bytes with a
+.Cm k , m , g
+or
+.Cm t
+suffix.
+Sizes are rounded down to whole 4 KiB blocks.
+.Pp
+The verbs are:
+.Bl -tag -width Ds
+.It Cm show
+Shows the tables of the named disks, or of every disk that has one: each
+partition's first sector, size in sectors, index and type (with
+.Fl l ,
+its label), and the free space between them.
+A GPT read from its backup, its primary header being damaged, is shown
+.Li [CORRUPT] ;
+any change writes both again.
+.It Cm create
+Writes an empty table:
+.Cm gpt
+or
+.Cm mbr .
+A disk with a table already must be
+.Cm destroy Ns ed
+first.
+.It Cm destroy
+Removes the table: the partition entries in sector 0 and, for GPT, both
+headers.
+Sector 0's boot code is kept.
+A table with partitions is removed only with
+.Fl F .
+.It Cm add
+Adds a partition of
+.Ar type ,
+numbered with the lowest free index.
+It starts at
+.Ar start ,
+or else at the first 1 MiB boundary of the first free space it fits in, and is
+.Ar size
+long, or else as long as that free space.
+.Fl l
+gives a GPT partition its label.
+.It Cm delete
+Removes partition
+.Ar index .
+.It Cm resize
+Makes partition
+.Ar index
+.Ar size
+long, or as long as the free space after it allows; its start stays.
+The file system on it is not resized.
+.It Cm modify
+Changes partition
+.Ar index Ns 's
+label or type.
+.It Cm set , Cm unset
+Sets or clears an MBR partition's
+.Cm active
+(boot) flag; setting it clears the others'.
+.El
+.Pp
+The types are
+.Cm oxfs ,
+.Cm efi
+(the EFI system partition),
+.Cm bios-boot
+(GPT only: where a BIOS boot loader's second stage goes),
+.Cm swap ,
+.Cm ms-basic-data
+(FAT or NTFS),
+.Cm linux-data
+and
+.Cm linux-swap ,
+or any other as
+.Cm \&! Ns Ar guid
+or
+.Cm \&!0x Ns Ar nn ,
+the form
+.Cm show
+uses for a type it doesn't know.
+.Sh EXIT STATUS
+0 if the command did what was asked, 1 otherwise.
+.Sh EXAMPLES
+A disk for OxideBSD with UEFI and BIOS boot:
+.Bd -literal -offset indent
+gpart create -s gpt ide1
+gpart add -t bios-boot -s 64k ide1
+gpart add -t efi -s 260m -l esp ide1
+gpart add -t oxfs -l rootfs ide1
+newfs_oxfs /dev/gpt/rootfs
+.Ed
+.Sh SEE ALSO
+.Xr mkimg 1 ,
+.Xr installer 8 ,
+.Xr newfs_oxfs 8
+.Sh HISTORY
+A
+.Nm
+command first appeared in
+.Fx 7.0 .
+OxideBSD's takes FreeBSD's verbs and output; its tables are written by the
+library
+.Xr mkimg 1
+and the installer use too.

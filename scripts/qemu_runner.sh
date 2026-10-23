@@ -100,7 +100,8 @@ case "$TEST_NAME" in
     install_boot|install_boot_bios)
         # The install medium alone (INSTALLER.md step 6), made from this kernel below: at 64 MB,
         # with a blank disk to install on, it boots into its mfsroot and the installer's first
-        # screen, where tests/install_boot.serial chooses Shell and checks the mfsroot.
+        # screen, where tests/install_boot.serial chooses Shell and checks the mfsroot, a keyboard
+        # layout (keys typed by tests/install_boot.monitor) and gpart on the blank disk.
         INSTALL_BOOT=1
         if [ "$TEST_NAME" = install_boot_bios ]; then
             OXIDEBSD_FIRMWARE=bios
@@ -110,7 +111,9 @@ case "$TEST_NAME" in
         export OXIDEBSD_QEMU_MEM
         QEMU_SERIAL_INPUT="$REPO_ROOT/tests/install_boot.serial"
         QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
-        QEMU_PASS_PATTERN="mfsroot-shell: 42"
+        QEMU_MONITOR_INPUT="$REPO_ROOT/tests/install_boot.monitor"
+        QEMU_MONITOR_INPUT_AFTER="type-2-now"
+        QEMU_PASS_PATTERN="mfsroot-ok 42 keys=yzü partitions=1"
         QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|\[fault\]|repeating too quickly"
         ;;
     oom_syscall_smoke)
