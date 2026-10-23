@@ -180,3 +180,29 @@ fn syntax_errors_have_positions() {
         assert_eq!(err.line, line, "{src}: {err}");
     }
 }
+
+#[test]
+fn compound_lists_need_a_command() {
+    // XCU 2.10.2: compound_list is never empty; bash and dash refuse these too.
+    for (src, near) in [
+        ("if then echo x; fi", "then"),
+        ("if true; then fi", "fi"),
+        ("if true; then :; else fi", "fi"),
+        ("if true; then :; elif then :; fi", "then"),
+        ("{ }", "}"),
+        ("( )", ")"),
+        ("while do :; done", "do"),
+        ("until\ndo :; done", "do"),
+        ("for i in a; do done", "done"),
+    ] {
+        let err = parse(src).unwrap_err();
+        assert!(!err.incomplete, "{src}: {err}");
+        assert!(err.to_string().contains(&format!("`{near}`")), "{src}: {err}");
+    }
+    // Unfinished, not wrong: an interactive shell asks for more.
+    assert!(parse("if").unwrap_err().incomplete);
+    assert!(parse("{\n").unwrap_err().incomplete);
+    // These may be empty.
+    parse("x=$( ); y=`` ").unwrap();
+    parse("case a in a) ;; b) esac").unwrap();
+}

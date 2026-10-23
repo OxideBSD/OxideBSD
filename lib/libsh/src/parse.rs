@@ -749,6 +749,19 @@ impl Parser {
         }
     }
 
+    /// A `compound_list`: a list that must hold at least one command (XCU 2.10.2), up to `term`.
+    fn compound_list(&mut self, term: Terminator) -> Result<List> {
+        let list = self.list(term)?;
+        if list.is_empty() {
+            return Err(match self.peek()?.clone() {
+                Token::Word(_, raw) => self.error(format!("unexpected `{raw}`")),
+                Token::Op(Op::RParen) => self.error("unexpected `)`"),
+                _ => self.error("expected a command"),
+            });
+        }
+        Ok(list)
+    }
+
     fn and_or(&mut self) -> Result<AndOr> {
         let first = self.pipeline()?;
         let mut rest = Vec::new();
@@ -783,14 +796,14 @@ impl Parser {
         let compound = match &token {
             Token::Op(Op::LParen) => {
                 self.next()?;
-                let body = self.list(Terminator::Words(&[")"]))?;
+                let body = self.compound_list(Terminator::Words(&[")"]))?;
                 self.expect_op(Op::RParen, ")")?;
                 Some(CompoundCommand::Subshell(body))
             }
             Token::Word(_, raw) => match raw.as_str() {
                 "{" => {
                     self.next()?;
-                    let body = self.list(Terminator::Words(&["}"]))?;
+                    let body = self.compound_list(Terminator::Words(&["}"]))?;
                     self.expect_reserved("}")?;
                     Some(CompoundCommand::Brace(body))
                 }
@@ -920,7 +933,7 @@ impl Parser {
     fn do_group(&mut self) -> Result<List> {
         self.skip_newlines()?;
         self.expect_reserved("do")?;
-        let body = self.list(Terminator::Words(&["done"]))?;
+        let body = self.compound_list(Terminator::Words(&["done"]))?;
         self.expect_reserved("done")?;
         Ok(body)
     }
@@ -930,9 +943,9 @@ impl Parser {
         let mut branches = Vec::new();
         let mut else_body = None;
         loop {
-            let cond = self.list(Terminator::Words(&["then"]))?;
+            let cond = self.compound_list(Terminator::Words(&["then"]))?;
             self.expect_reserved("then")?;
-            let body = self.list(Terminator::Words(&["elif", "else", "fi"]))?;
+            let body = self.compound_list(Terminator::Words(&["elif", "else", "fi"]))?;
             branches.push((cond, body));
             if self.peek_reserved("elif")? {
                 self.next()?;
@@ -940,7 +953,7 @@ impl Parser {
             }
             if self.peek_reserved("else")? {
                 self.next()?;
-                else_body = Some(self.list(Terminator::Words(&["fi"]))?);
+                else_body = Some(self.compound_list(Terminator::Words(&["fi"]))?);
             }
             self.expect_reserved("fi")?;
             return Ok(CompoundCommand::If { branches, else_body });
@@ -949,7 +962,7 @@ impl Parser {
 
     fn loop_clause(&mut self, is_while: bool) -> Result<CompoundCommand> {
         self.next()?;
-        let cond = self.list(Terminator::Words(&["do"]))?;
+        let cond = self.compound_list(Terminator::Words(&["do"]))?;
         let body = self.do_group()?;
         Ok(if is_while { CompoundCommand::While { cond, body } } else { CompoundCommand::Until { cond, body } })
     }
