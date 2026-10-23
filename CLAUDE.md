@@ -194,6 +194,10 @@ No libtest. Tests boot in QEMU and report through `isa-debug-exit` (`sys/qemu.rs
   links dynamically (`PT_INTERP` `/lib/ld-musl-x86_64.so.1`). Every `ET_DYN` main binary gets an
   ASLR bias, `PT_INTERP` or not, from `execve` and the kernel's own `spawn` (which refuses a
   `PT_INTERP` image: it loads no dynamic linker).
+- **The install medium's tools are crunched into `rescue/`** (`distrib/mfsroot/list`, INSTALLER.md
+  §4.3): each tool's `main.rs` is included as a module, so its `main` stays `pub(crate)` and its
+  modules reach each other with `super::`, never `crate::`; a new dependency goes in
+  `rescue/Cargo.toml` too.
 - **`/bin` and `/sbin` are static** (OpenBSD-style; `build_static_std_crate`, `StdLink::StaticPie`),
   including `/sbin/init`, `/bin/sh` and `/sbin/emergency`, which the kernel reads from the root
   file system and spawns as pid 1 (nothing userland is embedded in it). **Everything else is a dynamic PIE** on `/lib/libc.so` and `/lib/libgcc_s.so.1` (LLVM
