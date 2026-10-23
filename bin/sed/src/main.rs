@@ -1377,7 +1377,7 @@ fn script_name(text: &[u8]) -> String {
     if first.len() < t.len() { format!("\"{first}...\"") } else { format!("\"{first}\"") }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let mut units: Vec<Unit> = Vec::new();
     let (mut ere, mut nflag, mut flush_each) = (false, false, false);

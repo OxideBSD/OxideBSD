@@ -242,6 +242,9 @@ pub fn init(
     for disk in found {
         attach(disk, &mut parts);
     }
+    if crate::boot::mfsroot() && init_mfsroot(phys_mem_offset) {
+        return;
+    }
     // oxfs's 4 KiB blocks: its partition must start on one (`Partition::blocks`).
     match choose_root(&parts).and_then(|r| Some((r, r.part.blocks()?))) {
         Some((r, (_, blocks))) => {
@@ -633,6 +636,30 @@ fn choose_root(parts: &[Found]) -> Option<&Found> {
     Some(first)
 }
 
+/// With `mfsroot` on the command line: makes the boot module `mfsroot` the root, as memory disk
+/// `md0` read in place (`INSTALLER.md` §4.1), whatever the disks hold; `false` if no such module
+/// was loaded.
+pub fn init_mfsroot(phys_mem_offset: VirtAddr) -> bool {
+    let Some(image) = crate::boot::boot_module("/mfsroot") else {
+        serial_println!("[boot] disk: mfsroot asked for, but the boot loader loaded none");
+        return false;
+    };
+    if !super::md::init_image(image, phys_mem_offset) {
+        return false;
+    }
+    let sectors = super::md::capacity_blocks() * 8;
+    let model = String::from("mfsroot");
+    let disk = register(String::from("md0"), Backend::Memory, Kind::Memory, sectors, 512, model, 0, 0);
+    let handle = crate::kern::vfs_bdev::register("md0", 0, 0, 0, sectors, disk);
+    crate::kern::vfs_bdev::set_root(handle);
+    serial_println!(
+        "[boot] disk: root on the mfsroot ({} KiB, {} KiB loaded), nothing persists",
+        sectors / 2,
+        image.len() / 1024
+    );
+    true
+}
+
 /// Makes a memory disk of a quarter of RAM the root (`md0`): with no oxfs partition on any disk, or
 /// with `no-ata`, where real disks aren't probed at all.
 pub fn init_memory(phys_mem_offset: VirtAddr) {
@@ -763,7 +790,7 @@ pub fn set_root_readonly_at_boot() {
 }
 
 /// For oxfs: `1` when it should mount the root read-only at boot. Never for the memory disk:
-/// formatted moments ago, it has nothing to check, and no raw device to check it through.
+/// it lives only this boot, and has no raw device to check it through.
 pub extern "C" fn oxidebsd_root_readonly_at_boot() -> u64 {
     let on_memory = crate::kern::vfs_bdev::root()
         .and_then(crate::kern::vfs_bdev::extent)

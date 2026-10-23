@@ -290,7 +290,7 @@ struct ListOpts {
     only_down: bool,
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut o = ListOpts::default();
     let mut i = 0;

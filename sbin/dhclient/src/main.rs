@@ -691,7 +691,7 @@ fn resolv_conf_path() -> String {
     RESOLV_CONF.to_string()
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Ok(o) = parse_args(&args) else { return usage() };
     // SAFETY: geteuid can't fail.

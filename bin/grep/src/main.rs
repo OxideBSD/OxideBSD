@@ -789,7 +789,7 @@ fn parse_num(s: &OsStr, what: &str) -> Result<u64, ExitCode> {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     match run() {
         Ok(c) | Err(c) => c,
     }

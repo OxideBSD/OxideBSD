@@ -367,7 +367,7 @@ fn usage() -> ExitCode {
     ExitCode::from(EXIT_USAGE)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let (mut mode, mut force) = (Mode::Yes, false);
     let mut device = None;
     let mut answer_given = false;

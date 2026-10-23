@@ -335,7 +335,7 @@ fn base_name(p: &OsStr) -> &OsStr {
     OsStr::from_bytes(&b[start..])
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut clobber = Clobber::Default;
     let (mut no_deref, mut verbose) = (false, false);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();

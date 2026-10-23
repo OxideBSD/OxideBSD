@@ -565,6 +565,8 @@
 ./usr/share/man/man8/syslogd.8 type=file src=share/man/man8/syslogd.8
 ./usr/share/man/man8/cron.8 type=file src=share/man/man8/cron.8
 ./usr/share/man/man8/devd.8 type=file src=share/man/man8/devd.8
+./usr/share/man/man8/installer.8 type=file src=share/man/man8/installer.8
+./usr/share/man/man8/rescue.8 type=file src=share/man/man8/rescue.8
 ./usr/share/man/man8/mount.8 type=file src=share/man/man8/mount.8
 ./usr/share/man/man8/mount_nullfs.8 type=file hardlink=./usr/share/man/man8/mount.8
 ./usr/share/man/man8/mount_tmpfs.8 type=file hardlink=./usr/share/man/man8/mount.8

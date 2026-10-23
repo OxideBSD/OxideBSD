@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: touch [-acm] [-r ref_file | -t time | -d date_time] file ...";
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut atime, mut mtime, mut create) = (false, false, true);
     let mut when: Option<[libc::timespec; 2]> = None;

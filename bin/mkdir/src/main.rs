@@ -119,7 +119,7 @@ fn build(path: &[u8], mode: u32, verbose: bool) -> Built {
     result
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: the BSDs' default: a closed pipe (under -v) ends us quietly.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();

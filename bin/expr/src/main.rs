@@ -278,7 +278,7 @@ fn eval(args: &[Vec<u8>]) -> Result<Val, Fault> {
     Ok(v)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     use std::os::unix::ffi::OsStringExt;
     let mut args: Vec<Vec<u8>> = std::env::args_os().skip(1).map(OsStringExt::into_vec).collect();
     if args.len() > 1 && args[0] == b"--" {

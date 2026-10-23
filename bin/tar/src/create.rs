@@ -14,10 +14,10 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::process::Stdio;
 
-use crate::archive::{Comp, Reader, Writer};
-use crate::header::{self, Entry, Kind};
-use crate::pattern::{self, Target};
-use crate::{Mode, Operand, Opts, shown, strerror};
+use super::archive::{Comp, Reader, Writer};
+use super::header::{self, Entry, Kind};
+use super::pattern::{self, Target};
+use super::{Mode, Operand, Opts, shown, strerror};
 
 /// musl's (and glibc's) `dev_t` encoding, which OxideBSD's devfs uses.
 pub fn major(d: u64) -> u32 {

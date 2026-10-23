@@ -372,7 +372,7 @@ fn base_name(p: &OsStr) -> &OsStr {
     OsStr::from_bytes(&b[start..])
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut o = Opts {
         recursive: false,
         follow: Follow::Never,

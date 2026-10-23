@@ -25,11 +25,11 @@ use std::io::{self, BufWriter, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 
-use crate::archive::{ReadError, Reader};
-use crate::create::makedev;
-use crate::header::{Entry, Kind};
-use crate::pattern::{self, Target};
-use crate::{Mode, Operand, Opts, shown, strerror};
+use super::archive::{ReadError, Reader};
+use super::create::makedev;
+use super::header::{Entry, Kind};
+use super::pattern::{self, Target};
+use super::{Mode, Operand, Opts, shown, strerror};
 
 fn errno() -> io::Error {
     io::Error::last_os_error()

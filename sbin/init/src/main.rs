@@ -894,7 +894,7 @@ enum State {
     Recovery,
 }
 
-fn main() {
+pub(crate) fn main() {
     // Only the kernel starts init, as process 1; run from a shell it would run /etc/rc and fight
     // the console for a single-user shell. Refused as on OpenBSD and NetBSD.
     // SAFETY: getuid and getpid take no arguments.

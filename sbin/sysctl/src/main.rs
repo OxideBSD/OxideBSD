@@ -461,7 +461,7 @@ fn parse_file(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&argv) {
         Ok(a) => a,

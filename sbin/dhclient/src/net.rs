@@ -7,8 +7,8 @@
 //! renewal is unicast to the server from our address. On Linux (host tests only) the socket is
 //! also bound to the interface (`SO_BINDTODEVICE`), which Linux needs to send with no address.
 //!
-//! A lease is applied through [`ifnet`](crate::ifnet) (address, mask, up) and
-//! [`gateway`](crate::gateway) (the default route), and its name servers written to
+//! A lease is applied through [`ifnet`](super::ifnet) (address, mask, up) and
+//! [`gateway`](super::gateway) (the default route), and its name servers written to
 //! `resolv.conf` by [`write_atomic`].
 
 use std::io;

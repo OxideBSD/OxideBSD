@@ -3,7 +3,7 @@
 
 use std::net::Ipv4Addr;
 
-use crate::packet::{self, Reply};
+use super::packet::{self, Reply};
 
 /// Leases shorter than this are stretched to it, so a hostile or broken server can't make the
 /// client spin.
@@ -309,8 +309,8 @@ pub fn parse_date(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::tests::server_reply;
-    use crate::packet::*;
+    use super::super::packet::tests::server_reply;
+    use super::super::packet::*;
 
     #[test]
     fn dates() {

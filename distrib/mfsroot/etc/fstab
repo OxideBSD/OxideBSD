@@ -1,0 +1,5 @@
+# /etc/fstab on the install medium's mfsroot. Its root is the memory disk the boot loader loaded;
+# scratch space is a tmpfs, so it costs RAM only while used. See fstab(5).
+#
+# Device	Mountpoint	FStype	Options		Dump	Pass#
+tmpfs		/tmp		tmpfs	rw,mode=1777	0	0

@@ -97,7 +97,7 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut o = Opts::default();
     let mut special = None;
     let mut args = std::env::args().skip(1);

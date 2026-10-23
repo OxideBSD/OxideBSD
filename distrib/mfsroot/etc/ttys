@@ -1,0 +1,7 @@
+#
+# /etc/ttys on the install medium's mfsroot: the installer runs on the console in getty's place
+# (installer -t takes the terminal), and init starts it again whenever it exits. See ttys(5).
+#
+# name	getty				type	status		comments
+console	none				unknown	off		secure
+ttyv0	"/usr/libexec/installer -t"	linux	on		secure

@@ -1,0 +1,14 @@
+#!/sbin/init_sh
+#
+# /etc/rc on the install medium's mfsroot (INSTALLER.md §4): its root is a memory disk, already
+# read-write, and holds no services. init then starts the installer on the console (/etc/ttys).
+
+PATH=/sbin:/bin
+HOME=/
+export PATH HOME
+
+hostname installer
+mount -a
+echo
+date
+exit 0

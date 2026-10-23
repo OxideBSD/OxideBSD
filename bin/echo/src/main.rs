@@ -14,7 +14,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: back to the default, so `echo | head -0` ends quietly like the BSDs' echo.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();

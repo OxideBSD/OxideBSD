@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut parents = false;
     let mut verbose = false;
     let mut args = std::env::args().skip(1).peekable();

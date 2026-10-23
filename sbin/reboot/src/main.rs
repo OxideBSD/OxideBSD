@@ -24,7 +24,7 @@ enum Action {
     PowerOff,
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut args = std::env::args();
     let argv0 = args.next().unwrap_or_default();
     let name = argv0.rsplit('/').next().unwrap_or("reboot").to_string();

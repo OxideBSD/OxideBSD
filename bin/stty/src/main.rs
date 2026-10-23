@@ -484,7 +484,7 @@ fn usage() -> ExitCode {
     ExitCode::from(1)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut fmt = Fmt::NotSet;
     let mut gflag = false;

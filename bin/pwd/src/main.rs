@@ -40,7 +40,7 @@ fn logical() -> Option<OsString> {
     (l.dev() == p.dev() && l.ino() == p.ino()).then_some(pwd)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: the BSDs' default: a closed pipe ends us quietly.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let mut physical = false;

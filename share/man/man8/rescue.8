@@ -1,0 +1,93 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt RESCUE 8
+.Os OxideBSD
+.Sh NAME
+.Nm rescue
+.Nd the install medium's tools, in one program
+.Sh SYNOPSIS
+.Nm /rescue/rescue
+.Ar tool
+.Op Ar argument ...
+.Sh DESCRIPTION
+The install medium's mfsroot (see
+.Xr installer 8 )
+stays in memory all the while the medium runs, so its tools are built as
+one program,
+.Nm ,
+with one copy of the libraries they share, as
+.Fx Ns 's
+.Pa /rescue
+is.
+Each tool is a hard link to it, such as
+.Pa /bin/sh ,
+.Pa /bin/ls
+or
+.Pa /sbin/mount ,
+and
+.Nm
+runs the tool its name says.
+Run under its own name, it runs the tool its first argument names, with the
+rest as that tool's arguments.
+.Pp
+The tools are the system's own, built from the same source:
+.Xr cat 1 ,
+.Xr chmod 1 ,
+.Xr cp 1 ,
+.Xr date 1 ,
+.Xr dd 1 ,
+.Xr df 1 ,
+.Xr echo 1 ,
+.Xr expr 1 ,
+.Xr false 1 ,
+.Xr grep 1 ,
+.Xr hostname 1 ,
+.Xr kill 1 ,
+.Xr ln 1 ,
+.Xr ls 1 ,
+.Xr mkdir 1 ,
+.Xr mv 1 ,
+.Xr ps 1 ,
+.Xr pwd 1 ,
+.Xr rm 1 ,
+.Xr rmdir 1 ,
+.Xr sed 1 ,
+.Xr sh 1 ,
+.Xr sleep 1 ,
+.Xr stty 1 ,
+.Xr sync 1 ,
+.Xr tar 1 ,
+.Xr test 1 ,
+.Xr touch 1 ,
+.Xr true 1 ,
+.Xr dhclient 8 ,
+.Xr dmesg 8 ,
+.Xr fsck 8 ,
+.Xr fsck_msdosfs 8 ,
+.Xr fsck_oxfs 8 ,
+.Xr ifconfig 8 ,
+.Xr init 8 ,
+.Xr init_sh 8 ,
+.Xr mount 8 ,
+.Xr mount_msdosfs 8 ,
+.Xr mount_tmpfs 8 ,
+.Xr newfs_msdos 8 ,
+.Xr newfs_oxfs 8 ,
+.Xr reboot 8 ,
+.Xr route 8 ,
+.Xr sysctl 8
+and
+.Xr umount 8 .
+Its
+.Xr sh 1
+also takes
+.Xr init_sh 8 Ns 's
+service blocks.
+.Sh SEE ALSO
+.Xr installer 8
+.Sh HISTORY
+A
+.Pa /rescue
+first appeared in
+.Fx 5.2 .
+OxideBSD's lives only on the install medium.

@@ -1,0 +1,82 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 22, 2026
+.Dt INSTALLER 8
+.Os OxideBSD
+.Sh NAME
+.Nm installer
+.Nd install OxideBSD from the install medium
+.Sh SYNOPSIS
+.Nm /usr/libexec/installer
+.Op Fl t Ar tty
+.Sh DESCRIPTION
+.Nm
+runs on the console of a machine booted from the install medium,
+.Pa install.iso ,
+written to a CD or, with
+.Xr dd 1 ,
+to a USB stick.
+The medium boots on BIOS and UEFI into its mfsroot: a small root file system the
+boot loader loads into memory beside the kernel, which the kernel mounts as
+.Pa /
+when its command line says
+.Li mfsroot .
+Nothing written to it lasts past the boot.
+The mfsroot's
+.Pa /etc/ttys
+runs
+.Nm
+on the console in place of
+.Xr getty 8 ,
+so
+.Xr init 8
+starts it again whenever it exits.
+.Pp
+Its first screen offers:
+.Bl -tag -width Install
+.It Install
+Install OxideBSD on a disk of this machine.
+Not yet written: the partition editor and the install steps come next.
+.It Shell
+A shell on the mfsroot, for recovery:
+.Xr rescue 8 Ns 's
+tools, with the machine's disks in
+.Pa /dev
+and their file systems mountable;
+.Ic exit
+returns to the first screen.
+.It Reboot
+Restarts the machine.
+.El
+.Pp
+The arrow keys, or
+.Ic j
+and
+.Ic k ,
+move between them; Enter chooses.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl t Ar tty
+Take
+.Pa /dev/ Ns Ar tty
+as the controlling terminal of a session of its own, and as the standard input,
+output and error, as
+.Xr getty 8
+does.
+.El
+.Sh FILES
+.Bl -tag -width /OxideBSD/<version>/MANIFEST -compact
+.It Pa /boot/mfsroot
+the mfsroot on the medium, compressed
+.It Pa /OxideBSD/ Ns Ar version Ns Pa /*.tar.zst
+the sets
+.It Pa /OxideBSD/ Ns Ar version Ns Pa /MANIFEST
+each set's SHA-256 and size
+.El
+.Sh SEE ALSO
+.Xr ttys 5 ,
+.Xr init 8 ,
+.Xr rescue 8
+.Sh HISTORY
+.Nm
+first appeared in OxideBSD 0.3.

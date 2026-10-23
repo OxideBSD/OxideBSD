@@ -237,7 +237,7 @@ impl Out {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let (mut ibs, mut obs, mut bs, mut cbs) = (512usize, 512usize, None::<usize>, 0usize);

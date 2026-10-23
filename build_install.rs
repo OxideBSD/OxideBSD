@@ -486,6 +486,20 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
     let mkimg = build_host_tool(root, "usr.bin/mkimg", "mkimg");
     let fsck = build_host_tool(root, "sbin/fsck_oxfs", "fsck_oxfs");
 
+    // The install medium's pieces (INSTALLER.md §3-4), unless OXIDEBSD_NO_INSTALLER is set; the
+    // QEMU runner (scripts/mkinstalliso.sh) wraps them and a kernel into install.iso.
+    println!("cargo:rerun-if-env-changed=OXIDEBSD_NO_INSTALLER");
+    if std::env::var_os("OXIDEBSD_NO_INSTALLER").is_none() {
+        let artifact = |name: &str| {
+            env.iter().find(|(n, _)| *n == name).map(|(_, p)| Path::new(*p)).unwrap_or_else(|| panic!("no {name}"))
+        };
+        let (installer, rescue) = (artifact("OXFS_INSTALLER_ELF_PATH"), artifact("OXFS_RESCUE_ELF_PATH"));
+        build_mfsroot(root, &tree, &destdir, installer, rescue, epoch, &makefs, &fsck);
+        let images = root.join("target/images");
+        compress_mfsroot(&images.join("mfsroot.img"), &images.join("mfsroot.uz"), &zstd);
+        write_manifest(&sets, &sets_dir);
+    }
+
     // Rebuilt only when a set's contents or a tool changed.
     println!("cargo:rerun-if-env-changed=OXIDEBSD_DISK_MIB");
     let mib: u64 = std::env::var("OXIDEBSD_DISK_MIB").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
@@ -520,6 +534,155 @@ fn build_sets_and_images(env: &[(&str, &str)]) {
     let part = format!("oxfs/rootfs:={}", root_img.display());
     run_host_tool(&mkimg, &["-s".as_ref(), "gpt".as_ref(), "-o".as_ref(), disk_img.as_os_str(), "-p".as_ref(), part.as_ref()]);
     std::fs::write(&stamp_path, stamp).unwrap();
+}
+
+/// `target/images/mfsroot.img` (INSTALLER.md §4): the paths `distrib/mfsroot/list` names, from
+/// the installed tree or, marked `rescue`, as names of `/rescue/rescue` (one inode: makefs keeps
+/// files of one host inode as one), with their directories, `distrib/mfsroot/etc/*` in place of
+/// the tree's files of the same names, and the installer, as an oxfs image just large enough to
+/// hold them.
+#[allow(clippy::too_many_arguments)]
+fn build_mfsroot(root: &Path, tree: &InstallTree, destdir: &Path, installer: &Path, rescue: &Path, epoch: i64, makefs: &Path, fsck: &Path) {
+    let dir = root.join("distrib/mfsroot");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let list = std::fs::read_to_string(dir.join("list")).unwrap_or_else(|e| panic!("distrib/mfsroot/list: {e}"));
+    // Path -> (mode, the file's contents, or None for a directory).
+    let mut files: std::collections::BTreeMap<String, (u32, Option<PathBuf>)> = std::collections::BTreeMap::new();
+    files.insert("rescue/rescue".into(), (0o755, Some(rescue.to_path_buf())));
+    for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let mut words = line.split_whitespace();
+        let path = words.next().unwrap().trim_start_matches("./");
+        if words.next() == Some("rescue") {
+            files.insert(path.to_string(), (0o755, Some(rescue.to_path_buf())));
+            continue;
+        }
+        let item = tree.get(path).unwrap_or_else(|| panic!("distrib/mfsroot/list: {line} isn't installed"));
+        files.insert(path.to_string(), (item.mode, Some(destdir.join(path))));
+    }
+    for e in std::fs::read_dir(dir.join("etc")).unwrap().flatten() {
+        let name = format!("etc/{}", e.file_name().to_string_lossy());
+        let mode = default_file_mode(&e.path());
+        files.insert(name, (mode, Some(e.path())));
+    }
+    files.insert("usr/libexec/installer".into(), (0o755, Some(installer.to_path_buf())));
+    for d in ["dev", "proc", "tmp", "mnt", "cdrom", "var/run", "root"] {
+        files.insert(d.into(), (if d == "tmp" { 0o1777 } else { 0o755 }, None));
+    }
+    let paths: Vec<String> = files.keys().cloned().collect();
+    for p in paths {
+        let mut up = p.as_str();
+        while let Some((parent, _)) = up.rsplit_once('/') {
+            files.entry(parent.to_string()).or_insert((0o755, None));
+            up = parent;
+        }
+    }
+    let mut spec = mtree::Spec::default();
+    let mut top = mtree::Entry::new(b"");
+    top.set("type", "dir");
+    top.set("mode", "0755");
+    spec.entries.push(top);
+    for (path, (mode, contents)) in &files {
+        let mut e = mtree::Entry::new(path.as_bytes());
+        e.set("mode", format!("{mode:04o}"));
+        e.set("uid", "0");
+        e.set("gid", "0");
+        e.set("time", format!("{epoch}.0"));
+        match contents {
+            Some(c) => {
+                println!("cargo:rerun-if-changed={}", c.display());
+                e.set("type", "file");
+                e.set("contents", mtree::vis(c.to_str().unwrap().as_bytes()));
+            }
+            None => e.set("type", "dir"),
+        }
+        spec.entries.push(e);
+    }
+    let images = root.join("target/images");
+    std::fs::create_dir_all(&images).unwrap();
+    let input = images.join("mfsroot.makefs");
+    write_if_changed(&input, spec.write().as_bytes());
+    let img = images.join("mfsroot.img");
+    let newest = files
+        .values()
+        .filter_map(|(_, c)| c.as_ref())
+        .chain([&input, &makefs.to_path_buf()])
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max();
+    if std::fs::metadata(&img).and_then(|m| m.modified()).is_ok_and(|t| newest.is_some_and(|n| t >= n)) {
+        return;
+    }
+    let timestamp = epoch.to_string();
+    run_host_tool(
+        makefs,
+        &["-t".as_ref(), "oxfs".as_ref(), "-o".as_ref(), "label=mfsroot".as_ref(), "-T".as_ref(), timestamp.as_ref(), img.as_os_str(), input.as_os_str()],
+    );
+    run_host_tool(fsck, &["-fn".as_ref(), img.as_os_str()]);
+}
+
+/// The mfsroot the install medium carries (INSTALLER.md §4.3): `img` cut into 64 KiB chunks, each
+/// compressed by `zstd` alone, in the format `sys/drivers/md.rs` reads ("OXUZIP01").
+fn compress_mfsroot(img: &Path, out: &Path, zstd: &Path) {
+    const CHUNK: usize = 64 * 1024;
+    let fresh = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if fresh(out).is_some() && fresh(out) >= fresh(img) && fresh(out) >= fresh(zstd) {
+        return;
+    }
+    let data = std::fs::read(img).unwrap_or_else(|e| panic!("{}: {e}", img.display()));
+    let chunks: Vec<&[u8]> = data.chunks(CHUNK).collect();
+    let mut stored = Vec::new();
+    for chunk in &chunks {
+        use std::io::Write;
+        // The size in the frame, and a window no larger than the chunk: md decodes with one.
+        let mut child = Command::new(zstd)
+            .args(["-q", "-19", "-c", "--no-check", "--zstd=wlog=16"])
+            .arg(format!("--stream-size={}", chunk.len()))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to run {}: {e}", zstd.display()));
+        let mut stdin = child.stdin.take().unwrap();
+        let input = chunk.to_vec();
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
+        let output = child.wait_with_output().unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(output.status.success(), "zstd failed on an mfsroot chunk");
+        stored.push(if output.stdout.len() < chunk.len() { output.stdout } else { chunk.to_vec() });
+    }
+    let mut file = Vec::new();
+    file.extend_from_slice(b"OXUZIP01");
+    file.extend_from_slice(&(CHUNK as u32).to_le_bytes());
+    file.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+    file.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    let mut at = 24 + 8 * (chunks.len() as u64 + 1);
+    for c in &stored {
+        file.extend_from_slice(&at.to_le_bytes());
+        at += c.len() as u64;
+    }
+    file.extend_from_slice(&at.to_le_bytes());
+    for c in &stored {
+        file.extend_from_slice(c);
+    }
+    std::fs::write(out, file).unwrap();
+}
+
+/// `target/sets/MANIFEST` (INSTALLER.md §3.2), FreeBSD's format: per set its archive's name,
+/// SHA-256 and number of entries, the set's name, a description, and whether it's chosen by
+/// default.
+fn write_manifest(sets: &std::collections::BTreeMap<String, &'static str>, sets_dir: &Path) {
+    use sha2::Digest;
+    let mut text = String::new();
+    for set in SETS {
+        let archive = sets_dir.join(format!("{set}.tar.zst"));
+        let digest: String = sha2::Sha256::digest(std::fs::read(&archive).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        let entries = sets.values().filter(|s| **s == set).count();
+        let (descr, on) = match set {
+            "base" => ("Base system (MANDATORY)", "on"),
+            "clang" => ("Clang/LLVM, the C and C++ toolchain", "off"),
+            _ => ("The test programs", "off"),
+        };
+        text += &format!("{set}.tar.zst\t{digest}\t{entries}\t{set}\t\"{descr}\"\t{on}\n");
+    }
+    write_if_changed(&sets_dir.join("MANIFEST"), text.as_bytes());
 }
 
 /// One ustar(5) header block. `path` is split into `prefix` and `name` at a `/` when it's longer

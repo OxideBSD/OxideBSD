@@ -95,7 +95,7 @@ fn priority(line: &[u8]) -> Option<(u32, &[u8])> {
     Some((pri, &rest[end + 1..]))
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let (mut all, mut clear) = (false, false);
     for arg in std::env::args().skip(1) {
         match arg.strip_prefix('-') {

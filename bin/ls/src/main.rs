@@ -736,7 +736,7 @@ impl Ctx {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut o = Opts {
         format: if isatty(1) { Format::Columns } else { Format::One },
         sort: Sort::Name,

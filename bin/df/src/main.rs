@@ -254,7 +254,7 @@ impl TypeFilter {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let (mut bsize, mut header) = getbsize();
     let mut units = Units::Blocks(bsize);
     let (mut posix, mut kflag) = (false, false);

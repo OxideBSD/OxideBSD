@@ -252,6 +252,14 @@ pub fn single_user() -> bool {
     SINGLE_USER.load(Ordering::Relaxed)
 }
 
+/// `mfsroot` on the kernel command line: the root is the memory disk made from the boot module
+/// of that name, not a disk's partition (an install medium's, `INSTALLER.md` §4).
+static MFSROOT: AtomicBool = AtomicBool::new(false);
+
+pub fn mfsroot() -> bool {
+    MFSROOT.load(Ordering::Relaxed)
+}
+
 /// The programs `init=` and `init_path=` name for pid 1, as one colon-separated list (`init=`'s
 /// first), or empty. Recorded before the heap exists, so in a fixed buffer.
 static INIT_PATHS: spin::Mutex<([u8; 512], usize)> = spin::Mutex::new(([0; 512], 0));
@@ -290,6 +298,8 @@ pub struct BootFlags {
     pub no_ata: bool,
     /// `-s`, alone or combined (`-sv`): see `single_user`.
     pub single_user: bool,
+    /// `mfsroot`: see `mfsroot`.
+    pub mfsroot: bool,
     /// `console.underline=color`: show underlined console text as a color, not a stroke.
     pub underline_color: bool,
     /// `-D`: a dual console, the screen and COM1 (FreeBSD's `RB_MULTIPLE`).
@@ -306,6 +316,8 @@ pub fn parse_cmdline(cmdline: &str) -> BootFlags {
     for token in cmdline.split_whitespace() {
         if token == "no-ata" || token == "no-disk" {
             flags.no_ata = true;
+        } else if token == "mfsroot" {
+            flags.mfsroot = true;
         } else if let Some(mode) = token.strip_prefix("console.underline=") {
             flags.underline_color = mode == "color";
         } else if let Some(value) = ["pti=", "kpti=", "meltdown="]
@@ -337,6 +349,7 @@ pub fn apply_cmdline(cmdline: &str) {
     let flags = parse_cmdline(cmdline);
     ATA_DISABLED.store(flags.no_ata, Ordering::Relaxed);
     SINGLE_USER.store(flags.single_user, Ordering::Relaxed);
+    MFSROOT.store(flags.mfsroot, Ordering::Relaxed);
     crate::cpu::pti::request(flags.pti);
     if flags.underline_color {
         crate::console::vga::set_underline_mode(crate::console::vga::UnderlineMode::Color);

@@ -1,0 +1,59 @@
+# What the install medium's mfsroot holds (OxideBSD-doc INSTALLER.md §4.2), one path a line: a
+# path marked `rescue` is a hard link to /rescue/rescue, the tools crunched into one program
+# (rescue/, which must include it); any other is taken from the installed tree. build_install.rs
+# makes target/images/mfsroot.img of them, their directories, and this directory's etc/, which
+# replaces the tree's files of the same names.
+# The image stays in RAM all the while the medium runs, so only what installing and repairing need:
+# every byte here is a byte less for a 64 MB machine.
+./bin/cat	rescue
+./bin/chmod	rescue
+./bin/cp	rescue
+./bin/date	rescue
+./bin/dd	rescue
+./bin/df	rescue
+./bin/echo	rescue
+./bin/expr	rescue
+./bin/false	rescue
+./bin/grep	rescue
+./bin/hostname	rescue
+./bin/kill	rescue
+./bin/ln	rescue
+./bin/ls	rescue
+./bin/mkdir	rescue
+./bin/mv	rescue
+./bin/ps	rescue
+./bin/pwd	rescue
+./bin/rm	rescue
+./bin/rmdir	rescue
+./bin/sed	rescue
+./bin/sh	rescue
+./bin/sleep	rescue
+./bin/stty	rescue
+./bin/sync	rescue
+./bin/tar	rescue
+./bin/test	rescue
+./bin/touch	rescue
+./bin/true	rescue
+./bin/vi
+./sbin/dhclient	rescue
+./sbin/dmesg	rescue
+./sbin/fsck	rescue
+./sbin/fsck_msdosfs	rescue
+./sbin/fsck_oxfs	rescue
+./sbin/ifconfig	rescue
+./sbin/init	rescue
+./sbin/init_sh	rescue
+./sbin/mount	rescue
+./sbin/mount_msdosfs	rescue
+./sbin/mount_tmpfs	rescue
+./sbin/newfs_msdos	rescue
+./sbin/newfs_oxfs	rescue
+./sbin/reboot	rescue
+./sbin/route	rescue
+./sbin/sysctl	rescue
+./sbin/umount	rescue
+./sbin/zstd
+./etc/group
+./etc/master.passwd
+./etc/passwd
+./usr/share/terminfo/l/linux

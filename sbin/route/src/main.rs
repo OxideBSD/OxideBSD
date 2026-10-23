@@ -262,7 +262,7 @@ fn show_report(gw: Option<Ipv4Addr>, ifs: &[Iface]) -> String {
     s
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut f = Flags::default();
     let mut i = 0;

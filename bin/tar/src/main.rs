@@ -590,7 +590,7 @@ pub fn read_list(path: &OsString, null: bool) -> Result<Vec<Vec<u8>>, String> {
         .collect())
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<Vec<u8>> = std::env::args_os().skip(1).map(OsString::into_vec).collect();
     let mut o = match parse(args) {
         Ok(o) => o,

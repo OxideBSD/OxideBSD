@@ -14,7 +14,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use flate::gzip::{GzDecoder, GzEncoder};
 
-use crate::header::{self, BLOCK, Block, Entry, FormatError, Kind, MAX_META, Pax};
+use super::header::{self, BLOCK, Block, Entry, FormatError, Kind, MAX_META, Pax};
 
 const BUF: usize = 64 * 1024;
 
@@ -43,7 +43,7 @@ pub enum ReadError {
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadError::Io(e) => f.write_str(&crate::strerror(e)),
+            ReadError::Io(e) => f.write_str(&super::strerror(e)),
             ReadError::Format(e) => write!(f, "{e}"),
             ReadError::Truncated => f.write_str("Truncated tar archive"),
             ReadError::NotTar => f.write_str("Error opening archive: Unrecognized archive format"),
@@ -126,7 +126,7 @@ impl<R: Read> Read for Head<R> {
 /// Peeks at the start of `r`: the compression, and a reader giving all of it back.
 fn peek<R: Read>(mut r: R) -> Result<(Comp, Head<R>), String> {
     let mut head = vec![0u8; 6];
-    let n = read_full(&mut r, &mut head).map_err(|e| crate::strerror(&e))?;
+    let n = read_full(&mut r, &mut head).map_err(|e| super::strerror(&e))?;
     head.truncate(n);
     let c = sniff(&head)?;
     Ok((c, Head { head, at: 0, r }))
@@ -144,12 +144,12 @@ impl Reader {
             let (c, h) = peek(io::stdin())?;
             return Self::wrap(c, h);
         }
-        let f = File::open(name).map_err(|e| crate::strerror(&e))?;
+        let f = File::open(name).map_err(|e| super::strerror(&e))?;
         let (c, h) = peek(f)?;
         if c == Comp::Zstd {
             // A file can be zstd's own standard input, from its start.
             let mut f = h.r;
-            f.seek(SeekFrom::Start(0)).map_err(|e| crate::strerror(&e))?;
+            f.seek(SeekFrom::Start(0)).map_err(|e| super::strerror(&e))?;
             return Self::zstd(Stdio::from(f));
         }
         Self::wrap(c, h)
@@ -181,7 +181,7 @@ impl Reader {
             .stdin(input)
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot run zstd: {}", crate::strerror(&e)))?;
+            .map_err(|e| format!("cannot run zstd: {}", super::strerror(&e)))?;
         let out = child.stdout.take().unwrap();
         let mut r = Reader::new(Box::new(BufReader::with_capacity(BUF, out)));
         r.child = Some(child);
@@ -392,7 +392,7 @@ impl Writer {
                     .stdin(Stdio::piped())
                     .stdout(out_stdio.unwrap_or_else(Stdio::inherit))
                     .spawn()
-                    .map_err(|e| format!("cannot run zstd: {}", crate::strerror(&e)))?;
+                    .map_err(|e| format!("cannot run zstd: {}", super::strerror(&e)))?;
                 let stdin = child.stdin.take().unwrap();
                 Sink::Zstd(BufWriter::with_capacity(BUF, stdin), child)
             }

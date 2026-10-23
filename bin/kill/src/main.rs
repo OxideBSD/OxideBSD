@@ -107,7 +107,7 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse(&args) {
         Err(msg) if msg.is_empty() => usage(),

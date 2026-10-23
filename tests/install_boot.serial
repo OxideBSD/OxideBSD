@@ -1,0 +1,2 @@
+jset -- $(ls -i /bin/sh /sbin/mount); [ "$1" = "$3" ] && echo crunched > /root/note && [ "$(cat /root/note)" = crunched ] && touch /tmp/scratch && sysctl -n kern.disks | grep -q ide && echo "mfsroot-shell: $((6 * 7))"
+exit

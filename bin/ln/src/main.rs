@@ -249,7 +249,7 @@ fn link_it(o: &Opts, source: &[u8], target: &[u8], into_dir: bool) -> bool {
     true
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: the BSDs' default: a closed pipe (under -v) ends us quietly.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();

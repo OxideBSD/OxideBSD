@@ -28,7 +28,7 @@ fn strerror(e: &std::io::Error) -> String {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: the BSDs' default: a closed pipe ends us quietly.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();

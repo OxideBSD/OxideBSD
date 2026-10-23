@@ -537,7 +537,7 @@ impl Sel {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // Die quietly on a closed pipe (`ps | head`), as a C program does.
     // SAFETY: restoring a signal's default action.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };

@@ -333,7 +333,7 @@ fn iso(tm: &libc::tm, level: &str) -> Option<String> {
     Some(strftime(fmt, tm) + &z)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut no_set, mut rfc, mut utc) = (false, false, false);
     let mut iso_level: Option<String> = None;

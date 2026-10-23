@@ -75,6 +75,12 @@ volume mounted here on disks that have one: the boot loader, the kernel and
 .Xr fsconf 5
 the loader hands it.
 .El
+.It Pa /cdrom
+Mount points for CDs:
+.Xr devd 8
+mounts a disc put in a drive on the first free
+.Pa disk Ns Ar N
+here, read-only.
 .It Pa /dev
 Devices: a
 .Xr devfs 4

@@ -238,7 +238,7 @@ fn build_limine_deploy_tool() {
     ];
     // What Limine leaves the UEFI firmware before it claims memory (our fork's knob; upstream
     // keeps 64 MiB): OxideBSD must boot in 64 MB of RAM (CLAUDE.md, oxfs and disks).
-    const CPPFLAGS_FOR_TARGET: &str = "-DLIMINE_FIRMWARE_RESERVE_MIB=8";
+    const CPPFLAGS_FOR_TARGET: &str = "-DLIMINE_FIRMWARE_RESERVE_MIB=4";
     let version = std::fs::read_to_string(limine_dir.join("version"))
         .unwrap_or_else(|e| panic!("{}/version: {e} (submodule not checked out?)", limine_dir.display()));
     let stamp_contents = format!("{}\n{}\n{}", version.trim(), CONFIGURE_ARGS.join(" "), CPPFLAGS_FOR_TARGET);
@@ -566,6 +566,8 @@ fn main() {
         build_static_std_crate("sbin/rcorder", "OXFS_RCORDER_ELF_PATH", &musl_sysroot);
     // /sbin/devd runs its configuration in a libsh shell (DEVD.md §5.2).
     let devd_elf_path = build_static_std_crate("sbin/devd", "OXFS_DEVD_ELF_PATH", &musl_sysroot);
+    // The install medium's tools, crunched into one program (INSTALLER.md §4.3).
+    let rescue_elf_path = build_static_std_crate("rescue", "OXFS_RESCUE_ELF_PATH", &musl_sysroot);
     let reboot_elf_path =
         build_static_std_crate("sbin/reboot", "OXFS_REBOOT_ELF_PATH", &musl_sysroot);
     let shutdown_elf_path =
@@ -832,6 +834,16 @@ fn main() {
     let ncurses_sysroot = build_ncurses(&musl_sysroot);
     let ncurses_runtime_manifest_path = write_ncurses_runtime_manifest(&ncurses_sysroot);
     let ncurses_terminfo_manifest_path = write_ncurses_terminfo_manifest();
+    // The installer (INSTALLER.md §9), on the install medium's mfsroot only: static, as the
+    // mfsroot has no /lib, and drawing with ncurses.
+    let ncurses_lib = ncurses_sysroot.join("lib");
+    let installer_elf_path = build_std_oxidebsd_userland_crate_with_env(
+        "usr.sbin/installer",
+        "OXFS_INSTALLER_ELF_PATH",
+        &musl_sysroot,
+        &[("OXIDEBSD_NCURSES_DIR", &ncurses_lib)],
+        StdLink::StaticPie,
+    );
 
     // Time zones (TIMEZONE.md in OxideBSD-doc): the compiled IANA database for
     // /usr/share/zoneinfo, and zic/zdump for the target.
@@ -948,6 +960,8 @@ fn main() {
         ("OXFS_INIT_SH_ELF_PATH", init_sh_elf_path.to_str().unwrap()),
         ("OXFS_RCORDER_ELF_PATH", rcorder_elf_path.to_str().unwrap()),
         ("OXFS_DEVD_ELF_PATH", devd_elf_path.to_str().unwrap()),
+        ("OXFS_INSTALLER_ELF_PATH", installer_elf_path.to_str().unwrap()),
+        ("OXFS_RESCUE_ELF_PATH", rescue_elf_path.to_str().unwrap()),
         ("OXFS_REBOOT_ELF_PATH", reboot_elf_path.to_str().unwrap()),
         ("OXFS_SHUTDOWN_ELF_PATH", shutdown_elf_path.to_str().unwrap()),
         ("OXFS_SBIN_SYSCTL_ELF_PATH", sysctl_elf_path.to_str().unwrap()),

@@ -86,7 +86,7 @@ fn number(s: &str) -> Option<u64> {
     s.parse().ok().filter(|&n| n > 0)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let (mut dry_run, mut label, mut bytes_per_inode, mut sectors) = (false, String::new(), None, None);
     let mut special = None;
     let mut args = std::env::args().skip(1);

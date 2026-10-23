@@ -222,7 +222,7 @@ fn update(node: &str, rdonly: Option<bool>, options: &[String], verbose: bool) -
     Ok(())
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     let name = argv
         .first()

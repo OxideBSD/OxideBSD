@@ -33,7 +33,7 @@ fn run(vfstype: &str, spec: &str, flags: &str) -> u8 {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut flags = String::new();
     let mut vfstype: Option<String> = None;
     let mut named: Vec<String> = Vec::new();

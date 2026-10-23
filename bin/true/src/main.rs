@@ -2,6 +2,6 @@
 
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     ExitCode::SUCCESS
 }

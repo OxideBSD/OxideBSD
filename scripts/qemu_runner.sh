@@ -97,6 +97,22 @@ case "$TEST_NAME" in
         # The disk registry (INSTALLER.md §5.1): more disks than the system's, below.
         DISK_REGISTRY_TEST=1
         ;;
+    install_boot|install_boot_bios)
+        # The install medium alone (INSTALLER.md step 6), made from this kernel below: at 64 MB,
+        # with a blank disk to install on, it boots into its mfsroot and the installer's first
+        # screen, where tests/install_boot.serial chooses Shell and checks the mfsroot.
+        INSTALL_BOOT=1
+        if [ "$TEST_NAME" = install_boot_bios ]; then
+            OXIDEBSD_FIRMWARE=bios
+            export OXIDEBSD_FIRMWARE
+        fi
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
+        export OXIDEBSD_QEMU_MEM
+        QEMU_SERIAL_INPUT="$REPO_ROOT/tests/install_boot.serial"
+        QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
+        QEMU_PASS_PATTERN="mfsroot-shell: 42"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|\[fault\]|repeating too quickly"
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
@@ -184,6 +200,22 @@ xorriso -as mkisofs -R -r -J \
     "$ISO_ROOT" -o "$ISO_PATH" > /dev/null
 
 "$STAGE_DIR/limine" bios-install "$ISO_PATH" > /dev/null
+
+# The install medium (INSTALLER.md §3), from this kernel: at every `cargo run`, and for the
+# install tests; not with OXIDEBSD_NO_INSTALLER, which also keeps build.rs from making its pieces.
+INSTALL_ISO=""
+if [ -z "${OXIDEBSD_NO_INSTALLER:-}" ] && { [ "$IS_TEST" = 0 ] || [ "${INSTALL_BOOT:-0}" = 1 ]; }; then
+    if [ -f target/images/mfsroot.uz ]; then
+        INSTALL_ISO="target/images/install.iso"
+        if [ "$IS_TEST" = 1 ]; then
+            INSTALL_ISO="target/images/install-test.iso"
+        fi
+        # shellcheck disable=SC2086 # the command line's words, one argument each
+        scripts/mkinstalliso.sh "$KERNEL_ELF" "$INSTALL_ISO" $KERNEL_CMDLINE
+    else
+        echo "qemu_runner.sh: no target/images/mfsroot.uz (built with OXIDEBSD_NO_INSTALLER?): no install.iso" >&2
+    fi
+fi
 
 if [ "${DISK_BOOT:-0}" = 1 ]; then
     QEMU_DISK_SOURCE="target/images/boot-test.img"
@@ -279,6 +311,21 @@ else
     fi
     # Tests keep IDE (tests/ata_smoke.rs drives it directly); `cargo run` gets the fast disk.
     QEMU_DISK_DEFAULT=virtio
+fi
+# Booting the install medium (the install tests, or OXIDEBSD_BOOT_INSTALLER=1 for `cargo run`):
+# the disk to install on starts blank, and is never the dev disk.
+if [ "${INSTALL_BOOT:-0}" = 1 ] || [ -n "${OXIDEBSD_BOOT_INSTALLER:-}" ]; then
+    if [ -z "$INSTALL_ISO" ]; then
+        echo "qemu_runner.sh: no install.iso to boot" >&2
+        exit 1
+    fi
+    ISO_PATH="$INSTALL_ISO"
+    QEMU_DISK_SOURCE="target/images/blank.img"
+    [ -f "$QEMU_DISK_SOURCE" ] || truncate -s 4G "$QEMU_DISK_SOURCE"
+    if [ "$IS_TEST" = 0 ]; then
+        QEMU_DISK_IMAGE="${OXIDEBSD_DISK_IMAGE:-target/install_target.img}"
+        QEMU_DISK_MANAGED=0
+    fi
 fi
 QEMU_ISO_PATH="$ISO_PATH"
 QEMU_HEADLESS_TEST="$IS_TEST"

@@ -228,7 +228,7 @@ fn eval(args: &[&str]) -> Res {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     let name = argv
         .first()

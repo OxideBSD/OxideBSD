@@ -35,7 +35,7 @@ fn usage() -> ExitCode {
     ExitCode::from(1)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut all = false;
     let mut force = false;
     let mut verbose = false;

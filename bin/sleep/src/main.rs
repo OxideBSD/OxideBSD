@@ -31,7 +31,7 @@ fn total(args: &[String]) -> Option<f64> {
     args.iter().map(|a| seconds(a)).sum()
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: &[String] = if args.first().map(String::as_str) == Some("--") {
         &args[1..]

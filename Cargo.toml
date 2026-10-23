@@ -145,6 +145,8 @@ oxfs_format = { path = "lib/liboxfs" }
 vfs_if = { path = "lib/libvfs" }
 # Kernel threads' and taskqueues' kernel/module interface (KTHREAD.md §7).
 kthread_if = { path = "lib/libkthread" }
+# zstd decoding, for the install medium's compressed mfsroot (INSTALLER.md §4.3, drivers::md).
+ruzstd = { version = "0.9", default-features = false }
 
 [build-dependencies]
 # The trust store's logic, shared with certctl(8): build.rs's build_trust_store runs its rehash.
@@ -159,6 +161,14 @@ harness = false
 
 [[test]]
 name = "ram_floor_boot"
+harness = false
+
+[[test]]
+name = "install_boot"
+harness = false
+
+[[test]]
+name = "install_boot_bios"
 harness = false
 
 [[test]]

@@ -118,7 +118,7 @@ impl Run<'_> {
     }
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let mut opts = Opts {
         force: false,
         no_deref: false,
