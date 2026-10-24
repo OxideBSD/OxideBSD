@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 use part::{Kind, Scheme, Table};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Config, Guided, Layout, PartSpec, guided_parts};
+use crate::config::{Config, Guided, Layout, Net, PartSpec, Use, guided_parts};
 use crate::loaders;
 
 const DIOCGSECTORSIZE: u64 = 0x8004_6480;
@@ -40,7 +40,7 @@ const MEDIUM_LABEL: &str = "OXIDEBSD_INSTALL";
 
 /// The smallest `/` the guided layout makes beside other systems: the base set takes about a
 /// third of it.
-const MIN_ROOT_BYTES: u64 = 1 << 30;
+pub const MIN_ROOT_BYTES: u64 = 1 << 30;
 
 /// Runs `cmd` with `args`; its error output becomes the error.
 pub(crate) fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
@@ -181,6 +181,8 @@ enum Plan {
     New(Scheme, Vec<PartSpec>),
     /// The guided layout in the largest free space of the disk's table, all of it kept.
     Beside,
+    /// The disk's own partitions, put to these uses.
+    Existing(Vec<Use>),
 }
 
 /// The guided layout beside the systems in `t`: OxideBSD's own BIOS boot partition (on GPT; on
@@ -237,10 +239,23 @@ fn lay_out(t: &mut Table, disk: &str, parts: &[PartSpec], (start, len): (u64, u6
     Ok(made)
 }
 
-/// Lays the disk out as `plan` says, with Limine's BIOS boot code from `bootcode`, and writes it:
-/// the partitions OxideBSD uses, the EFI system partition among them.
-fn partition(disk: &str, plan: Plan, bootcode: &[u8]) -> Result<Vec<Made>, String> {
-    let mut d = Disk::open(disk)?;
+/// The disk's table as `plan` makes it, not written yet: the partitions OxideBSD uses (the EFI
+/// system partition among them), and the BIOS boot partition Limine's stage 2 goes into.
+fn plan_table(d: &mut Disk, disk: &str, plan: Plan) -> Result<(Table, Vec<Made>, Option<u32>), String> {
+    let read = |d: &mut Disk| {
+        part::read(d)
+            .map_err(|_| format!("{disk}: its partition table can't be read"))?
+            .ok_or(format!("{disk}: it has no partition table"))
+    };
+    let kept = |t: &Table, e: &part::Entry, spec: PartSpec, keep: bool| Made {
+        spec,
+        dev: dev_for(disk, t.scheme, e.index, &e.guid),
+        label: e.label.clone(),
+        index: e.index,
+        guid: e.guid,
+        bytes: e.sectors * t.sector_size as u64,
+        kept: keep,
+    };
     let beside = matches!(plan, Plan::Beside);
     let (mut t, parts, mut made) = match plan {
         Plan::New(scheme, parts) => {
@@ -248,20 +263,29 @@ fn partition(disk: &str, plan: Plan, bootcode: &[u8]) -> Result<Vec<Made>, Strin
             (t, parts, Vec::new())
         }
         Plan::Beside => {
-            let t = part::read(&mut d)
-                .map_err(|_| format!("{disk}: its partition table can't be read"))?
-                .ok_or(format!("{disk}: no partition table to install beside"))?;
+            let t = read(d)?;
             let parts = beside_parts(&t);
-            let esp = t.entries.iter().find(|e| e.kind() == Kind::Efi).map(|e| Made {
-                spec: PartSpec { size: None, kind: Kind::Efi, mount: None },
-                dev: dev_for(disk, t.scheme, e.index, &e.guid),
-                label: e.label.clone(),
-                index: e.index,
-                guid: e.guid,
-                bytes: e.sectors * t.sector_size as u64,
-                kept: true,
-            });
+            let esp = t.entries.iter().find(|e| e.kind() == Kind::Efi);
+            let esp = esp.map(|e| kept(&t, e, PartSpec { size: None, kind: Kind::Efi, mount: None }, true));
             (t, parts, esp.into_iter().collect())
+        }
+        Plan::Existing(uses) => {
+            let t = read(d)?;
+            let mut made = Vec::new();
+            for u in &uses {
+                let e = t.entry(u.index).ok_or(format!("{disk}: it has no partition {}", u.index))?;
+                let spec = PartSpec { size: None, kind: u.kind, mount: u.mount.clone() };
+                let mut m = kept(&t, e, spec, !u.newfs);
+                if m.label.is_empty() && u.mount.as_deref() == Some("/") {
+                    m.label = "rootfs".into();
+                }
+                made.push(m);
+            }
+            if !made.iter().any(|m| m.spec.mount.as_deref() == Some("/")) {
+                return Err("no partition is mounted on /".into());
+            }
+            let bios = t.entries.iter().find(|e| e.kind() == Kind::BiosBoot).map(|e| e.index);
+            return Ok((t, made, bios));
         }
     };
     let free = t.free().into_iter().max_by_key(|&(_, n)| n).ok_or(format!("{disk}: no free space"))?;
@@ -277,10 +301,26 @@ fn partition(disk: &str, plan: Plan, bootcode: &[u8]) -> Result<Vec<Made>, Strin
     }
     let bios = new.iter().find(|m| m.spec.kind == Kind::BiosBoot).map(|m| m.index);
     made.extend(new);
-    let stage2 = t.set_bios_bootcode_in(bootcode, bios).map_err(|e| format!("{disk}: {e}"))?;
-    let mut sectors = t.write();
-    sectors.push(stage2);
-    d.write(&sectors)?;
+    Ok((t, made, bios))
+}
+
+/// Lays the disk out as `plan` says, with Limine's BIOS boot code from `bootcode`, and writes it:
+/// the partitions OxideBSD uses, the EFI system partition among them. Partitions made by hand
+/// (`Plan::Existing`) get the boot code only where it has room; without, the table is left as
+/// it is.
+fn partition(disk: &str, plan: Plan, bootcode: &[u8], say: &mut dyn FnMut(&str)) -> Result<Vec<Made>, String> {
+    let mut d = Disk::open(disk)?;
+    let existing = matches!(plan, Plan::Existing(_));
+    let (mut t, made, bios) = plan_table(&mut d, disk, plan)?;
+    match t.set_bios_bootcode_in(bootcode, bios) {
+        Ok(stage2) => {
+            let mut sectors = t.write();
+            sectors.push(stage2);
+            d.write(&sectors)?;
+        }
+        Err(e) if existing => say(&format!("{disk}: no BIOS boot code ({e}): it boots on UEFI only")),
+        Err(e) => return Err(format!("{disk}: {e}")),
+    }
     drop(d);
     for m in &made {
         if m.spec.kind != Kind::BiosBoot && !Path::new(&m.dev).exists() {
@@ -290,12 +330,94 @@ fn partition(disk: &str, plan: Plan, bootcode: &[u8]) -> Result<Vec<Made>, Strin
     Ok(made)
 }
 
+/// What an install as `layout` says would do to its disk, nothing written: the disk, whether
+/// it's erased, and a line for each partition, in the order they lie.
+pub struct Preview {
+    pub disk: String,
+    pub erased: bool,
+    /// `(partition, size in bytes, what it is, what happens to it)`.
+    pub parts: Vec<(String, u64, String, String)>,
+}
+
+pub fn preview(layout: &Layout) -> Result<Preview, String> {
+    let (disk, plan) = plan_of(layout)?;
+    let erased = matches!(plan, Plan::New(..));
+    let mut d = Disk::open_read(&disk)?;
+    let (t, made, _) = plan_table(&mut d, &disk, plan)?;
+    let mut parts = Vec::new();
+    let mut entries: Vec<&part::Entry> = t.entries.iter().collect();
+    entries.sort_by_key(|e| e.first);
+    let suffix = if t.scheme == Scheme::Gpt { "p" } else { "s" };
+    for e in entries {
+        let name = format!("{disk}{suffix}{}", e.index);
+        let bytes = e.sectors * t.sector_size as u64;
+        let (what, fate) = match made.iter().find(|m| m.index == e.index) {
+            Some(m) => {
+                let what = match (&m.spec.kind, &m.spec.mount) {
+                    (Kind::Oxfs, Some(on)) => format!("oxfs {on}"),
+                    (Kind::Efi, _) => "EFI system".into(),
+                    (Kind::BiosBoot, _) => "BIOS boot".into(),
+                    (k, _) => k.name(),
+                };
+                let fate = match (m.kept, m.spec.kind) {
+                    (true, Kind::Efi) => "kept; OxideBSD's boot files added",
+                    (true, _) => "kept",
+                    (false, _) if matches!(layout, Layout::Existing { .. }) => "formatted: its contents erased",
+                    (false, Kind::BiosBoot) => "new: Limine's BIOS stage 2",
+                    (false, _) => "new",
+                };
+                (what, fate.to_string())
+            }
+            None => (e.kind().name(), "kept as it is".to_string()),
+        };
+        parts.push((name, bytes, what, fate));
+    }
+    Ok(Preview { disk, erased, parts })
+}
+
 /// The ISO 9660 volume label of `dev`, from its primary volume descriptor (sector 16).
 fn volume_label(dev: &str) -> Option<String> {
     let f = File::open(dev).ok()?;
     let mut pvd = [0u8; 2048];
     f.read_exact_at(&mut pvd, 16 * 2048).ok()?;
     (pvd[0] == 1 && &pvd[1..6] == b"CD001").then(|| String::from_utf8_lossy(&pvd[40..72]).trim_end().to_string())
+}
+
+/// One set on the install medium, as its `MANIFEST` describes it.
+pub struct SetInfo {
+    /// `clang.tar.zst`.
+    pub file: String,
+    pub description: String,
+    /// Ticked unless the user says otherwise.
+    pub default: bool,
+    /// The compressed file's size.
+    pub bytes: u64,
+}
+
+/// The sets on the install medium (mounted if it isn't yet), `base.tar.zst` first.
+pub fn sets_on_medium() -> Result<Vec<SetInfo>, String> {
+    let dir = mount_medium()?;
+    let manifest = std::fs::read_to_string(dir.join("MANIFEST")).map_err(|e| format!("MANIFEST: {e}"))?;
+    let mut sets: Vec<SetInfo> = manifest
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let file = f.first()?.to_string();
+            Some(SetInfo {
+                bytes: std::fs::metadata(dir.join(&file)).map_or(0, |m| m.len()),
+                description: f.get(4).map_or("", |d| d.trim_matches('"')).to_string(),
+                default: f.get(5) == Some(&"on"),
+                file,
+            })
+        })
+        .collect();
+    sets.sort_by_key(|s| s.file != "base.tar.zst");
+    Ok(sets)
+}
+
+/// Disk `name`'s partition table, if it has one that can be read.
+pub fn disk_table(name: &str) -> Option<Table> {
+    part::read(&mut Disk::open_read(name).ok()?).ok().flatten()
 }
 
 /// Finds the install medium among the optical drives by its label and mounts it on `/dist`, read
@@ -392,23 +514,24 @@ fn fstab(base: &str, made: &[Made]) -> String {
     out
 }
 
-/// `rc.conf` with `hostname` set.
-fn set_hostname(rc_conf: &str, name: &str) -> String {
-    let line = format!("hostname=\"{name}\"");
+/// `rc.conf` with `key` set to `value` (in place of its line, else at the end), or its line gone.
+fn set_rc(rc_conf: &str, key: &str, value: Option<&str>) -> String {
+    let prefix = format!("{key}=");
+    let line = value.map(|v| format!("{key}=\"{v}\""));
     let mut found = false;
-    let mut out: Vec<String> = rc_conf
-        .lines()
-        .map(|l| {
-            if l.starts_with("hostname=") {
-                found = true;
-                line.clone()
-            } else {
-                l.to_string()
+    let mut out: Vec<String> = Vec::new();
+    for l in rc_conf.lines() {
+        if l.starts_with(&prefix) {
+            if !found {
+                out.extend(line.clone());
             }
-        })
-        .collect();
+            found = true;
+        } else {
+            out.push(l.to_string());
+        }
+    }
     if !found {
-        out.push(line);
+        out.extend(line);
     }
     out.join("\n") + "\n"
 }
@@ -480,6 +603,26 @@ fn guided_disk(disk: Option<&str>) -> Result<String, String> {
     disks().into_iter().find(|(_, k)| k == "disk").map(|(d, _)| d).ok_or("no disk to install on".into())
 }
 
+/// The disk `layout` uses, and what goes on it.
+fn plan_of(layout: &Layout) -> Result<(String, Plan), String> {
+    Ok(match layout {
+        Layout::Explicit { disk, scheme, parts } => (disk.clone(), Plan::New(*scheme, parts.clone())),
+        Layout::Existing { disk, parts } => (disk.clone(), Plan::Existing(parts.clone())),
+        Layout::Guided { disk, how } => {
+            let disk = guided_disk(disk.as_deref())?;
+            let beside = match how {
+                Guided::Whole => false,
+                Guided::Beside => true,
+                // A table that can't be read is not a blank disk.
+                Guided::Auto => part::read(&mut Disk::open_read(&disk)?)
+                    .map_err(|_| format!("{disk}: its partition table can't be read"))?
+                    .is_some(),
+            };
+            (disk, if beside { Plan::Beside } else { Plan::New(Scheme::Gpt, guided_parts()) })
+        }
+    })
+}
+
 /// What is mounted, to unmount in reverse at the end or on a failure.
 struct Mounts(Vec<String>);
 
@@ -518,23 +661,9 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let boot = Path::new(DIST).join("boot");
     let bootcode = std::fs::read(boot.join("limine/limine-bios-hdd.bin")).map_err(|e| format!("limine-bios-hdd.bin: {e}"))?;
 
-    let (disk, plan) = match &cfg.layout {
-        Layout::Explicit { disk, scheme, parts } => (disk.clone(), Plan::New(*scheme, parts.clone())),
-        Layout::Guided { disk, how } => {
-            let disk = guided_disk(disk.as_deref())?;
-            let beside = match how {
-                Guided::Whole => false,
-                Guided::Beside => true,
-                // A table that can't be read is not a blank disk.
-                Guided::Auto => part::read(&mut Disk::open_read(&disk)?)
-                    .map_err(|_| format!("{disk}: its partition table can't be read"))?
-                    .is_some(),
-            };
-            (disk, if beside { Plan::Beside } else { Plan::New(Scheme::Gpt, guided_parts()) })
-        }
-    };
+    let (disk, plan) = plan_of(&cfg.layout)?;
     say(&format!("Partitioning {disk}"));
-    let made = partition(&disk, plan, &bootcode)?;
+    let made = partition(&disk, plan, &bootcode, say)?;
 
     for m in made.iter().filter(|m| !m.kept) {
         match m.spec.kind {
@@ -562,6 +691,8 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
         say(&format!("Extracting {set}"));
         run("/bin/tar", &["-xpf", &sets_dir.join(set).to_string_lossy(), "-C", TARGET])?;
     }
+    // The new system's /dev, for what runs in it: pw reads /dev/urandom for its salts.
+    mounts.mount(&["-t", "devfs", "devfs"], &format!("{TARGET}/dev"))?;
     let esp = made.iter().find(|m| m.spec.kind == Kind::Efi);
     if let Some(e) = esp {
         // A kept partition must be FAT already: msdosfs refuses anything else.
@@ -573,20 +704,61 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let rd = |f: &str| std::fs::read_to_string(etc.join(f)).map_err(|e| format!("/etc/{f}: {e}"));
     let wr = |f: &str, s: &str| std::fs::write(etc.join(f), s).map_err(|e| format!("/etc/{f}: {e}"));
     wr("fstab", &fstab(&rd("fstab")?, &made))?;
+    let mut rc = rd("rc.conf")?;
     if let Some(h) = &cfg.hostname {
-        wr("rc.conf", &set_hostname(&rd("rc.conf")?, h))?;
+        rc = set_rc(&rc, "hostname", Some(h));
+    }
+    for i in &cfg.ifaces {
+        let key = format!("ifconfig_{}", i.name);
+        rc = match &i.net {
+            Net::Dhcp => set_rc(&rc, &key, Some("DHCP")),
+            Net::Static { addr, router } => {
+                if let Some(r) = router {
+                    rc = set_rc(&rc, "defaultrouter", Some(r));
+                }
+                set_rc(&rc, &key, Some(&format!("inet {addr}")))
+            }
+            Net::Off => set_rc(&rc, &key, None),
+        };
+    }
+    wr("rc.conf", &rc)?;
+    if !cfg.nameservers.is_empty() {
+        let lines: String = cfg.nameservers.iter().map(|n| format!("nameserver {n}\n")).collect();
+        wr("resolv.conf", &lines)?;
+    }
+    if let Some(zone) = &cfg.timezone {
+        // The new system's own tzsetup, which checks the zone; TZSETUP_ROOT keeps it from
+        // telling this machine's kernel the zone's offset.
+        let r = in_target("/usr/sbin/tzsetup").arg(zone).env("TZSETUP_ROOT", "/").stdout(Stdio::null()).status();
+        status_ok(&format!("tzsetup {zone}"), r)?;
+    }
+    if cfg.wall_cmos_clock {
+        wr("wall_cmos_clock", "")?;
     }
     if let Some(k) = &cfg.keymap {
         wr("wsconsctl.conf", &format!("{}keyboard.encoding={k}\n", rd("wsconsctl.conf")?))?;
     }
     if let Some(p) = &cfg.rootpass {
         let mut c = in_target("/usr/sbin/pw");
-        c.args(["usermod", "root", "-h", "0"]).stdin(Stdio::piped());
+        c.args(["usermod", "root", "-h", "0"]).stdin(Stdio::piped()).stdout(Stdio::null());
         let mut child = c.spawn().map_err(|e| format!("pw: {e}"))?;
         if let Some(mut i) = child.stdin.take() {
             let _ = writeln!(i, "{p}");
         }
         status_ok("pw usermod root", child.wait())?;
+    }
+    for u in &cfg.users {
+        say(&format!("Adding the user {}", u.name));
+        let mut c = in_target("/usr/sbin/pw");
+        c.args(["useradd", &u.name, "-m", "-c", &u.full_name, "-s", "/bin/sh", "-h", "0"]);
+        if u.wheel {
+            c.args(["-G", "wheel"]);
+        }
+        let mut child = c.stdin(Stdio::piped()).stdout(Stdio::null()).spawn().map_err(|e| format!("pw: {e}"))?;
+        if let Some(mut i) = child.stdin.take() {
+            let _ = writeln!(i, "{}", u.password);
+        }
+        status_ok(&format!("pw useradd {}", u.name), child.wait())?;
     }
 
     if let Some(esp) = esp {
@@ -721,8 +893,9 @@ mod tests {
 
     #[test]
     fn hostname_and_labels() {
-        assert_eq!(set_hostname("a=1\nhostname=\"x\"\n", "oxide"), "a=1\nhostname=\"oxide\"\n");
-        assert_eq!(set_hostname("a=1\n", "oxide"), "a=1\nhostname=\"oxide\"\n");
+        assert_eq!(set_rc("a=1\nhostname=\"x\"\n", "hostname", Some("oxide")), "a=1\nhostname=\"oxide\"\n");
+        assert_eq!(set_rc("a=1\n", "hostname", Some("oxide")), "a=1\nhostname=\"oxide\"\n");
+        assert_eq!(set_rc("a=1\nifconfig_rl0=\"DHCP\"\nb=2\n", "ifconfig_rl0", None), "a=1\nb=2\n");
         let p = |kind, mount: Option<&str>| PartSpec { size: None, kind, mount: mount.map(str::to_string) };
         assert_eq!(label_for(&p(Kind::Oxfs, Some("/")), 0), "rootfs");
         assert_eq!(label_for(&p(Kind::Oxfs, Some("/var/log")), 0), "var-log");

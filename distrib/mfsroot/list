@@ -60,3 +60,4 @@
 ./etc/master.passwd
 ./etc/passwd
 ./usr/share/terminfo/l/linux
+./usr/share/zoneinfo/zone1970.tab

@@ -38,6 +38,46 @@ pub enum Layout {
     Guided { disk: Option<String>, how: Guided },
     /// These partitions, in a new table of `scheme`, on `disk`.
     Explicit { disk: String, scheme: Scheme, parts: Vec<PartSpec> },
+    /// Partitions `disk` has already (made by hand, or in the partition editor), put to these
+    /// uses; the table itself is kept.
+    Existing { disk: String, parts: Vec<Use> },
+}
+
+/// A partition already on the disk, and what it's for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Use {
+    /// Its number in the table.
+    pub index: u32,
+    /// `Oxfs` (with `mount`), `Efi` or `Swap`.
+    pub kind: Kind,
+    pub mount: Option<String>,
+    /// A new file system on it (always for oxfs; an EFI system partition may be kept as it is).
+    pub newfs: bool,
+}
+
+/// How a network interface is set up (`rc.conf`'s `ifconfig_<if>`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Net {
+    Dhcp,
+    /// `inet address/prefix`, and the default route's gateway.
+    Static { addr: String, router: Option<String> },
+    Off,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Iface {
+    pub name: String,
+    pub net: Net,
+}
+
+/// A user to make (`pw useradd`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct User {
+    pub name: String,
+    pub full_name: String,
+    pub password: String,
+    /// In `wheel`: may use `su` and `sudo`.
+    pub wheel: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +90,34 @@ pub struct Config {
     pub rootpass: Option<String>,
     /// The script after the preamble's `#!/bin/sh` line, run in the new system.
     pub script: Option<String>,
+    /// The interfaces' settings; one not named keeps the base set's (`rl0` by DHCP).
+    pub ifaces: Vec<Iface>,
+    /// `resolv.conf`'s name servers, for interfaces set by hand.
+    pub nameservers: Vec<String>,
+    /// The zone (`Europe/Berlin`, `UTC`), else the base set's (none: UTC).
+    pub timezone: Option<String>,
+    /// The CMOS clock keeps local time (`/etc/wall_cmos_clock`), as Windows keeps it.
+    pub wall_cmos_clock: bool,
+    pub users: Vec<User>,
+}
+
+impl Config {
+    /// The answers nothing has given yet: the guided layout on the first disk, the base set.
+    pub fn new() -> Config {
+        Config {
+            layout: Layout::Guided { disk: None, how: Guided::Auto },
+            sets: parse_sets(""),
+            hostname: None,
+            keymap: None,
+            rootpass: None,
+            script: None,
+            ifaces: Vec::new(),
+            nameservers: Vec::new(),
+            timezone: None,
+            wall_cmos_clock: false,
+            users: Vec::new(),
+        }
+    }
 }
 
 /// The guided layout's partitions on a blank disk: a BIOS boot partition, an EFI system
@@ -201,6 +269,7 @@ pub fn read(path: &str) -> Result<Config, String> {
         keymap: get(3),
         rootpass: get(4),
         script: script.map(str::to_string),
+        ..Config::new()
     })
 }
 

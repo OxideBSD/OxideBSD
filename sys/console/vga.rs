@@ -239,6 +239,10 @@ struct Writer {
     /// `SGR 11` (`smacs` in the `linux` terminfo entry) until `SGR 10`: bytes are drawn as the
     /// font's glyphs, as they are, ncurses' line-drawing characters among them.
     raw_glyphs: bool,
+    /// Shifted out (SO, `0x0e`) to the G1 character set until shifted in (SI, `0x0f`): Linux's
+    /// G1 is the VT100 line-drawing set, printable ASCII drawn as boxes (`dec_graphic`). The
+    /// `linux` terminfo's `sgr` ends every attribute change with one or the other.
+    shifted_out: bool,
     /// A UTF-8 character begun: its bits so far, and how many continuation bytes are to come.
     utf8_char: u32,
     utf8_left: u8,
@@ -870,7 +874,10 @@ impl Writer {
                 // intermediate/final byte is itself printable ASCII, so ESC is the only addition
                 // an escape sequence needs here.
                 b'\n' | b'\r' | b'\t' | 0x08 | 0x7f | 0x1b => self.write_byte(byte),
+                0x0e => self.shifted_out = true,
+                0x0f => self.shifted_out = false,
                 _ if self.raw_glyphs => self.put_char(byte),
+                0x60..=0x7e if self.shifted_out => self.put_char(cp437_glyph(dec_graphic(byte))),
                 0x20..=0x7e => self.write_byte(byte),
                 0xc2..=0xdf => (self.utf8_char, self.utf8_left) = ((byte & 0x1f) as u32, 1),
                 0xe0..=0xef => (self.utf8_char, self.utf8_left) = ((byte & 0x0f) as u32, 2),
@@ -1092,6 +1099,16 @@ const CP437_HIGH: [char; 128] = [
 
 /// The font's glyph for `c` (UTF-8 output, `write_bytes`): ASCII as itself, code page 437's
 /// characters as theirs, a few look-alikes, else the placeholder.
+/// The VT100 line-drawing set's character for `byte` (`0x60..=0x7e`; DEC Special Graphics), as
+/// Linux's console draws G1.
+fn dec_graphic(byte: u8) -> char {
+    const SET: [char; 31] = [
+        '◆', '▒', '␉', '␌', '␍', '␊', '°', '±', '␤', '␋', '┘', '┐', '┌', '└', '┼', '⎺', '⎻', '─', '⎼', '⎽', '├', '┤', '┴', '┬',
+        '│', '≤', '≥', 'π', '≠', '£', '·',
+    ];
+    SET.get(byte.wrapping_sub(0x60) as usize).copied().unwrap_or(byte as char)
+}
+
 fn cp437_glyph(c: char) -> u8 {
     if c.is_ascii() && !c.is_ascii_control() {
         return c as u8;
@@ -1102,8 +1119,21 @@ fn cp437_glyph(c: char) -> u8 {
         'Ø' | 'ø' | '€' => return PLACEHOLDER,
         c => c,
     };
+    if let Some(i) = CP437_LOW.iter().position(|&g| g == c) {
+        return 0x01 + i as u8;
+    }
+    if c == '⌂' {
+        return 0x7f;
+    }
     CP437_HIGH.iter().position(|&g| g == c).map_or(PLACEHOLDER, |i| 0x80 + i as u8)
 }
+
+/// Code page 437's glyphs for 0x01..=0x1f, which a byte stream can't reach (they're control
+/// characters there) but Unicode can: the arrows, card suits, ...
+const CP437_LOW: [char; 31] = [
+    '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼', '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓',
+    '→', '←', '∟', '↔', '▲', '▼',
+];
 
 #[allow(clippy::deref_addrof)] // false positive: `&raw mut` + deref avoids a deny-by-default
 // direct `&mut` to a mutable static (edition 2024 `static_mut_refs`), see the field's own comment
@@ -1122,6 +1152,7 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
         sgr_reverse: false,
         sgr_underline: false,
         raw_glyphs: false,
+        shifted_out: false,
         utf8_char: 0,
         utf8_left: 0,
         esc_state: EscState::Ground,

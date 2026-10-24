@@ -2,8 +2,8 @@
 //!
 //! The install medium's `/etc/ttys` starts it on the console as `installer -t ttyv0`, in place of
 //! getty: it takes the terminal as a session of its own, then shows its first screen, from which
-//! the user installs, gets a shell on the mfsroot (recovery, §4.4) or reboots. init starts it again
-//! whenever it exits. The install steps' screens (§9.2) come with `INSTALLER.md` step 9b.
+//! the user installs (`screens`, drawn by `ui`), gets a shell on the mfsroot (recovery, §4.4) or
+//! reboots. init starts it again whenever it exits.
 //!
 //! `installer -f file` installs with no screens, every answer read from `file`, an
 //! `installerconfig` (§9.4, `config`), and exits 0 once the new system is in place (`engine`).
@@ -12,12 +12,15 @@ mod config;
 mod curses;
 mod engine;
 mod loaders;
+mod screens;
+mod ui;
 
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
-use curses::{A_BOLD, A_REVERSE, KEY_DOWN, KEY_ENTER, KEY_UP, Screen};
+use curses::Screen;
+use ui::{Dialog, Ui};
 
 fn usage() -> ExitCode {
     eprintln!("usage: installer [-t tty]\n       installer -f installerconfig");
@@ -59,52 +62,24 @@ fn release() -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Choice {
-    Install,
-    Shell,
-    Reboot,
-}
+const HELP_WELCOME: &str = "Install puts OxideBSD on a disk of this machine, asking first about \
+    the keyboard, the disks, the network, the time zone and the users; nothing is written before the \
+    last question. Shell is a shell on the install medium, to repair a system. In every dialog the \
+    arrows move, Tab goes to the buttons, Enter goes on, Esc goes back, F1 shows help and F10 a shell.";
 
-const CHOICES: [(Choice, &str, &str); 3] = [
-    (Choice::Install, "Install", "Install OxideBSD on a disk of this machine"),
-    (Choice::Shell, "Shell", "A shell on the install medium, for recovery"),
-    (Choice::Reboot, "Reboot", "Restart the machine"),
-];
-
-/// Shows `lines` under the title, then waits for a key.
-fn message(screen: &Screen, title: &str, lines: &[&str]) {
-    screen.clear();
-    screen.put(1, 2, title, A_BOLD);
-    for (i, l) in lines.iter().enumerate() {
-        screen.put(3 + i as i32, 2, l, 0);
-    }
-    screen.put(4 + lines.len() as i32, 2, "Press any key.", 0);
-    screen.show();
-    screen.key();
-}
-
-/// The first screen: the choices, the arrow keys to move, Enter to choose.
-fn welcome(screen: &Screen, title: &str, at: &mut usize) -> Option<Choice> {
-    loop {
-        screen.clear();
-        let (rows, _) = screen.size();
-        screen.put(1, 2, title, A_BOLD);
-        screen.put(3, 2, "Welcome. This program installs OxideBSD, or gives you a shell to repair one.", 0);
-        for (i, (_, name, what)) in CHOICES.iter().enumerate() {
-            let y = 5 + i as i32;
-            screen.put(y, 4, &format!(" {name:<8} "), if i == *at { A_REVERSE } else { 0 });
-            screen.put(y, 15, what, 0);
-        }
-        screen.put(rows - 2, 2, "Up and down choose, Enter goes.", 0);
-        screen.show();
-        match screen.key()? {
-            KEY_UP | 0x6b => *at = at.checked_sub(1).unwrap_or(CHOICES.len() - 1),
-            KEY_DOWN | 0x6a => *at = (*at + 1) % CHOICES.len(),
-            KEY_ENTER | 0x0a | 0x0d => return Some(CHOICES[*at].0),
-            _ => {}
-        }
-    }
+/// The first screen: install, a shell, or reboot.
+fn welcome(ui: &Ui, at: &mut usize) -> Option<usize> {
+    let items = [
+        ("Install", "Install OxideBSD on a disk of this machine"),
+        ("Shell", "A shell on the install medium, for recovery"),
+        ("Reboot", "Restart the machine"),
+    ]
+    .map(|(n, w)| (n.to_string(), w.to_string()));
+    let d = Dialog::new("Welcome", "Welcome. This program installs OxideBSD, or gives you a shell to repair one.", HELP_WELCOME);
+    // The tests wait for this line before typing.
+    let i = ui.menu_keys(&d, &items, *at, "Up and down choose, Enter goes.   F1 help   F10 shell")?;
+    *at = i;
+    Some(i)
 }
 
 /// `-f`: installs as `file` says, telling each step on the standard output.
@@ -136,28 +111,24 @@ fn main() -> ExitCode {
         _ => return usage(),
     }
     let title = format!("OxideBSD {} installer", release());
-    let screen = Screen::start();
+    let mut ui = Ui::new(Screen::start(), title);
     let mut at = 0;
     loop {
-        match welcome(&screen, &title, &mut at) {
-            None => return ExitCode::SUCCESS,
-            Some(Choice::Install) => message(
-                &screen,
-                &title,
-                &["Installing isn't here yet: it comes with the partition editor and the install steps.", "Choose Shell to work by hand."],
-            ),
-            Some(Choice::Shell) => {
-                screen.suspend(|| {
-                    println!("\nThe install medium's shell; `exit` returns to the installer.\n");
-                    let _ = std::process::Command::new("/bin/sh").arg0("-sh").status();
-                });
+        ui.step = String::new();
+        let reboot = match welcome(&ui, &mut at) {
+            None => continue,
+            Some(0) => matches!(screens::run(&mut ui), screens::After::Reboot),
+            Some(1) => {
+                ui.shell();
+                false
             }
-            Some(Choice::Reboot) => {
-                drop(screen);
-                let err = std::process::Command::new("/sbin/reboot").exec();
-                eprintln!("installer: /sbin/reboot: {err}");
-                return ExitCode::from(1);
-            }
+            Some(_) => true,
+        };
+        if reboot {
+            drop(ui);
+            let err = std::process::Command::new("/sbin/reboot").exec();
+            eprintln!("installer: /sbin/reboot: {err}");
+            return ExitCode::from(1);
         }
     }
 }

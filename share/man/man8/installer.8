@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 23, 2026
+.Dd October 24, 2026
 .Dt INSTALLER 8
 .Os OxideBSD
 .Sh NAME
@@ -36,10 +36,8 @@ starts it again whenever it exits.
 Its first screen offers:
 .Bl -tag -width Install
 .It Install
-Install OxideBSD on a disk of this machine.
-Not yet written: the install steps' screens come next; until then, install with
-.Fl f
-from the shell.
+Install OxideBSD on a disk of this machine: the screens below ask every
+question, then install unattended.
 .It Shell
 A shell on the mfsroot, for recovery:
 .Xr rescue 8 Ns 's
@@ -52,11 +50,65 @@ returns to the first screen.
 Restarts the machine.
 .El
 .Pp
-The arrow keys, or
+The screens are boxed dialogs, as
+.Xr dialog 1
+draws them, and take its keys: the arrows (and
 .Ic j
 and
-.Ic k ,
-move between them; Enter chooses.
+.Ic k )
+move in a list, the first letter of an item goes to it, Tab and Shift-Tab move
+between a list or fields and the buttons, Enter takes the highlighted button
+(in a list, its item), Space ticks a checklist's item and Esc goes back.
+From any of them F1 shows the screen's help and F10 a shell on the mfsroot.
+The installer sets the console's colours to its own rust palette
+.Pq the Linux Li ESC ] P No escape
+and gives them back when it leaves.
+.Pp
+An install asks, in order, each step allowing a step back:
+.Bl -enum
+.It
+The keyboard's layout, applied at once
+.Pq Xr wsconsctl 8 .
+.It
+The host name.
+.It
+The disk, then how to use it:
+.Em Beside
+puts OxideBSD in its largest free space and keeps every partition there, sharing
+an EFI system partition the disk has (offered when the free space is enough);
+.Em Whole
+erases the disk;
+.Em Shell
+gives a shell to partition by hand with
+.Xr gpart 8 ,
+then asks what each partition is for: an oxfs one
+.Pa /
+or another mount point, an EFI system partition kept or formatted, a swap one
+swap.
+.It
+The sets to install.
+.It
+Each network interface: DHCP, an address by hand, or off; tried there and then,
+so the result shows before the reboot.
+.It
+The time zone, and whether the hardware clock keeps UTC or local time, as
+Windows keeps it
+.Pq Pa /etc/wall_cmos_clock ;
+local time is suggested when Windows looks to be on the machine.
+.It
+Root's password, then the users to make, each with a password and whether it
+is in
+.Li wheel .
+Users may be left for later; the installer warns that only root can then log in.
+.It
+A last screen lists what happens to each partition of the disk (erased,
+formatted, kept, new), the sets and the settings; nothing is written before
+.Em Install
+is chosen there.
+.El
+.Pp
+The install then runs under a progress bar, and ends on a screen offering a
+reboot, a shell, or the first screen.
 .Pp
 The options are:
 .Bl -tag -width Ds

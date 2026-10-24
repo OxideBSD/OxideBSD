@@ -228,6 +228,9 @@ qemu_common_run_test_and_translate_exit() {
         qemu-system-x86_64 "$@" &
     fi
     qemu_pid=$!
+    # Killed (an outer `timeout`, Ctrl-C), this script takes its QEMU with it: left running, an
+    # orphaned QEMU holds cargo's output pipe open, and cargo waits on it forever.
+    trap 'kill "$qemu_pid" 2>/dev/null; exit 143' TERM INT HUP
     serial_sent=0
     # Lets a host-side script (or a human) find and kill this exact QEMU instance without
     # pattern-matching its argv.

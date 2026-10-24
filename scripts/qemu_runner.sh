@@ -149,6 +149,38 @@ case "$TEST_NAME" in
                 ;;
         esac
         ;;
+    install_screens)
+        # INSTALLER.md step 9b: as install_disk, but through the screens, every answer a key on
+        # the serial line (tests/install_screens.serial), the new system's files checked from the
+        # last screen's shell.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
+        export OXIDEBSD_QEMU_MEM
+        INSTALLED_DISK="target/images/screens.img"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]|install failed|screens-check-2-failed"
+        case "${INSTALL_DISK_PHASE:-}" in
+            "")
+                rm -f "$INSTALLED_DISK"
+                truncate -s 4G "$INSTALLED_DISK"
+                for phase in install uefi bios; do
+                    echo "qemu_runner.sh: install_screens: $phase"
+                    INSTALL_DISK_PHASE=$phase "$0" "$@" || exit $?
+                done
+                exit 0
+                ;;
+            install)
+                INSTALL_BOOT=1
+                QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
+                QEMU_PASS_PATTERN="screens-7-ok"
+                ;;
+            uefi | bios)
+                OXIDEBSD_FIRMWARE=$INSTALL_DISK_PHASE
+                export OXIDEBSD_FIRMWARE
+                QEMU_SERIAL_INPUT=""
+                QEMU_NO_ISO=1
+                QEMU_PASS_PATTERN="OxideBSD/[^ ]+ \(screens\)"
+                ;;
+        esac
+        ;;
     install_beside)
         # INSTALLER.md step 9c: as install_disk, onto a disk that holds another system: a
         # "Windows" EFI system partition (a fake bootmgfw.efi; a removable fallback that isn't a
