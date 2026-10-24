@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use part::Kind;
 
-use crate::config::{Config, Guided, Iface, Layout, Net, Use, User};
+use crate::config::{Config, DiskUse, Guided, Iface, Layout, Net, Use, User};
 use crate::engine;
 use crate::ui::{Check, Dialog, Field, Ui};
 
@@ -150,7 +150,8 @@ fn hostname(ui: &Ui, cfg: &mut Config) -> Flow {
 
 const HELP_DISKS: &str = "Beside keeps everything on the disk and puts OxideBSD in its largest free \
     space, sharing the EFI system partition if there is one: the other systems stay in the boot \
-    menu. Whole erases the disk and gives all of it to OxideBSD. Shell gives you a shell to \
+    menu. Whole erases the disk and gives all of it to OxideBSD. Manual opens the partition \
+    editor, on every disk: several oxfs partitions, swap, an install over disks. Shell gives you a shell to \
     partition by hand with gpart(8) (oxfs, efi and swap types), then asks what each partition is \
     for. Nothing is written until the last step, which lists what is erased.";
 
@@ -177,7 +178,7 @@ fn disks(ui: &Ui, cfg: &mut Config, st: &mut State) -> Flow {
         let d = Dialog::new("Disks", "Choose the disk to install OxideBSD on.", HELP_DISKS);
         let Some(i) = ui.menu(&d, &items, st.disk_at) else { return Flow::Back };
         st.disk_at = i;
-        if let Some(layout) = disk_layout(ui, &disks[i]) {
+        if let Some(layout) = disk_layout(ui, &disks, i) {
             cfg.layout = layout;
             return Flow::Next;
         }
@@ -197,9 +198,11 @@ fn summary(disk: &str, t: &part::Table) -> String {
     format!("{}; the largest free space is {}.", lines.join(", "), human(free))
 }
 
-/// How `disk` is laid out: the guided layout beside the others or over the whole disk, or the
-/// partitions made in a shell; `None` to choose another disk.
-fn disk_layout(ui: &Ui, disk: &str) -> Option<Layout> {
+/// How disk `disks[i]` is laid out: the guided layout beside the others or over the whole disk,
+/// the partition editor's layout (on any of the disks), or the partitions made in a shell; `None`
+/// to choose another disk.
+fn disk_layout(ui: &Ui, disks: &[String], i: usize) -> Option<Layout> {
+    let disk = disks[i].as_str();
     let mut at = 0;
     loop {
         let table = engine::disk_table(disk);
@@ -216,13 +219,19 @@ fn disk_layout(ui: &Ui, disk: &str) -> Option<Layout> {
             None => format!("{disk} is blank."),
         };
         items.push(("Whole".into(), format!("Erase {disk} and use all of it")));
+        items.push(("Manual".into(), "The partition editor: every disk, by hand".into()));
         items.push(("Shell".into(), "Partition by hand with gpart, then choose".into()));
         let d = Dialog::new("Partitioning", &text, HELP_DISKS);
-        let i = ui.menu(&d, &items, at)?;
-        at = i;
-        match items[i].0.as_str() {
+        let c = ui.menu(&d, &items, at)?;
+        at = c;
+        match items[c].0.as_str() {
             "Beside" => return Some(beside),
             "Whole" => return Some(Layout::Guided { disk: Some(disk.to_string()), how: Guided::Whole }),
+            "Manual" => {
+                if let Some(l) = crate::editor::run(ui, disks, disks.iter().position(|d| d == disk).unwrap_or(0)) {
+                    return Some(l);
+                }
+            }
             _ => {
                 ui.shell();
                 if let Some(l) = assign(ui, disk) {
@@ -271,7 +280,8 @@ fn assign(ui: &Ui, disk: &str) -> Option<Layout> {
             let roots = uses.iter().flatten().filter(|u| u.mount.as_deref() == Some("/")).count();
             let esps = uses.iter().flatten().filter(|u| u.kind == Kind::Efi).count();
             if roots == 1 && esps == 1 {
-                return Some(Layout::Existing { disk: disk.to_string(), parts: uses.into_iter().flatten().collect() });
+                let parts = uses.into_iter().flatten().collect();
+                return Some(Layout::Edited { disks: vec![DiskUse { disk: disk.to_string(), table: None, parts }] });
             }
             ui.message(&Dialog::new("Partitions", "One oxfs partition must be /, and one partition the EFI system partition.", ""));
             continue;
@@ -289,7 +299,7 @@ fn assign(ui: &Ui, disk: &str) -> Option<Layout> {
         };
         let items: Vec<(String, String)> = roles.iter().map(|(n, w)| (n.to_string(), w.to_string())).collect();
         let Some(r) = ui.menu(&Dialog::new("Partitions", &items[0].1, HELP_ASSIGN), &items, 0) else { continue };
-        let u = |kind, mount: Option<&str>, newfs| Some(Use { index: e.index, kind, mount: mount.map(str::to_string), newfs });
+        let u = |kind, mount: Option<&str>, newfs| Some(Use { index: e.index, kind, mount: mount.map(str::to_string), newfs, grow: false });
         uses[i - 1] = match roles[r].0 {
             "/" => u(Kind::Oxfs, Some("/"), true),
             "Other" => {
@@ -676,17 +686,18 @@ const HELP_CONFIRM: &str = "This is what the install does. Lines in copper erase
     Install starts it; Back goes back through the questions. Nothing has been written yet.";
 
 /// Everything the install will do, a line each; lines starting `!` erase something.
-fn review_lines(cfg: &Config, p: &engine::Preview) -> Vec<String> {
+fn review_lines(cfg: &Config, disks: &[engine::DiskPreview]) -> Vec<String> {
     let mut l = Vec::new();
-    if p.erased {
-        l.push(format!("!Everything on {} is erased.", p.disk));
+    for p in disks {
+        if p.erased {
+            l.push(format!("!Everything on {} is erased.", p.disk));
+        }
+        l.push(format!("{}:", p.disk));
+        for q in &p.parts {
+            l.push(format!("{}  {:<10} {:>9}  {:<14} {}", if q.erases { "!" } else { " " }, q.name, human(q.bytes), q.what, q.fate));
+        }
+        l.push(String::new());
     }
-    l.push(format!("{}:", p.disk));
-    for (name, bytes, what, fate) in &p.parts {
-        let erases = fate.starts_with("formatted") || (p.erased && fate.starts_with("new"));
-        l.push(format!("{}  {name:<10} {:>9}  {what:<14} {fate}", if erases { "!" } else { " " }, human(*bytes)));
-    }
-    l.push(String::new());
     let sets: Vec<&str> = cfg.sets.iter().map(|s| s.trim_end_matches(".tar.zst")).collect();
     l.push(format!("Sets: {}", sets.join(", ")));
     l.push(format!(
@@ -719,7 +730,7 @@ fn confirm(ui: &Ui, cfg: &Config) -> Flow {
     let p = match engine::preview(&cfg.layout) {
         Ok(p) => p,
         Err(e) => {
-            ui.message(&Dialog::new("Confirm", &format!("The disk can't be laid out so: {e}"), ""));
+            ui.message(&Dialog::new("Confirm", &format!("The disks can't be laid out so: {e}"), ""));
             return Flow::Back;
         }
     };
@@ -774,7 +785,7 @@ mod tests {
 
     #[test]
     fn one_root() {
-        let u = |i, m: &str| Some(Use { index: i, kind: Kind::Oxfs, mount: Some(m.into()), newfs: true });
+        let u = |i, m: &str| Some(Use { index: i, kind: Kind::Oxfs, mount: Some(m.into()), newfs: true, grow: false });
         let mut uses = vec![u(1, "/"), u(2, "/usr"), u(3, "/")];
         dedupe(&mut uses, 2);
         assert_eq!(uses[0], None);

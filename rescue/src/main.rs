@@ -91,6 +91,8 @@ mod sbin_mount;
 mod sbin_newfs_msdos;
 #[path = "../../sbin/newfs_oxfs/src/main.rs"]
 mod sbin_newfs_oxfs;
+#[path = "../../sbin/growfs/src/main.rs"]
+mod sbin_growfs;
 #[path = "../../sbin/reboot/src/main.rs"]
 mod sbin_reboot;
 #[path = "../../sbin/route/src/main.rs"]
@@ -151,6 +153,7 @@ const TOOLS: &[(&str, fn() -> ExitCode)] = &[
     ("mount_tmpfs", || sbin_mount::main().report()),
     ("newfs_msdos", || sbin_newfs_msdos::main().report()),
     ("newfs_oxfs", || sbin_newfs_oxfs::main().report()),
+    ("growfs", || sbin_growfs::main().report()),
     ("reboot", || sbin_reboot::main().report()),
     ("route", || sbin_route::main().report()),
     ("sysctl", || sbin_sysctl::main().report()),

@@ -128,7 +128,7 @@ impl Disk {
 }
 
 /// Sixteen random bytes, for a GUID.
-fn random_guid() -> [u8; 16] {
+pub(crate) fn random_guid() -> [u8; 16] {
     let mut g = [0u8; 16];
     if File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut g)).is_err() {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
@@ -153,11 +153,13 @@ struct Made {
     bytes: u64,
     /// Already there: it keeps its file system.
     kept: bool,
+    /// Kept, and its oxfs grown to fill it (`growfs`).
+    grow: bool,
 }
 
 /// A partition's GPT label: `rootfs` for `/`, the mount point's path (`usr`, `var-log`) for any
 /// other, `efi`, `swap<N>`; the BIOS boot partition has none.
-fn label_for(spec: &PartSpec, nth_swap: usize) -> String {
+pub(crate) fn label_for(spec: &PartSpec, nth_swap: usize) -> String {
     match (spec.kind, spec.mount.as_deref()) {
         (Kind::Oxfs, Some("/")) => "rootfs".into(),
         (Kind::Oxfs, Some(m)) => m.trim_matches('/').replace('/', "-"),
@@ -175,14 +177,15 @@ fn dev_for(disk: &str, scheme: Scheme, index: u32, guid: &[u8; 16]) -> String {
     }
 }
 
-/// What goes on the disk.
+/// What goes on a disk.
 enum Plan {
     /// A new table of this scheme, with these partitions, over whatever the disk held.
     New(Scheme, Vec<PartSpec>),
     /// The guided layout in the largest free space of the disk's table, all of it kept.
     Beside,
-    /// The disk's own partitions, put to these uses.
-    Existing(Vec<Use>),
+    /// A table laid out by hand -- the partition editor's, written at the install, or (`None`)
+    /// the disk's own, made in a shell -- and what each partition is for.
+    Edited(Option<Table>, Vec<Use>),
 }
 
 /// The guided layout beside the systems in `t`: OxideBSD's own BIOS boot partition (on GPT; on
@@ -233,7 +236,7 @@ fn lay_out(t: &mut Table, disk: &str, parts: &[PartSpec], (start, len): (u64, u6
         let guid = if scheme == Scheme::Gpt { random_guid() } else { [0; 16] };
         let index = t.add(code, &label, Some(first), Some(sectors), guid).map_err(|e| format!("{disk}: {e}"))?;
         let dev = dev_for(disk, scheme, index, &guid);
-        made.push(Made { spec: (*p).clone(), dev, label, index, guid, bytes: sectors * ss, kept: false });
+        made.push(Made { spec: (*p).clone(), dev, label, index, guid, bytes: sectors * ss, kept: false, grow: false });
         at = first + sectors;
     }
     Ok(made)
@@ -255,6 +258,7 @@ fn plan_table(d: &mut Disk, disk: &str, plan: Plan) -> Result<(Table, Vec<Made>,
         guid: e.guid,
         bytes: e.sectors * t.sector_size as u64,
         kept: keep,
+        grow: false,
     };
     let beside = matches!(plan, Plan::Beside);
     let (mut t, parts, mut made) = match plan {
@@ -269,20 +273,21 @@ fn plan_table(d: &mut Disk, disk: &str, plan: Plan) -> Result<(Table, Vec<Made>,
             let esp = esp.map(|e| kept(&t, e, PartSpec { size: None, kind: Kind::Efi, mount: None }, true));
             (t, parts, esp.into_iter().collect())
         }
-        Plan::Existing(uses) => {
-            let t = read(d)?;
+        Plan::Edited(table, uses) => {
+            let t = match table {
+                Some(t) => t,
+                None => read(d)?,
+            };
             let mut made = Vec::new();
             for u in &uses {
                 let e = t.entry(u.index).ok_or(format!("{disk}: it has no partition {}", u.index))?;
                 let spec = PartSpec { size: None, kind: u.kind, mount: u.mount.clone() };
                 let mut m = kept(&t, e, spec, !u.newfs);
+                m.grow = u.grow && !u.newfs;
                 if m.label.is_empty() && u.mount.as_deref() == Some("/") {
                     m.label = "rootfs".into();
                 }
                 made.push(m);
-            }
-            if !made.iter().any(|m| m.spec.mount.as_deref() == Some("/")) {
-                return Err("no partition is mounted on /".into());
             }
             let bios = t.entries.iter().find(|e| e.kind() == Kind::BiosBoot).map(|e| e.index);
             return Ok((t, made, bios));
@@ -304,22 +309,32 @@ fn plan_table(d: &mut Disk, disk: &str, plan: Plan) -> Result<(Table, Vec<Made>,
     Ok((t, made, bios))
 }
 
-/// Lays the disk out as `plan` says, with Limine's BIOS boot code from `bootcode`, and writes it:
-/// the partitions OxideBSD uses, the EFI system partition among them. Partitions made by hand
-/// (`Plan::Existing`) get the boot code only where it has room; without, the table is left as
-/// it is.
-fn partition(disk: &str, plan: Plan, bootcode: &[u8], say: &mut dyn FnMut(&str)) -> Result<Vec<Made>, String> {
+/// Lays the disk out as `plan` says and writes it, with Limine's BIOS boot code from `bootcode`
+/// on the disk the machine boots from: the partitions OxideBSD uses. A disk laid out by hand gets
+/// the boot code only where it has room (else it boots on UEFI only), and its table is written
+/// only if the partition editor made it.
+fn partition(disk: &str, plan: Plan, bootcode: Option<&[u8]>, say: &mut dyn FnMut(&str)) -> Result<Vec<Made>, String> {
     let mut d = Disk::open(disk)?;
-    let existing = matches!(plan, Plan::Existing(_));
+    let by_hand = matches!(plan, Plan::Edited(..));
+    let staged = matches!(plan, Plan::Edited(Some(_), _));
     let (mut t, made, bios) = plan_table(&mut d, disk, plan)?;
-    match t.set_bios_bootcode_in(bootcode, bios) {
-        Ok(stage2) => {
-            let mut sectors = t.write();
-            sectors.push(stage2);
-            d.write(&sectors)?;
+    let mut sectors = None;
+    if let Some(code) = bootcode {
+        match t.set_bios_bootcode_in(code, bios) {
+            Ok(stage2) => {
+                let mut s = t.write();
+                s.push(stage2);
+                sectors = Some(s);
+            }
+            Err(e) if by_hand => say(&format!("{disk}: no BIOS boot code ({e}): it boots on UEFI only")),
+            Err(e) => return Err(format!("{disk}: {e}")),
         }
-        Err(e) if existing => say(&format!("{disk}: no BIOS boot code ({e}): it boots on UEFI only")),
-        Err(e) => return Err(format!("{disk}: {e}")),
+    }
+    if sectors.is_none() && (staged || !by_hand) {
+        sectors = Some(t.write());
+    }
+    if let Some(s) = sectors {
+        d.write(&s)?;
     }
     drop(d);
     for m in &made {
@@ -330,49 +345,84 @@ fn partition(disk: &str, plan: Plan, bootcode: &[u8], say: &mut dyn FnMut(&str))
     Ok(made)
 }
 
-/// What an install as `layout` says would do to its disk, nothing written: the disk, whether
-/// it's erased, and a line for each partition, in the order they lie.
-pub struct Preview {
+/// One disk of an install's preview (`preview`).
+pub struct DiskPreview {
     pub disk: String,
+    /// Its table is replaced whole: everything on it goes.
     pub erased: bool,
-    /// `(partition, size in bytes, what it is, what happens to it)`.
-    pub parts: Vec<(String, u64, String, String)>,
+    /// Its partitions, in the order they lie, then those deleted.
+    pub parts: Vec<PartPreview>,
 }
 
-pub fn preview(layout: &Layout) -> Result<Preview, String> {
-    let (disk, plan) = plan_of(layout)?;
-    let erased = matches!(plan, Plan::New(..));
-    let mut d = Disk::open_read(&disk)?;
-    let (t, made, _) = plan_table(&mut d, &disk, plan)?;
-    let mut parts = Vec::new();
-    let mut entries: Vec<&part::Entry> = t.entries.iter().collect();
-    entries.sort_by_key(|e| e.first);
-    let suffix = if t.scheme == Scheme::Gpt { "p" } else { "s" };
-    for e in entries {
-        let name = format!("{disk}{suffix}{}", e.index);
-        let bytes = e.sectors * t.sector_size as u64;
-        let (what, fate) = match made.iter().find(|m| m.index == e.index) {
-            Some(m) => {
-                let what = match (&m.spec.kind, &m.spec.mount) {
-                    (Kind::Oxfs, Some(on)) => format!("oxfs {on}"),
-                    (Kind::Efi, _) => "EFI system".into(),
-                    (Kind::BiosBoot, _) => "BIOS boot".into(),
-                    (k, _) => k.name(),
-                };
-                let fate = match (m.kept, m.spec.kind) {
-                    (true, Kind::Efi) => "kept; OxideBSD's boot files added",
-                    (true, _) => "kept",
-                    (false, _) if matches!(layout, Layout::Existing { .. }) => "formatted: its contents erased",
-                    (false, Kind::BiosBoot) => "new: Limine's BIOS stage 2",
-                    (false, _) => "new",
-                };
-                (what, fate.to_string())
-            }
-            None => (e.kind().name(), "kept as it is".to_string()),
+pub struct PartPreview {
+    pub name: String,
+    pub bytes: u64,
+    /// `oxfs /usr`, `EFI system`, another system's type.
+    pub what: String,
+    /// What happens to it: kept, new, formatted, grown, deleted.
+    pub fate: String,
+    /// Something on the disk is lost by it.
+    pub erases: bool,
+}
+
+/// What an install as `layout` says would do to each of its disks, nothing written.
+pub fn preview(layout: &Layout) -> Result<Vec<DiskPreview>, String> {
+    let mut out = Vec::new();
+    for (disk, plan) in plans(layout)? {
+        let erased = matches!(plan, Plan::New(..));
+        let mut d = Disk::open_read(&disk)?;
+        let on_disk = part::read(&mut d).ok().flatten();
+        let (t, made, _) = plan_table(&mut d, &disk, plan)?;
+        let erased = erased || on_disk.as_ref().is_some_and(|o| o.scheme != t.scheme);
+        let suffix = |s: Scheme| if s == Scheme::Gpt { "p" } else { "s" };
+        // The partition `e` was on the disk already: same place, same type.
+        let was = |e: &part::Entry| {
+            on_disk.as_ref().filter(|_| !erased).and_then(|o| o.entries.iter().find(|x| x.first == e.first && x.code == e.code)).cloned()
         };
-        parts.push((name, bytes, what, fate));
+        let mut entries: Vec<&part::Entry> = t.entries.iter().collect();
+        entries.sort_by_key(|e| e.first);
+        let mut parts = Vec::new();
+        for e in &entries {
+            let old = was(e);
+            let (what, fate, erases) = match made.iter().find(|m| m.index == e.index) {
+                Some(m) => {
+                    let what = match (&m.spec.kind, &m.spec.mount) {
+                        (Kind::Oxfs, Some(on)) => format!("oxfs {on}"),
+                        (Kind::Efi, _) => "EFI system".into(),
+                        (Kind::BiosBoot, _) => "BIOS boot".into(),
+                        (k, _) => k.name(),
+                    };
+                    match (m.kept, m.spec.kind) {
+                        (true, Kind::Efi) => (what, "kept; OxideBSD's boot files added", false),
+                        (true, _) if m.grow => (what, "kept, grown to fill it", false),
+                        (true, _) => (what, "kept", false),
+                        (false, _) if old.is_some() => (what, "formatted: its contents erased", true),
+                        (false, Kind::BiosBoot) => (what, "new: Limine's BIOS stage 2", erased),
+                        (false, _) => (what, "new", erased),
+                    }
+                }
+                None if old.is_some() => (e.kind().name(), "kept as it is", false),
+                None => (e.kind().name(), "new, not used", erased),
+            };
+            let name = format!("{disk}{}{}", suffix(t.scheme), e.index);
+            parts.push(PartPreview { name, bytes: e.sectors * t.sector_size as u64, what, fate: fate.into(), erases });
+        }
+        if let Some(o) = on_disk.as_ref().filter(|_| !erased) {
+            for x in &o.entries {
+                if !t.entries.iter().any(|e| e.first == x.first && e.code == x.code) {
+                    parts.push(PartPreview {
+                        name: format!("{disk}{}{}", suffix(o.scheme), x.index),
+                        bytes: x.sectors * o.sector_size as u64,
+                        what: x.kind().name(),
+                        fate: "deleted: its contents lost".into(),
+                        erases: true,
+                    });
+                }
+            }
+        }
+        out.push(DiskPreview { disk, erased, parts });
     }
-    Ok(Preview { disk, erased, parts })
+    Ok(out)
 }
 
 /// The ISO 9660 volume label of `dev`, from its primary volume descriptor (sector 16).
@@ -413,6 +463,12 @@ pub fn sets_on_medium() -> Result<Vec<SetInfo>, String> {
         .collect();
     sets.sort_by_key(|s| s.file != "base.tar.zst");
     Ok(sets)
+}
+
+/// Disk `name`'s sector size and its size in those sectors.
+pub fn disk_geometry(name: &str) -> Option<(u32, u64)> {
+    let d = Disk::open_read(name).ok()?;
+    Some((d.sector_size, d.sectors))
 }
 
 /// Disk `name`'s partition table, if it has one that can be read.
@@ -603,11 +659,20 @@ fn guided_disk(disk: Option<&str>) -> Result<String, String> {
     disks().into_iter().find(|(_, k)| k == "disk").map(|(d, _)| d).ok_or("no disk to install on".into())
 }
 
-/// The disk `layout` uses, and what goes on it.
-fn plan_of(layout: &Layout) -> Result<(String, Plan), String> {
+/// The disks `layout` uses, and what goes on each.
+fn plans(layout: &Layout) -> Result<Vec<(String, Plan)>, String> {
     Ok(match layout {
-        Layout::Explicit { disk, scheme, parts } => (disk.clone(), Plan::New(*scheme, parts.clone())),
-        Layout::Existing { disk, parts } => (disk.clone(), Plan::Existing(parts.clone())),
+        Layout::Explicit { disk, scheme, parts } => vec![(disk.clone(), Plan::New(*scheme, parts.clone()))],
+        Layout::Edited { disks } => {
+            let uses = || disks.iter().flat_map(|d| d.parts.iter());
+            if uses().filter(|u| u.mount.as_deref() == Some("/")).count() != 1 {
+                return Err("one partition must be mounted on /".into());
+            }
+            if uses().filter(|u| u.kind == Kind::Efi).count() != 1 {
+                return Err("one partition must be the EFI system partition".into());
+            }
+            disks.iter().map(|d| (d.disk.clone(), Plan::Edited(d.table.clone(), d.parts.clone()))).collect()
+        }
         Layout::Guided { disk, how } => {
             let disk = guided_disk(disk.as_deref())?;
             let beside = match how {
@@ -618,9 +683,21 @@ fn plan_of(layout: &Layout) -> Result<(String, Plan), String> {
                     .map_err(|_| format!("{disk}: its partition table can't be read"))?
                     .is_some(),
             };
-            (disk, if beside { Plan::Beside } else { Plan::New(Scheme::Gpt, guided_parts()) })
+            vec![(disk, if beside { Plan::Beside } else { Plan::New(Scheme::Gpt, guided_parts()) })]
         }
     })
+}
+
+/// The disk the machine boots from: the one with the EFI system partition, which gets Limine's
+/// BIOS boot code too.
+fn boot_disk(plans: &[(String, Plan)]) -> Option<String> {
+    plans
+        .iter()
+        .find(|(_, p)| match p {
+            Plan::Edited(_, uses) => uses.iter().any(|u| u.kind == Kind::Efi),
+            _ => true,
+        })
+        .map(|(d, _)| d.clone())
 }
 
 /// What is mounted, to unmount in reverse at the end or on a failure.
@@ -661,10 +738,19 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let boot = Path::new(DIST).join("boot");
     let bootcode = std::fs::read(boot.join("limine/limine-bios-hdd.bin")).map_err(|e| format!("limine-bios-hdd.bin: {e}"))?;
 
-    let (disk, plan) = plan_of(&cfg.layout)?;
-    say(&format!("Partitioning {disk}"));
-    let made = partition(&disk, plan, &bootcode, say)?;
+    let plans = plans(&cfg.layout)?;
+    let boot_on = boot_disk(&plans);
+    let mut made = Vec::new();
+    for (disk, plan) in plans {
+        say(&format!("Partitioning {disk}"));
+        let code = (Some(&disk) == boot_on.as_ref()).then_some(&bootcode[..]);
+        made.extend(partition(&disk, plan, code, say)?);
+    }
 
+    for m in made.iter().filter(|m| m.grow) {
+        say(&format!("Growing the oxfs on {}", m.dev));
+        run("/sbin/growfs", &["-y", &m.dev])?;
+    }
     for m in made.iter().filter(|m| !m.kept) {
         match m.spec.kind {
             Kind::Oxfs => {
@@ -827,7 +913,7 @@ mod tests {
 
     fn made(kind: Kind, mount: Option<&str>, dev: &str) -> Made {
         let spec = PartSpec { size: None, kind, mount: mount.map(str::to_string) };
-        Made { spec, dev: dev.into(), label: String::new(), index: 1, guid: [0; 16], bytes: 0, kept: false }
+        Made { spec, dev: dev.into(), label: String::new(), index: 1, guid: [0; 16], bytes: 0, kept: false, grow: false }
     }
 
     #[test]

@@ -10,6 +10,7 @@
 
 mod config;
 mod curses;
+mod editor;
 mod engine;
 mod loaders;
 mod screens;

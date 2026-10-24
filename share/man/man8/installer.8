@@ -78,6 +78,18 @@ puts OxideBSD in its largest free space and keeps every partition there, sharing
 an EFI system partition the disk has (offered when the free space is enough);
 .Em Whole
 erases the disk;
+.Em Manual
+opens the partition editor on every disk of the machine: Create makes a
+partition in free space (on a blank disk, first a GPT or MBR table), Delete
+removes one, Modify says what one is for \(em an oxfs one
+.Pa /
+or another mount point, formatted or kept, an existing one grown into the free
+space after it
+.Pq Xr growfs 8 ,
+an EFI system partition kept or formatted, a swap one swap \(em and Revert puts
+a disk back as it was; other systems' partitions are only ever kept or deleted.
+Its changes are written with the rest, after the last question, and one install
+may span disks: the disk with the EFI system partition is the one that boots;
 .Em Shell
 gives a shell to partition by hand with
 .Xr gpart 8 ,
@@ -305,6 +317,7 @@ Limine's BIOS boot code, for the new disk
 .Xr ttys 5 ,
 .Xr efibootmgr 8 ,
 .Xr gpart 8 ,
+.Xr growfs 8 ,
 .Xr init 8 ,
 .Xr rescue 8
 .Sh HISTORY

@@ -264,16 +264,28 @@ impl Ui {
 
     /// `menu`, with `keys` on the screen's bottom line.
     pub fn menu_keys(&self, d: &Dialog, items: &[(String, String)], at: usize, keys: &str) -> Option<usize> {
+        match self.menu_buttons(d, items, at, &["OK", "Back"], keys, true)? {
+            (_, 1) => None,
+            (_, _) if items.is_empty() => None,
+            (i, _) => Some(i),
+        }
+    }
+
+    /// A list of `(name, what)` items and a row of `buttons`: Enter gives the highlighted item
+    /// and button, `None` is Esc. With `jump`, a letter goes to the next item starting with it;
+    /// without, to the button starting with it, as if pressed.
+    pub fn menu_buttons(&self, d: &Dialog, items: &[(String, String)], at: usize, buttons: &[&str], keys: &str, jump: bool) -> Option<(usize, usize)> {
         let mut at = at.min(items.len().saturating_sub(1));
-        let mut on_buttons = None::<usize>;
+        let mut btn = 0usize;
         let name_w = items.iter().map(|(n, _)| width_of(n)).max().unwrap_or(0) + 2;
         let line_w = items.iter().map(|(_, w)| name_w + width_of(w)).max().unwrap_or(0);
+        let buttons_w = buttons.len() as i32 * 14;
         let mut top = 0usize;
         loop {
             self.backdrop(keys);
             let (rows, _) = self.screen.size();
             let shown = (items.len() as i32).min(rows - 14).max(3) as usize;
-            let p = self.place(d, shown as i32 + 3, line_w + 12);
+            let p = self.place(d, shown as i32 + 3, (line_w + 12).max(buttons_w));
             let lx = p.x + 3;
             let lw = p.w - 6;
             self.frame(p.body, lx, shown as i32 + 2, lw);
@@ -298,25 +310,27 @@ impl Ui {
             if top + shown < items.len() {
                 self.screen.put(p.body + shown as i32 + 1, lx + lw - 4, "↓", Pair::Frame.attr());
             }
-            self.buttons(&p, &["OK", "Back"], on_buttons.unwrap_or(0), true);
+            self.buttons(&p, buttons, btn, true);
             self.screen.show();
             let Some(k) = self.key(d.help) else { continue };
+            let n = buttons.len();
             match k {
-                KEY_UP | 0x6b if !items.is_empty() => at = at.checked_sub(1).unwrap_or(items.len() - 1),
-                KEY_DOWN | 0x6a if !items.is_empty() => at = (at + 1) % items.len(),
+                KEY_UP | 0x6b if jump && !items.is_empty() => at = at.checked_sub(1).unwrap_or(items.len() - 1),
+                KEY_DOWN | 0x6a if jump && !items.is_empty() => at = (at + 1) % items.len(),
+                KEY_UP if !items.is_empty() => at = at.checked_sub(1).unwrap_or(items.len() - 1),
+                KEY_DOWN if !items.is_empty() => at = (at + 1) % items.len(),
                 KEY_PPAGE => at = at.saturating_sub(shown),
                 KEY_NPAGE => at = (at + shown).min(items.len().saturating_sub(1)),
                 KEY_HOME => at = 0,
                 KEY_END => at = items.len().saturating_sub(1),
-                TAB | KEY_RIGHT => on_buttons = Some(on_buttons.map_or(1, |b| (b + 1) % 2)),
-                KEY_BTAB | KEY_LEFT => on_buttons = Some(on_buttons.map_or(1, |b| (b + 1) % 2)),
+                TAB | KEY_RIGHT => btn = (btn + 1) % n,
+                KEY_BTAB | KEY_LEFT => btn = (btn + n - 1) % n,
                 ESC => return None,
-                k if is_enter(k) => {
-                    return match on_buttons {
-                        Some(1) => None,
-                        _ if items.is_empty() => None,
-                        _ => Some(at),
-                    };
+                k if is_enter(k) => return Some((at, btn)),
+                k if !jump => {
+                    if let Some(b) = buttons.iter().position(|b| first_letter(b) == Some(k)) {
+                        return Some((at, b));
+                    }
                 }
                 k => {
                     // The first item after this one whose name starts with the letter.

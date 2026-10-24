@@ -36,9 +36,12 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT/boot/limine" "$ROOT/EFI/BOOT" "$ROOT/OxideBSD/$VERSION"
 # Hard links where the file system allows: the sets are tens of MiB.
 put() { ln -f "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
-# Without its debug sections: the boot loader reads the whole file into memory first.
+# Without its debug sections or symbol table: the boot loader reads the whole file into memory
+# beside the segments it loads from it, and at 64 MB under UEFI with two partitioned disks the
+# symbols' 600 KB were what didn't fit. Nothing on the target reads them (gdb uses the ELF in
+# target/), and an installed system's kernel is this one.
 OBJCOPY="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy"
-"$OBJCOPY" --strip-debug "$KERNEL" "$ROOT/boot/kernel"
+"$OBJCOPY" --strip-all "$KERNEL" "$ROOT/boot/kernel"
 put "$MFSROOT" "$ROOT/boot/mfsroot"
 # limine-bios-hdd.bin: the BIOS boot code the installer puts on the disk (INSTALLER.md §8.4).
 for f in limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin limine-bios-hdd.bin; do

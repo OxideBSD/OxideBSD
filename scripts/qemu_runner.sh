@@ -181,6 +181,56 @@ case "$TEST_NAME" in
                 ;;
         esac
         ;;
+    install_editor)
+        # INSTALLER.md step 9b2: the partition editor over two disks. The installed one (ide0)
+        # holds a "Windows" EFI system partition and a partition of random bytes, free space
+        # after; the second (virt0, EDITOR_DISK, attached at every boot) an oxfs of 64 MiB holding
+        # /marker, free space after it, grown to fill the disk and kept as /home.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
+        export OXIDEBSD_QEMU_MEM
+        INSTALLED_DISK="target/images/editor.img"
+        EDITOR_DISK="target/images/editor-home.img"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]|install failed|edited-check-2-failed"
+        case "${INSTALL_DISK_PHASE:-}" in
+            "")
+                w=target/images/editor
+                rm -rf "$w" "$INSTALLED_DISK" "$EDITOR_DISK"
+                mkdir -p "$w/esp/EFI/Microsoft/Boot" "$w/home"
+                echo fake-windows-boot-manager > "$w/esp/EFI/Microsoft/Boot/bootmgfw.efi"
+                echo home-kept > "$w/home/marker"
+                tools=target/host-tools/x86_64-unknown-linux-gnu/release
+                "$tools/makefs" -t msdos -o volume_label=SYSTEM -s 100m "$w/esp.img" "$w/esp" > /dev/null
+                "$tools/makefs" -t oxfs -o label=home -s 64m "$w/home.img" "$w/home" > /dev/null
+                head -c 64M /dev/urandom > "$w/other.img"
+                "$tools/mkimg" -s gpt -c 4G -o "$INSTALLED_DISK" \
+                    -p "efi/EFI system partition:=$w/esp.img" -p "ms-basic-data/Basic data partition:=$w/other.img"
+                "$tools/mkimg" -s gpt -c 1G -o "$EDITOR_DISK" -p "oxfs/home:=$w/home.img"
+                for phase in install uefi bios; do
+                    echo "qemu_runner.sh: install_editor: $phase"
+                    INSTALL_DISK_PHASE=$phase "$0" "$@" || exit $?
+                done
+                other=$(dd if="$INSTALLED_DISK" bs=1M skip=101 count=64 status=none | sha256sum | cut -d' ' -f1)
+                if [ "$other" != "$(sha256sum < "$w/other.img" | cut -d' ' -f1)" ]; then
+                    echo "qemu_runner.sh: install_editor: the other system's partition changed" >&2
+                    exit 1
+                fi
+                echo "qemu_runner.sh: install_editor: the other system's partition is untouched"
+                exit 0
+                ;;
+            install)
+                INSTALL_BOOT=1
+                QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
+                QEMU_PASS_PATTERN="edited-7-ok"
+                ;;
+            uefi | bios)
+                OXIDEBSD_FIRMWARE=$INSTALL_DISK_PHASE
+                export OXIDEBSD_FIRMWARE
+                QEMU_SERIAL_INPUT=""
+                QEMU_NO_ISO=1
+                QEMU_PASS_PATTERN="OxideBSD/[^ ]+ \(edited\)"
+                ;;
+        esac
+        ;;
     install_beside)
         # INSTALLER.md step 9c: as install_disk, onto a disk that holds another system: a
         # "Windows" EFI system partition (a fake bootmgfw.efi; a removable fallback that isn't a
@@ -403,6 +453,10 @@ if [ "${CD9660_TEST:-0}" = 1 ]; then
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=satabig,bus=ahci0.4"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sataempty,media=cdrom"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=sataempty,bus=ahci1.5"
+fi
+if [ -n "${EDITOR_DISK:-}" ]; then
+    QEMU_EXTRA_ARGS="-drive if=none,id=editordisk,format=raw,file=$EDITOR_DISK"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device virtio-blk-pci,drive=editordisk,disable-legacy=on"
 fi
 if [ "${EFIRT_TEST:-0}" = 1 ]; then
     rm -f target/images/efirt-esp.img

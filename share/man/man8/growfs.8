@@ -1,0 +1,68 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 24, 2026
+.Dt GROWFS 8
+.Os OxideBSD
+.Sh NAME
+.Nm growfs
+.Nd grow an oxfs to fill its partition
+.Sh SYNOPSIS
+.Nm
+.Op Fl Ny
+.Op Fl s Ar size
+.Ar special
+.Sh DESCRIPTION
+.Nm
+grows the oxfs on
+.Ar special ,
+a partition made larger
+.Pq Xr gpart 8 Cm resize
+or an image file, to fill it.
+The file system must be unmounted and clean
+.Pq Xr fsck_oxfs 8 ;
+nothing in it changes but its size, and the new space is free.
+.Pp
+An oxfs's block bitmap lies before its data and grows with it: past the room
+in the bitmap's last block, every data block in use moves further into the
+partition to make way for the new bitmap blocks.
+The move is not safe against a crash: power lost while it runs leaves the file
+system damaged.
+Without
+.Fl y ,
+.Nm
+says so and asks first.
+.Pp
+The options are:
+.Bl -tag -width indent
+.It Fl N
+Say what would be done; write nothing.
+.It Fl y
+Don't ask: grow at once.
+.It Fl s Ar size
+Grow to the first
+.Ar size
+512-byte sectors of
+.Ar special ,
+not all of it.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Grow the third partition of
+.Pa ide0
+into the free space after it, then its file system:
+.Bd -literal -offset indent
+gpart resize -i 3 ide0
+growfs /dev/ide0p3
+.Ed
+.Sh SEE ALSO
+.Xr fsck_oxfs 8 ,
+.Xr gpart 8 ,
+.Xr newfs_oxfs 8
+.Sh HISTORY
+A
+.Nm
+command for UFS appeared in
+.Fx 4.4 ;
+this one, for oxfs, in OxideBSD 0.3.
+.Sh BUGS
+It can't shrink a file system, nor grow one that is mounted.

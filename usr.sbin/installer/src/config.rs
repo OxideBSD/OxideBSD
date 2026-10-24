@@ -8,7 +8,7 @@
 
 use std::process::Command;
 
-use part::{Kind, Scheme};
+use part::{Kind, Scheme, Table};
 
 /// One partition to make.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,9 +38,19 @@ pub enum Layout {
     Guided { disk: Option<String>, how: Guided },
     /// These partitions, in a new table of `scheme`, on `disk`.
     Explicit { disk: String, scheme: Scheme, parts: Vec<PartSpec> },
-    /// Partitions `disk` has already (made by hand, or in the partition editor), put to these
-    /// uses; the table itself is kept.
-    Existing { disk: String, parts: Vec<Use> },
+    /// Disks laid out by hand -- in the partition editor, or in a shell -- and what each
+    /// partition is for, on any of them.
+    Edited { disks: Vec<DiskUse> },
+}
+
+/// One disk of `Layout::Edited`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskUse {
+    pub disk: String,
+    /// The table the partition editor made, written at the install; `None` keeps the disk's own
+    /// (partitioned in a shell).
+    pub table: Option<Table>,
+    pub parts: Vec<Use>,
 }
 
 /// A partition already on the disk, and what it's for.
@@ -51,8 +61,10 @@ pub struct Use {
     /// `Oxfs` (with `mount`), `Efi` or `Swap`.
     pub kind: Kind,
     pub mount: Option<String>,
-    /// A new file system on it (always for oxfs; an EFI system partition may be kept as it is).
+    /// A new file system on it (an EFI system partition, or an oxfs, may be kept as it is).
     pub newfs: bool,
+    /// An oxfs kept and grown to fill its partition, made larger (`growfs`).
+    pub grow: bool,
 }
 
 /// How a network interface is set up (`rc.conf`'s `ifconfig_<if>`).
@@ -131,7 +143,7 @@ pub fn guided_parts() -> Vec<PartSpec> {
 }
 
 /// `512K`, `260M`, `20G`, `1T` or plain bytes.
-fn parse_size(s: &str) -> Option<u64> {
+pub fn parse_size(s: &str) -> Option<u64> {
     let (digits, shift) = match s.as_bytes().last()?.to_ascii_uppercase() {
         b'K' => (&s[..s.len() - 1], 10),
         b'M' => (&s[..s.len() - 1], 20),

@@ -49,6 +49,7 @@
 ./sbin/mount_tmpfs	rescue
 ./sbin/newfs_msdos	rescue
 ./sbin/newfs_oxfs	rescue
+./sbin/growfs	rescue
 ./sbin/reboot	rescue
 ./sbin/route	rescue
 ./sbin/sysctl	rescue

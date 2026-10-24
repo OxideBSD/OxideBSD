@@ -8,7 +8,9 @@
 
 #![no_std]
 
+mod grow;
 mod writer;
+pub use grow::{GrowError, Grown, grow, plan as grow_plan};
 pub use writer::{BlockDevice, Error, FormatOptions, Writer};
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -573,6 +575,68 @@ mod tests {
             *self.0.get_mut(n as usize).ok_or(())? = *buf;
             Ok(())
         }
+    }
+
+    /// Files whose every block holds its own pattern, so a moved block that landed wrong shows.
+    fn fill(w: &mut Writer<Mem>, files: usize, blocks: usize) -> std::vec::Vec<u32> {
+        let mut made = std::vec::Vec::new();
+        for f in 0..files {
+            let mut ino = Inode::new(InodeKind::File, 7);
+            for b in 0..blocks {
+                let mut data = [0u8; BLOCK_SIZE];
+                data[..8].copy_from_slice(&((f * 100_000 + b) as u64).to_le_bytes());
+                w.put_block(&mut ino, b, &data).unwrap();
+            }
+            ino.size = (blocks * BLOCK_SIZE) as u64;
+            let n = w.create(ROOT_INODE, std::format!("f{f}").as_bytes(), &ino).unwrap();
+            made.push(n);
+        }
+        made
+    }
+
+    #[test]
+    fn grow_moves_every_block() {
+        // ~1.5 bitmap blocks of data, grown to ~7: the data moves 5 blocks in.
+        let small = 50_000u64;
+        let dev = Mem(std::vec![[0u8; BLOCK_SIZE]; small as usize]);
+        let opts = FormatOptions { label: b"rootfs", inodes: 64, now: 7 };
+        let mut w = Writer::format(dev, small, &opts).unwrap();
+        // Spread over the whole bitmap: files of 2000 blocks each.
+        let files = fill(&mut w, 20, 2000);
+        let mut dev = w.finish().unwrap();
+        let big = 230_000u64;
+        dev.0.resize(big as usize, [0xAA; BLOCK_SIZE]);
+        let g = grow(&mut dev, big).unwrap();
+        assert!(g.moved_by >= 5 && g.new_blocks > g.old_blocks);
+        assert_eq!(grow(&mut dev, big), Err(GrowError::NoRoom));
+
+        let sb = Superblock::decode(&dev.0[0]).unwrap();
+        assert!(sb.clean && sb.data_blocks == g.new_blocks && sb.label() == b"rootfs");
+        let mut w = Writer { dev: &mut dev, sb, next_block: 0, next_inode: 0 };
+        for (f, &n) in files.iter().enumerate() {
+            let ino = w.read_inode(n).unwrap();
+            for b in [0usize, 1, 999, 1999] {
+                let at = w.block_at(&ino, b).unwrap().unwrap();
+                let data = w.read_data(at).unwrap();
+                assert_eq!(u64::from_le_bytes(data[..8].try_into().unwrap()), (f * 100_000 + b) as u64, "file {f} block {b}");
+            }
+        }
+        assert_eq!(w.lookup(ROOT_INODE, b"f7").unwrap(), Some(files[7]));
+        // The new blocks are free: the allocator hands one out, past the old end.
+        let fresh = (0..10).map(|_| w.alloc_block().unwrap()).max().unwrap();
+        assert!(fresh < g.new_blocks);
+    }
+
+    #[test]
+    fn grow_within_the_last_bitmap_block() {
+        let dev = Mem(std::vec![[0u8; BLOCK_SIZE]; 20_000]);
+        let opts = FormatOptions { label: b"", inodes: 64, now: 7 };
+        let w = Writer::format(dev, 20_000, &opts).unwrap();
+        let mut dev = w.finish().unwrap();
+        dev.0.resize(30_000, [0; BLOCK_SIZE]);
+        let g = grow(&mut dev, 30_000).unwrap();
+        assert_eq!(g.moved_by, 0);
+        assert_eq!(Superblock::decode(&dev.0[0]).unwrap().data_blocks, g.new_blocks);
     }
 
     #[test]

@@ -568,6 +568,7 @@ fn build_mfsroot(root: &Path, tree: &InstallTree, destdir: &Path, installer: &Pa
     for d in ["dev", "proc", "tmp", "mnt", "cdrom", "var/run", "root"] {
         files.insert(d.into(), (if d == "tmp" { 0o1777 } else { 0o755 }, None));
     }
+    strip_programs(root, &mut files);
     let paths: Vec<String> = files.keys().cloned().collect();
     for p in paths {
         let mut up = p.as_str();
@@ -617,6 +618,45 @@ fn build_mfsroot(root: &Path, tree: &InstallTree, destdir: &Path, installer: &Pa
         &["-t".as_ref(), "oxfs".as_ref(), "-o".as_ref(), "label=mfsroot".as_ref(), "-T".as_ref(), timestamp.as_ref(), img.as_os_str(), input.as_os_str()],
     );
     run_host_tool(fsck, &["-fn".as_ref(), img.as_os_str()]);
+}
+
+/// The mfsroot's programs without their symbol tables: it lives in memory, and at 64 MB under
+/// UEFI the boot loader has to fit it in what the firmware leaves. Each ELF among `files` is
+/// replaced by a stripped copy under `target/images/mfsroot-strip`, one per source file, so the
+/// rescue tools' many names still share one inode.
+fn strip_programs(root: &Path, files: &mut std::collections::BTreeMap<String, (u32, Option<PathBuf>)>) {
+    let out = root.join("target/images/mfsroot-strip");
+    std::fs::create_dir_all(&out).unwrap();
+    let sysroot = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("rustc --print sysroot");
+    let sysroot = String::from_utf8_lossy(&sysroot.stdout).trim().to_string();
+    let objcopy = Path::new(&sysroot).join("lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy");
+    let mut done: std::collections::BTreeMap<PathBuf, PathBuf> = std::collections::BTreeMap::new();
+    for (_, contents) in files.values_mut() {
+        let Some(src) = contents.as_ref() else { continue };
+        if let Some(copy) = done.get(src) {
+            *contents = Some(copy.clone());
+            continue;
+        }
+        let mut magic = [0u8; 4];
+        let is_elf = std::fs::File::open(src).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic)).is_ok() && &magic == b"\x7fELF";
+        if !is_elf {
+            continue;
+        }
+        let name = src.to_string_lossy().trim_start_matches('/').replace('/', "_");
+        let copy = out.join(name);
+        let stale = |a: &Path, b: &Path| {
+            let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            m(b).is_none() || m(a) > m(b)
+        };
+        if stale(src, &copy) {
+            run_host_tool(&objcopy, &["--strip-all".as_ref(), src.as_os_str(), copy.as_os_str()]);
+        }
+        done.insert(src.clone(), copy.clone());
+        *contents = Some(copy);
+    }
 }
 
 /// The mfsroot the install medium carries (INSTALLER.md §4.3): `img` cut into 64 KiB chunks, each

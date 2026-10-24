@@ -148,6 +148,7 @@
 ./sbin/fsck type=file src=artifact:OXFS_FSCK_ELF_PATH
 ./sbin/fsck_oxfs type=file src=artifact:OXFS_FSCK_OXFS_ELF_PATH
 ./sbin/newfs_oxfs type=file src=artifact:OXFS_NEWFS_OXFS_ELF_PATH
+./sbin/growfs type=file src=artifact:OXFS_GROWFS_ELF_PATH
 ./sbin/fsck_msdosfs type=file src=artifact:OXFS_FSCK_MSDOSFS_ELF_PATH
 ./sbin/newfs_msdos type=file src=artifact:OXFS_NEWFS_MSDOS_ELF_PATH
 ./sbin/zstd type=file src=artifact:OXFS_ZSTD_ELF_PATH
@@ -546,6 +547,7 @@
 ./usr/share/man/man8/fsck.8 type=file src=share/man/man8/fsck.8
 ./usr/share/man/man8/fsck_oxfs.8 type=file src=share/man/man8/fsck_oxfs.8
 ./usr/share/man/man8/newfs_oxfs.8 type=file src=share/man/man8/newfs_oxfs.8
+./usr/share/man/man8/growfs.8 type=file src=share/man/man8/growfs.8
 ./usr/share/man/man8/fsck_msdosfs.8 type=file src=share/man/man8/fsck_msdosfs.8
 ./usr/share/man/man8/newfs_msdos.8 type=file src=share/man/man8/newfs_msdos.8
 ./usr/share/man/man8/getty.8 type=file src=share/man/man8/getty.8
