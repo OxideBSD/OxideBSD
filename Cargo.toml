@@ -72,6 +72,7 @@ members = [
   "regress/openssl-syscall-smoke",
   "regress/loopback-syscall-smoke",
   "regress/devfs-syscall-smoke",
+  "regress/efirt-syscall-smoke",
   "regress/sem-open-syscall-smoke",
   "regress/pthread-cancel-crash-smoke",
   "regress/pshared-cond-crash-smoke",
@@ -175,6 +176,10 @@ harness = false
 
 [[test]]
 name = "efirt_smoke"
+harness = false
+
+[[test]]
+name = "efirt_syscall_smoke"
 harness = false
 
 [[test]]

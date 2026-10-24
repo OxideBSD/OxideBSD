@@ -1,0 +1,25 @@
+[package]
+name = "libefivar"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "efivar"
+
+# UEFI variables' formats (OxideBSD-doc EFIRT.md §6): GUIDs, device paths and boot entries, for
+# efivar(8) and efibootmgr(8). no_std with alloc; its own workspace, testable on the host, like
+# lib/libpart.
+[features]
+# `dev`: the variables through /dev/efi (efi(4)), for the tools; needs std and libc.
+dev = ["dep:libc"]
+
+[dependencies]
+libc = { version = "0.2", optional = true }
+
+# The libc fork OxideBSD's std is built with; a [patch] only applies from the workspace root.
+[patch.crates-io]
+libc = { git = "https://github.com/OxideBSD/libc-crate-oxidebsd.git", branch = "oxidebsd" }
+
+[workspace]

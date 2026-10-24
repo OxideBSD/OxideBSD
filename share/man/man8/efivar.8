@@ -1,0 +1,119 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 23, 2026
+.Dt EFIVAR 8
+.Os OxideBSD
+.Sh NAME
+.Nm efivar
+.Nd show and change UEFI variables
+.Sh SYNOPSIS
+.Nm
+.Op Fl AbgHNqRu
+.Fl l
+.Op Fl p
+.Nm
+.Op Fl AbgHNqRu
+.Op Fl p
+.Fl n Ar name | Ar name
+.Nm
+.Op Fl q
+.Op Fl t Ar attributes
+.Op Fl f Ar file
+.Fl w | Fl a
+.Fl n Ar name
+.Nm
+.Op Fl q
+.Fl D
+.Fl n Ar name
+.Nm
+.Op Fl R
+.Fl L
+.Sh DESCRIPTION
+.Nm
+lists, prints, writes and deletes the firmware's variables through
+.Xr efi 4 .
+A variable is named by its vendor GUID and its name,
+.Ar guid Ns Li - Ns Ar name
+.Pq Li 8be4df61-93ca-11d2-aa0d-00e098032b8c-BootOrder ,
+or with a well-known GUID's name in place of the GUID
+.Pq Li global-BootOrder .
+.Pp
+The options are FreeBSD's:
+.Bl -tag -width "-t attributes"
+.It Fl l , Fl Fl list
+List every variable; with
+.Fl p ,
+each one's value too.
+.It Fl p , Fl Fl print
+Print the variable's value (the default for a name).
+.It Fl n Ar name , Fl Fl name Ar name
+The variable to work on; also given as the operand.
+.It Fl w , Fl Fl write
+Set the variable to the standard input, or to
+.Ar file .
+.It Fl a , Fl Fl append
+Append the standard input, or
+.Ar file ,
+to it.
+.It Fl D , Fl Fl delete
+Delete it.
+.It Fl f Ar file , Fl Fl fromfile Ar file
+Write or append
+.Ar file Ns 's
+contents.
+.It Fl t Ar attributes , Fl Fl attributes Ar attributes
+The attributes to write with, in hex; 7 (non-volatile, at boot and at run
+time) by default.
+.It Fl H , Fl Fl hex
+Print values as a hex dump (the default).
+.It Fl A , Fl Fl ascii
+Print values as text, a byte outside printable ASCII as
+.Ql % Ns Ar xx .
+.It Fl u , Fl Fl utf8
+Print values as UCS-2 text, in UTF-8.
+.It Fl b , Fl Fl binary
+Print values as they are.
+.It Fl N , Fl Fl no-name
+Leave out the variable's name.
+.It Fl g , Fl Fl guid
+Show well-known GUIDs by name.
+.It Fl R , Fl Fl raw-guid
+Show GUIDs as numbers.
+.It Fl L , Fl Fl list-guids
+List the well-known GUIDs:
+.Li global ,
+.Li oxidebsd ,
+.Li security
+and
+.Li shell .
+.It Fl q , Fl Fl quiet
+Print no error messages.
+.El
+.Pp
+Writing is root's, and limited to the boot manager's variables and
+OxideBSD's own unless
+.Va machdep.efi.unsafe_writes
+is set
+.Pq Xr efi 4 .
+The device-path options of FreeBSD's
+.Nm ,
+.Fl d
+and
+.Fl Fl load-option ,
+are not here yet.
+.Sh EXIT STATUS
+0 on success, 1 otherwise.
+.Sh EXAMPLES
+The boot order:
+.Dl efivar -p global-BootOrder
+.Pp
+A variable of OxideBSD's own, written and read back:
+.Bd -literal -offset indent
+printf hello | efivar -w -n oxidebsd-Note
+efivar -A -N oxidebsd-Note
+.Ed
+.Sh SEE ALSO
+.Xr efi 4
+.Sh HISTORY
+An
+.Nm
+first appeared in FreeBSD 11.1; OxideBSD's in OxideBSD 0.3.

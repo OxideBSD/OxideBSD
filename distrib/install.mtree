@@ -36,6 +36,8 @@
 ./usr/tests/rc/run.sh type=file src=regress/rc-syscall-smoke/run.sh
 ./usr/tests/devfs type=dir
 ./usr/tests/devfs/run.sh type=file src=regress/devfs-syscall-smoke/run.sh
+./usr/tests/efirt type=dir
+./usr/tests/efirt/run.sh type=file src=regress/efirt-syscall-smoke/run.sh
 ./usr/tests/cred type=dir
 ./usr/tests/cred/cred-smoke type=file src=artifact:OXFS_CRED_SMOKE_ELF_PATH
 ./usr/tests/init type=dir
@@ -173,6 +175,7 @@
 ./usr/sbin/vipw type=file src=artifact:OXFS_VIPW_ELF_PATH
 ./usr/sbin/adduser type=file src=usr.sbin/adduser/adduser.sh
 ./usr/sbin/rmuser type=file src=usr.sbin/adduser/rmuser.sh
+./usr/sbin/efivar type=file src=artifact:OXFS_EFIVAR_ELF_PATH
 ./usr/sbin/fsconf_mkdb type=file src=artifact:OXFS_FSCONF_MKDB_ELF_PATH
 ./usr/sbin/makefs type=file src=artifact:OXFS_MAKEFS_ELF_PATH
 ./usr/bin/mkimg type=file src=artifact:OXFS_MKIMG_ELF_PATH
@@ -497,6 +500,7 @@
 ./usr/share/man/man4 type=dir
 ./usr/share/man/man4/devfs.4 type=file src=share/man/man4/devfs.4
 ./usr/share/man/man4/devctl.4 type=file src=share/man/man4/devctl.4
+./usr/share/man/man4/efi.4 type=file src=share/man/man4/efi.4
 ./usr/share/man/man4/klog.4 type=file src=share/man/man4/klog.4
 ./usr/share/man/man4/pts.4 type=file src=share/man/man4/pts.4
 ./usr/share/man/man4/unix.4 type=file src=share/man/man4/unix.4
@@ -558,6 +562,7 @@
 ./usr/share/man/man8/vipw.8 type=file src=share/man/man8/vipw.8
 ./usr/share/man/man8/adduser.8 type=file src=share/man/man8/adduser.8
 ./usr/share/man/man8/rmuser.8 type=file src=share/man/man8/rmuser.8
+./usr/share/man/man8/efivar.8 type=file src=share/man/man8/efivar.8
 ./usr/share/man/man8/fsconf_mkdb.8 type=file src=share/man/man8/fsconf_mkdb.8
 ./usr/share/man/man8/makefs.8 type=file src=share/man/man8/makefs.8
 ./usr/share/man/man1/mkimg.1 type=file src=share/man/man1/mkimg.1

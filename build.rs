@@ -421,6 +421,7 @@ fn main() {
     build_userland_crate("openssl-syscall-smoke", "OPENSSL_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("loopback-syscall-smoke", "LOOPBACK_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("devfs-syscall-smoke", "DEVFS_SYSCALL_SMOKE_ELF_PATH");
+    build_userland_crate("efirt-syscall-smoke", "EFIRT_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate("sem-open-syscall-smoke", "SEM_OPEN_SYSCALL_SMOKE_ELF_PATH");
     build_userland_crate(
         "pthread-cancel-crash-smoke",
@@ -740,6 +741,8 @@ fn main() {
     let vipw_elf_path = build_std_oxidebsd_userland_crate("usr.sbin/vipw", "OXFS_VIPW_ELF_PATH", &musl_sysroot);
     let fsconf_mkdb_elf_path =
         build_std_oxidebsd_userland_crate("usr.sbin/fsconf_mkdb", "OXFS_FSCONF_MKDB_ELF_PATH", &musl_sysroot);
+    // efivar(8): UEFI variables through /dev/efi (OxideBSD-doc EFIRT.md §6.1).
+    let efivar_elf_path = build_std_oxidebsd_userland_crate("usr.sbin/efivar", "OXFS_EFIVAR_ELF_PATH", &musl_sysroot);
     build_boot_fsconf();
     // makefs(8) and mkimg(1), on the target as well as the host (RAM_FLOOR.md §4.2.4); makefs
     // reads mtree(5) through lib/libmtree.
@@ -999,6 +1002,7 @@ fn main() {
         ("OXFS_PW_ELF_PATH", pw_elf_path.to_str().unwrap()),
         ("OXFS_VIPW_ELF_PATH", vipw_elf_path.to_str().unwrap()),
         ("OXFS_FSCONF_MKDB_ELF_PATH", fsconf_mkdb_elf_path.to_str().unwrap()),
+        ("OXFS_EFIVAR_ELF_PATH", efivar_elf_path.to_str().unwrap()),
         ("OXFS_MAKEFS_ELF_PATH", makefs_elf_path.to_str().unwrap()),
         ("OXFS_MKIMG_ELF_PATH", mkimg_elf_path.to_str().unwrap()),
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),
@@ -1143,6 +1147,7 @@ fn main() {
         "regress/openssl-syscall-smoke/run.sh",
         "regress/loopback-syscall-smoke/run.sh",
         "regress/devfs-syscall-smoke/run.sh",
+        "regress/efirt-syscall-smoke/run.sh",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

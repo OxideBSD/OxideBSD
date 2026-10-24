@@ -1,0 +1,143 @@
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd October 23, 2026
+.Dt EFI 4
+.Os OxideBSD
+.Sh NAME
+.Nm efi
+.Nd UEFI runtime services device
+.Sh SYNOPSIS
+.Pa /dev/efi
+.Sh DESCRIPTION
+On a machine booted by UEFI firmware, the kernel calls the firmware's runtime
+services: the functions that stay in memory after boot, which keep the
+firmware's variables (its boot entries among them) and clock.
+.Pa /dev/efi ,
+root's alone, reaches them; it exists only when the firmware has runtime
+services.
+.Pp
+Its
+.Xr ioctl 2
+requests take a
+.Vt struct efi_var_ioc :
+.Bd -literal -offset indent
+struct efi_var_ioc {
+	uint16_t *name;		/* UTF-16, NUL-terminated */
+	size_t	  namesize;	/* bytes, the NUL included */
+	uint8_t	  vendor[16];	/* the vendor GUID, as UEFI stores it */
+	uint32_t  attrib;	/* EFI_VARIABLE_* */
+	uint32_t  pad;
+	void	 *data;
+	size_t	  datasize;	/* bytes */
+};
+.Ed
+.Bl -tag -width EFIIOC_VAR_NEXT
+.It Dv EFIIOC_VAR_GET
+Reads variable
+.Va name
+of
+.Va vendor
+into
+.Va data ,
+setting
+.Va attrib
+and
+.Va datasize .
+If
+.Va datasize
+is too small, it fails with
+.Er EOVERFLOW
+and sets
+.Va datasize
+to the size needed.
+.It Dv EFIIOC_VAR_NEXT
+Replaces
+.Va name
+and
+.Va vendor
+with the next variable's, in the firmware's order: an empty
+.Va name
+starts with the first.
+.Va namesize
+is the buffer's size, and becomes the name's; a buffer too small fails with
+.Er EOVERFLOW
+and the size needed, and the end with
+.Er ENOENT .
+.It Dv EFIIOC_VAR_SET
+Sets the variable to
+.Va data
+with
+.Va attrib ;
+an empty
+.Va data
+deletes it.
+Only root may, through a descriptor open for writing, and by default only the
+boot manager's variables
+.Po
+.Li Boot Ns Ar XXXX ,
+.Li BootOrder ,
+.Li BootNext ,
+.Li Timeout ,
+.Li Driver Ns Ar XXXX
+and
+.Li DriverOrder
+of the global GUID,
+.Li 8be4df61-93ca-11d2-aa0d-00e098032b8c
+.Pc
+and any of OxideBSD's own GUID,
+.Li 916e441e-ead7-4301-9aaf-6e0ba5a85339 .
+Any other fails with
+.Er EPERM
+unless the
+.Va machdep.efi.unsafe_writes
+sysctl is 1: some firmware has made machines unbootable on writes it didn't
+expect, and the Secure Boot databases are variables too.
+.It Dv EFIIOC_GET_TIME
+The firmware's clock, as an
+.Vt EFI_TIME .
+.El
+.Pp
+The firmware runs on a page table of its own, mapped where it expects to be.
+If a call faults inside the firmware, the call fails with
+.Er ENXIO
+and runtime services are off until the machine reboots;
+.Va machdep.efi.runtime
+then reads 0.
+.Sh SYSCTL VARIABLES
+.Bl -tag -width machdep.efi.unsafe_writes
+.It Va machdep.efi.runtime
+1 when runtime services can be called.
+.It Va machdep.efi.vendor
+The firmware's vendor.
+.It Va machdep.efi.revision
+The UEFI specification it follows.
+.It Va machdep.efi.unsafe_writes
+1 lets
+.Dv EFIIOC_VAR_SET
+write any variable.
+.El
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er ENOENT
+No such variable, or no more.
+.It Bq Er EOVERFLOW
+The buffer is too small: the size needed is set.
+.It Bq Er EPERM
+Not root, a variable outside the allow-list, or the firmware's own refusal
+(a security violation).
+.It Bq Er EROFS
+The variable is read-only.
+.It Bq Er ENOSPC
+The firmware is out of room for variables.
+.It Bq Er ENXIO
+Runtime services are off.
+.It Bq Er EIO
+The firmware failed.
+.El
+.Sh SEE ALSO
+.Xr efivar 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Nm
+device first appeared in FreeBSD 11.1; OxideBSD's, with its own request
+numbers, in OxideBSD 0.3.

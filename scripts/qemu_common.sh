@@ -183,7 +183,23 @@ elif [ "$FIRMWARE" = "uefi" ]; then
         echo "  Set OXIDEBSD_FIRMWARE=bios to boot via BIOS instead." >&2
         exit 1
     }
-    set -- "$@" -bios "$OVMF_PATH"
+    if [ -n "${QEMU_UEFI_VARS:-}" ]; then
+        # The firmware's variables in a file of their own that keeps what's written (EFIRT.md
+        # §8.1): OVMF's code read-only and a copy of its variable store, made from OVMF's
+        # template when the file is missing, as two flash devices instead of the one -bios image.
+        ovmf_dir=$(dirname "$OVMF_PATH")
+        ovmf_code=$(ls "$ovmf_dir"/OVMF_CODE.4m.fd "$ovmf_dir"/OVMF_CODE.fd 2>/dev/null | head -n 1)
+        ovmf_vars=$(ls "$ovmf_dir"/OVMF_VARS.4m.fd "$ovmf_dir"/OVMF_VARS.fd 2>/dev/null | head -n 1)
+        if [ -z "$ovmf_code" ] || [ -z "$ovmf_vars" ]; then
+            echo "qemu_common.sh: QEMU_UEFI_VARS needs OVMF_CODE and OVMF_VARS beside $OVMF_PATH" >&2
+            exit 1
+        fi
+        [ -f "$QEMU_UEFI_VARS" ] || cp "$ovmf_vars" "$QEMU_UEFI_VARS"
+        set -- "$@" -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+            -drive "if=pflash,format=raw,file=$QEMU_UEFI_VARS"
+    else
+        set -- "$@" -bios "$OVMF_PATH"
+    fi
 else
     echo "qemu_common.sh: unknown OXIDEBSD_FIRMWARE '$FIRMWARE' (expected 'uefi' or 'bios')" >&2
     exit 1

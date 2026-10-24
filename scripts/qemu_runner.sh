@@ -149,6 +149,11 @@ case "$TEST_NAME" in
                 ;;
         esac
         ;;
+    efirt_syscall_smoke)
+        # UEFI variables (EFIRT.md §8.2), in a fresh copy of OVMF's variable store each run.
+        QEMU_UEFI_VARS="target/images/efirt-vars.fd"
+        rm -f "$QEMU_UEFI_VARS"
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"

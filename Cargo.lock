@@ -194,6 +194,10 @@ name = "dynlink-syscall-smoke"
 version = "0.1.0"
 
 [[package]]
+name = "efirt-syscall-smoke"
+version = "0.1.0"
+
+[[package]]
 name = "fb-mmap-syscall-smoke"
 version = "0.1.0"
 

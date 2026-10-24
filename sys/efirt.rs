@@ -15,10 +15,16 @@
 //! call fails, and runtime services are off for the rest of the boot (`DEAD`) rather than the
 //! fault rebooting the machine.
 //!
+//! Variables (`get_variable`, `next_variable_name`, `set_variable`) reach userland through
+//! `/dev/efi` (`efi(4)`, EFIRT.md §5), here beside them as `/dev/devctl` is beside its queue:
+//! FreeBSD's requests with OxideBSD's numbers, setting root's and only the boot manager's
+//! variables and OxideBSD's own unless `machdep.efi.unsafe_writes` (`may_write`).
+//!
 //! Under BIOS there's no system table, and nothing here does anything.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use x86_64::PhysAddr;
@@ -49,6 +55,9 @@ const MEMORY_ATTRIBUTES_TABLE: [u8; 16] =
 #[repr(usize)]
 enum Service {
     GetTime = 0,
+    GetVariable = 6,
+    GetNextVariableName = 7,
+    SetVariable = 8,
     ResetSystem = 10,
 }
 
@@ -462,6 +471,7 @@ pub fn init_and_log() {
     if !available() {
         return;
     }
+    make_device();
     match get_time() {
         Some(t) => {
             serial_println!(
@@ -477,5 +487,272 @@ pub fn init_and_log() {
         None => {
             serial_println!("[efirt] GetTime failed");
         }
+    }
+}
+
+// ---- Variables ---------------------------------------------------------------------------------
+
+/// `EFI_GLOBAL_VARIABLE`, `8be4df61-93ca-11d2-aa0d-00e098032b8c`, as stored.
+pub const GLOBAL_GUID: [u8; 16] = [0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c];
+/// OxideBSD's own vendor GUID, `916e441e-ead7-4301-9aaf-6e0ba5a85339`, as stored.
+pub const OXIDEBSD_GUID: [u8; 16] = [0x1e, 0x44, 0x6e, 0x91, 0xd7, 0xea, 0x01, 0x43, 0x9a, 0xaf, 0x6e, 0x0b, 0xa5, 0xa8, 0x53, 0x39];
+
+/// `EFI_STATUS` errors (high bit set, Appendix D) a variable call may return.
+const EFI_ERROR: u64 = 1 << 63;
+const EFI_INVALID_PARAMETER: u64 = EFI_ERROR | 2;
+const EFI_UNSUPPORTED: u64 = EFI_ERROR | 3;
+const EFI_BUFFER_TOO_SMALL: u64 = EFI_ERROR | 5;
+const EFI_DEVICE_ERROR: u64 = EFI_ERROR | 7;
+const EFI_WRITE_PROTECTED: u64 = EFI_ERROR | 8;
+const EFI_OUT_OF_RESOURCES: u64 = EFI_ERROR | 9;
+const EFI_NOT_FOUND: u64 = EFI_ERROR | 14;
+const EFI_SECURITY_VIOLATION: u64 = EFI_ERROR | 26;
+
+// musl's errno values.
+const EPERM: i64 = 1;
+const ENOENT: i64 = 2;
+const EIO: i64 = 5;
+const ENXIO: i64 = 6;
+const EBADF: i64 = 9;
+const ENOMEM: i64 = 12;
+const EINVAL: i64 = 22;
+const ENOTTY: i64 = 25;
+const ENOSPC: i64 = 28;
+const EROFS: i64 = 30;
+const EOVERFLOW: i64 = 75;
+const ENOTSUP: i64 = 95;
+
+/// A firmware status as an errno (FreeBSD's `efi_status_to_errno`); `ENXIO` when the firmware
+/// couldn't be called at all.
+fn errno(status: Option<u64>) -> i64 {
+    match status {
+        None => ENXIO,
+        Some(EFI_INVALID_PARAMETER) => EINVAL,
+        Some(EFI_UNSUPPORTED) => ENOTSUP,
+        Some(EFI_BUFFER_TOO_SMALL) => EOVERFLOW,
+        Some(EFI_WRITE_PROTECTED) => EROFS,
+        Some(EFI_OUT_OF_RESOURCES) => ENOSPC,
+        Some(EFI_NOT_FOUND) => ENOENT,
+        Some(EFI_SECURITY_VIOLATION) => EPERM,
+        Some(EFI_DEVICE_ERROR) | Some(_) => EIO,
+    }
+}
+
+/// Variable `name` (UTF-16, its NUL included) of vendor `guid` into `data`: its attributes and
+/// size. A too-small `data` fails with `EOVERFLOW` and the size it needs.
+pub fn get_variable(name: &[u16], guid: &[u8; 16], data: &mut [u8]) -> Result<(u32, usize), (i64, usize)> {
+    let mut attrib: u32 = 0;
+    let mut size: u64 = data.len() as u64;
+    let status = call(
+        Service::GetVariable,
+        [name.as_ptr() as u64, guid.as_ptr() as u64, &raw mut attrib as u64, &raw mut size as u64, data.as_mut_ptr() as u64, 0],
+    );
+    match status {
+        Some(0) => Ok((attrib, size as usize)),
+        s => Err((errno(s), size as usize)),
+    }
+}
+
+/// The variable after `name` (in `name`'s buffer, its NUL included; empty for the first) and
+/// `guid`, replacing both: the new name's size in bytes. A too-small buffer fails with
+/// `EOVERFLOW` and the size it needs; past the last, `ENOENT`.
+pub fn next_variable_name(name: &mut [u16], guid: &mut [u8; 16]) -> Result<usize, (i64, usize)> {
+    let mut size: u64 = (name.len() * 2) as u64;
+    let status = call(Service::GetNextVariableName, [&raw mut size as u64, name.as_mut_ptr() as u64, guid.as_mut_ptr() as u64, 0, 0, 0]);
+    match status {
+        Some(0) => Ok(size as usize),
+        s => Err((errno(s), size as usize)),
+    }
+}
+
+/// Sets (empty `data`: deletes) variable `name` of `guid`. The allow-list (`may_write`) is the
+/// caller's.
+pub fn set_variable(name: &[u16], guid: &[u8; 16], attrib: u32, data: &[u8]) -> Result<(), i64> {
+    let status = call(
+        Service::SetVariable,
+        [name.as_ptr() as u64, guid.as_ptr() as u64, attrib as u64, data.len() as u64, data.as_ptr() as u64, 0],
+    );
+    match status {
+        Some(0) => Ok(()),
+        s => Err(errno(s)),
+    }
+}
+
+/// `machdep.efi.unsafe_writes`: any variable may be written, not only the boot manager's.
+static UNSAFE_WRITES: AtomicBool = AtomicBool::new(false);
+
+pub fn unsafe_writes() -> bool {
+    UNSAFE_WRITES.load(Ordering::Relaxed)
+}
+
+pub fn set_unsafe_writes(on: bool) {
+    UNSAFE_WRITES.store(on, Ordering::Relaxed);
+}
+
+/// Whether variable `name` (UTF-16, without its NUL) of `guid` may be written by default
+/// (EFIRT.md §5.2): the boot manager's (`Boot####`, `BootOrder`, `BootNext`, `Timeout`,
+/// `Driver####`, `DriverOrder`) and anything of OxideBSD's own GUID.
+pub fn may_write(name: &[u16], guid: &[u8; 16]) -> bool {
+    if *guid == OXIDEBSD_GUID {
+        return true;
+    }
+    if *guid != GLOBAL_GUID {
+        return false;
+    }
+    let Ok(name) = String::from_utf16(name) else { return false };
+    let numbered = |prefix: &str| {
+        name.strip_prefix(prefix).is_some_and(|n| n.len() == 4 && n.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()))
+    };
+    matches!(name.as_str(), "BootOrder" | "BootNext" | "Timeout" | "DriverOrder") || numbered("Boot") || numbered("Driver")
+}
+
+// ---- /dev/efi (efi(4)) -------------------------------------------------------------------------
+
+/// `/dev/efi`'s number, beside `klog` and `devctl` (DEVFS.md §3).
+pub const EFI_DEVICE: (u32, u32) = (7, 2);
+
+/// The device's requests (EFIRT.md §5.1; FreeBSD's shapes, OxideBSD's numbers).
+const EFIIOC_GET_TIME: u64 = 0x6f78_4502;
+const EFIIOC_VAR_GET: u64 = 0x6f78_4504;
+const EFIIOC_VAR_NEXT: u64 = 0x6f78_4505;
+const EFIIOC_VAR_SET: u64 = 0x6f78_4506;
+
+/// The longest name and value a request takes: past any firmware's variable size.
+const NAME_MAX_BYTES: u64 = 1024;
+const DATA_MAX: u64 = 64 << 10;
+
+/// `EFIIOC_VAR_*`'s argument: the name in UTF-16 with its NUL (`namesize` in bytes), the vendor
+/// GUID, the attributes, and the data (`datasize` bytes); the pointers are the caller's.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VarIoc {
+    name: u64,
+    namesize: u64,
+    vendor: [u8; 16],
+    attrib: u32,
+    pad: u32,
+    data: u64,
+    datasize: u64,
+}
+
+// SAFETY: plain integers and bytes, with `pad` making the padding explicit.
+unsafe impl crate::memory::usercopy::Pod for VarIoc {}
+// SAFETY: as above.
+unsafe impl crate::memory::usercopy::Pod for EfiTime {}
+
+/// Registers `/dev/efi`, root's alone, when the firmware has runtime services.
+fn make_device() {
+    let _ = crate::fs::devfs::make_dev("efi", EFI_DEVICE.0, EFI_DEVICE.1, 0, 0, 0o600, dev_open);
+}
+
+extern "C" fn dev_open(_major: u64, _minor: u64, flags: u64) -> i64 {
+    if let Err(e) = crate::fs::fd::check_room(1) {
+        return -e;
+    }
+    let real_fd = crate::fs::fd::oxidebsd_alloc_fd();
+    crate::fs::fd::finstall(real_fd, &EFI_OPS, 0, crate::fs::fd::open_flag(flags), crate::fs::fd::FdKind::Module)
+}
+
+static EFI_OPS: crate::fs::fd::FileOps = crate::fs::fd::FileOps { ioctl: Some(dev_ioctl), ..crate::fs::fd::FileOps::NONE };
+
+extern "C" fn dev_ioctl(real_fd: u64, request: u64, argp: u64) -> i64 {
+    match ioctl(real_fd, request, argp) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// The caller's UTF-16 name, NUL-terminated within `namesize` bytes.
+fn name_in(v: &VarIoc) -> Result<Vec<u16>, i64> {
+    use crate::memory::usercopy::{UserPtr, copyin};
+    if v.namesize < 2 || v.namesize % 2 != 0 || v.namesize > NAME_MAX_BYTES {
+        return Err(EINVAL);
+    }
+    let mut bytes = alloc::vec![0u8; v.namesize as usize];
+    copyin(UserPtr::new(v.name), &mut bytes).map_err(|e| e as i64)?;
+    let mut name: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let end = name.iter().position(|&c| c == 0).ok_or(EINVAL)?;
+    name.truncate(end + 1);
+    Ok(name)
+}
+
+fn ioctl(real_fd: u64, request: u64, argp: u64) -> Result<(), i64> {
+    use crate::memory::usercopy::{UserPtr, copyin, copyin_val, copyout, copyout_val};
+    if !available() {
+        return Err(ENXIO);
+    }
+    let arg = UserPtr::new(argp);
+    match request {
+        EFIIOC_GET_TIME => {
+            let t = get_time().ok_or(EIO)?;
+            copyout_val(&t, arg).map_err(|e| e as i64)
+        }
+        EFIIOC_VAR_GET => {
+            let mut v: VarIoc = copyin_val(arg).map_err(|e| e as i64)?;
+            let name = name_in(&v)?;
+            let mut data = Vec::new();
+            data.try_reserve_exact(v.datasize.min(DATA_MAX) as usize).map_err(|_| ENOMEM)?;
+            data.resize(v.datasize.min(DATA_MAX) as usize, 0);
+            let r = get_variable(&name, &v.vendor, &mut data);
+            match r {
+                Ok((attrib, size)) => {
+                    copyout(&data[..size], UserPtr::new(v.data)).map_err(|e| e as i64)?;
+                    v.attrib = attrib;
+                    v.datasize = size as u64;
+                    copyout_val(&v, arg).map_err(|e| e as i64)
+                }
+                Err((EOVERFLOW, need)) => {
+                    v.datasize = need as u64;
+                    copyout_val(&v, arg).map_err(|e| e as i64)?;
+                    Err(EOVERFLOW)
+                }
+                Err((e, _)) => Err(e),
+            }
+        }
+        EFIIOC_VAR_NEXT => {
+            let mut v: VarIoc = copyin_val(arg).map_err(|e| e as i64)?;
+            let mut name = name_in(&v)?;
+            // The firmware writes the next name into the caller's whole buffer.
+            name.resize(v.namesize as usize / 2, 0);
+            let mut guid = v.vendor;
+            match next_variable_name(&mut name, &mut guid) {
+                Ok(size) => {
+                    let bytes: Vec<u8> = name.iter().take(size / 2).flat_map(|c| c.to_le_bytes()).collect();
+                    copyout(&bytes, UserPtr::new(v.name)).map_err(|e| e as i64)?;
+                    v.vendor = guid;
+                    v.namesize = size as u64;
+                    copyout_val(&v, arg).map_err(|e| e as i64)
+                }
+                Err((EOVERFLOW, need)) => {
+                    v.namesize = need as u64;
+                    copyout_val(&v, arg).map_err(|e| e as i64)?;
+                    Err(EOVERFLOW)
+                }
+                Err((e, _)) => Err(e),
+            }
+        }
+        EFIIOC_VAR_SET => {
+            // Written only through a descriptor open for writing, as FreeBSD's efi(4) asks.
+            if !crate::fs::fd::file_of(real_fd).is_some_and(|(_, flag, _, _)| flag & crate::fs::fd::FWRITE != 0) {
+                return Err(EBADF);
+            }
+            if !crate::process::identity::current_cred().privileged() {
+                return Err(EPERM);
+            }
+            let v: VarIoc = copyin_val(arg).map_err(|e| e as i64)?;
+            let name = name_in(&v)?;
+            if !unsafe_writes() && !may_write(&name[..name.len() - 1], &v.vendor) {
+                return Err(EPERM);
+            }
+            if v.datasize > DATA_MAX {
+                return Err(EINVAL);
+            }
+            let mut data = Vec::new();
+            data.try_reserve_exact(v.datasize as usize).map_err(|_| ENOMEM)?;
+            data.resize(v.datasize as usize, 0);
+            copyin(UserPtr::new(v.data), &mut data).map_err(|e| e as i64)?;
+            set_variable(&name, &v.vendor, v.attrib, &data)
+        }
+        _ => Err(ENOTTY),
     }
 }

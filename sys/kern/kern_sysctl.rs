@@ -412,6 +412,64 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
         );
     }
 
+    // UEFI's runtime services (`efirt`, EFIRT.md §5.3): whether they answer, the firmware, and
+    // whether variables past the boot manager's may be written (§5.2).
+    let efi = add_node(t, &machdep, None, "efi", "UEFI runtime services");
+    for leaf in [
+        Leaf {
+            number: None,
+            name: "runtime",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RD,
+            descr: "UEFI runtime services can be called",
+            get: || int(crate::efirt::available() as i32),
+            set: None,
+        },
+        Leaf {
+            number: None,
+            name: "vendor",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RD,
+            descr: "The UEFI firmware's vendor",
+            get: || string(crate::efirt::firmware().map_or("", |f| f.0).as_bytes()),
+            set: None,
+        },
+        Leaf {
+            number: None,
+            name: "revision",
+            kind: CTLTYPE_STRING,
+            fmt: "A",
+            flags: CTLFLAG_RD,
+            descr: "The UEFI specification the firmware follows",
+            get: || match crate::efirt::firmware() {
+                Some((_, _, uefi)) => string(alloc::format!("{}.{}", uefi >> 16, (uefi & 0xffff) / 10).as_bytes()),
+                None => string(b""),
+            },
+            set: None,
+        },
+        Leaf {
+            number: None,
+            name: "unsafe_writes",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "Any UEFI variable may be written, not only the boot manager's",
+            get: || int(crate::efirt::unsafe_writes() as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                if !(0..=1).contains(&v) {
+                    return Err(EINVAL as i64);
+                }
+                crate::efirt::set_unsafe_writes(v == 1);
+                Ok(())
+            }),
+        },
+    ] {
+        add_leaf(t, &efi, leaf);
+    }
+
     let leaves = [
         Leaf {
             number: Some(KERN_OSTYPE),
