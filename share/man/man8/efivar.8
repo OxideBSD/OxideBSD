@@ -11,7 +11,8 @@
 .Fl l
 .Op Fl p
 .Nm
-.Op Fl AbgHNqRu
+.Op Fl AbdgHNqRu
+.Op Fl Fl load-option
 .Op Fl p
 .Fl n Ar name | Ar name
 .Nm
@@ -72,6 +73,14 @@ Print values as text, a byte outside printable ASCII as
 Print values as UCS-2 text, in UTF-8.
 .It Fl b , Fl Fl binary
 Print values as they are.
+.It Fl d , Fl Fl device-path
+Print values as UEFI device paths, in the specification's text form
+.Pq Li HD(1,GPT,...,0x800,0x82000)/\eEFI\eBOOT\eBOOTX64.EFI .
+.It Fl Fl load-option
+Print values as boot entries
+.Pq Li EFI_LOAD_OPTION :
+.Ql *
+if active, the label, and the device path.
 .It Fl N , Fl Fl no-name
 Leave out the variable's name.
 .It Fl g , Fl Fl guid
@@ -94,12 +103,6 @@ OxideBSD's own unless
 .Va machdep.efi.unsafe_writes
 is set
 .Pq Xr efi 4 .
-The device-path options of FreeBSD's
-.Nm ,
-.Fl d
-and
-.Fl Fl load-option ,
-are not here yet.
 .Sh EXIT STATUS
 0 on success, 1 otherwise.
 .Sh EXAMPLES
@@ -111,8 +114,12 @@ A variable of OxideBSD's own, written and read back:
 printf hello | efivar -w -n oxidebsd-Note
 efivar -A -N oxidebsd-Note
 .Ed
+.Pp
+A boot entry, decoded:
+.Dl efivar --load-option global-Boot0001
 .Sh SEE ALSO
-.Xr efi 4
+.Xr efi 4 ,
+.Xr efibootmgr 8
 .Sh HISTORY
 An
 .Nm

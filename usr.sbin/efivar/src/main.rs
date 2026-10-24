@@ -147,6 +147,9 @@ fn run(o: &Opts) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
+    // SAFETY: back to the default, so `efivar -l | grep -q ...` ends quietly when the reader
+    // goes, as the BSDs' tools do, rather than failing a write.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let mut o = Opts {
         list: false,
         print: false,

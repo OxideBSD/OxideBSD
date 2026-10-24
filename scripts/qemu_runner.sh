@@ -150,9 +150,11 @@ case "$TEST_NAME" in
         esac
         ;;
     efirt_syscall_smoke)
-        # UEFI variables (EFIRT.md §8.2), in a fresh copy of OVMF's variable store each run.
+        # UEFI variables (EFIRT.md §8.2), in a fresh copy of OVMF's variable store each run, and
+        # (below) a disk with an empty EFI system partition, `esptest`, for efibootmgr's entries.
         QEMU_UEFI_VARS="target/images/efirt-vars.fd"
         rm -f "$QEMU_UEFI_VARS"
+        EFIRT_TEST=1
         ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
@@ -319,6 +321,13 @@ if [ "${CD9660_TEST:-0}" = 1 ]; then
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=satabig,bus=ahci0.4"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -drive if=none,id=sataempty,media=cdrom"
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-cd,drive=sataempty,bus=ahci1.5"
+fi
+if [ "${EFIRT_TEST:-0}" = 1 ]; then
+    rm -f target/images/efirt-esp.img
+    target/host-tools/x86_64-unknown-linux-gnu/release/mkimg -s gpt -o target/images/efirt-esp.img \
+        -p "efi/esptest::32m"
+    QEMU_EXTRA_ARGS="-drive if=none,id=espdisk,format=raw,file=target/images/efirt-esp.img"
+    QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device virtio-blk-pci,drive=espdisk,disable-legacy=on"
 fi
 if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
     # Two virtio-blk disks (virt0: a GPT with one partition labelled `extra`; virt1: blank) and,

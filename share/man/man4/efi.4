@@ -77,9 +77,10 @@ boot manager's variables
 .Li BootOrder ,
 .Li BootNext ,
 .Li Timeout ,
-.Li Driver Ns Ar XXXX
-and
+.Li Driver Ns Ar XXXX ,
 .Li DriverOrder
+and
+.Li OsIndications
 of the global GUID,
 .Li 8be4df61-93ca-11d2-aa0d-00e098032b8c
 .Pc
@@ -134,6 +135,7 @@ Runtime services are off.
 The firmware failed.
 .El
 .Sh SEE ALSO
+.Xr efibootmgr 8 ,
 .Xr efivar 8 ,
 .Xr sysctl 8
 .Sh HISTORY

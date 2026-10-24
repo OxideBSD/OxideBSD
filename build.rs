@@ -570,6 +570,8 @@ fn main() {
     // The console's settings (INSTALLER.md §7) and partition tables (§8), over lib/libpart.
     let wsconsctl_elf_path = build_static_std_crate("sbin/wsconsctl", "OXFS_WSCONSCTL_ELF_PATH", &musl_sysroot);
     println!("cargo:rerun-if-changed={}", Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libpart/src").display());
+    // lib/libefivar: efivar(8) and efibootmgr(8)'s formats and /dev/efi calls (EFIRT.md §6).
+    println!("cargo:rerun-if-changed={}", Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libefivar/src").display());
     let gpart_elf_path = build_static_std_crate("sbin/gpart", "OXFS_GPART_ELF_PATH", &musl_sysroot);
     // The install medium's tools, crunched into one program (INSTALLER.md §4.3).
     let rescue_elf_path = build_static_std_crate("rescue", "OXFS_RESCUE_ELF_PATH", &musl_sysroot);
@@ -743,6 +745,9 @@ fn main() {
         build_std_oxidebsd_userland_crate("usr.sbin/fsconf_mkdb", "OXFS_FSCONF_MKDB_ELF_PATH", &musl_sysroot);
     // efivar(8): UEFI variables through /dev/efi (OxideBSD-doc EFIRT.md §6.1).
     let efivar_elf_path = build_std_oxidebsd_userland_crate("usr.sbin/efivar", "OXFS_EFIVAR_ELF_PATH", &musl_sysroot);
+    // efibootmgr(8): the firmware's boot entries (EFIRT.md §6.2).
+    let efibootmgr_elf_path =
+        build_std_oxidebsd_userland_crate("usr.sbin/efibootmgr", "OXFS_EFIBOOTMGR_ELF_PATH", &musl_sysroot);
     build_boot_fsconf();
     // makefs(8) and mkimg(1), on the target as well as the host (RAM_FLOOR.md §4.2.4); makefs
     // reads mtree(5) through lib/libmtree.
@@ -1003,6 +1008,7 @@ fn main() {
         ("OXFS_VIPW_ELF_PATH", vipw_elf_path.to_str().unwrap()),
         ("OXFS_FSCONF_MKDB_ELF_PATH", fsconf_mkdb_elf_path.to_str().unwrap()),
         ("OXFS_EFIVAR_ELF_PATH", efivar_elf_path.to_str().unwrap()),
+        ("OXFS_EFIBOOTMGR_ELF_PATH", efibootmgr_elf_path.to_str().unwrap()),
         ("OXFS_MAKEFS_ELF_PATH", makefs_elf_path.to_str().unwrap()),
         ("OXFS_MKIMG_ELF_PATH", mkimg_elf_path.to_str().unwrap()),
         ("OXFS_OXDOC_ELF_PATH", oxdoc_elf_path.to_str().unwrap()),

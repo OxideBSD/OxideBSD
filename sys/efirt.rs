@@ -591,7 +591,8 @@ pub fn set_unsafe_writes(on: bool) {
 
 /// Whether variable `name` (UTF-16, without its NUL) of `guid` may be written by default
 /// (EFIRT.md §5.2): the boot manager's (`Boot####`, `BootOrder`, `BootNext`, `Timeout`,
-/// `Driver####`, `DriverOrder`) and anything of OxideBSD's own GUID.
+/// `Driver####`, `DriverOrder`, and `OsIndications`, which asks for the firmware's setup screens
+/// at the next boot) and anything of OxideBSD's own GUID.
 pub fn may_write(name: &[u16], guid: &[u8; 16]) -> bool {
     if *guid == OXIDEBSD_GUID {
         return true;
@@ -603,7 +604,7 @@ pub fn may_write(name: &[u16], guid: &[u8; 16]) -> bool {
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix).is_some_and(|n| n.len() == 4 && n.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()))
     };
-    matches!(name.as_str(), "BootOrder" | "BootNext" | "Timeout" | "DriverOrder") || numbered("Boot") || numbered("Driver")
+    matches!(name.as_str(), "BootOrder" | "BootNext" | "Timeout" | "DriverOrder" | "OsIndications") || numbered("Boot") || numbered("Driver")
 }
 
 // ---- /dev/efi (efi(4)) -------------------------------------------------------------------------
