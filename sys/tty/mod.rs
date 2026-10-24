@@ -1437,6 +1437,10 @@ const TIOCGSID: u64 = 0x5429;
 const KBDIOC_GETENCODING: u64 = 0x6f78_4b01;
 const KBDIOC_SETENCODING: u64 = 0x6f78_4b02;
 const KBD_NAME: usize = 32;
+/// The console's display requests (`wsconsctl display.palette`), the same shape: the named
+/// palette's name (`console::framebuffer::PALETTES`).
+const DISPIOC_GETPALETTE: u64 = 0x6f78_4401;
+const DISPIOC_SETPALETTE: u64 = 0x6f78_4402;
 
 /// `FileOps::ioctl` for a terminal: the terminal requests (TTY.md §5.6). An unknown one is logged
 /// and `ENOTTY`.
@@ -1501,7 +1505,27 @@ fn ioctl(real_fd: u64, request: u64, argp: u64) -> Result<u64, u64> {
             copyout_val(&0i32, UserPtr::new(argp))?;
             Ok(0)
         }
-        KBDIOC_GETENCODING | KBDIOC_SETENCODING if tty != TTYV0 => Err(ENOTTY),
+        KBDIOC_GETENCODING | KBDIOC_SETENCODING | DISPIOC_GETPALETTE | DISPIOC_SETPALETTE if tty != TTYV0 => Err(ENOTTY),
+        DISPIOC_GETPALETTE => {
+            let mut name = [0u8; KBD_NAME];
+            let current = crate::console::framebuffer::palette_name().as_bytes();
+            name[..current.len()].copy_from_slice(current);
+            copyout_val(&name, UserPtr::new(argp))?;
+            Ok(0)
+        }
+        DISPIOC_SETPALETTE => {
+            if !crate::process::identity::current_cred().privileged() {
+                return Err(crate::syscall::EPERM);
+            }
+            let name: [u8; KBD_NAME] = copyin_val(UserPtr::new(argp))?;
+            let len = name.iter().position(|&b| b == 0).ok_or(EINVAL)?;
+            let name = core::str::from_utf8(&name[..len]).map_err(|_| EINVAL)?;
+            if !crate::console::framebuffer::set_palette(name) {
+                return Err(EINVAL);
+            }
+            crate::console::framebuffer::redraw();
+            Ok(0)
+        }
         KBDIOC_GETENCODING => {
             let mut name = [0u8; KBD_NAME];
             let current = crate::cpu::interrupts::keyboard_encoding().as_bytes();

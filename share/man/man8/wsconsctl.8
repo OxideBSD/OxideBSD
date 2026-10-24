@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 22, 2026
+.Dd October 23, 2026
 .Dt WSCONSCTL 8
 .Os OxideBSD
 .Sh NAME
@@ -57,6 +57,26 @@ Keys held down when the layout changes are forgotten.
 The console terminal receives what the keys type as UTF-8, and shows the
 characters its font has; the rest it shows as
 .Ql \(sq .
+.It Va display.palette
+The console's 16 colours:
+.Bl -tag -width us.colemak -compact
+.It Li vga
+the standard VGA colours (the default)
+.It Li rust
+OxideBSD's own: each colour's hue kept, in oxidised metal (rust for brown and
+red, verdigris and patina for cyan and green, brass for yellow, steel for blue)
+on a warm black and cream
+.El
+A program may also redefine colours itself with the Linux console's
+.Li ESC ] P Ar nrrggbb
+(as
+.Xr ncurses 3 Ns 's
+.Fn init_color
+does with the
+.Li linux
+terminal type);
+.Li ESC ] R
+puts back the palette's own.
 .El
 .Pp
 .Pa /etc/rc.d/wsconsctl
@@ -75,6 +95,9 @@ the settings made at boot
 .Sh EXAMPLES
 A German keyboard:
 .Dl wsconsctl keyboard.encoding=de
+.Pp
+The rust colours:
+.Dl wsconsctl display.palette=rust
 .Sh SEE ALSO
 .Xr wsconsctl.conf 5
 .Sh HISTORY

@@ -188,13 +188,19 @@ struct AltScreen {
     col: usize,
 }
 
-/// Where a byte stream sits relative to an ANSI/VT100 escape sequence. Only `CSI` (`ESC [ ... `)
-/// is actually interpreted -- see `handle_escape_byte`/`handle_csi_byte`.
+/// Where a byte stream sits relative to an ANSI/VT100 escape sequence: `CSI` (`ESC [ ...`), and
+/// of the operating system commands (`ESC ] ...`) Linux's palette ones (`handle_osc_byte`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EscState {
     Ground,
     Escape,
     Csi,
+    /// After `ESC ]`.
+    Osc,
+    /// `ESC ] P`: collecting `nrrggbb` (`osc_len` hex digits so far, in `osc_hex`).
+    OscPalette,
+    /// Any other OSC (an xterm title, ...): skipped to its BEL or ST.
+    OscString,
 }
 
 /// DECSC/DECRC (`ESC 7`/`ESC 8`, also the ANSI.SYS-style `CSI s`/`CSI u`) snapshot -- position plus
@@ -237,6 +243,8 @@ struct Writer {
     utf8_char: u32,
     utf8_left: u8,
     esc_state: EscState,
+    osc_hex: [u8; 7],
+    osc_len: usize,
     csi_params: [u16; MAX_CSI_PARAMS],
     csi_param_count: usize,
     csi_cur: u16,
@@ -278,6 +286,7 @@ impl Writer {
             EscState::Ground => self.write_byte_ground(byte),
             EscState::Escape => self.handle_escape_byte(byte),
             EscState::Csi => self.handle_csi_byte(byte),
+            EscState::Osc | EscState::OscPalette | EscState::OscString => self.handle_osc_byte(byte),
         }
         // The hardware cursor is synced once per write (`write_bytes`, `write_str`), not per
         // byte: its four `outb`s are each a trip to the hypervisor, which made every byte of a
@@ -340,6 +349,10 @@ impl Writer {
                 self.esc_state = EscState::Csi;
                 return;
             }
+            b']' => {
+                self.esc_state = EscState::Osc;
+                return;
+            }
             // DECSC/DECRC: save/restore cursor position + SGR state. Not CSI-prefixed (no `[`),
             // a bare two-byte escape -- `reset`'s own `ESC c ESC(B ESC[m ESC[J ESC[?25h` sequence
             // doesn't use these, but real vttest-style full-screen apps commonly do.
@@ -352,6 +365,53 @@ impl Writer {
             _ => {}
         }
         self.esc_state = EscState::Ground;
+    }
+
+    /// One byte of an operating system command (`ESC ]`). Linux's two palette commands, which the
+    /// `linux` terminfo's `initc` and `oc` send (ncurses' `init_color`): `ESC ] P nrrggbb`, seven
+    /// hex digits with no terminator, redefines colour `n` (ANSI order: 0-7, then the bright 8-15)
+    /// as `rrggbb`, and `ESC ] R` puts every colour back (`framebuffer::reset_palette`). Any other
+    /// is skipped to its BEL or ST (`ESC \`), so it can't print as text.
+    fn handle_osc_byte(&mut self, byte: u8) {
+        match self.esc_state {
+            EscState::Osc => {
+                self.esc_state = match byte {
+                    b'P' => {
+                        self.osc_len = 0;
+                        EscState::OscPalette
+                    }
+                    b'R' => {
+                        crate::console::framebuffer::reset_palette();
+                        EscState::Ground
+                    }
+                    0x07 => EscState::Ground,
+                    0x1b => EscState::Escape,
+                    _ => EscState::OscString,
+                };
+            }
+            EscState::OscPalette => {
+                if !byte.is_ascii_hexdigit() {
+                    self.esc_state = EscState::Ground;
+                    return;
+                }
+                self.osc_hex[self.osc_len] = (byte as char).to_digit(16).unwrap_or(0) as u8;
+                self.osc_len += 1;
+                if self.osc_len == self.osc_hex.len() {
+                    let h = self.osc_hex;
+                    let n = h[0] as u16;
+                    let vga = if n < 8 { Color::from_ansi_base(n) } else { Color::from_ansi_bright(n - 8) };
+                    let rgb = (h[1] << 4 | h[2], h[3] << 4 | h[4], h[5] << 4 | h[6]);
+                    crate::console::framebuffer::set_color(vga as u8, rgb);
+                    self.esc_state = EscState::Ground;
+                }
+            }
+            _ => match byte {
+                0x07 => self.esc_state = EscState::Ground,
+                // ST is `ESC \`: the backslash ends the escape (`handle_escape_byte`).
+                0x1b => self.esc_state = EscState::Escape,
+                _ => {}
+            },
+        }
     }
 
     /// One byte of a `CSI` sequence's parameter/intermediate/final bytes (ECMA-48): digits and
@@ -1065,6 +1125,8 @@ static WRITER: Lazy<Mutex<Writer>> = Lazy::new(|| {
         utf8_char: 0,
         utf8_left: 0,
         esc_state: EscState::Ground,
+        osc_hex: [0; 7],
+        osc_len: 0,
         csi_params: [0; MAX_CSI_PARAMS],
         csi_param_count: 0,
         csi_cur: 0,

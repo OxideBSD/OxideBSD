@@ -30,12 +30,11 @@
 //! screen, not a fixed 640x400 window centered inside a larger one (tried that first; found live
 //! that it left real, visible letterboxing on any display bigger than exactly 640x400).
 //!
-//! Colors: the real, standard 16-color CGA/VGA palette (`PALETTE` below) -- not a flat two-tone
-//! grey-on-black -- driven directly by `vga::Cell`'s own real `fg`/`bg` palette indices, which
-//! `vga::Writer`'s existing SGR handling already computes correctly for every color BusyBox's
-//! `hush`/`vi`/coloured `ls` etc. actually use.
+//! Colors: 16, by `vga::Cell`'s `fg`/`bg` palette indices, from the palette in use (`PALETTE`):
+//! a named one (`PALETTES`: the standard CGA/VGA colours, or `rust`; `wsconsctl display.palette`),
+//! with any colour redefined by Linux's `ESC ] P` (ncurses' `init_color`) until `ESC ] R`.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::boot::FbInfo;
 
@@ -65,7 +64,7 @@ pub fn set_owned_by_userspace(owned: bool) {
 /// The real, standard 16-color CGA/VGA palette, indexed exactly like `console::vga::Color`'s own
 /// discriminants (0=black, 1=blue, ..., 15=white) -- the values every real VGA adapter's default
 /// DAC registers hold, not an approximation.
-const PALETTE: [(u8, u8, u8); 16] = [
+const VGA_PALETTE: [(u8, u8, u8); 16] = [
     (0x00, 0x00, 0x00),
     (0x00, 0x00, 0xAA),
     (0x00, 0xAA, 0x00),
@@ -83,6 +82,92 @@ const PALETTE: [(u8, u8, u8); 16] = [
     (0xFF, 0xFF, 0x55),
     (0xFF, 0xFF, 0xFF),
 ];
+
+/// OxideBSD's own: each colour the VGA one's hue, in oxidised metal -- iron rust for brown and
+/// red, verdigris and patina for cyan and green, brass for yellow, steel for blue, on a warm black
+/// and cream -- so programs' colours keep their meaning.
+const RUST_PALETTE: [(u8, u8, u8); 16] = [
+    (0x1A, 0x10, 0x0B),
+    (0x2F, 0x5D, 0x7A),
+    (0x5E, 0x7A, 0x3A),
+    (0x4F, 0x8A, 0x82),
+    (0xA2, 0x32, 0x1A),
+    (0x8A, 0x3F, 0x5E),
+    (0xB4, 0x47, 0x1B),
+    (0xD9, 0xC7, 0xB0),
+    (0x6B, 0x54, 0x46),
+    (0x7F, 0xA3, 0xC4),
+    (0xA3, 0xB8, 0x6A),
+    (0x8C, 0xC7, 0xBC),
+    (0xE0, 0x70, 0x3F),
+    (0xD0, 0x8A, 0xA3),
+    (0xF0, 0xC0, 0x60),
+    (0xFF, 0xF3, 0xE2),
+];
+
+/// The named palettes (`wsconsctl display.palette`), the first the default.
+pub const PALETTES: [(&str, [(u8, u8, u8); 16]); 2] = [("vga", VGA_PALETTE), ("rust", RUST_PALETTE)];
+
+const fn packed(c: (u8, u8, u8)) -> u32 {
+    (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32
+}
+
+/// The colours in use, `0xRRGGBB` by VGA index: the named palette's (`PALETTE_NAME`), as
+/// `ESC ] P` has changed them since.
+static PALETTE: [AtomicU32; 16] = [
+    AtomicU32::new(packed(VGA_PALETTE[0])),
+    AtomicU32::new(packed(VGA_PALETTE[1])),
+    AtomicU32::new(packed(VGA_PALETTE[2])),
+    AtomicU32::new(packed(VGA_PALETTE[3])),
+    AtomicU32::new(packed(VGA_PALETTE[4])),
+    AtomicU32::new(packed(VGA_PALETTE[5])),
+    AtomicU32::new(packed(VGA_PALETTE[6])),
+    AtomicU32::new(packed(VGA_PALETTE[7])),
+    AtomicU32::new(packed(VGA_PALETTE[8])),
+    AtomicU32::new(packed(VGA_PALETTE[9])),
+    AtomicU32::new(packed(VGA_PALETTE[10])),
+    AtomicU32::new(packed(VGA_PALETTE[11])),
+    AtomicU32::new(packed(VGA_PALETTE[12])),
+    AtomicU32::new(packed(VGA_PALETTE[13])),
+    AtomicU32::new(packed(VGA_PALETTE[14])),
+    AtomicU32::new(packed(VGA_PALETTE[15])),
+];
+static PALETTE_NAME: AtomicUsize = AtomicUsize::new(0);
+/// A colour changed: the next `redraw` repaints every cell, not only the changed ones.
+static REPAINT: AtomicBool = AtomicBool::new(false);
+
+fn color(index: u8) -> (u8, u8, u8) {
+    let c = PALETTE[index as usize & 15].load(Ordering::Relaxed);
+    ((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// Redefines colour `index` (VGA order) as `rgb` (`ESC ] P`).
+pub fn set_color(index: u8, rgb: (u8, u8, u8)) {
+    PALETTE[index as usize & 15].store(packed(rgb), Ordering::Relaxed);
+    REPAINT.store(true, Ordering::Relaxed);
+}
+
+/// Every colour back to the named palette's (`ESC ] R`).
+pub fn reset_palette() {
+    let (_, colors) = PALETTES[PALETTE_NAME.load(Ordering::Relaxed)];
+    for (slot, &c) in PALETTE.iter().zip(colors.iter()) {
+        slot.store(packed(c), Ordering::Relaxed);
+    }
+    REPAINT.store(true, Ordering::Relaxed);
+}
+
+/// The named palette in use.
+pub fn palette_name() -> &'static str {
+    PALETTES[PALETTE_NAME.load(Ordering::Relaxed)].0
+}
+
+/// Changes to the named palette `name` (every colour of it); false if there's none of the name.
+pub fn set_palette(name: &str) -> bool {
+    let Some(i) = PALETTES.iter().position(|(n, _)| *n == name) else { return false };
+    PALETTE_NAME.store(i, Ordering::Relaxed);
+    reset_palette();
+    true
+}
 
 #[rustfmt::skip]
 static VGAFONT16: [[u8; 16]; 256] = [
@@ -487,6 +572,7 @@ pub fn redraw() {
     // (`console::serial::_print`) -- no concurrent access to either static is possible.
     let prev_cursor = unsafe { (&raw const PREV_CURSOR).read() };
 
+    let repaint = REPAINT.swap(false, Ordering::Relaxed);
     crate::console::vga::for_each_cell(|row, col, cell| {
         let key = (cell.ascii, cell.fg, cell.bg, cell.underline);
         // SAFETY: see above. `&raw mut` + deref, not a direct `&mut PREV_CELLS[...]`, is required
@@ -498,9 +584,9 @@ pub fn redraw() {
         // way to know were touched.
         let at_cursor_edge =
             (row, col) == (cursor_row, cursor_col) || Some((row, col)) == prev_cursor;
-        if *slot != Some(key) || at_cursor_edge {
-            let fg_rgb = PALETTE[cell.fg as usize];
-            let bg_rgb = PALETTE[cell.bg as usize];
+        if *slot != Some(key) || at_cursor_edge || repaint {
+            let fg_rgb = color(cell.fg);
+            let bg_rgb = color(cell.bg);
             let fg = pack_rgb(&fb, fg_rgb.0, fg_rgb.1, fg_rgb.2);
             let bg = pack_rgb(&fb, bg_rgb.0, bg_rgb.1, bg_rgb.2);
             target.draw_cell(
