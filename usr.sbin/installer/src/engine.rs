@@ -2,11 +2,17 @@
 //! screens ask for and `installer -f` reads from a file.
 //!
 //! In order: the install medium is found and mounted on `/dist`, the chosen sets checked against
-//! its `MANIFEST`; the disk gets its new table (and Limine's BIOS boot code, §8.4), each partition
-//! its file system; they're mounted under `/mnt`, the sets extracted onto them, and the new
-//! system's `fstab`, `rc.conf`, `wsconsctl.conf` and root's password written; the EFI system
-//! partition gets Limine, the kernel, `limine.conf` and `fsconf`; the answer file's script runs in
-//! the new system; everything is unmounted.
+//! its `MANIFEST`; the disk gets its new table, or OxideBSD's partitions in the largest free space
+//! of the one it has (§9.5), and Limine's BIOS boot code (§8.4); each new partition gets its file
+//! system; they're mounted under `/mnt`, the sets extracted onto them, and the new system's
+//! `fstab`, `rc.conf`, `wsconsctl.conf` and root's password written; the EFI system partition (a
+//! new one, or the one the disk has) gets Limine and the kernel in `\EFI\OxideBSD`, a menu entry
+//! in `/boot/limine/limine.conf` beside one for each other system found (`loaders`), and on UEFI
+//! the firmware a boot entry (`efibootmgr`, §9.6); the answer file's script runs in the new
+//! system; everything is unmounted.
+//!
+//! The new system names its partitions by GPT GUID (`/dev/gptid/<guid>`), which no other disk
+//! shares: two systems both labelled `rootfs` would leave `/dev/gpt/rootfs` the first's.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -19,7 +25,8 @@ use std::process::{Command, Stdio};
 use part::{Kind, Scheme, Table};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Config, Layout, PartSpec, guided_parts};
+use crate::config::{Config, Guided, Layout, PartSpec, guided_parts};
+use crate::loaders;
 
 const DIOCGSECTORSIZE: u64 = 0x8004_6480;
 const DIOCGMEDIASIZE: u64 = 0x8008_6481;
@@ -31,8 +38,12 @@ const TARGET: &str = "/mnt";
 /// The install medium's ISO 9660 volume label (`scripts/mkinstalliso.sh`).
 const MEDIUM_LABEL: &str = "OXIDEBSD_INSTALL";
 
+/// The smallest `/` the guided layout makes beside other systems: the base set takes about a
+/// third of it.
+const MIN_ROOT_BYTES: u64 = 1 << 30;
+
 /// Runs `cmd` with `args`; its error output becomes the error.
-fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     let out = Command::new(cmd).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{cmd}: {e}"))?;
     if out.status.success() {
         return Ok(());
@@ -56,8 +67,8 @@ pub fn disks() -> Vec<(String, String)> {
         .collect()
 }
 
-/// A disk, open for reading and writing its table.
-struct Disk {
+/// A disk, open for reading (and writing) its table.
+pub(crate) struct Disk {
     name: String,
     file: File,
     sector_size: u32,
@@ -78,8 +89,16 @@ impl part::Disk for Disk {
 
 impl Disk {
     fn open(name: &str) -> Result<Disk, String> {
+        Disk::open_with(name, true)
+    }
+
+    pub(crate) fn open_read(name: &str) -> Result<Disk, String> {
+        Disk::open_with(name, false)
+    }
+
+    fn open_with(name: &str, write: bool) -> Result<Disk, String> {
         let path = format!("/dev/{name}");
-        let file = OpenOptions::new().read(true).write(true).open(&path).map_err(|e| format!("{path}: {e}"))?;
+        let file = OpenOptions::new().read(true).write(write).open(&path).map_err(|e| format!("{path}: {e}"))?;
         let mut ss: u32 = 0;
         let mut bytes: i64 = 0;
         // SAFETY: each request writes one value of the type passed.
@@ -121,10 +140,19 @@ fn random_guid() -> [u8; 16] {
     g
 }
 
-/// A partition as made: what it is, and its device node.
+/// A partition as made, or found and kept (an EFI system partition other systems use too).
 struct Made {
     spec: PartSpec,
     dev: String,
+    /// Its GPT name (`rootfs`), or empty.
+    label: String,
+    index: u32,
+    /// Its GPT unique GUID; zero on MBR.
+    guid: [u8; 16],
+    /// Its size in bytes.
+    bytes: u64,
+    /// Already there: it keeps its file system.
+    kept: bool,
 }
 
 /// A partition's GPT label: `rootfs` for `/`, the mount point's path (`usr`, `var-log`) for any
@@ -139,47 +167,117 @@ fn label_for(spec: &PartSpec, nth_swap: usize) -> String {
     }
 }
 
-/// Lays `parts` out in a new table of `scheme` on `disk`, with Limine's BIOS boot code from
-/// `bootcode`, and writes it.
-fn partition(disk: &str, scheme: Scheme, parts: &[PartSpec], bootcode: &[u8]) -> Result<Vec<Made>, String> {
-    let mut d = Disk::open(disk)?;
-    let ss = d.sector_size as u64;
-    let mut t = Table::new(scheme, d.sector_size, d.sectors, random_guid()).map_err(|e| format!("{disk}: {e}"))?;
-    // Whole 4 KiB blocks, in the disk's sectors.
-    let sectors_of = |bytes: u64| bytes.div_ceil(part::BLOCK_BYTES) * part::BLOCK_BYTES / ss;
+/// The node the new system names partition `index` of `disk` by: its GUID's on GPT.
+fn dev_for(disk: &str, scheme: Scheme, index: u32, guid: &[u8; 16]) -> String {
+    match scheme {
+        Scheme::Gpt => format!("/dev/gptid/{}", part::guid_string(guid).to_ascii_lowercase()),
+        Scheme::Mbr => format!("/dev/{disk}s{index}"),
+    }
+}
+
+/// What goes on the disk.
+enum Plan {
+    /// A new table of this scheme, with these partitions, over whatever the disk held.
+    New(Scheme, Vec<PartSpec>),
+    /// The guided layout in the largest free space of the disk's table, all of it kept.
+    Beside,
+}
+
+/// The guided layout beside the systems in `t`: OxideBSD's own BIOS boot partition (on GPT; on
+/// MBR the boot code goes into the gap before the first partition), an EFI system partition only
+/// if the disk has none, and `/` over the rest.
+fn beside_parts(t: &Table) -> Vec<PartSpec> {
+    let mut parts = guided_parts();
+    if t.entries.iter().any(|e| e.kind() == Kind::Efi) {
+        parts.retain(|p| p.kind != Kind::Efi);
+    }
+    parts
+}
+
+/// Adds `parts` to `t` one after another in its free space `(start, sectors)`, each on a 1 MiB
+/// boundary, of whole 4 KiB blocks; `auto` takes what the ones after it leave.
+fn lay_out(t: &mut Table, disk: &str, parts: &[PartSpec], (start, len): (u64, u64)) -> Result<Vec<Made>, String> {
+    let scheme = t.scheme;
+    let ss = t.sector_size as u64;
+    let block = part::BLOCK_BYTES / ss;
     let align = part::ALIGN_BYTES / ss;
+    let up = |n: u64| n.div_ceil(align) * align;
+    let sectors_of = |bytes: u64| bytes.div_ceil(part::BLOCK_BYTES) * block;
+    // MBR's boot code goes into the gap before the first partition instead.
+    let parts: Vec<&PartSpec> = parts.iter().filter(|p| !(scheme == Scheme::Mbr && p.kind == Kind::BiosBoot)).collect();
+    let end = start + len;
+    let mut at = start;
     let mut made = Vec::new();
     let mut swaps = 0;
     for (i, p) in parts.iter().enumerate() {
-        if scheme == Scheme::Mbr && p.kind == Kind::BiosBoot {
-            // MBR's boot code goes into the gap before the first partition instead.
-            continue;
-        }
+        let first = up(at);
         let sectors = match p.size {
-            Some(b) => Some(sectors_of(b)),
-            // `auto` before other partitions: what's left once they have theirs.
-            None if i + 1 < parts.len() => {
-                let free = t.free().into_iter().map(|(_, n)| n).max().unwrap_or(0);
-                let later: u64 = parts[i + 1..].iter().filter_map(|q| q.size).map(|b| sectors_of(b).div_ceil(align) * align).sum();
-                Some(free.checked_sub(later + align).filter(|&n| n > 0).ok_or(format!("{disk}: too small for the partitions"))? / (part::BLOCK_BYTES / ss) * (part::BLOCK_BYTES / ss))
+            Some(b) => sectors_of(b),
+            None => {
+                let later: u64 = parts[i + 1..].iter().filter_map(|q| q.size).map(|b| up(sectors_of(b))).sum();
+                let room = end.saturating_sub(first + later);
+                // Ending on a boundary for the later ones, or on a block.
+                if i + 1 < parts.len() { room / align * align } else { room / block * block }
             }
-            None => None,
         };
+        if sectors == 0 || first + sectors > end {
+            return Err(format!("{disk}: too small for the partitions"));
+        }
         let label = if scheme == Scheme::Gpt { label_for(p, swaps) } else { String::new() };
         if p.kind == Kind::Swap {
             swaps += 1;
         }
         let code = p.kind.code(scheme).ok_or(format!("{}: not a type {} holds", p.kind.name(), scheme.name()))?;
         let guid = if scheme == Scheme::Gpt { random_guid() } else { [0; 16] };
-        let index = t.add(code, &label, None, sectors, guid).map_err(|e| format!("{disk}: {e}"))?;
-        let dev = match scheme {
-            Scheme::Gpt if !label.is_empty() => format!("/dev/gpt/{label}"),
-            Scheme::Gpt => format!("/dev/{disk}p{index}"),
-            Scheme::Mbr => format!("/dev/{disk}s{index}"),
-        };
-        made.push(Made { spec: p.clone(), dev });
+        let index = t.add(code, &label, Some(first), Some(sectors), guid).map_err(|e| format!("{disk}: {e}"))?;
+        let dev = dev_for(disk, scheme, index, &guid);
+        made.push(Made { spec: (*p).clone(), dev, label, index, guid, bytes: sectors * ss, kept: false });
+        at = first + sectors;
     }
-    let stage2 = t.set_bios_bootcode(bootcode).map_err(|e| format!("{disk}: {e}"))?;
+    Ok(made)
+}
+
+/// Lays the disk out as `plan` says, with Limine's BIOS boot code from `bootcode`, and writes it:
+/// the partitions OxideBSD uses, the EFI system partition among them.
+fn partition(disk: &str, plan: Plan, bootcode: &[u8]) -> Result<Vec<Made>, String> {
+    let mut d = Disk::open(disk)?;
+    let beside = matches!(plan, Plan::Beside);
+    let (mut t, parts, mut made) = match plan {
+        Plan::New(scheme, parts) => {
+            let t = Table::new(scheme, d.sector_size, d.sectors, random_guid()).map_err(|e| format!("{disk}: {e}"))?;
+            (t, parts, Vec::new())
+        }
+        Plan::Beside => {
+            let t = part::read(&mut d)
+                .map_err(|_| format!("{disk}: its partition table can't be read"))?
+                .ok_or(format!("{disk}: no partition table to install beside"))?;
+            let parts = beside_parts(&t);
+            let esp = t.entries.iter().find(|e| e.kind() == Kind::Efi).map(|e| Made {
+                spec: PartSpec { size: None, kind: Kind::Efi, mount: None },
+                dev: dev_for(disk, t.scheme, e.index, &e.guid),
+                label: e.label.clone(),
+                index: e.index,
+                guid: e.guid,
+                bytes: e.sectors * t.sector_size as u64,
+                kept: true,
+            });
+            (t, parts, esp.into_iter().collect())
+        }
+    };
+    let free = t.free().into_iter().max_by_key(|&(_, n)| n).ok_or(format!("{disk}: no free space"))?;
+    let new = lay_out(&mut t, disk, &parts, free)?;
+    if let Some(root) = new.iter().find(|m| m.spec.mount.as_deref() == Some("/")).filter(|_| beside) {
+        if root.bytes < MIN_ROOT_BYTES {
+            return Err(format!(
+                "{disk}: {} MiB free beside the other systems; OxideBSD needs {} MiB",
+                free.1 * t.sector_size as u64 >> 20,
+                MIN_ROOT_BYTES >> 20
+            ));
+        }
+    }
+    let bios = new.iter().find(|m| m.spec.kind == Kind::BiosBoot).map(|m| m.index);
+    made.extend(new);
+    let stage2 = t.set_bios_bootcode_in(bootcode, bios).map_err(|e| format!("{disk}: {e}"))?;
     let mut sectors = t.write();
     sectors.push(stage2);
     d.write(&sectors)?;
@@ -315,9 +413,39 @@ fn set_hostname(rc_conf: &str, name: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// Limine's configuration on the EFI system partition: the kernel, with `fsconf` naming the root.
-fn limine_conf() -> String {
-    "timeout: 3\nserial: yes\n\n/OxideBSD\n    protocol: limine\n    kernel_path: boot():/boot/kernel\n    module_path: boot():/boot/fsconf\n".into()
+/// Where on the EFI system partition this install's kernel and `fsconf` go: a directory of its own
+/// under `\EFI\OxideBSD`, named by its root's GUID, so another OxideBSD can share the partition.
+fn system_dir(root: &Made) -> String {
+    let id = if root.guid == [0; 16] { random_guid() } else { root.guid };
+    format!("EFI/OxideBSD/{}", &part::guid_string(&id).to_ascii_lowercase()[..8])
+}
+
+/// The menu entry for this system, `title`, its files in `dir` of the EFI system partition.
+fn limine_entry(title: &str, dir: &str) -> String {
+    format!("/{title}\n    protocol: limine\n    kernel_path: boot():/{dir}/kernel\n    module_path: boot():/{dir}/fsconf\n")
+}
+
+/// `/boot/limine/limine.conf`, which every Limine on the partition reads (`\EFI\OxideBSD`'s, the
+/// removable fallback's, BIOS's): `old`, if there is one, with this system's entry and each of
+/// `others` it hasn't got added at its end (none removed), else a new one, this system first.
+fn limine_conf(old: Option<&str>, name: &str, dir: &str, others: &[loaders::Loader]) -> String {
+    let mut conf = match old {
+        Some(o) => {
+            let mut c = o.to_string();
+            if !c.ends_with('\n') {
+                c.push('\n');
+            }
+            c + "\n" + &limine_entry(&format!("OxideBSD ({name})"), dir)
+        }
+        None => format!("timeout: 3\nserial: yes\n\n{}", limine_entry("OxideBSD", dir)),
+    };
+    for l in others {
+        if !l.listed_in(&conf) {
+            conf += "\n";
+            conf += &l.conf();
+        }
+    }
+    conf
 }
 
 /// A command run inside the new system (`chroot` to `/mnt`).
@@ -390,17 +518,28 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let boot = Path::new(DIST).join("boot");
     let bootcode = std::fs::read(boot.join("limine/limine-bios-hdd.bin")).map_err(|e| format!("limine-bios-hdd.bin: {e}"))?;
 
-    let (disk, scheme, parts) = match &cfg.layout {
-        Layout::Explicit { disk, scheme, parts } => (disk.clone(), *scheme, parts.clone()),
-        Layout::Guided(d) => (guided_disk(d.as_deref())?, Scheme::Gpt, guided_parts()),
+    let (disk, plan) = match &cfg.layout {
+        Layout::Explicit { disk, scheme, parts } => (disk.clone(), Plan::New(*scheme, parts.clone())),
+        Layout::Guided { disk, how } => {
+            let disk = guided_disk(disk.as_deref())?;
+            let beside = match how {
+                Guided::Whole => false,
+                Guided::Beside => true,
+                // A table that can't be read is not a blank disk.
+                Guided::Auto => part::read(&mut Disk::open_read(&disk)?)
+                    .map_err(|_| format!("{disk}: its partition table can't be read"))?
+                    .is_some(),
+            };
+            (disk, if beside { Plan::Beside } else { Plan::New(Scheme::Gpt, guided_parts()) })
+        }
     };
     say(&format!("Partitioning {disk}"));
-    let made = partition(&disk, scheme, &parts, &bootcode)?;
+    let made = partition(&disk, plan, &bootcode)?;
 
-    for m in &made {
+    for m in made.iter().filter(|m| !m.kept) {
         match m.spec.kind {
             Kind::Oxfs => {
-                let label = m.dev.rsplit('/').next().unwrap_or("rootfs");
+                let label = if m.label.is_empty() { "rootfs" } else { &m.label };
                 say(&format!("Making an oxfs file system on {}", m.dev));
                 run("/sbin/newfs_oxfs", &["-L", label, &m.dev])?;
             }
@@ -425,6 +564,7 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     }
     let esp = made.iter().find(|m| m.spec.kind == Kind::Efi);
     if let Some(e) = esp {
+        // A kept partition must be FAT already: msdosfs refuses anything else.
         mounts.mount(&["-t", "msdosfs", &e.dev], &format!("{TARGET}/boot/efi"))?;
     }
 
@@ -449,7 +589,7 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
         status_ok("pw usermod root", child.wait())?;
     }
 
-    if esp.is_some() {
+    if let Some(esp) = esp {
         say("Installing the boot loader");
         let efi = PathBuf::from(format!("{TARGET}/boot/efi"));
         let copy = |from: PathBuf, to: PathBuf| -> Result<(), String> {
@@ -459,14 +599,39 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
             std::fs::copy(&from, &to).map(|_| ()).map_err(|e| format!("{}: {e}", from.display()))
         };
         let medium = Path::new(DIST);
-        for f in ["BOOTX64.EFI", "BOOTIA32.EFI"] {
-            copy(medium.join("EFI/BOOT").join(f), efi.join("EFI/BOOT").join(f))?;
+        let root = made.iter().find(|m| m.spec.mount.as_deref() == Some("/")).ok_or("no / partition")?;
+        let dir = system_dir(root);
+        copy(medium.join("EFI/BOOT/BOOTX64.EFI"), efi.join("EFI/OxideBSD/BOOTX64.EFI"))?;
+        // The removable fallback, which firmware with no boot entries runs, only if no system has
+        // taken it.
+        if !efi.join("EFI/BOOT/BOOTX64.EFI").exists() {
+            for f in ["BOOTX64.EFI", "BOOTIA32.EFI"] {
+                copy(medium.join("EFI/BOOT").join(f), efi.join("EFI/BOOT").join(f))?;
+            }
         }
+        // BIOS: the boot code written above is this Limine's, so its stage 3 is too.
         copy(boot.join("limine/limine-bios.sys"), efi.join("boot/limine/limine-bios.sys"))?;
-        copy(boot.join("kernel"), efi.join("boot/kernel"))?;
-        std::fs::write(efi.join("boot/limine/limine.conf"), limine_conf()).map_err(|e| format!("limine.conf: {e}"))?;
-        let r = in_target("/usr/sbin/fsconf_mkdb").args(["-f", "/etc/fstab", "-o", "/boot/efi/boot/fsconf"]).status();
+        copy(boot.join("kernel"), efi.join(&dir).join("kernel"))?;
+        let r = in_target("/usr/sbin/fsconf_mkdb").args(["-f", "/etc/fstab", "-o", &format!("/boot/efi/{dir}/fsconf")]).status();
         status_ok("fsconf_mkdb", r)?;
+
+        say("Looking for other systems");
+        let others = loaders::scan(Some((&esp.guid, &efi)));
+        let conf_path = efi.join("boot/limine/limine.conf");
+        let old = std::fs::read_to_string(&conf_path).ok();
+        let name = cfg.hostname.clone().unwrap_or_else(|| dir.rsplit('/').next().unwrap_or("").to_string());
+        let conf = limine_conf(old.as_deref(), &name, &dir, &others);
+        std::fs::write(&conf_path, conf).map_err(|e| format!("limine.conf: {e}"))?;
+        for l in &others {
+            say(&format!("Boot menu: {}", l.title));
+        }
+
+        // UEFI: the firmware's own entry, first in its order (EFIRT.md).
+        if Path::new("/dev/efi").exists() {
+            say("Adding the firmware's boot entry");
+            let loader = efi.join("EFI/OxideBSD/BOOTX64.EFI");
+            run("/usr/sbin/efibootmgr", &["-c", "-a", "-l", &loader.to_string_lossy(), "-L", "OxideBSD"])?;
+        }
     }
 
     if let Some(script) = &cfg.script {
@@ -489,7 +654,8 @@ mod tests {
     use super::*;
 
     fn made(kind: Kind, mount: Option<&str>, dev: &str) -> Made {
-        Made { spec: PartSpec { size: None, kind, mount: mount.map(str::to_string) }, dev: dev.into() }
+        let spec = PartSpec { size: None, kind, mount: mount.map(str::to_string) };
+        Made { spec, dev: dev.into(), label: String::new(), index: 1, guid: [0; 16], bytes: 0, kept: false }
     }
 
     #[test]
@@ -510,6 +676,47 @@ mod tests {
         assert!(lines[5].starts_with("/dev/gpt/swap0\tnone\t\tswap"));
         assert!(lines[6].starts_with("tmpfs"));
         assert_eq!(f.matches("\t/\t").count(), 1);
+    }
+
+    #[test]
+    fn layouts() {
+        let gib = (1u64 << 30) / 512;
+        // A blank 4 GiB disk: bios, efi, / over the rest, on 1 MiB boundaries.
+        let mut t = Table::new(Scheme::Gpt, 512, 4 * gib, [1; 16]).unwrap();
+        let free = t.free()[0];
+        let m = lay_out(&mut t, "d", &guided_parts(), free).unwrap();
+        let firsts: Vec<u64> = t.entries.iter().map(|e| e.first).collect();
+        assert_eq!(firsts, [2048, 4096, 4096 + (260 << 11)]);
+        assert_eq!(m.iter().map(|m| m.spec.kind).collect::<Vec<_>>(), [Kind::BiosBoot, Kind::Efi, Kind::Oxfs]);
+        assert!(m[2].dev.starts_with("/dev/gptid/") && m[2].label == "rootfs");
+        assert_eq!(t.entries[2].end(), (t.last_usable + 1) / 8 * 8);
+
+        // Beside: an ESP and another system's partition kept; the new ones in the larger gap.
+        let mut t = Table::new(Scheme::Gpt, 512, 8 * gib, [1; 16]).unwrap();
+        let esp = t.add(Kind::Efi.code(Scheme::Gpt).unwrap(), "EFI system partition", None, Some(100 << 11), [2; 16]).unwrap();
+        t.add(Kind::MsBasicData.code(Scheme::Gpt).unwrap(), "C", Some(2 * gib), Some(gib), [3; 16]).unwrap();
+        let before = t.entries.clone();
+        let parts = beside_parts(&t);
+        assert_eq!(parts.iter().map(|p| p.kind).collect::<Vec<_>>(), [Kind::BiosBoot, Kind::Oxfs]);
+        let free = t.free().into_iter().max_by_key(|&(_, n)| n).unwrap();
+        assert_eq!(free.0, 3 * gib);
+        let m = lay_out(&mut t, "d", &parts, free).unwrap();
+        assert_eq!(&t.entries[..2], &before[..]);
+        assert!(m.iter().all(|m| t.entry(m.index).unwrap().first >= 3 * gib));
+        assert!(m.iter().all(|m| m.index != esp));
+    }
+
+    #[test]
+    fn limine_confs() {
+        let win = loaders::Loader { title: "Windows Boot Manager".into(), lines: vec!["protocol: efi".into(), "path: guid(x):/EFI/Microsoft/Boot/bootmgfw.efi".into()] };
+        let new = limine_conf(None, "oxide", "EFI/OxideBSD/0123abcd", std::slice::from_ref(&win));
+        assert!(new.starts_with("timeout: 3\nserial: yes\n\n/OxideBSD\n    protocol: limine\n    kernel_path: boot():/EFI/OxideBSD/0123abcd/kernel\n"));
+        assert!(new.ends_with("\n/Windows Boot Manager\n    protocol: efi\n    path: guid(x):/EFI/Microsoft/Boot/bootmgfw.efi\n"));
+        // Another system's conf: kept whole, this system added, Windows not twice.
+        let again = limine_conf(Some(&new), "second", "EFI/OxideBSD/89abcdef", &[win]);
+        assert!(again.starts_with(&new));
+        assert_eq!(again.matches("bootmgfw").count(), 1);
+        assert!(again.contains("/OxideBSD (second)\n    protocol: limine\n    kernel_path: boot():/EFI/OxideBSD/89abcdef/kernel"));
     }
 
     #[test]

@@ -175,6 +175,10 @@ name = "install_disk"
 harness = false
 
 [[test]]
+name = "install_beside"
+harness = false
+
+[[test]]
 name = "efirt_smoke"
 harness = false
 

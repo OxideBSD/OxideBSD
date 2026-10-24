@@ -720,6 +720,13 @@ impl Table {
     /// partition is marked active if none is, as some BIOSes need. [`Table::write`] then writes
     /// the boot sector; stage 2 is returned as `(lba, bytes)` for the caller to write with it.
     pub fn set_bios_bootcode(&mut self, code: &[u8]) -> Result<(u64, Vec<u8>), Error> {
+        self.set_bios_bootcode_in(code, None)
+    }
+
+    /// [`Table::set_bios_bootcode`], stage 2 going into GPT partition `bios` (a BIOS boot
+    /// partition) if given, else into the first BIOS boot partition: a disk another system's
+    /// boot code already uses one of may get a second.
+    pub fn set_bios_bootcode_in(&mut self, code: &[u8], bios: Option<u32>) -> Result<(u64, Vec<u8>), Error> {
         const SECTOR: usize = 512;
         const STAGE2_LOC_OFFSET: usize = 0x1a4;
         // After the boot sector, and a multiple of every sector size; Limine allows up to 63.
@@ -730,7 +737,11 @@ impl Table {
         let stage2 = &code[SECTOR..];
         let (loc, room) = match self.scheme {
             Scheme::Gpt => {
-                let bios = self.entries.iter().find(|e| e.kind() == Kind::BiosBoot).ok_or(Error::BootCode)?;
+                let bios = self
+                    .entries
+                    .iter()
+                    .find(|e| e.kind() == Kind::BiosBoot && bios.is_none_or(|i| e.index == i))
+                    .ok_or(Error::BootCode)?;
                 (bios.first * SECTOR as u64, bios.sectors * SECTOR as u64)
             }
             Scheme::Mbr => {

@@ -149,6 +149,56 @@ case "$TEST_NAME" in
                 ;;
         esac
         ;;
+    install_beside)
+        # INSTALLER.md step 9c: as install_disk, onto a disk that holds another system: a
+        # "Windows" EFI system partition (a fake bootmgfw.efi; a removable fallback that isn't a
+        # loader, so the installed system boots on UEFI only through the firmware entry the
+        # installer adds, kept in one variable store across the boots) and a partition of random
+        # bytes, which must come through all three boots untouched.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
+        export OXIDEBSD_QEMU_MEM
+        INSTALLED_DISK="target/images/beside.img"
+        QEMU_UEFI_VARS="target/images/beside-vars.fd"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]|install-failed-2"
+        case "${INSTALL_DISK_PHASE:-}" in
+            "")
+                w=target/images/beside
+                rm -rf "$w" "$INSTALLED_DISK" "$QEMU_UEFI_VARS"
+                mkdir -p "$w/esp/EFI/Microsoft/Boot" "$w/esp/EFI/BOOT"
+                echo fake-windows-boot-manager > "$w/esp/EFI/Microsoft/Boot/bootmgfw.efi"
+                echo not-a-loader > "$w/esp/EFI/BOOT/BOOTX64.EFI"
+                tools=target/host-tools/x86_64-unknown-linux-gnu/release
+                "$tools/makefs" -t msdos -o volume_label=SYSTEM -s 100m "$w/esp.img" "$w/esp" > /dev/null
+                head -c 64M /dev/urandom > "$w/other.img"
+                "$tools/mkimg" -s gpt -c 4G -o "$INSTALLED_DISK" \
+                    -p "efi/EFI system partition:=$w/esp.img" -p "ms-basic-data/Basic data partition:=$w/other.img"
+                for phase in install uefi bios; do
+                    echo "qemu_runner.sh: install_beside: $phase"
+                    INSTALL_DISK_PHASE=$phase "$0" "$@" || exit $?
+                done
+                # The other partition, where mkimg put it: right after the ESP, both 1 MiB aligned.
+                other=$(dd if="$INSTALLED_DISK" bs=1M skip=101 count=64 status=none | sha256sum | cut -d' ' -f1)
+                if [ "$other" != "$(sha256sum < "$w/other.img" | cut -d' ' -f1)" ]; then
+                    echo "qemu_runner.sh: install_beside: the other system's partition changed" >&2
+                    exit 1
+                fi
+                echo "qemu_runner.sh: install_beside: the other system's partition is untouched"
+                exit 0
+                ;;
+            install)
+                INSTALL_BOOT=1
+                QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
+                QEMU_PASS_PATTERN="beside-5-done"
+                ;;
+            uefi | bios)
+                OXIDEBSD_FIRMWARE=$INSTALL_DISK_PHASE
+                export OXIDEBSD_FIRMWARE
+                QEMU_SERIAL_INPUT=""
+                QEMU_NO_ISO=1
+                QEMU_PASS_PATTERN="OxideBSD/[^ ]+ \(beside\)"
+                ;;
+        esac
+        ;;
     efirt_syscall_smoke)
         # UEFI variables (EFIRT.md §8.2), in a fresh copy of OVMF's variable store each run, and
         # (below) a disk with an empty EFI system partition, `esptest`, for efibootmgr's entries.

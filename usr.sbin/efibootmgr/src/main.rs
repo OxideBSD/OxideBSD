@@ -308,7 +308,7 @@ fn run(o: &Opts) -> Result<(), String> {
     show(&efi, o.verbose)
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     // SAFETY: back to the default, so `efibootmgr -v | grep -q ...` ends quietly when the reader
     // goes, as the BSDs' tools do, rather than failing a write.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };

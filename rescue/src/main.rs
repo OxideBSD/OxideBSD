@@ -103,6 +103,8 @@ mod sbin_umount;
 mod sbin_gpart;
 #[path = "../../sbin/wsconsctl/src/main.rs"]
 mod sbin_wsconsctl;
+#[path = "../../usr.sbin/efibootmgr/src/main.rs"]
+mod usr_sbin_efibootmgr;
 
 /// The tools, by name, and their `main`s.
 const TOOLS: &[(&str, fn() -> ExitCode)] = &[
@@ -155,6 +157,7 @@ const TOOLS: &[(&str, fn() -> ExitCode)] = &[
     ("umount", || sbin_umount::main().report()),
     ("gpart", || sbin_gpart::main().report()),
     ("wsconsctl", || sbin_wsconsctl::main().report()),
+    ("efibootmgr", || usr_sbin_efibootmgr::main().report()),
 ];
 
 fn main() -> ExitCode {

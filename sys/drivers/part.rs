@@ -20,8 +20,9 @@ pub enum Scheme {
     Mbr,
 }
 
-/// One partition: its index from 1, where it is in sectors, whether it's oxfs's, and its GPT
-/// name (the label `/dev/gpt/<label>` names it by), if it has one.
+/// One partition: its index from 1, where it is in sectors, whether it's oxfs's, its GPT name
+/// (the label `/dev/gpt/<label>` names it by), if it has one, and its GPT unique GUID
+/// (`/dev/gptid/<guid>`).
 #[derive(Clone, Debug)]
 pub struct Partition {
     pub scheme: Scheme,
@@ -30,6 +31,7 @@ pub struct Partition {
     pub sectors: u64,
     pub oxfs: bool,
     pub label: Option<alloc::string::String>,
+    pub guid: Option<[u8; 16]>,
 }
 
 impl Partition {
@@ -37,6 +39,11 @@ impl Partition {
     pub fn suffix(&self) -> alloc::string::String {
         let letter = if self.scheme == Scheme::Gpt { 'p' } else { 's' };
         alloc::format!("{letter}{}", self.index)
+    }
+
+    /// Its `/dev/gptid/` name: the GUID's usual form in lower case, as FreeBSD's.
+    pub fn gptid(&self) -> Option<alloc::string::String> {
+        self.guid.map(|g| part::guid_string(&g).to_ascii_lowercase())
     }
 
     /// Its extent in 4 KiB blocks, if it's block-aligned.
@@ -68,6 +75,7 @@ pub fn read(head: &[u8], sector: usize, disk_sectors: u64) -> Vec<Partition> {
                 sectors: e.sectors.checked_mul(scale)?,
                 oxfs: e.kind() == part::Kind::Oxfs,
                 label: (scheme == Scheme::Gpt && !e.label.is_empty() && !e.label.contains('/')).then_some(e.label),
+                guid: (scheme == Scheme::Gpt && e.guid != [0; 16]).then_some(e.guid),
             })
         })
         .collect()

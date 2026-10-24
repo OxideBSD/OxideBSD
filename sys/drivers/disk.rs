@@ -8,7 +8,8 @@
 //! one counter per bus except AHCI's, optical drives counted with disks (their kind is in
 //! `kern.disk.<name>.kind`); partitions are `<disk>p<N>` (GPT) or
 //! `<disk>s<N>` (MBR), and labelled GPT partitions are also `gpt/<label>` (FreeBSD's `glabel`;
-//! the first of a label wins). Each becomes a block device (`kern::vfs_bdev`) and a raw device in
+//! the first of a label wins), every GPT partition `gptid/<guid>` (its unique GUID, lower case:
+//! the name an installed system's `fstab` uses, which two disks never share). Each becomes a block device (`kern::vfs_bdev`) and a raw device in
 //! `/dev`, readable and writable by root, except that a device overlapping one a file system has
 //! mounted read-write can't be written (RAM_FLOOR.md §3.4.3: the writes would go around its
 //! cache).
@@ -144,6 +145,9 @@ const VIRTIO_MAJOR: u32 = 252;
 /// `/dev/gpt/<label>`: another name for a labelled GPT partition, minors in the order found.
 const GPT_LABEL_MAJOR: u32 = 253;
 static NEXT_LABEL_MINOR: AtomicU32 = AtomicU32::new(0);
+/// `/dev/gptid/<guid>`: another name for a GPT partition, by its unique GUID.
+const GPT_ID_MAJOR: u32 = 254;
+static NEXT_ID_MINOR: AtomicU32 = AtomicU32::new(0);
 
 /// Open raw devices: `real_fd -> block device handle` (`kern::vfs_bdev`). The offset is the
 /// file's (`fs::fd`).
@@ -533,14 +537,17 @@ fn attach_partitions(disk: u32, parts: &mut Vec<Found>) {
         let handle = vfs_bdev::register(&dev, major, minor | p.index, p.first_lba, p.sectors, disk);
         let _ = crate::fs::devfs::make_dev(&dev, major, minor | p.index, 0, 0, 0o600, raw_open);
         nodes.push((handle, major, minor | p.index));
-        if let Some(label) = &p.label {
-            let label_dev = alloc::format!("gpt/{label}");
-            let label_minor = NEXT_LABEL_MINOR.fetch_add(1, Ordering::Relaxed);
-            if crate::fs::devfs::make_dev(&label_dev, GPT_LABEL_MAJOR, label_minor, 0, 0, 0o600, raw_open).is_ok() {
-                let h = vfs_bdev::register(&label_dev, GPT_LABEL_MAJOR, label_minor, p.first_lba, p.sectors, disk);
-                nodes.push((h, GPT_LABEL_MAJOR, label_minor));
+        let aliases = [
+            p.label.as_ref().map(|l| (alloc::format!("gpt/{l}"), GPT_LABEL_MAJOR, &NEXT_LABEL_MINOR)),
+            p.gptid().map(|g| (alloc::format!("gptid/{g}"), GPT_ID_MAJOR, &NEXT_ID_MINOR)),
+        ];
+        for (alias, alias_major, next_minor) in aliases.into_iter().flatten() {
+            let alias_minor = next_minor.fetch_add(1, Ordering::Relaxed);
+            if crate::fs::devfs::make_dev(&alias, alias_major, alias_minor, 0, 0, 0o600, raw_open).is_ok() {
+                let h = vfs_bdev::register(&alias, alias_major, alias_minor, p.first_lba, p.sectors, disk);
+                nodes.push((h, alias_major, alias_minor));
             } else {
-                serial_println!("[boot] disk: {}: label {} is taken -- only {} names it", name, label_dev, dev);
+                serial_println!("[boot] disk: {}: {} is taken -- only {} names it", name, alias, dev);
             }
         }
         parts.push(Found { name: dev, handle, part: p });
@@ -678,14 +685,16 @@ pub(crate) fn mounted(handle: u32, mounted: bool) {
     }
 }
 
-/// The root's partition: the device `/boot/fsconf` names (`/dev/virt0p1`, or `/dev/gpt/<label>`),
-/// on whichever disk; else the first oxfs partition, with a word when there are several to choose
-/// from (an `/etc/fstab` root entry settles it).
+/// The root's partition: the device `/boot/fsconf` names (`/dev/virt0p1`, `/dev/gpt/<label>` or
+/// `/dev/gptid/<guid>`), on whichever disk; else the first oxfs partition, with a word when there
+/// are several to choose from (an `/etc/fstab` root entry settles it).
 fn choose_root(parts: &[Found]) -> Option<&Found> {
     if let Some(device) = crate::kern::fsconf::root_device() {
         let spec = device.strip_prefix("/dev/").unwrap_or(&device);
         let named = parts.iter().find(|f| {
-            f.name == spec || f.part.label.as_deref().is_some_and(|l| spec.strip_prefix("gpt/") == Some(l))
+            f.name == spec
+                || f.part.label.as_deref().is_some_and(|l| spec.strip_prefix("gpt/") == Some(l))
+                || f.part.gptid().is_some_and(|g| spec.strip_prefix("gptid/").is_some_and(|s| s.eq_ignore_ascii_case(&g)))
         });
         match named {
             Some(f) => {

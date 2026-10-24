@@ -48,8 +48,9 @@ pub fn root_device() -> Option<String> {
 }
 
 /// The root file system's entry in `/boot/fsconf`, if the boot loader loaded a valid one with an
-/// entry for `/`.
+/// entry for `/`. The module is the one whose path ends `/fsconf`: an installed system's is
+/// `/EFI/OxideBSD/<id>/fsconf` on the EFI system partition (OxideBSD-doc `INSTALLER.md` §8.4).
 pub fn root_entry() -> Option<Entry> {
-    let entries = parse(crate::boot::boot_module("/boot/fsconf")?)?;
+    let entries = parse(crate::boot::boot_module("/fsconf")?)?;
     entries.into_iter().find(|e| e.mount_point == "/")
 }

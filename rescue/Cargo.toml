@@ -10,6 +10,7 @@ publish = false
 libc = "0.2"
 flate = { path = "../lib/libz" }
 fstab = { path = "../lib/libfstab" }
+libefivar = { path = "../lib/libefivar", features = ["dev"] }
 libpart = { path = "../lib/libpart" }
 libsh = { path = "../lib/libsh", features = ["init-dialect"] }
 mode = { path = "../lib/libmode" }

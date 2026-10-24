@@ -55,6 +55,7 @@
 ./sbin/umount	rescue
 ./sbin/wsconsctl	rescue
 ./sbin/zstd
+./usr/sbin/efibootmgr	rescue
 ./etc/group
 ./etc/master.passwd
 ./etc/passwd

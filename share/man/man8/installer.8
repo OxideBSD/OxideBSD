@@ -65,7 +65,9 @@ Install with no screens, every answer read from
 .Ar installerconfig
 (below), and exit 0 once the new system is in place, telling each step on the
 standard output.
-The disk it names is erased without asking.
+A disk it names with a new table, or with
+.Li WHOLE ,
+is erased without asking.
 .It Fl t Ar tty
 Take
 .Pa /dev/ Ns Ar tty
@@ -86,11 +88,13 @@ mounts it read-only on
 and checks each chosen set against its
 .Pa MANIFEST ;
 .It
-writes the disk's new partition table, with Limine's BIOS boot code, and makes
-each partition's file system:
+writes the disk's new partition table, or adds OxideBSD's partitions to the
+largest free space of the table it has, every other partition kept; writes
+Limine's BIOS boot code; and makes each new partition's file system:
 .Xr newfs_oxfs 8
-and, on the EFI system partition, FAT32
+and, on a new EFI system partition, FAT32
 .Pq Xr newfs_msdos 8 ;
+an EFI system partition the disk has already is used as it is;
 .It
 mounts them under
 .Pa /mnt
@@ -98,13 +102,9 @@ and extracts the sets onto them;
 .It
 writes the new system's
 .Xr fstab 5
-(each partition by its GPT label:
-.Pa /dev/gpt/rootfs
-for
-.Pa / ,
-.Pa /dev/gpt/efi
-for
-.Pa /boot/efi ) ,
+(each partition by its GPT GUID,
+.Pa /dev/gptid/ Ns Ar guid ,
+which no other disk shares),
 its host name in
 .Xr rc.conf 5 ,
 its keyboard layout in
@@ -112,13 +112,34 @@ its keyboard layout in
 and root's password;
 .It
 puts Limine
-.Pq Pa EFI/BOOT/BOOTX64.EFI , Pa boot/limine/limine-bios.sys ,
-its
-.Pa limine.conf ,
-the kernel and
-.Pa /boot/fsconf
+.Po Pa EFI/OxideBSD/BOOTX64.EFI , Pa boot/limine/limine-bios.sys ,
+and
+.Pa EFI/BOOT/BOOTX64.EFI
+if no other system has it
+.Pc ,
+the kernel and its
+.Pa fsconf
 .Pq Xr fsconf_mkdb 8
+in
+.Pa EFI/OxideBSD/ Ns Ar id ,
 on the EFI system partition, so the disk boots on BIOS and on UEFI;
+.Ar id
+is the first 8 digits of the root's GUID;
+.It
+adds the new system to
+.Pa boot/limine/limine.conf
+there (a new one, or the one another system left, nothing in it removed),
+with an entry for each other system's boot loader found on the machine's
+EFI system partitions (Windows, shim or GRUB, systemd-boot, another Limine,
+any other
+.Pa EFI/ Ns Ar dir Ns Pa /*.efi )
+and, for BIOS, each MBR disk's active partitions and each FreeBSD boot
+partition;
+.It
+on UEFI, adds a firmware boot entry,
+.Li OxideBSD ,
+first in the boot order
+.Pq Xr efibootmgr 8 ;
 .It
 runs the
 .Ar installerconfig Ns 's
@@ -142,7 +163,19 @@ The variables are:
 .It Ev PARTITIONS
 .Li DEFAULT
 (or unset): the guided layout on the first disk that isn't a CD drive.
-A disk's name alone: the guided layout on it.
+.Oo Ar disk Oc Op Li BESIDE | Li WHOLE :
+the guided layout on
+.Ar disk
+(or the first):
+.Li WHOLE
+over the whole disk, erasing it;
+.Li BESIDE
+in the largest free space of its partition table, every partition there
+kept; neither word means
+.Li WHOLE
+on a disk with no partition table and
+.Li BESIDE
+on one with.
 Otherwise
 .Ar disk Oo Li GPT | Li MBR Oc Li { Ar size type Oo Ar mountpoint Oc , ... Li } :
 a new table of those partitions, in order;
@@ -172,7 +205,10 @@ and one of them must be
 The guided layout is a GPT of a 512 KiB BIOS boot partition, a 260 MiB EFI
 system partition, and
 .Pa /
-over the rest.
+over the rest; beside other systems, a BIOS boot partition of its own (GPT),
+an EFI system partition only if the disk has none, and
+.Pa /
+over the rest of the free space, at least 1 GiB.
 .It Ev DISTRIBUTIONS
 The sets, by file name:
 .Li base.tar.zst
@@ -215,6 +251,7 @@ Limine's BIOS boot code, for the new disk
 .Xr fstab 5 ,
 .Xr rc.conf 5 ,
 .Xr ttys 5 ,
+.Xr efibootmgr 8 ,
 .Xr gpart 8 ,
 .Xr init 8 ,
 .Xr rescue 8

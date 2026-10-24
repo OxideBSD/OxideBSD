@@ -20,11 +20,22 @@ pub struct PartSpec {
     pub mount: Option<String>,
 }
 
+/// Where the guided layout goes on its disk (`INSTALLER.md` §9.5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Guided {
+    /// `WHOLE` on a disk with no table, `BESIDE` on one with: a disk is erased only when asked.
+    Auto,
+    /// The whole disk, erasing whatever it holds.
+    Whole,
+    /// Its largest free space, every partition already there kept.
+    Beside,
+}
+
 /// How the disk is laid out.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Layout {
-    /// The guided layout (`INSTALLER.md` §9.5) on this disk, or on the first one.
-    Guided(Option<String>),
+    /// The guided layout on this disk, or on the first one.
+    Guided { disk: Option<String>, how: Guided },
     /// These partitions, in a new table of `scheme`, on `disk`.
     Explicit { disk: String, scheme: Scheme, parts: Vec<PartSpec> },
 }
@@ -72,12 +83,21 @@ fn parse_kind(s: &str) -> Option<Kind> {
     }
 }
 
-/// `PARTITIONS`: `DEFAULT`, a disk alone (the guided layout on it), or FreeBSD's
+/// `BESIDE` or `WHOLE`: the guided layout's place, said outright.
+fn parse_guided(s: &str) -> Option<Guided> {
+    match s {
+        "BESIDE" => Some(Guided::Beside),
+        "WHOLE" => Some(Guided::Whole),
+        _ => None,
+    }
+}
+
+/// `PARTITIONS`: `DEFAULT`, `[disk] [BESIDE | WHOLE]` (the guided layout on it), or FreeBSD's
 /// `disk [scheme] { size type [mountpoint], ... }`.
 pub fn parse_partitions(s: &str) -> Result<Layout, String> {
     let s = s.trim();
     if s.is_empty() || s == "DEFAULT" {
-        return Ok(Layout::Guided(None));
+        return Ok(Layout::Guided { disk: None, how: Guided::Auto });
     }
     let (head, body) = match s.find('{') {
         Some(i) => {
@@ -88,16 +108,21 @@ pub fn parse_partitions(s: &str) -> Result<Layout, String> {
         None => (s, None),
     };
     let words: Vec<&str> = head.split_whitespace().collect();
+    let Some(body) = body else {
+        let (disk, how) = match words.as_slice() {
+            [w] => match parse_guided(w) {
+                Some(how) => (None, how),
+                None => (Some(w.to_string()), Guided::Auto),
+            },
+            [disk, w] => (Some(disk.to_string()), parse_guided(w).ok_or("PARTITIONS: a scheme without partitions")?),
+            _ => return Err(format!("PARTITIONS: `{head}`: expected a disk and BESIDE or WHOLE")),
+        };
+        return Ok(Layout::Guided { disk, how });
+    };
     let (disk, scheme) = match words.as_slice() {
         [disk] => (disk.to_string(), None),
         [disk, scheme] => (disk.to_string(), Some(*scheme)),
         _ => return Err(format!("PARTITIONS: `{head}`: expected a disk and a scheme")),
-    };
-    let Some(body) = body else {
-        if scheme.is_some() {
-            return Err("PARTITIONS: a scheme without partitions".into());
-        }
-        return Ok(Layout::Guided(Some(disk)));
     };
     let scheme = match scheme.map(|s| s.to_ascii_uppercase()).as_deref() {
         None | Some("GPT") => Scheme::Gpt,
@@ -185,9 +210,13 @@ mod tests {
 
     #[test]
     fn partitions() {
-        assert_eq!(parse_partitions("DEFAULT"), Ok(Layout::Guided(None)));
-        assert_eq!(parse_partitions(""), Ok(Layout::Guided(None)));
-        assert_eq!(parse_partitions("ide0"), Ok(Layout::Guided(Some("ide0".into()))));
+        let guided = |disk: Option<&str>, how| Ok(Layout::Guided { disk: disk.map(str::to_string), how });
+        assert_eq!(parse_partitions("DEFAULT"), guided(None, Guided::Auto));
+        assert_eq!(parse_partitions(""), guided(None, Guided::Auto));
+        assert_eq!(parse_partitions("ide0"), guided(Some("ide0"), Guided::Auto));
+        assert_eq!(parse_partitions("BESIDE"), guided(None, Guided::Beside));
+        assert_eq!(parse_partitions("ide0 WHOLE"), guided(Some("ide0"), Guided::Whole));
+        assert_eq!(parse_partitions(" virt1  BESIDE "), guided(Some("virt1"), Guided::Beside));
         let l = parse_partitions("ide0 GPT { 512K bios, 260M efi, 2G oxfs /, auto oxfs /home, 1G swap }").unwrap();
         let Layout::Explicit { disk, scheme, parts } = l else { panic!() };
         assert_eq!((disk.as_str(), scheme), ("ide0", Scheme::Gpt));
@@ -204,6 +233,8 @@ mod tests {
             "ide0 GPT { 1Q oxfs / }",
             "ide0 GPT { auto oxfs /",
             "ide0 GPT",
+            "ide0 beside",
+            "ide0 BESIDE WHOLE",
         ] {
             assert!(parse_partitions(bad).is_err(), "{bad}");
         }

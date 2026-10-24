@@ -11,6 +11,7 @@
 mod config;
 mod curses;
 mod engine;
+mod loaders;
 
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;

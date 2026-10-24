@@ -2,7 +2,8 @@
 //! BOOTX64.EFI`), and the firmware's device path for it (`HD(1,GPT,<guid>,0x800,0x82000)/
 //! \EFI\OxideBSD\BOOTX64.EFI`): the partition is found by its GPT entry (`lib/libpart`), the
 //! mount by the device it's mounted from -- the partition's node by its device number, or its
-//! label's (`/dev/gpt/<label>`, a node of its own, another number) by the GPT name.
+//! label's (`/dev/gpt/<label>`, a node of its own, another number) by the GPT name, its
+//! `/dev/gptid/<guid>` by the GUID.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -90,8 +91,11 @@ fn rdev(path: &str) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| m.rdev())
 }
 
-/// Whether device `spec` (a mount's) is partition `p`: its own node, or its label's.
+/// Whether device `spec` (a mount's) is partition `p`: its own node, its label's or its GUID's.
 fn names(spec: &str, p: &Part) -> bool {
+    if let Some(id) = spec.strip_prefix("/dev/gptid/") {
+        return part::parse_guid(id) == Some(p.guid);
+    }
     match spec.strip_prefix("/dev/gpt/") {
         Some(label) => !p.label.is_empty() && label == p.label,
         None => rdev(spec).is_some_and(|d| rdev(&p.dev) == Some(d)),
