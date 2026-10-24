@@ -41,10 +41,6 @@ const SECTOR: u64 = 512;
 const ALIGN: u64 = 2048;
 /// The GPT entry array's bytes (16 KiB): a whole number of sectors of every size `-S` takes.
 const GPT_ENTRY_BYTES: u64 = 128 * 128;
-/// Where Limine's boot sector keeps stage 2's byte offset.
-const STAGE2_LOC_OFFSET: usize = 0x1a4;
-/// Stage 2's place on an MBR disk: after the boot sector, and a multiple of every sector size.
-const MBR_STAGE2_LOC: u64 = 4096;
 
 fn usage() -> ExitCode {
     eprintln!("usage: mkimg -s gpt|mbr -o outfile [-S secsz] [-c capacity] [-b bootcode] -p type[/label]:=file|::size ...");
@@ -140,41 +136,6 @@ fn parse_part(s: &str) -> Result<Part, String> {
     Ok(Part { kind, label: label.to_string(), file, sectors: bytes.div_ceil(4096) * 8, first: 0 })
 }
 
-/// `-b`: Limine's boot sector over sector 0 (its timestamp, bytes 218-223, and the partition
-/// table, 440-509, kept), stage 2 at `stage2_loc`, and that offset in the boot sector.
-fn install_bootcode(disk: &File, scheme: Scheme, parts: &[Part], code: &[u8]) -> Result<(), String> {
-    if code.len() <= SECTOR as usize {
-        return Err("boot code: no stage 2 after its first sector".into());
-    }
-    let stage2 = &code[SECTOR as usize..];
-    let (loc, room) = match scheme {
-        Scheme::Gpt => {
-            let bios = parts
-                .iter()
-                .find(|p| p.kind == PartType::Bios)
-                .ok_or("-b on a GPT disk needs a bios partition (-p bios::64k)")?;
-            (bios.first * SECTOR, bios.sectors * SECTOR)
-        }
-        // Partitions start at 1 MiB; Limine itself allows up to sector 63.
-        Scheme::Mbr => (MBR_STAGE2_LOC, 63 * SECTOR - MBR_STAGE2_LOC),
-    };
-    if stage2.len() as u64 > room {
-        return Err(format!("boot code: stage 2 is {} bytes, only {room} fit", stage2.len()));
-    }
-    let mut sector0 = vec![0u8; SECTOR as usize];
-    disk.read_exact_at(&mut sector0, 0).map_err(|e| e.to_string())?;
-    sector0[..218].copy_from_slice(&code[..218]);
-    sector0[224..440].copy_from_slice(&code[224..440]);
-    sector0[510..512].copy_from_slice(&code[510..512]);
-    sector0[STAGE2_LOC_OFFSET..STAGE2_LOC_OFFSET + 8].copy_from_slice(&loc.to_le_bytes());
-    // Some BIOSes boot only a disk with an active partition: the first, as Limine marks it.
-    if scheme == Scheme::Mbr && !(0..4).any(|i| sector0[446 + i * 16] == 0x80) {
-        sector0[446] = 0x80;
-    }
-    disk.write_all_at(&sector0, 0).map_err(|e| e.to_string())?;
-    disk.write_all_at(stage2, loc).map_err(|e| e.to_string())
-}
-
 /// The table of a disk of `total` sectors of `ss` bytes holding `parts` (laid out in 512-byte
 /// sectors). A GPT's disk and partition GUIDs are derived from the layout, so the same
 /// partitions give the same disk.
@@ -230,11 +191,14 @@ fn run(scheme: Scheme, out: &str, ss: u64, capacity: u64, bootcode: Option<&[u8]
         .map_err(|e| format!("{out}: {e}"))?;
     disk.set_len(total * ss).map_err(|e| format!("{out}: {e}"))?;
     let io = |e: std::io::Error| format!("{out}: {e}");
-    for (lba, bytes) in table(scheme, total, &parts, ss)?.write() {
+    let mut t = table(scheme, total, &parts, ss)?;
+    // `-b`: Limine's boot sector and stage 2 (libpart's `set_bios_bootcode`).
+    let stage2 = match bootcode {
+        Some(code) => Some(t.set_bios_bootcode(code).map_err(|e| format!("{out}: boot code: {e}"))?),
+        None => None,
+    };
+    for (lba, bytes) in t.write().into_iter().chain(stage2) {
         disk.write_all_at(&bytes, lba * ss).map_err(io)?;
-    }
-    if let Some(code) = bootcode {
-        install_bootcode(&disk, scheme, &parts, code).map_err(|e| format!("{out}: {e}"))?;
     }
     let mut buf = vec![0u8; 1 << 20];
     for p in &mut parts {

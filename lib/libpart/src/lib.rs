@@ -288,6 +288,9 @@ pub enum Error {
     TooBigForMbr,
     /// A size or start of zero, or not whole 4 KiB blocks.
     BadSize,
+    /// BIOS boot code with no stage 2, or one too large for its place; or a GPT disk without a
+    /// BIOS boot partition, or a disk of other than 512-byte sectors.
+    BootCode,
 }
 
 impl fmt::Display for Error {
@@ -302,6 +305,7 @@ impl fmt::Display for Error {
             Error::BadLabel => "labels are GPT's, at most 36 characters",
             Error::TooBigForMbr => "past MBR's 2 TiB",
             Error::BadSize => "sizes are whole 4 KiB blocks, more than none",
+            Error::BootCode => "the BIOS boot code doesn't fit: GPT needs a bios-boot partition large enough, and sectors of 512 bytes",
         })
     }
 }
@@ -706,6 +710,49 @@ impl Table {
             e.label = String::from(l);
         }
         Ok(())
+    }
+
+    /// Takes Limine's BIOS boot code (`limine-bios-hdd.bin`) as `limine bios-install` does
+    /// (OxideBSD-doc `RAM_FLOOR.md` §4.4.4): its first sector becomes the boot sector's code (the
+    /// disk timestamp at bytes 218-223 and the disk signature kept), and the rest, stage 2, goes
+    /// into the GPT's BIOS boot partition, or on MBR into the gap before the first partition; the
+    /// boot sector is told where (a little-endian byte offset at `0x1a4`). An MBR disk's first
+    /// partition is marked active if none is, as some BIOSes need. [`Table::write`] then writes
+    /// the boot sector; stage 2 is returned as `(lba, bytes)` for the caller to write with it.
+    pub fn set_bios_bootcode(&mut self, code: &[u8]) -> Result<(u64, Vec<u8>), Error> {
+        const SECTOR: usize = 512;
+        const STAGE2_LOC_OFFSET: usize = 0x1a4;
+        // After the boot sector, and a multiple of every sector size; Limine allows up to 63.
+        const MBR_STAGE2_LOC: u64 = 4096;
+        if self.sector_size as usize != SECTOR || code.len() <= SECTOR {
+            return Err(Error::BootCode);
+        }
+        let stage2 = &code[SECTOR..];
+        let (loc, room) = match self.scheme {
+            Scheme::Gpt => {
+                let bios = self.entries.iter().find(|e| e.kind() == Kind::BiosBoot).ok_or(Error::BootCode)?;
+                (bios.first * SECTOR as u64, bios.sectors * SECTOR as u64)
+            }
+            Scheme::Mbr => {
+                let first = self.entries.iter().map(|e| e.first).min().unwrap_or(u64::MAX);
+                let end = (63 * SECTOR as u64).min(first.saturating_mul(SECTOR as u64));
+                (MBR_STAGE2_LOC, end.saturating_sub(MBR_STAGE2_LOC))
+            }
+        };
+        if stage2.len() as u64 > room {
+            return Err(Error::BootCode);
+        }
+        self.boot[..218].copy_from_slice(&code[..218]);
+        self.boot[224..440].copy_from_slice(&code[224..440]);
+        self.boot[STAGE2_LOC_OFFSET..STAGE2_LOC_OFFSET + 8].copy_from_slice(&loc.to_le_bytes());
+        if self.scheme == Scheme::Mbr && !self.entries.iter().any(|e| e.active) {
+            if let Some(first) = self.entries.iter().min_by_key(|e| e.first).map(|e| e.index) {
+                self.set_active(first, true)?;
+            }
+        }
+        let mut bytes = stage2.to_vec();
+        bytes.resize(stage2.len().div_ceil(SECTOR) * SECTOR, 0);
+        Ok((loc / SECTOR as u64, bytes))
     }
 
     /// Sets (or clears) MBR partition `index`'s boot flag; setting it clears the others'.

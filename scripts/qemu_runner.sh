@@ -116,6 +116,39 @@ case "$TEST_NAME" in
         QEMU_PASS_PATTERN="mfsroot-ok 42 keys=yzü partitions=1"
         QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|\[fault\]|repeating too quickly"
         ;;
+    install_disk)
+        # The installer's engine (INSTALLER.md step 9a), in three boots of this script, each at
+        # 64 MB, on one disk: the install medium, where tests/install_disk.serial runs
+        # `installer -f` onto it while blank; then the installed disk alone, on UEFI and on BIOS,
+        # to the login prompt of the host name it was given.
+        OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-64}"
+        export OXIDEBSD_QEMU_MEM
+        INSTALLED_DISK="target/images/installed.img"
+        QEMU_FAIL_PATTERN="panicked at|PANIC|[Oo]ut of memory|ENOMEM|rc: failed services|\[fault\]|install-failed-2"
+        case "${INSTALL_DISK_PHASE:-}" in
+            "")
+                rm -f "$INSTALLED_DISK"
+                truncate -s 4G "$INSTALLED_DISK"
+                for phase in install uefi bios; do
+                    echo "qemu_runner.sh: install_disk: $phase"
+                    INSTALL_DISK_PHASE=$phase "$0" "$@" || exit $?
+                done
+                exit 0
+                ;;
+            install)
+                INSTALL_BOOT=1
+                QEMU_SERIAL_INPUT_AFTER="Up and down choose, Enter goes."
+                QEMU_PASS_PATTERN="install-5-done"
+                ;;
+            uefi | bios)
+                OXIDEBSD_FIRMWARE=$INSTALL_DISK_PHASE
+                export OXIDEBSD_FIRMWARE
+                QEMU_SERIAL_INPUT=""
+                QEMU_NO_ISO=1
+                QEMU_PASS_PATTERN="OxideBSD/[^ ]+ \(installed\)"
+                ;;
+        esac
+        ;;
     oom_syscall_smoke)
         # Runs out of memory on purpose (COW.md §6): small, so filling it is quick.
         OXIDEBSD_QEMU_MEM="${OXIDEBSD_QEMU_MEM:-128}"
@@ -302,7 +335,10 @@ if [ "${DISK_REGISTRY_TEST:-0}" = 1 ]; then
     QEMU_EXTRA_ARGS="$QEMU_EXTRA_ARGS -device ide-hd,drive=regide,bus=ide.0,unit=0"
 fi
 
-if [ "$IS_TEST" = 1 ]; then
+if [ -n "${INSTALLED_DISK:-}" ]; then
+    # install_disk's one disk, kept from boot to boot.
+    QEMU_DISK_IMAGE="$INSTALLED_DISK"
+elif [ "$IS_TEST" = 1 ]; then
     QEMU_DISK_IMAGE="target/oxfs_test_disk.img"
     QEMU_DISK_FRESH=1
 else

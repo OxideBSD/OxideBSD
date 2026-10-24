@@ -3,9 +3,14 @@
 //! The install medium's `/etc/ttys` starts it on the console as `installer -t ttyv0`, in place of
 //! getty: it takes the terminal as a session of its own, then shows its first screen, from which
 //! the user installs, gets a shell on the mfsroot (recovery, §4.4) or reboots. init starts it again
-//! whenever it exits. The install steps themselves (§9.2) come with `INSTALLER.md` step 9.
+//! whenever it exits. The install steps' screens (§9.2) come with `INSTALLER.md` step 9b.
+//!
+//! `installer -f file` installs with no screens, every answer read from `file`, an
+//! `installerconfig` (§9.4, `config`), and exits 0 once the new system is in place (`engine`).
 
+mod config;
 mod curses;
+mod engine;
 
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
@@ -14,7 +19,7 @@ use std::process::ExitCode;
 use curses::{A_BOLD, A_REVERSE, KEY_DOWN, KEY_ENTER, KEY_UP, Screen};
 
 fn usage() -> ExitCode {
-    eprintln!("usage: installer [-t tty]");
+    eprintln!("usage: installer [-t tty]\n       installer -f installerconfig");
     ExitCode::from(1)
 }
 
@@ -101,6 +106,21 @@ fn welcome(screen: &Screen, title: &str, at: &mut usize) -> Option<Choice> {
     }
 }
 
+/// `-f`: installs as `file` says, telling each step on the standard output.
+fn scripted(file: &str) -> ExitCode {
+    let result = config::read(file).and_then(|cfg| engine::install(&cfg, &mut |step| println!("installer: {step}")));
+    match result {
+        Ok(()) => {
+            println!("installer: OxideBSD is installed");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("installer: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -111,6 +131,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+        [f, file] if f == "-f" => return scripted(file),
         _ => return usage(),
     }
     let title = format!("OxideBSD {} installer", release());

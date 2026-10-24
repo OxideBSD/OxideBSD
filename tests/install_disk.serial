@@ -1,0 +1,1 @@
+jcat > /tmp/ic <<'END'PARTITIONS=DEFAULTHOSTNAME=installed#!/bin/shecho '    kernel_cmdline: -D' >> /boot/efi/boot/limine/limine.confEND/usr/libexec/installer -f /tmp/ic && echo install-$((2 + 3))-done || echo install-failed-$((1 + 1))

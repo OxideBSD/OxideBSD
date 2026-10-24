@@ -170,6 +170,10 @@ name = "install_boot"
 harness = false
 
 [[test]]
+name = "install_disk"
+harness = false
+
+[[test]]
 name = "install_boot_bios"
 harness = false
 

@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 22, 2026
+.Dd October 23, 2026
 .Dt INSTALLER 8
 .Os OxideBSD
 .Sh NAME
@@ -8,6 +8,8 @@
 .Sh SYNOPSIS
 .Nm /usr/libexec/installer
 .Op Fl t Ar tty
+.Nm /usr/libexec/installer
+.Fl f Ar installerconfig
 .Sh DESCRIPTION
 .Nm
 runs on the console of a machine booted from the install medium,
@@ -35,7 +37,9 @@ Its first screen offers:
 .Bl -tag -width Install
 .It Install
 Install OxideBSD on a disk of this machine.
-Not yet written: the partition editor and the install steps come next.
+Not yet written: the install steps' screens come next; until then, install with
+.Fl f
+from the shell.
 .It Shell
 A shell on the mfsroot, for recovery:
 .Xr rescue 8 Ns 's
@@ -56,6 +60,12 @@ move between them; Enter chooses.
 .Pp
 The options are:
 .Bl -tag -width Ds
+.It Fl f Ar installerconfig
+Install with no screens, every answer read from
+.Ar installerconfig
+(below), and exit 0 once the new system is in place, telling each step on the
+standard output.
+The disk it names is erased without asking.
 .It Fl t Ar tty
 Take
 .Pa /dev/ Ns Ar tty
@@ -64,6 +74,132 @@ output and error, as
 .Xr getty 8
 does.
 .El
+.Sh INSTALLING
+An install, from the screens or from an
+.Ar installerconfig :
+.Bl -enum -compact
+.It
+finds the install medium among the CD drives by its volume label,
+.Li OXIDEBSD_INSTALL ,
+mounts it read-only on
+.Pa /dist ,
+and checks each chosen set against its
+.Pa MANIFEST ;
+.It
+writes the disk's new partition table, with Limine's BIOS boot code, and makes
+each partition's file system:
+.Xr newfs_oxfs 8
+and, on the EFI system partition, FAT32
+.Pq Xr newfs_msdos 8 ;
+.It
+mounts them under
+.Pa /mnt
+and extracts the sets onto them;
+.It
+writes the new system's
+.Xr fstab 5
+(each partition by its GPT label:
+.Pa /dev/gpt/rootfs
+for
+.Pa / ,
+.Pa /dev/gpt/efi
+for
+.Pa /boot/efi ) ,
+its host name in
+.Xr rc.conf 5 ,
+its keyboard layout in
+.Xr wsconsctl.conf 5 ,
+and root's password;
+.It
+puts Limine
+.Pq Pa EFI/BOOT/BOOTX64.EFI , Pa boot/limine/limine-bios.sys ,
+its
+.Pa limine.conf ,
+the kernel and
+.Pa /boot/fsconf
+.Pq Xr fsconf_mkdb 8
+on the EFI system partition, so the disk boots on BIOS and on UEFI;
+.It
+runs the
+.Ar installerconfig Ns 's
+script, if it has one, in the new system
+.Pq Xr chroot 2 ,
+with the EFI system partition on
+.Pa /boot/efi ;
+.It
+unmounts everything.
+.El
+.Sh INSTALLERCONFIG
+The answer file is FreeBSD's
+.Xr bsdinstall 8
+format: a preamble of shell variable assignments, run by
+.Xr sh 1 ,
+then optionally a line
+.Li #!/bin/sh
+and a script for the new system.
+The variables are:
+.Bl -tag -width DISTRIBUTIONS
+.It Ev PARTITIONS
+.Li DEFAULT
+(or unset): the guided layout on the first disk that isn't a CD drive.
+A disk's name alone: the guided layout on it.
+Otherwise
+.Ar disk Oo Li GPT | Li MBR Oc Li { Ar size type Oo Ar mountpoint Oc , ... Li } :
+a new table of those partitions, in order;
+.Ar size
+in bytes or with
+.Li K ,
+.Li M ,
+.Li G
+or
+.Li T ,
+or
+.Li auto
+for what's left (one partition at most);
+.Ar type
+one of
+.Li oxfs ,
+.Li efi ,
+.Li bios
+(a BIOS boot partition) and
+.Li swap ;
+an
+.Li oxfs
+partition is mounted on its
+.Ar mountpoint ,
+and one of them must be
+.Pa / .
+The guided layout is a GPT of a 512 KiB BIOS boot partition, a 260 MiB EFI
+system partition, and
+.Pa /
+over the rest.
+.It Ev DISTRIBUTIONS
+The sets, by file name:
+.Li base.tar.zst
+is always among them; also
+.Li clang.tar.zst
+and
+.Li tests.tar.zst .
+.It Ev HOSTNAME
+The new system's host name.
+.It Ev KEYMAP
+Its keyboard layout, a
+.Xr wsconsctl 8
+.Li keyboard.encoding
+name.
+.It Ev ROOTPASS
+Root's password.
+.El
+.Pp
+For example:
+.Bd -literal -offset indent
+PARTITIONS="ide0 GPT { 512K bios, 260M efi, 20G oxfs /, auto oxfs /home }"
+DISTRIBUTIONS="base.tar.zst clang.tar.zst"
+HOSTNAME=oxide
+KEYMAP=de
+#!/bin/sh
+pw useradd alice -m -G wheel
+.Ed
 .Sh FILES
 .Bl -tag -width /OxideBSD/<version>/MANIFEST -compact
 .It Pa /boot/mfsroot
@@ -71,10 +207,15 @@ the mfsroot on the medium, compressed
 .It Pa /OxideBSD/ Ns Ar version Ns Pa /*.tar.zst
 the sets
 .It Pa /OxideBSD/ Ns Ar version Ns Pa /MANIFEST
-each set's SHA-256 and size
+each set's SHA-256 and number of files
+.It Pa /boot/limine/limine-bios-hdd.bin
+Limine's BIOS boot code, for the new disk
 .El
 .Sh SEE ALSO
+.Xr fstab 5 ,
+.Xr rc.conf 5 ,
 .Xr ttys 5 ,
+.Xr gpart 8 ,
 .Xr init 8 ,
 .Xr rescue 8
 .Sh HISTORY

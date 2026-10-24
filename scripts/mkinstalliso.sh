@@ -40,7 +40,8 @@ put() { ln -f "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 OBJCOPY="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy"
 "$OBJCOPY" --strip-debug "$KERNEL" "$ROOT/boot/kernel"
 put "$MFSROOT" "$ROOT/boot/mfsroot"
-for f in limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin; do
+# limine-bios-hdd.bin: the BIOS boot code the installer puts on the disk (INSTALLER.md §8.4).
+for f in limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin limine-bios-hdd.bin; do
     put "$STAGE/$f" "$ROOT/boot/limine/$f"
 done
 put "$STAGE/BOOTX64.EFI" "$ROOT/EFI/BOOT/BOOTX64.EFI"

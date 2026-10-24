@@ -248,3 +248,38 @@ fn names() {
     assert_eq!(parse_guid("not-a-guid"), None);
     assert_eq!(Kind::parse("ufs"), None);
 }
+
+#[test]
+fn bios_boot_code() {
+    // A stand-in for limine-bios-hdd.bin: a boot sector, then 3 sectors of stage 2.
+    let mut boot = vec![0x11u8; 512 + 3 * 512 - 7];
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let (mut mem, mut t) = gpt_disk(512, 64 * MIB);
+    t.boot[218..224].copy_from_slice(b"STAMP!");
+    t.boot[440..444].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+    assert_eq!(t.set_bios_bootcode(&boot), Err(Error::BootCode));
+    t.add(code(Kind::BiosBoot, Scheme::Gpt), "", None, Some(128), [1; 16]).unwrap();
+    t.add(code(Kind::Oxfs, Scheme::Gpt), "rootfs", None, None, [2; 16]).unwrap();
+    let (lba, stage2) = t.set_bios_bootcode(&boot).unwrap();
+    let bios = t.entries.iter().find(|e| e.kind() == Kind::BiosBoot).unwrap().first;
+    assert_eq!((lba, stage2.len()), (bios, 3 * 512));
+    mem.apply(&t.write());
+    mem.apply(&[(lba, stage2)]);
+    assert_eq!(mem.table().unwrap(), t);
+    assert_eq!(&mem.data[218..224], b"STAMP!");
+    assert_eq!(&mem.data[440..444], &0xdead_beefu32.to_le_bytes());
+    assert_eq!(u64::from_le_bytes(mem.data[0x1a4..0x1ac].try_into().unwrap()), bios * 512);
+    assert_eq!(mem.data[0], 0x11);
+    // A stage 2 larger than its partition, and a 4Kn disk, are refused.
+    assert_eq!(t.set_bios_bootcode(&vec![0u8; 512 + 128 * 512 + 1]), Err(Error::BootCode));
+    let (_, mut t4) = gpt_disk(4096, 64 * MIB);
+    t4.add(code(Kind::BiosBoot, Scheme::Gpt), "", None, Some(16), [1; 16]).unwrap();
+    assert_eq!(t4.set_bios_bootcode(&boot), Err(Error::BootCode));
+
+    // MBR: stage 2 in the gap at 4 KiB, the first partition made active.
+    let mut m = Table::new(Scheme::Mbr, 512, 64 * MIB / 512, [0; 16]).unwrap();
+    m.add(code(Kind::Oxfs, Scheme::Mbr), "", None, None, [0; 16]).unwrap();
+    assert_eq!(m.set_bios_bootcode(&boot).unwrap().0, 8);
+    assert!(m.entry(1).unwrap().active);
+}
