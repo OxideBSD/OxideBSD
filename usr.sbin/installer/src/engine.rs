@@ -592,6 +592,20 @@ fn set_rc(rc_conf: &str, key: &str, value: Option<&str>) -> String {
     out.join("\n") + "\n"
 }
 
+/// `ttys` with every `ttyv` terminal marked `secure`: root may log in there.
+fn secure_consoles(ttys: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for l in ttys.lines() {
+        if l.starts_with("ttyv") && l.trim_end().ends_with("insecure") {
+            let at = l.rfind("insecure").unwrap_or(l.len());
+            out.push(format!("{}secure", &l[..at]));
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    out.join("\n") + "\n"
+}
+
 /// Where on the EFI system partition this install's kernel and `fsconf` go: a directory of its own
 /// under `\EFI\OxideBSD`, named by its root's GUID, so another OxideBSD can share the partition.
 fn system_dir(root: &Made) -> String {
@@ -833,6 +847,14 @@ pub fn install(cfg: &Config, say: &mut dyn FnMut(&str)) -> Result<(), String> {
         }
         status_ok("pw usermod root", child.wait())?;
     }
+    // The base set's `user` (password `user`, in wheel) is the development system's: never an
+    // installed one's. Gone before the users are made, so one may be called `user` again.
+    let r = in_target("/usr/sbin/pw").args(["userdel", "user", "-r"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    status_ok("pw userdel user", r)?;
+    if cfg.users.is_empty() {
+        // Nobody else to log in: root may at the console, which is otherwise insecure.
+        wr("ttys", &secure_consoles(&rd("ttys")?))?;
+    }
     for u in &cfg.users {
         say(&format!("Adding the user {}", u.name));
         let mut c = in_target("/usr/sbin/pw");
@@ -975,6 +997,14 @@ mod tests {
         assert!(again.starts_with(&new));
         assert_eq!(again.matches("bootmgfw").count(), 1);
         assert!(again.contains("/OxideBSD (second)\n    protocol: limine\n    kernel_path: boot():/EFI/OxideBSD/89abcdef/kernel"));
+    }
+
+    #[test]
+    fn consoles() {
+        let t = "# insecure: root may not log in\nconsole\tnone\tunknown\toff\tinsecure\nttyv0\t\"/usr/libexec/getty Pc\"\tlinux\ton\tinsecure\n";
+        let s = secure_consoles(t);
+        assert!(s.contains("ttyv0\t\"/usr/libexec/getty Pc\"\tlinux\ton\tsecure\n"));
+        assert!(s.contains("console\tnone\tunknown\toff\tinsecure") && s.starts_with("# insecure: root"));
     }
 
     #[test]

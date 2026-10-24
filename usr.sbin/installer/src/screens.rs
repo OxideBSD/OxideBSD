@@ -581,9 +581,9 @@ fn taken_names() -> Vec<String> {
 }
 
 const HELP_USERS: &str = "Root is the system's administrator; give it a password. Users are the \
-    people who log in: one in the wheel group can become root with su(1) or sudo(8). Users may \
-    be left for later (adduser(8), or a first-boot setup), but then only root can log in, and \
-    root can't log in from the network.";
+    people who log in: one in the wheel group can become root with su(1) or sudo(8); root itself \
+    may not log in at the console then. Users may be left for later (adduser(8), or a first-boot \
+    setup): then root logs in at the console, which is marked secure for it in ttys(5).";
 
 fn users(ui: &Ui, cfg: &mut Config) -> Flow {
     let mut f = [Field::secret("Password"), Field::secret("Again")];
@@ -635,7 +635,7 @@ fn user_list(ui: &Ui, cfg: &mut Config) -> bool {
                 if !cfg.users.is_empty() {
                     return true;
                 }
-                let text = "No users: only root can log in, and only at the console. Users can be added later (adduser, or a first-boot setup). Go on?";
+                let text = "No users: root logs in at the console instead, which is marked secure for it. Users can be added later (adduser, or a first-boot setup). Go on?";
                 if ui.yesno(&Dialog::new("Users", text, HELP_USERS), "Go on", "Back") == Some(true) {
                     return true;
                 }
