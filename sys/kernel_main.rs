@@ -162,6 +162,17 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // their own pid 1, keep it read-write.
     crate::drivers::disk::set_root_readonly_at_boot();
 
+    // The loader's memory (UEFI boot services, Limine's own data): 40 MB or more of a 64 MB UEFI
+    // machine, taken back before the file systems load and the root's mount fills the buffer
+    // cache: how much the loader holds varies (Limine started from a disk's ESP keeps 3 MB more
+    // than from the install medium), and none of it may decide whether a 64 MB machine boots. Not
+    // before the drivers above: the reclaimed frames are scattered, and their DMA buffers must
+    // be contiguous (and below 4 GiB) from the allocator's untouched regions. Every boot response
+    // the kernel keeps is copied first; Limine's page tables, which the kernel runs on, and this
+    // stack stay.
+    crate::boot::snapshot();
+    crate::memory::reclaim_bootloader_memory();
+
     load_file_systems();
     let (transfers, irqs) = crate::drivers::disk::stats();
     serial_println!("[boot] disk: {} transfers so far, {} completion interrupts", transfers, irqs);
@@ -220,12 +231,6 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // stdin/stdout/stderr moved out of being special-cased directly in sys_read/sys_write) --
     // must happen before any process (starting with pid 1 below) can issue its first read/write.
     crate::fs::fd::init();
-
-    // The loader's memory (UEFI boot services, Limine's own data): 40 MB of a 64 MB UEFI
-    // machine. Every boot response the kernel keeps is copied first; Limine's page tables, which
-    // the kernel runs on, and this stack stay.
-    crate::boot::snapshot();
-    crate::memory::reclaim_bootloader_memory();
 
     // pid 1 is `/sbin/init` (INIT.md), read from the root file system as FreeBSD's start_init
     // does -- nothing userland is embedded in the kernel (RAM_FLOOR.md §4.6.3) -- started with the

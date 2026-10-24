@@ -371,8 +371,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
 - **RAM rule: never require more than 64 MB**, boot and console install, forever (user, 2026-10-14);
   UEFI is exempt only if OVMF itself needs more. `ram_floor_boot` boots at 64 MB and fails on any
   `[fault]` or failed rc service, not just panics. Under UEFI that takes our Limine fork's
-  `LIMINE_FIRMWARE_RESERVE_MIB` (set in `build.rs`) and `memory::reclaim_bootloader_memory`; boot
-  responses read after boot are cached first (`boot::snapshot`).
+  `LIMINE_FIRMWARE_RESERVE_MIB` (set in `build.rs`) and `memory::reclaim_bootloader_memory`, run
+  after the drivers take their DMA buffers (reclaimed frames are scattered) and before the file
+  systems load; boot responses read after boot are cached first (`boot::snapshot`). `install_disk`
+  boots an installed disk at 64 MB on both firmwares.
 - **The kernel never formats or seeds** (RAM_FLOOR.md §4): the system is `target/images/disk.img`,
   built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
   disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`

@@ -291,8 +291,9 @@ impl BootInfoFrameAllocator {
 
 /// Takes back the memory the boot loader leaves the kernel once it's done
 /// (`MEMMAP_BOOTLOADER_RECLAIMABLE`: UEFI boot services' memory, Limine's own data, its stack and
-/// page tables): 42 MB of a 64 MB UEFI machine, against 4 MB under BIOS. Once, after the boot
-/// responses the kernel keeps are copied (`boot::snapshot`) and before pid 1 starts.
+/// page tables): 42 MB of a 64 MB UEFI machine, against 4 MB under BIOS. Once, as soon as the heap
+/// exists (`kernel_main::run_real_system`), after the boot responses the kernel keeps are copied
+/// (`boot::snapshot`).
 ///
 /// Kept: the page tables the kernel runs on (Limine built them, and every address space shares
 /// their kernel half), found by walking the active ones, and the boot stack this runs on (the

@@ -144,7 +144,7 @@ pub struct FbInfo {
 #[cfg(not(feature = "multiboot2"))]
 pub fn primary_framebuffer() -> Option<FbInfo> {
     // Read once, at boot: the response lives in bootloader-reclaimable memory, which the kernel
-    // takes back before starting pid 1 (`memory::reclaim_bootloader_memory`).
+    // takes back once the heap exists (`memory::reclaim_bootloader_memory`).
     static FB: spin::Once<Option<FbInfo>> = spin::Once::new();
     *FB.call_once(read_primary_framebuffer)
 }
