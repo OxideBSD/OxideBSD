@@ -252,8 +252,9 @@ pub(crate) static MAXFILES: Mutex<i32> = Mutex::new(0);
 pub(crate) static MAXFILESPERPROC: Mutex<i32> = Mutex::new(0);
 
 /// `kern.utc_offset`: the local time zone's offset from UTC, in minutes east, OpenBSD's name and
-/// unit. The clock keeps UTC (`TIMEZONE.md` §4.3); this is for the formats that store local time,
-/// FAT's timestamps (msdosfs). `adjkerntz(8)` sets it from `/etc/localtime` at boot and from cron,
+/// unit. The kernel's clock keeps UTC (`TIMEZONE.md` §4.3); this is for the formats that store
+/// local time, FAT's timestamps (msdosfs), and for a CMOS clock keeping local time
+/// (`machdep.wall_cmos_clock`, `cpu::rtc::correct`). `adjkerntz(8)` sets it from `/etc/localtime` at boot and from cron,
 /// so it follows daylight saving time within the hour. Modules read it with
 /// `module::oxidebsd_utc_offset`.
 pub(crate) static UTC_OFFSET: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
@@ -411,6 +412,29 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
             },
         );
     }
+
+    // The real-time clock chip keeps local time (Windows' way) rather than UTC (`cpu::rtc`).
+    add_leaf(
+        t,
+        &machdep,
+        Leaf {
+            number: None,
+            name: "wall_cmos_clock",
+            kind: CTLTYPE_INT,
+            fmt: "I",
+            flags: CTLFLAG_RW,
+            descr: "The CMOS clock keeps local time, not UTC",
+            get: || int(crate::cpu::rtc::WALL_CMOS_CLOCK.load(core::sync::atomic::Ordering::Relaxed) as i32),
+            set: Some(|new| {
+                let v = new.try_into().map(i32::from_ne_bytes).map_err(|_| EINVAL as i64)?;
+                crate::cpu::rtc::WALL_CMOS_CLOCK.store(v != 0, core::sync::atomic::Ordering::Relaxed);
+                if crate::cpu::rtc::correct(None) {
+                    crate::process::timers::wake_realtime_sleepers_after_clock_change();
+                }
+                Ok(())
+            }),
+        },
+    );
 
     // UEFI's runtime services (`efirt`, EFIRT.md §5.3): whether they answer, the firmware, and
     // whether variables past the boot manager's may be written (§5.2).
@@ -584,6 +608,9 @@ fn populate(t: &mut BTreeMap<Vec<i32>, Oid>) {
                     return Err(EINVAL as i64);
                 }
                 UTC_OFFSET.store(v, core::sync::atomic::Ordering::Relaxed);
+                if crate::cpu::rtc::correct(Some(v)) {
+                    crate::process::timers::wake_realtime_sleepers_after_clock_change();
+                }
                 Ok(())
             }),
         },

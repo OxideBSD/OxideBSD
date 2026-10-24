@@ -58,6 +58,7 @@ static int child_exit_ok(int (*fn)(void))
 #include "inet.c"
 #include "kthread.c"
 #include "devctl.c"
+#include "wallclock.c"
 
 static const struct {
 	const char *name;
@@ -77,6 +78,7 @@ static const struct {
 	{ "devctl-dump", devctl_dump_main },
 	{ "devd-pipe", devd_pipe_main },
 	{ "pty-cycle", pty_cycle_main },
+	{ "wallclock", wallclock_main },
 };
 
 int main(int argc, char **argv)

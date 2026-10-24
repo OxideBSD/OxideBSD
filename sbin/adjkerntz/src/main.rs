@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Reads the offset in effect now from `/etc/localtime` (UTC without it; `TZ` is ignored, since
-//! the kernel's offset is the system's, not a user's) and sets the sysctl if it changed. rc(8)
+//! the kernel's offset is the system's, not a user's) and sets the sysctl. rc(8)
 //! runs it at boot and cron(8) every hour, so the offset follows daylight saving time; tzsetup(8)
 //! runs it after changing the zone.
 
@@ -44,17 +44,9 @@ fn main() -> ExitCode {
     }
     let want = local_offset();
     let name = c"kern.utc_offset";
-    let mut have: i32 = 0;
-    let mut len = size_of::<i32>();
-    // SAFETY: `have` and `len` are valid for the call.
-    if unsafe { sysctlbyname(name.as_ptr(), (&raw mut have).cast(), &mut len, std::ptr::null(), 0) } != 0 {
-        eprintln!("adjkerntz: kern.utc_offset: {}", std::io::Error::last_os_error());
-        return ExitCode::from(1);
-    }
-    if have == want {
-        return ExitCode::SUCCESS;
-    }
-    // SAFETY: as above, with `want` as the new value.
+    // Set even when it's the kernel's already: the first setting tells the kernel the zone is
+    // known, which a CMOS clock keeping local time waits for (`machdep.wall_cmos_clock`).
+    // SAFETY: `want` is valid for the call.
     if unsafe { sysctlbyname(name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), (&raw const want).cast(), size_of::<i32>()) } != 0 {
         eprintln!("adjkerntz: kern.utc_offset: {}", std::io::Error::last_os_error());
         return ExitCode::from(1);

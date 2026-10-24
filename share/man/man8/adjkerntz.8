@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: BSD-3-Clause
-.Dd October 17, 2026
+.Dd October 24, 2026
 .Dt ADJKERNTZ 8
 .Os OxideBSD
 .Sh NAME
@@ -15,6 +15,19 @@ among them, so the kernel needs the local zone's offset to convert:
 .Nm
 sets it.
 .Pp
+The machine's hardware (CMOS) clock keeps UTC too, unless
+.Pa /etc/wall_cmos_clock
+exists: then it keeps local time, as Windows keeps it, and
+.Xr rc 8
+sets the
+.Va machdep.wall_cmos_clock
+variable to 1 before running
+.Nm .
+Once both are known, the kernel takes the offset in effect then off the time it
+read from the hardware clock at boot, once; a later offset, at a change to or
+from daylight saving time, doesn't move the system clock, and keeping the
+hardware clock in local time across it is the other system's job.
+.Pp
 The option is as follows:
 .Bl -tag -width indent
 .It Fl a
@@ -23,7 +36,7 @@ Read the offset in effect now from
 and set the
 .Va kern.utc_offset
 .Xr sysctl 8
-variable, in minutes east of UTC, if it differs.
+variable, in minutes east of UTC.
 Without
 .Pa /etc/localtime
 the offset is 0.
@@ -45,9 +58,11 @@ saving time, and
 .Xr tzsetup 8
 runs it after changing the zone.
 .Sh FILES
-.Bl -tag -width /etc/localtime -compact
+.Bl -tag -width /etc/wall_cmos_clock -compact
 .It Pa /etc/localtime
 The local time zone.
+.It Pa /etc/wall_cmos_clock
+If present, the hardware clock keeps local time.
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -61,7 +76,8 @@ An
 .Nm
 command appeared in
 .Fx 1.0 ,
-where it also adjusts a hardware clock kept in local time.
+where it also adjusts a hardware clock kept in local time; here the kernel
+corrects the time it reads instead, and the hardware clock is never written.
 The
 .Va kern.utc_offset
 variable is

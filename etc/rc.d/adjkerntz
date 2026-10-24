@@ -6,7 +6,9 @@
 #
 # Tells the kernel the local time zone's offset (kern.utc_offset, adjkerntz(8)) before any file
 # system whose timestamps are local time (msdosfs) is checked or mounted. cron(8) runs it again
-# every hour, for daylight saving time.
+# every hour, for daylight saving time. With /etc/wall_cmos_clock the CMOS clock keeps local time
+# (as Windows keeps it): machdep.wall_cmos_clock says so first, and the kernel takes the offset
+# off the clock once.
 
 . /etc/rc.subr
 
@@ -17,6 +19,9 @@ stop_cmd=":"
 
 adjkerntz_start()
 {
+	if [ -f /etc/wall_cmos_clock ]; then
+		/sbin/sysctl -q machdep.wall_cmos_clock=1 > /dev/null
+	fi
 	/sbin/adjkerntz -a
 }
 

@@ -12,6 +12,8 @@
 //! year`, no century register read). Sub-second resolution isn't offered at all --
 //! `sys_clock_gettime`'s `CLOCK_REALTIME` always reports `tv_nsec = 0`.
 
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
 use x86_64::instructions::port::Port;
 
 const CMOS_INDEX: u16 = 0x70;
@@ -135,13 +137,53 @@ pub(crate) extern "C" fn oxidebsd_unix_time() -> i64 {
 /// function's own doc comment), which a one-shot `Once` can't express.
 static REALTIME_BASE_TICKS: spin::Mutex<Option<i64>> = spin::Mutex::new(None);
 
+/// `machdep.wall_cmos_clock` (FreeBSD's name): the chip keeps local time, as Windows keeps it,
+/// not UTC. rc(8) sets it from `/etc/wall_cmos_clock`, before `adjkerntz(8)` sets
+/// `kern.utc_offset`; once both are known the clock is corrected by that offset (`correct`).
+pub static WALL_CMOS_CLOCK: AtomicBool = AtomicBool::new(false);
+/// Whether `kern.utc_offset` has been set this boot (0 is a real offset, so it can't tell).
+static UTC_OFFSET_KNOWN: AtomicBool = AtomicBool::new(false);
+/// Seconds the chip's reading is ahead of UTC, taken away at calibration: the offset in effect
+/// when the correction was made, once; 0 for a chip keeping UTC.
+static RTC_AHEAD: AtomicI64 = AtomicI64::new(0);
+static CORRECTED: AtomicBool = AtomicBool::new(false);
+
+/// After `machdep.wall_cmos_clock` or `kern.utc_offset` (minutes east, `offset`) is set: with
+/// a chip keeping local time and the zone known, the clock is corrected once per boot by the
+/// zone's offset then -- at calibration, or at once if it was calibrated already. A later offset
+/// (daylight saving time, from cron's `adjkerntz`) changes nothing: the chip is read only at
+/// calibration, and the time the kernel keeps is UTC either way. Whether the clock moved.
+pub fn correct(offset_set: Option<i32>) -> bool {
+    if offset_set.is_some() {
+        UTC_OFFSET_KNOWN.store(true, Ordering::Relaxed);
+    }
+    if !WALL_CMOS_CLOCK.load(Ordering::Relaxed) || !UTC_OFFSET_KNOWN.load(Ordering::Relaxed) {
+        return false;
+    }
+    let offset = offset_set.unwrap_or_else(|| crate::kern::kern_sysctl::UTC_OFFSET.load(Ordering::Relaxed));
+    let mut guard = REALTIME_BASE_TICKS.lock();
+    if CORRECTED.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    let ahead = offset as i64 * 60;
+    RTC_AHEAD.store(ahead, Ordering::Relaxed);
+    match guard.as_mut() {
+        Some(base) => {
+            *base -= ahead * crate::cpu::pit::TIMER_HZ as i64;
+            ahead != 0
+        }
+        None => false,
+    }
+}
+
 fn realtime_base_ticks() -> i64 {
     let mut guard = REALTIME_BASE_TICKS.lock();
     match *guard {
         Some(base) => base,
         None => {
             let hz = crate::cpu::pit::TIMER_HZ as i64;
-            let base = unix_epoch_seconds() * hz - crate::cpu::interrupts::ticks() as i64;
+            let utc = unix_epoch_seconds() - RTC_AHEAD.load(Ordering::Relaxed);
+            let base = utc * hz - crate::cpu::interrupts::ticks() as i64;
             *guard = Some(base);
             base
         }
