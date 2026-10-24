@@ -264,6 +264,10 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   Rust, or after leaving it, goes in `.text.entry*`/`.data.entry*` (KPTI maps only those);
   `entry::check` panics at boot otherwise. Ring-3 traps land on `ENTRY_STACK` (fixed `TSS.RSP0`).
 - The NMI handler takes no locks (it only counts): an NMI can interrupt any lock holder.
+- **UEFI runtime calls** (`efirt`, `OxideBSD-doc/EFIRT.md`) run on a page table of their own with
+  the firmware mapped one to one; ring-0 trap handlers ask `efirt::fixup_fault` before anything
+  else (COW/demand paging must not try to resolve a firmware fault). Never call one from
+  interrupt context or holding a spin lock.
 - **KPTI** (`cpu::pti`, `THREAT_MODEL.md` §3.4): on for Intel without RDCL_NO, off otherwise;
   `pti=`/`kpti=`/`meltdown=` on|off override, `vm.pmap.pti`/`machdep.kpti`/`hw.meltdown` report it.
   Each `AddressSpace` gets a second (user) L4 mapping only the entry area plus its user half

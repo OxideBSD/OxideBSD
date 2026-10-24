@@ -17,7 +17,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use limine::memmap::Entry;
 #[cfg(not(feature = "multiboot2"))]
 use limine::request::FramebufferRequest;
-use limine::request::{ExecutableCmdlineRequest, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest};
+use limine::request::{
+    EfiMemmapRequest, EfiRequest, ExecutableCmdlineRequest, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest,
+};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
@@ -47,6 +49,14 @@ static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 /// `/boot/fsconf` (`kern::fsconf`).
 #[unsafe(link_section = ".requests")]
 static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
+
+/// The EFI system table and memory map, for UEFI's runtime services (`efirt`, OxideBSD-doc
+/// `EFIRT.md` §3). No response under BIOS.
+#[unsafe(link_section = ".requests")]
+static EFI_REQUEST: EfiRequest = EfiRequest::new();
+
+#[unsafe(link_section = ".requests")]
+static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end")]
@@ -216,6 +226,20 @@ pub fn rsdp_address() -> Option<u64> {
     *RSDP.call_once(|| RSDP_REQUEST.response().map(|r| r.address as u64))
 }
 
+/// The EFI system table's address (in the HHDM, at this base revision), if the firmware is UEFI.
+pub fn efi_system_table() -> Option<u64> {
+    // As `boot_module`: read once, before the response's memory is reclaimed.
+    static TABLE: spin::Once<Option<u64>> = spin::Once::new();
+    *TABLE.call_once(|| EFI_REQUEST.response().map(|r| r.address as u64).filter(|&a| a != 0))
+}
+
+/// A copy of the EFI memory map, and its descriptors' size, if the firmware is UEFI: the map
+/// itself lives in bootloader-reclaimable memory.
+pub fn efi_memory_map() -> Option<&'static (alloc::vec::Vec<u8>, usize)> {
+    static MAP: spin::Once<Option<(alloc::vec::Vec<u8>, usize)>> = spin::Once::new();
+    MAP.call_once(|| EFI_MEMMAP_REQUEST.response().map(|r| (r.memmap().to_vec(), r.desc_size as usize))).as_ref()
+}
+
 /// Reads every bootloader response the kernel uses after boot, so nothing reads them once the
 /// memory they live in is reclaimed (`memory::reclaim_bootloader_memory`). The heap must exist.
 pub fn snapshot() {
@@ -223,6 +247,8 @@ pub fn snapshot() {
     let _ = primary_framebuffer();
     let _ = boot_module("");
     let _ = rsdp_address();
+    let _ = efi_system_table();
+    let _ = efi_memory_map();
 }
 
 /// Whether the kernel was booted with `no-ata` on its Limine command line (`limine.conf`'s

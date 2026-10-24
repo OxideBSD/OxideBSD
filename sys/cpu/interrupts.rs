@@ -259,6 +259,10 @@ const EXCEPTIONS: [(&str, u64); 32] = {
 /// gates, a ring-3 divide by zero found vector 0 not present, which escalated to a double fault
 /// and rebooted the machine.
 fn exception(frame: &mut TrapFrame) {
+    // Inside a firmware call (`efirt`): that call fails, the kernel goes on.
+    if crate::efirt::fixup_fault(frame) {
+        return;
+    }
     let (name, signal) = EXCEPTIONS[frame.vector as usize];
     if frame.from_user() && signal != 0 && user_fault(frame, name, signal, None) {
         return;
@@ -325,6 +329,11 @@ fn user_fault(frame: &mut TrapFrame, name: &str, signal: u64, fault_addr: Option
 /// (every other unmapped/invalid ring-3 reference); `deliver_pending_signal`, reached via the
 /// trampoline, resolves the real disposition.
 fn page_fault_handler(frame: &mut TrapFrame) {
+    // Inside a firmware call (`efirt`), first: its page table isn't the process's, so nothing
+    // below (copy-on-write, demand paging, stack growth) may try to resolve the fault.
+    if crate::efirt::fixup_fault(frame) {
+        return;
+    }
     let error_code = PageFaultErrorCode::from_bits_truncate(frame.error_code);
     // KPTI lazy user-half mirror: a ring-3 fault on a 512 GiB region the user table hasn't got yet
     // just copies the L4 entry from the kernel table and retries (`cpu::pti::mirror_user_l4`).

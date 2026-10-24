@@ -172,6 +172,8 @@ pub fn run_real_system(boot_info: &'static BootInfo) -> ! {
     // stack stay.
     crate::boot::snapshot();
     crate::memory::reclaim_bootloader_memory();
+    // UEFI's runtime services (EFIRT.md), with the memory map just copied.
+    crate::efirt::init_and_log();
 
     load_file_systems();
     let (transfers, irqs) = crate::drivers::disk::stats();

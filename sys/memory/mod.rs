@@ -367,7 +367,7 @@ pub fn reclaim_bootloader_memory() {
 }
 
 /// The physical address of kernel virtual address `va` under the active page tables.
-fn translate_kernel(va: u64) -> Option<u64> {
+pub(crate) fn translate_kernel(va: u64) -> Option<u64> {
     use x86_64::structures::paging::{OffsetPageTable, Translate};
     let (l4, _) = x86_64::registers::control::Cr3::read();
     let offset = phys_mem_offset();

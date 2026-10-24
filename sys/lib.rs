@@ -11,6 +11,7 @@ pub mod boot;
 pub mod console;
 pub mod cpu;
 pub mod drivers;
+pub mod efirt;
 pub mod fs;
 pub mod kern;
 pub mod kernel_main;
