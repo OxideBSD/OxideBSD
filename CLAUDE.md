@@ -378,7 +378,9 @@ log `unrecognized syscall number N` and return `ENOSYS`.
   `LIMINE_FIRMWARE_RESERVE_MIB` (set in `build.rs`) and `memory::reclaim_bootloader_memory`, run
   after the drivers take their DMA buffers (reclaimed frames are scattered) and before the file
   systems load; boot responses read after boot are cached first (`boot::snapshot`). `install_disk`
-  boots an installed disk at 64 MB on both firmwares.
+  boots an installed disk at 64 MB on both firmwares. **Never add a Limine `ExecutableFileRequest`**:
+  the fork frees the kernel's file only without one, and the install medium's mfsroot needs that
+  room at 64 MB under UEFI with a partitioned disk (`install_beside`).
 - **The kernel never formats or seeds** (RAM_FLOOR.md §4): the system is `target/images/disk.img`,
   built by `build_install.rs` (makefs/mkimg, fsck'd at build). Tests boot a fresh copy; the dev
   disk `target/oxfs_disk.img` is replaced when the sets' contents change (`OXIDEBSD_KEEP_DISK=1`
