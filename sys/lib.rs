@@ -104,6 +104,11 @@ pub fn init(
     memory::usercopy::check_user_range_layout(&mapper);
     memory::wx::check_kernel(&mapper, "boot");
 
+    // The local APIC, for MSI delivery (`drivers::usb` mass storage). Legacy IRQs stay on the
+    // 8259; this only adds the MSI path. After the mapper exists (it maps the LAPIC's registers),
+    // before any driver that asks for an MSI vector.
+    cpu::apic::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
+
     if cpu::pti::enabled() {
         // Build the shared entry template, then arm the entry/exit CR3 switch. Both happen here,
         // after the mapper and frame allocator exist and before any user address space is built

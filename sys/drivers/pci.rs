@@ -113,6 +113,70 @@ impl PciDevice {
             command | (1 << 2),
         );
     }
+
+    pub fn config_read_u16(&self, offset: u8) -> u16 {
+        (self.config_read_u32(offset & !3) >> ((offset & 3) * 8)) as u16
+    }
+
+    pub fn config_write_u32(&self, offset: u8, value: u32) {
+        config_write_u32(self.bus, self.device, self.function, offset, value);
+    }
+
+    /// A 16-bit config-space write, read-modify-write of the dword that contains it (PCI config
+    /// space is only dword-addressable through the legacy port mechanism).
+    pub fn config_write_u16(&self, offset: u8, value: u16) {
+        let aligned = offset & !3;
+        let shift = (offset & 3) * 8;
+        let old = self.config_read_u32(aligned);
+        let new = (old & !(0xFFFF << shift)) | ((value as u32) << shift);
+        self.config_write_u32(aligned, new);
+    }
+
+    /// Programs this device's MSI-X capability to deliver `(address, data)` (from
+    /// `cpu::apic::msi_message`) on table entry 0, maps and unmasks that entry, and enables MSI-X.
+    /// One vector, entry 0, is all this kernel's single-interrupter devices need. `false` (logged)
+    /// if the device has no MSI-X capability -- the caller then falls back to `INTx` or polling.
+    ///
+    /// The vector table lives in a memory BAR (the capability's Table Offset/BIR field names
+    /// which); it's mapped uncached through the same primitive as any BAR, a no-op if the driver
+    /// already mapped that BAR for its registers.
+    pub fn enable_msix(
+        &self,
+        mapper: &mut impl Mapper<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+        phys_mem_offset: VirtAddr,
+        address: u32,
+        data: u32,
+    ) -> bool {
+        let Some(&cap) = self.capabilities(0x11).first() else {
+            return false;
+        };
+        let table = self.config_read_u32(cap + 4);
+        let bir = (table & 0x7) as usize;
+        let offset = (table & !0x7) as u64;
+        let Some(bar) = self.mem_bar(bir) else {
+            crate::serial_println!("[pci] MSI-X table BAR {} is not a memory BAR", bir);
+            return false;
+        };
+        let entry_phys = PhysAddr::new(bar + offset); // entry 0
+        let page_phys = PhysAddr::new(entry_phys.as_u64() & !0xFFF);
+        // Two pages: entry 0 sits at `offset & 0xFFF` into the page, and the 16-byte entry can't
+        // cross a page boundary, but a second page costs nothing and covers an unlucky alignment.
+        let page_virt = map_mmio(mapper, frame_allocator, phys_mem_offset, page_phys, 2);
+        let entry = page_virt + (entry_phys.as_u64() & 0xFFF);
+        // SAFETY: `entry` is the mapped, uncached MSI-X table entry 0.
+        unsafe {
+            let p = entry.as_mut_ptr::<u32>();
+            core::ptr::write_volatile(p, address);
+            core::ptr::write_volatile(p.add(1), 0); // message address high
+            core::ptr::write_volatile(p.add(2), data);
+            core::ptr::write_volatile(p.add(3), 0); // vector control: bit 0 clear = unmasked
+        }
+        // Message Control (cap + 2): set MSI-X Enable (bit 15), clear Function Mask (bit 14).
+        let mc = self.config_read_u16(cap + 2);
+        self.config_write_u16(cap + 2, (mc | (1 << 15)) & !(1 << 14));
+        true
+    }
 }
 
 fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {

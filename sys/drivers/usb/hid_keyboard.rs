@@ -20,7 +20,7 @@ use x86_64::structures::paging::{FrameAllocator, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
 use super::xhci::{
-    EndpointType, TrbRing, Xhci, alloc_zeroed_page, endpoint_dci, enqueue_normal_in,
+    EndpointType, RawTrb, TrbRing, Xhci, alloc_zeroed_page, endpoint_dci, enqueue_normal_in,
     write_endpoint_context, write_input_control_context, write_slot_context,
 };
 use crate::serial_println;
@@ -73,33 +73,40 @@ impl KeyboardDevice {
     /// resulting make/break scancodes into `interrupts::feed_synthetic_scancode`. Called once per
     /// timer tick (see `super::poll`) -- any other event type on the shared ring (there shouldn't
     /// be any once bring-up has finished) is simply dropped.
-    pub(crate) fn poll(&mut self, controller: &mut Xhci) {
-        while let Some(evt) = controller.poll_event() {
-            if !evt.is_transfer_event()
-                || evt.slot_id() != self.slot_id
-                || evt.endpoint_id() != self.interrupt_ep_dci
-            {
-                continue;
-            }
-            if evt.is_success() {
-                let mut report = [0u8; 8];
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        self.report_buf_virt.as_ptr::<u8>(),
-                        report.as_mut_ptr(),
-                        8,
-                    );
-                }
-                self.handle_report(report);
-            }
-            // Re-arm regardless of completion code -- a stalled/short-packet report shouldn't
-            // stop future polling.
-            enqueue_normal_in(&mut self.interrupt_ring, self.report_buf_phys, 8);
-            controller.ring_endpoint_doorbell(self.slot_id, self.interrupt_ep_dci);
+    /// Processes one Event Ring TRB if it belongs to this keyboard's interrupt-IN endpoint: reads
+    /// the completed report, re-arms the endpoint, and returns `true`. Returns `false` for any
+    /// other event, which the caller routes elsewhere. The drain loop (`usb::service`) owns the
+    /// Event Ring and is shared between the MSI handler and the polling fallback, so this sees one
+    /// event at a time rather than draining the ring itself.
+    pub(crate) fn handle_transfer_event(&mut self, controller: &mut Xhci, evt: RawTrb) -> bool {
+        if !evt.is_transfer_event()
+            || evt.slot_id() != self.slot_id
+            || evt.endpoint_id() != self.interrupt_ep_dci
+        {
+            return false;
         }
+        if evt.is_success() {
+            let mut report = [0u8; 8];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.report_buf_virt.as_ptr::<u8>(),
+                    report.as_mut_ptr(),
+                    8,
+                );
+            }
+            self.handle_report(report);
+        }
+        // Re-arm regardless of completion code -- a stalled/short-packet report shouldn't stop
+        // future input.
+        enqueue_normal_in(&mut self.interrupt_ring, self.report_buf_phys, 8);
+        controller.ring_endpoint_doorbell(self.slot_id, self.interrupt_ep_dci);
+        true
+    }
 
-        // Auto-repeat: driven by the clock, not by report arrival -- see `REPEAT_INITIAL_DELAY_
-        // TICKS`'s own doc comment for why a held key generates no further events to react to here.
+    /// Auto-repeat, driven by the clock rather than by report arrival -- see `REPEAT_INITIAL_DELAY_
+    /// TICKS`'s own doc comment for why a held key generates no further events to react to. Called
+    /// every timer tick, independent of how reports are delivered.
+    pub(crate) fn poll_repeat(&mut self) {
         if let Some(usage) = self.repeat_usage {
             let now = crate::cpu::interrupts::ticks();
             if now >= self.repeat_next_tick {

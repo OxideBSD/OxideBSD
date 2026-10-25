@@ -24,9 +24,10 @@ use x86_64::structures::DescriptorTablePointer;
 use crate::cpu::entry::ENTRY_STACK_SIZE;
 use crate::cpu::gdt::{self, DOUBLE_FAULT_IST_INDEX, MACHINE_CHECK_IST_INDEX, NMI_IST_INDEX};
 
-/// The vectors with a stub of their own: the 32 exceptions and the 16 legacy PIC lines. Every
-/// higher vector shares `trap_stub_spurious`, which reports itself as `SPURIOUS_VECTOR`.
-pub const STUB_VECTORS: usize = 48;
+/// The vectors with a stub of their own: the 32 exceptions, the 16 legacy PIC lines, and the
+/// `cpu::apic::MSI_VECTORS` MSI vectors above them (48..56). Every higher vector shares
+/// `trap_stub_spurious`, which reports itself as `SPURIOUS_VECTOR`.
+pub const STUB_VECTORS: usize = 56;
 
 /// What `trap_stub_spurious` pushes as its vector: nothing raises 255 here (the PICs are remapped
 /// to 32-47, and there's no local APIC in use), so seeing it means a stray interrupt.
@@ -139,6 +140,9 @@ trap_stubs! {
     36 noerr normal, 37 noerr normal, 38 noerr normal, 39 noerr normal,
     40 noerr normal, 41 noerr normal, 42 noerr normal, 43 noerr normal,
     44 noerr normal, 45 noerr normal, 46 noerr normal, 47 noerr normal,
+    // MSI vectors (`cpu::apic`): 48..56, routed to `apic::dispatch_msi`, LAPIC-acknowledged.
+    48 noerr normal, 49 noerr normal, 50 noerr normal, 51 noerr normal,
+    52 noerr normal, 53 noerr normal, 54 noerr normal, 55 noerr normal,
 }
 
 global_asm!(

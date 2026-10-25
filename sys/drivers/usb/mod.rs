@@ -3,13 +3,15 @@
 //! for). See `xhci`'s own module doc comment for the host-controller driver itself and
 //! `hid_keyboard`'s for the keyboard device on top of it.
 //!
-//! **Polled, not IRQ-driven, deliberately**: `poll()` is called once per timer tick (100 Hz, see
-//! `cpu::interrupts::timer_interrupt_handler`) rather than registering a PCI IRQ handler the way
-//! `drivers::rtl8139` does. This kernel has no IOAPIC/MSI support, and this is its first real-hardware
-//! (not just QEMU) boot target -- legacy PCI `INTx` routing on a modern UEFI-only chipset is a
-//! real, unquantified risk not worth taking just to shave a few milliseconds of keystroke latency
-//! a human typist will never notice. Matches `drivers::ata`'s own established polling-only
-//! precedent for exactly this class of "first real-hardware driver" concern.
+//! **MSI-X when the local APIC is up, with a polling safety net.** `init` arms the controller for
+//! MSI-X (`cpu::apic`) once boot enumeration is done, so completions arrive as interrupts
+//! (`msi_handler`) -- the keyboard's reports, and the bulk transfers of USB mass storage, where
+//! waiting on the 100 Hz tick would make disk I/O crawl. The tick-driven `poll` stays as a safety
+//! net (it drains anything an interrupt missed on lock contention) and as the sole path when
+//! there's no LAPIC or no MSI-X capability. Legacy `INTx` is deliberately not used: on the
+//! real-hardware target (a UEFI-only PCIe chipset) its routing is an unquantified risk, which is
+//! the whole reason `cpu::apic` exists. Auto-repeat is driven from `poll` either way, being a
+//! function of the clock, not of report arrival.
 //!
 //! One keyboard device for v1: the first HID boot-keyboard endpoint found during the one-time
 //! port scan in `init` wins; no hot-plug (attach/detach after boot). Mouse/pointer input is out of
@@ -27,6 +29,10 @@ use crate::serial_println;
 struct UsbState {
     controller: xhci::Xhci,
     keyboard: Option<hid_keyboard::KeyboardDevice>,
+    /// Whether the controller delivers completions as MSI-X (`msi_handler`) rather than relying on
+    /// the tick-driven `poll` fallback. Either way `poll` still drains the ring as a safety net
+    /// and drives keyboard auto-repeat.
+    msi_armed: bool,
 }
 
 /// `None` until `init` has found and brought up a real xHCI controller; stays `None` for the rest
@@ -83,27 +89,73 @@ pub fn init(
         serial_println!("[usb] xHCI controller up, but no HID boot keyboard found on any port");
     }
 
+    // Boot-time enumeration is done (it spin-polled the Event Ring synchronously), so it's now
+    // safe to hand the ring to the MSI handler. Store the state first, then arm MSI-X holding the
+    // state lock -- so if the very first completion interrupts mid-arm, `msi_handler` simply bails
+    // (lock held) and the tick `poll` drains it a moment later.
     *STATE.lock() = Some(UsbState {
         controller,
         keyboard,
+        msi_armed: false,
     });
+    if let Some(vector) = crate::cpu::apic::register_msi(msi_handler) {
+        let mut guard = STATE.lock();
+        let state = guard.as_mut().unwrap();
+        if state
+            .controller
+            .arm_msix(mapper, frame_allocator, phys_mem_offset, vector)
+        {
+            state.msi_armed = true;
+            serial_println!("[usb] xHCI completions via MSI-X (vector {})", vector);
+        }
+    }
 }
 
-/// Drains and processes any pending USB keyboard input. Called once per timer tick -- see this
-/// module's own doc comment for why polling, not an IRQ handler. A no-op (a single `try_lock` plus
-/// two `Option` checks) until `init` has actually found a working keyboard.
+/// Drains the Event Ring and dispatches each event to its owner (the keyboard today; a future
+/// mass-storage completion wakes its waiter here). The sole consumer of the ring once MSI is
+/// armed, and the polling fallback's drain otherwise -- both call it holding `STATE`, so the two
+/// never race on the ring's dequeue pointer. Acknowledges interrupter 0 at the end so the next
+/// completion can raise a fresh MSI.
+fn service(state: &mut UsbState) {
+    while let Some(evt) = state.controller.poll_event() {
+        if let Some(keyboard) = state.keyboard.as_mut()
+            && keyboard.handle_transfer_event(&mut state.controller, evt)
+        {
+            continue;
+        }
+        // Unclaimed: dropped, same as the driver has always done with a stray event.
+    }
+    if state.msi_armed {
+        state.controller.ack_interrupter();
+    }
+}
+
+/// The MSI-X interrupt handler: drains and dispatches completions. Bails on lock contention (the
+/// tick `poll`, or `init`'s arming, holds `STATE`) -- the tick drains what it missed within one
+/// tick. `cpu::apic::dispatch_msi` sends the LAPIC EOI after this returns.
+fn msi_handler() {
+    if let Some(mut guard) = STATE.try_lock()
+        && let Some(state) = guard.as_mut()
+    {
+        service(state);
+    }
+}
+
+/// Called once per timer tick. Drains the Event Ring as a safety net (when MSI is armed the
+/// handler normally does this first; this catches anything it skipped on lock contention, and is
+/// the only drain when MSI isn't armed), then drives keyboard auto-repeat (inherently clock-, not
+/// event-driven). A near-no-op until `init` has found a working controller.
 pub fn poll() {
     let Some(mut guard) = STATE.try_lock() else {
-        // Never expected to actually contend (this driver has no other caller), but a timer tick
-        // firing while `init` itself is still mid-setup is possible early at boot -- skip this
-        // tick rather than spin-waiting inside a timer IRQ.
+        // A timer tick firing while `init` is mid-setup, or during an MSI drain -- skip this tick
+        // rather than spin-waiting inside a timer IRQ.
         return;
     };
     let Some(state) = guard.as_mut() else {
         return;
     };
-    let Some(keyboard) = state.keyboard.as_mut() else {
-        return;
-    };
-    keyboard.poll(&mut state.controller);
+    service(state);
+    if let Some(keyboard) = state.keyboard.as_mut() {
+        keyboard.poll_repeat();
+    }
 }

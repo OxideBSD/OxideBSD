@@ -3,12 +3,14 @@
 //! <https://www.intel.com/content/www/us/en/products/docs/io/universal-serial-bus/extensible-host-controler-interface-usb-xhci.html>
 //! for the spec this follows (xHCI 1.1/1.2 register and data-structure layout).
 //!
-//! **Polling, not IRQ-driven, deliberately** -- see `super`'s own module doc comment for the full
-//! rationale (this kernel's first real-hardware boot target has no known-good legacy PCI `INTx`
-//! routing story, and this kernel has no IOAPIC/MSI support at all). Interrupter 0's Interrupt
-//! Enable bit and `USBCMD.INTE` are deliberately left clear -- the Event Ring mechanism itself
-//! (`ERSTBA`/`ERSTSZ`/`ERDP`) works identically either way; only actual CPU interrupt *signaling*
-//! is gated by those bits, and this driver never asks for one.
+//! **Event Ring completions: polled during boot enumeration, MSI-X-driven afterwards.** The Event
+//! Ring mechanism itself (`ERSTBA`/`ERSTSZ`/`ERDP`) runs the same either way; only CPU interrupt
+//! *signalling* is gated by interrupter 0's Interrupt Enable and `USBCMD.INTE`, both left clear
+//! until `arm_msix`. Boot enumeration (`enable_slot`/`address_device`/... and `hid_keyboard`'s
+//! bring-up) spin-polls the ring synchronously via the `wait_for_*` helpers; `super::init` then
+//! arms MSI-X (`cpu::apic`), after which the MSI handler owns the ring -- see `super`'s module doc
+//! comment. Legacy PCI `INTx` is deliberately not used (the real-hardware target's routing is an
+//! unquantified risk), which is why MSI came first.
 //!
 //! **32-byte device contexts only** (`HCCPARAMS1.CSZ == 0`) -- what QEMU's `qemu-xhci` and the
 //! overwhelming majority of real platforms use. A controller reporting `CSZ == 1` (64-byte
@@ -256,8 +258,13 @@ impl EventRing {
 /// Command Ring and one Event Ring every operation (regardless of which device slot it targets)
 /// shares.
 pub struct Xhci {
+    /// The controller's PCI function, kept for MSI-X capability programming (`arm_msix`).
+    pci: crate::drivers::pci::PciDevice,
     op_base: VirtAddr,
     db_base: VirtAddr,
+    /// Interrupter 0's register block (`IMAN` at +0, `ERDP` at +0x18), for enabling and
+    /// acknowledging its interrupt.
+    intr0: VirtAddr,
     dcbaa_virt: VirtAddr,
     max_ports: u8,
     cmd_ring: TrbRing,
@@ -279,6 +286,14 @@ const OP_PORTSC_STRIDE: u64 = 0x10;
 
 const USBCMD_RS: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
+/// USBCMD Interrupter Enable -- the controller-wide master gate on interrupt generation.
+const USBCMD_INTE: u32 = 1 << 2;
+
+/// Interrupter Management register (interrupter 0, `intr0 + 0`): bit 0 Interrupt Pending (RW1C),
+/// bit 1 Interrupt Enable.
+const IMAN: u64 = 0x00;
+const IMAN_IP: u32 = 1 << 0;
+const IMAN_IE: u32 = 1 << 1;
 const USBSTS_HCH: u32 = 1 << 0;
 const USBSTS_CNR: u32 = 1 << 11;
 
@@ -431,8 +446,9 @@ impl Xhci {
             erdp_reg,
         };
 
-        // Run/Stop -- interrupt signaling (IMAN.IE / USBCMD.INTE) deliberately left disabled; see
-        // this module's own doc comment.
+        // Run/Stop -- interrupt signalling (IMAN.IE / USBCMD.INTE) stays off until `arm_msix`, so
+        // boot enumeration can spin-poll the Event Ring with no handler racing it; see this
+        // module's own doc comment.
         write32(op_base + OP_USBCMD, USBCMD_RS);
         let deadline = tsc::now() + tsc::ms_to_cycles(50);
         while read32(op_base + OP_USBSTS) & USBSTS_HCH != 0 {
@@ -448,8 +464,10 @@ impl Xhci {
         serial_println!("[usb] xHCI controller running");
 
         Some(Xhci {
+            pci: candidate,
             op_base,
             db_base,
+            intr0,
             dcbaa_virt,
             max_ports,
             cmd_ring,
@@ -460,6 +478,43 @@ impl Xhci {
 
     pub(crate) fn max_ports(&self) -> u8 {
         self.max_ports
+    }
+
+    /// Programs MSI-X to deliver `vector`, then enables interrupter 0 and the controller's master
+    /// interrupt enable, so completions arrive as MSI from here on (the Event Ring mechanism
+    /// itself was already running -- only CPU signalling was gated). `false` (logged by
+    /// `enable_msix`) if the controller offers no MSI-X capability, leaving the caller to poll.
+    ///
+    /// Arm this only *after* boot-time enumeration is done: while it's armed the MSI handler owns
+    /// the Event Ring, and a synchronous `wait_for_*` draining it too would race the handler.
+    pub(crate) fn arm_msix(
+        &mut self,
+        mapper: &mut impl Mapper<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+        phys_mem_offset: VirtAddr,
+        vector: u8,
+    ) -> bool {
+        let (address, data) = crate::cpu::apic::msi_message(vector);
+        if !self
+            .pci
+            .enable_msix(mapper, frame_allocator, phys_mem_offset, address, data)
+        {
+            serial_println!("[usb] xHCI controller has no MSI-X capability -- staying on polling");
+            return false;
+        }
+        write32(self.intr0 + IMAN, IMAN_IE);
+        write32(
+            self.op_base + OP_USBCMD,
+            read32(self.op_base + OP_USBCMD) | USBCMD_INTE,
+        );
+        true
+    }
+
+    /// Acknowledges interrupter 0 (clears Interrupt Pending, keeps Interrupt Enable) so a later
+    /// completion can raise a fresh MSI. Called from the MSI handler after it has drained the
+    /// Event Ring.
+    pub(crate) fn ack_interrupter(&self) {
+        write32(self.intr0 + IMAN, IMAN_IE | IMAN_IP);
     }
 
     fn portsc_addr(&self, port: u8) -> VirtAddr {

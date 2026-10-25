@@ -185,6 +185,8 @@ pub(crate) fn dispatch(frame: &mut TrapFrame) {
     const TIMER: u64 = InterruptIndex::Timer as u64;
     const KEYBOARD: u64 = InterruptIndex::Keyboard as u64;
     const IRQ_LAST: u64 = PIC_1_OFFSET as u64 + 15;
+    const MSI_FIRST: u64 = crate::cpu::apic::MSI_VECTOR_BASE as u64;
+    const MSI_LAST: u64 = MSI_FIRST + crate::cpu::apic::MSI_VECTORS as u64 - 1;
     match frame.vector {
         14 => page_fault_handler(frame),
         8 => double_fault_handler(frame),
@@ -204,6 +206,7 @@ pub(crate) fn dispatch(frame: &mut TrapFrame) {
         TIMER => timer_interrupt_handler(frame),
         KEYBOARD => keyboard_interrupt_handler(frame),
         34..=IRQ_LAST => irq((frame.vector - PIC_1_OFFSET as u64) as u8, frame.from_user()),
+        MSI_FIRST..=MSI_LAST => crate::cpu::apic::dispatch_msi(frame.vector),
         SPURIOUS_VECTOR => {
             serial_println!("[trap] spurious interrupt at ip {:#x}", frame.rip);
         }
