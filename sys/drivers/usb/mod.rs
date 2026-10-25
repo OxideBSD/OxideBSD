@@ -165,6 +165,21 @@ fn service(state: &mut UsbState) {
     }
 }
 
+/// Reads whole 512-byte sectors from `lba` of the first configured mass-storage device into `buf`
+/// (its length a multiple of 512), through the Bulk-Only transport. `false` if there's no such
+/// device or the read fails. A direct hook for the storage smoke test, matching the test-facing
+/// raw reads `drivers::ata` exposes; production reads go through `drivers::disk`/`usb0`.
+pub fn read_first_storage_sectors(lba: u64, buf: &mut [u8]) -> bool {
+    let Some(unit) = STATE
+        .lock()
+        .as_ref()
+        .and_then(|st| st.storage.first().map(|d| d.unit()))
+    else {
+        return false;
+    };
+    super::scsi::read(&unit, lba, 512, unit.max_blocks(512), buf).is_ok()
+}
+
 /// The next CBW tag (`storage`).
 pub(crate) fn next_storage_tag() -> u32 {
     STORAGE_TAG.fetch_add(1, Ordering::Relaxed)

@@ -97,6 +97,20 @@ case "$TEST_NAME" in
         # The disk registry (INSTALLER.md §5.1): more disks than the system's, below.
         DISK_REGISTRY_TEST=1
         ;;
+    usb_storage)
+        # A QEMU usb-storage stick on the xHCI controller (INSTALLER.md step 5), its first two
+        # sectors carrying markers the test reads back over Bulk-Only Transport.
+        OXIDEBSD_QEMU_USB=1
+        export OXIDEBSD_QEMU_USB
+        USB_IMG="target/images/usb_test.img"
+        mkdir -p target/images
+        rm -f "$USB_IMG"
+        truncate -s 16M "$USB_IMG"
+        printf 'OXIDEBSD_USB_TEST_SECTOR'   | dd of="$USB_IMG" bs=1 seek=0   conv=notrunc status=none
+        printf 'OXIDEBSD_USB_TEST_SECTOR_1' | dd of="$USB_IMG" bs=1 seek=512 conv=notrunc status=none
+        OXIDEBSD_QEMU_USB_DISK="$USB_IMG"
+        export OXIDEBSD_QEMU_USB_DISK
+        ;;
     install_boot|install_boot_bios)
         # The install medium alone (INSTALLER.md step 6), made from this kernel below: at 64 MB,
         # with a blank disk to install on, it boots into its mfsroot and the installer's first

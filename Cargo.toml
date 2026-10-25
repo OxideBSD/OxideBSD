@@ -263,6 +263,10 @@ name = "ata_smoke"
 harness = false
 
 [[test]]
+name = "usb_storage"
+harness = false
+
+[[test]]
 name = "oxfs_persistence_syscall_smoke"
 harness = false
 
