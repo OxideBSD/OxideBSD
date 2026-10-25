@@ -212,8 +212,16 @@ impl Screen {
         // SAFETY: ncurses is set up; refresh after endwin resumes it.
         unsafe { endwin() };
         palette(false);
+        // A clean screen for `f`, not the dialogs in the console's own colours.
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[0m\x1b[H\x1b[2J");
+        let _ = out.flush();
         let r = f();
+        // Curses resuming resets the terminal's colours: the palette after it, then everything
+        // drawn again in it (`f` drew over all of it anyway).
+        self.show();
         palette(true);
+        self.repaint();
         self.show();
         r
     }

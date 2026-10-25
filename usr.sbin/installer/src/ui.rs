@@ -220,6 +220,7 @@ impl Ui {
         self.screen.suspend(|| {
             println!("\nThe install medium's shell; `exit` returns to the installer.\n");
             let _ = std::process::Command::new("/bin/sh").arg0("-sh").status();
+            take_foreground();
         });
     }
 
@@ -500,6 +501,19 @@ impl Ui {
         self.screen.put(p.body, p.x + 4, &bar, Pair::Title.attr());
         self.screen.put(p.body, p.x + 4 + (bw as i32 - 4) / 2, &pct, Pair::Box.attr() | A_BOLD);
         self.screen.show();
+    }
+}
+
+/// The terminal's foreground back for the installer's process group. An interactive shell makes
+/// its own group the foreground and leaves it so when it exits: the installer, then in the
+/// background, would be stopped (SIGTTOU) at curses' next terminal setting. Asking for it back is
+/// itself such a call, so SIGTTOU is ignored while it's made.
+fn take_foreground() {
+    // SAFETY: plain system calls on the standard input, the terminal.
+    unsafe {
+        let old = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(0, libc::getpgrp());
+        libc::signal(libc::SIGTTOU, old);
     }
 }
 

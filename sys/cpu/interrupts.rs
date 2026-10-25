@@ -968,9 +968,9 @@ fn dispatch_key(code: KeyCode, key: DecodedKey) -> bool {
     handle_decoded_key(normalize_enter_key(code, key))
 }
 
-/// Linux console key sequences (`kcuu1`/`khome`/`kdch1`/... in the `linux` terminfo entry).
+/// Linux console key sequences (`kcuu1`/`khome`/`kdch1`/`kf1`/... in the `linux` terminfo entry).
 /// pc-keyboard reports these keys as `RawKey` -- they used to be dropped entirely, so no program
-/// ever saw an arrow key -- except Delete, which it decodes as DEL (0x7f), and Backspace, as BS
+/// ever saw an arrow or function key -- except Delete, which it decodes as DEL (0x7f), and Backspace, as BS
 /// (0x08). A Linux console sends DEL for Backspace (matching `VERASE`, see
 /// `crate::tty::default_termios`) and `ESC [ 3 ~` for Delete, so both are rewritten too.
 /// Ctrl+H still produces BS: only the Backspace key itself is matched.
@@ -987,6 +987,19 @@ fn console_key_sequence(code: KeyCode, key: &DecodedKey) -> Option<&'static [u8]
         (KeyCode::PageDown | KeyCode::Numpad3, DecodedKey::RawKey(_)) => b"\x1b[6~",
         (KeyCode::Delete | KeyCode::NumpadPeriod, DecodedKey::Unicode('\u{7f}')) => b"\x1b[3~",
         (KeyCode::Backspace, DecodedKey::Unicode('\u{8}')) => b"\x7f",
+        // The function keys, as `kf1`..`kf12` in the `linux` terminfo entry.
+        (KeyCode::F1, DecodedKey::RawKey(_)) => b"\x1b[[A",
+        (KeyCode::F2, DecodedKey::RawKey(_)) => b"\x1b[[B",
+        (KeyCode::F3, DecodedKey::RawKey(_)) => b"\x1b[[C",
+        (KeyCode::F4, DecodedKey::RawKey(_)) => b"\x1b[[D",
+        (KeyCode::F5, DecodedKey::RawKey(_)) => b"\x1b[[E",
+        (KeyCode::F6, DecodedKey::RawKey(_)) => b"\x1b[17~",
+        (KeyCode::F7, DecodedKey::RawKey(_)) => b"\x1b[18~",
+        (KeyCode::F8, DecodedKey::RawKey(_)) => b"\x1b[19~",
+        (KeyCode::F9, DecodedKey::RawKey(_)) => b"\x1b[20~",
+        (KeyCode::F10, DecodedKey::RawKey(_)) => b"\x1b[21~",
+        (KeyCode::F11, DecodedKey::RawKey(_)) => b"\x1b[23~",
+        (KeyCode::F12, DecodedKey::RawKey(_)) => b"\x1b[24~",
         _ => return None,
     };
     Some(seq)
