@@ -17,23 +17,38 @@
 //! port scan in `init` wins; no hot-plug (attach/detach after boot). Mouse/pointer input is out of
 //! scope entirely -- this kernel has no GUI or pointer concept anywhere to consume it.
 
+mod enumerate;
 mod hid_keyboard;
+pub(crate) mod storage;
 mod xhci;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use spin::Mutex;
-use x86_64::VirtAddr;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::serial_println;
 
 struct UsbState {
     controller: xhci::Xhci,
     keyboard: Option<hid_keyboard::KeyboardDevice>,
+    /// The configured mass-storage devices (`usb0`, ...); their bulk rings and completion state
+    /// live here, reached by slot id from `storage_xfer`.
+    storage: alloc::vec::Vec<storage::StorageDevice>,
     /// Whether the controller delivers completions as MSI-X (`msi_handler`) rather than relying on
     /// the tick-driven `poll` fallback. Either way `poll` still drains the ring as a safety net
     /// and drives keyboard auto-repeat.
     msi_armed: bool,
 }
+
+/// One Bulk-Only command at a time across all mass-storage devices (one Event Ring, one
+/// completion slot per device; serialising keeps the transport model simple).
+static STORAGE_COMMAND: Mutex<()> = Mutex::new(());
+/// The next Command Block Wrapper tag (`storage`).
+static STORAGE_TAG: AtomicU32 = AtomicU32::new(1);
+/// How long a single bulk stage waits before it's called a transport failure.
+const STORAGE_TIMEOUT_MS: u64 = 10_000;
 
 /// `None` until `init` has found and brought up a real xHCI controller; stays `None` for the rest
 /// of the boot if none was found, or if one was found but no HID boot keyboard ever showed up on
@@ -55,38 +70,47 @@ pub fn init(
         return;
     };
 
+    // One keyboard (the first found) and every mass-storage device. A port holds one device, so
+    // for each: try the keyboard first (its path is unchanged for a real keyboard), then storage.
+    // A storage device fails the keyboard attempt after being addressed and is then re-addressed
+    // to a fresh slot -- a minor slot leak that a shared enumerator will fold away with hubs.
     let mut keyboard = None;
+    let mut storage = alloc::vec::Vec::new();
     for port in 1..=controller.max_ports() {
         let Some(speed) = controller.reset_port(port) else {
             continue;
         };
-        serial_println!(
-            "[usb] device connected on port {} (speed id {})",
-            port,
-            speed
-        );
-        match hid_keyboard::bring_up(
-            &mut controller,
-            frame_allocator,
-            phys_mem_offset,
-            port,
-            speed,
-        ) {
-            Some(kb) => {
-                serial_println!("[usb] USB HID keyboard ready on port {}", port);
-                keyboard = Some(kb);
-                break;
+        serial_println!("[usb] device connected on port {} (speed id {})", port, speed);
+        // Enumerate once (one slot, addressed, descriptors read), then dispatch by what it is --
+        // so a wrong first guess doesn't leave a slot owning the port.
+        let Some(mut dev) =
+            enumerate::enumerate(&mut controller, frame_allocator, phys_mem_offset, port, speed)
+        else {
+            continue;
+        };
+        if keyboard.is_none()
+            && let Some(kb) =
+                hid_keyboard::finish(&mut controller, frame_allocator, phys_mem_offset, &mut dev)
+        {
+            serial_println!("[usb] USB HID keyboard ready on port {}", port);
+            keyboard = Some(kb);
+            continue;
+        }
+        match storage::finish(&mut controller, frame_allocator, phys_mem_offset, &mut dev) {
+            Some(sd) => {
+                serial_println!("[usb] USB mass storage ready on port {} (slot {})", port, sd.slot_id());
+                storage.push(sd);
             }
             None => {
                 serial_println!(
-                    "[usb] port {}: device didn't come up as a HID boot keyboard -- skipping",
+                    "[usb] port {}: not a HID boot keyboard or BOT mass-storage device -- skipping",
                     port
                 );
             }
         }
     }
-    if keyboard.is_none() {
-        serial_println!("[usb] xHCI controller up, but no HID boot keyboard found on any port");
+    if keyboard.is_none() && storage.is_empty() {
+        serial_println!("[usb] xHCI controller up, but no keyboard or mass storage on any port");
     }
 
     // Boot-time enumeration is done (it spin-polled the Event Ring synchronously), so it's now
@@ -96,6 +120,7 @@ pub fn init(
     *STATE.lock() = Some(UsbState {
         controller,
         keyboard,
+        storage,
         msi_armed: false,
     });
     if let Some(vector) = crate::cpu::apic::register_msi(msi_handler) {
@@ -117,10 +142,15 @@ pub fn init(
 /// never race on the ring's dequeue pointer. Acknowledges interrupter 0 at the end so the next
 /// completion can raise a fresh MSI.
 fn service(state: &mut UsbState) {
+    let mut had_storage = false;
     while let Some(evt) = state.controller.poll_event() {
         if let Some(keyboard) = state.keyboard.as_mut()
             && keyboard.handle_transfer_event(&mut state.controller, evt)
         {
+            continue;
+        }
+        if state.storage.iter_mut().any(|d| d.handle_event(evt)) {
+            had_storage = true;
             continue;
         }
         // Unclaimed: dropped, same as the driver has always done with a stray event.
@@ -128,6 +158,96 @@ fn service(state: &mut UsbState) {
     if state.msi_armed {
         state.controller.ack_interrupter();
     }
+    // A storage completion was recorded -- wake whoever's blocked in `storage_xfer`. Safe from
+    // interrupt context on one core (IF is clear), the same way `virtio_scsi`'s handler wakes.
+    if had_storage {
+        super::dma::wake_disk_waiters(&mut crate::process::table().lock());
+    }
+}
+
+/// The next CBW tag (`storage`).
+pub(crate) fn next_storage_tag() -> u32 {
+    STORAGE_TAG.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Serialises Bulk-Only commands (held for a whole CBW/data/CSW transaction).
+pub(crate) fn storage_command_lock() -> spin::MutexGuard<'static, ()> {
+    STORAGE_COMMAND.lock()
+}
+
+/// One bulk stage for mass-storage device `slot_id`: enqueue `len` bytes at `phys` on endpoint
+/// `ep_dci` (a chained data TD if `td`, else a single-TRB CBW/CSW), ring its doorbell, and wait
+/// for the completion. Returns the residual (bytes not moved) on success. The wait sleeps through
+/// the scheduler at run time (woken by the Event Ring service) and spins at boot, via `dma` --
+/// never holding the state lock across it, so the service can take it to record the completion.
+pub(crate) fn storage_xfer(
+    slot_id: u8,
+    ep_dci: u8,
+    phys: PhysAddr,
+    len: u32,
+    td: bool,
+) -> Result<u32, ()> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = STATE.lock();
+        let Some(dev) = guard
+            .as_mut()
+            .and_then(|st| st.storage.iter_mut().find(|d| d.slot_id() == slot_id))
+        else {
+            return Err(());
+        };
+        dev.arm(ep_dci);
+        if td {
+            xhci::enqueue_bulk_td(dev.ring_for(ep_dci), phys, len);
+        } else {
+            xhci::enqueue_normal_in(dev.ring_for(ep_dci), phys, len as u16);
+        }
+        Ok(())
+    })?;
+    // Doorbell after arming (a separate STATE take so the borrow of the controller doesn't overlap
+    // the device's ring above).
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(st) = STATE.lock().as_ref() {
+            st.controller.ring_endpoint_doorbell(slot_id, ep_dci);
+        }
+    });
+    if !super::dma::wait_for_disk(STORAGE_TIMEOUT_MS, || storage_done(slot_id)) {
+        serial_println!("[usb] storage slot {}: transfer on endpoint {} timed out", slot_id, ep_dci);
+        return Err(());
+    }
+    let (ok, residual) = x86_64::instructions::interrupts::without_interrupts(|| {
+        STATE
+            .lock()
+            .as_ref()
+            .and_then(|st| st.storage.iter().find(|d| d.slot_id() == slot_id))
+            .and_then(|d| d.completion())
+    })
+    .ok_or(())?;
+    if ok { Ok(residual) } else { Err(()) }
+}
+
+fn storage_done(slot_id: u8) -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        STATE
+            .lock()
+            .as_ref()
+            .and_then(|st| st.storage.iter().find(|d| d.slot_id() == slot_id))
+            .map(|d| d.completion().is_some())
+            .unwrap_or(false)
+    })
+}
+
+/// Probes every configured mass-storage device's logical unit, for `drivers::disk` to register.
+/// Called once file systems are coming up, after `init` armed the controller -- the bulk probes
+/// (`INQUIRY`, `READ CAPACITY`) run interrupt-driven. The state lock is dropped before probing,
+/// since each probe re-takes it through `storage_xfer`.
+pub(crate) fn probe_storage() -> alloc::vec::Vec<storage::Found> {
+    let units: alloc::vec::Vec<storage::MsdUnit> = STATE
+        .lock()
+        .as_ref()
+        .map(|st| st.storage.iter().map(|d| d.unit()).collect())
+        .unwrap_or_default();
+    serial_println!("[usb] probing {} mass-storage unit(s)", units.len());
+    units.into_iter().filter_map(storage::probe).collect()
 }
 
 /// The MSI-X interrupt handler: drains and dispatches completions. Bails on lock contention (the

@@ -25,14 +25,10 @@ use super::xhci::{
 };
 use crate::serial_println;
 
-const REQ_GET_DESCRIPTOR: u8 = 0x06;
 const REQ_SET_CONFIGURATION: u8 = 0x09;
-const DESC_TYPE_DEVICE: u16 = 1 << 8;
-const DESC_TYPE_CONFIGURATION: u16 = 2 << 8;
 const HID_REQ_SET_IDLE: u8 = 0x0A;
 const HID_REQ_SET_PROTOCOL: u8 = 0x0B;
 const HID_BOOT_PROTOCOL: u16 = 0;
-const BM_STD_DEV_TO_HOST: u8 = 0x80;
 const BM_STD_HOST_TO_DEV: u8 = 0x00;
 const BM_CLASS_INTERFACE_HOST_TO_DEV: u8 = 0x21;
 
@@ -288,18 +284,6 @@ fn hid_usage_to_scancode(usage: u8) -> Option<(u8, bool)> {
     })
 }
 
-/// EP0's initial `bMaxPacketSize0` guess by Port Speed ID (xHCI spec Table 5-12). Low/High/Super
-/// Speed values are spec-fixed; Full Speed's real value (8/16/32/64) is read from the device's own
-/// descriptor and applied via a real Evaluate Context command once known -- see `bring_up`.
-fn initial_ep0_max_packet(speed: u8) -> u16 {
-    match speed {
-        2 => 8,   // Low Speed -- always exactly 8.
-        3 => 64,  // High Speed -- always exactly 64.
-        1 => 8,   // Full Speed -- refined below once the real descriptor is read.
-        _ => 512, // SuperSpeed(+) and anything unrecognized.
-    }
-}
-
 fn log2_ceil_u32(n: u32) -> u8 {
     if n <= 1 {
         return 0;
@@ -383,124 +367,21 @@ fn parse_hid_keyboard_config(bytes: &[u8]) -> Option<HidKeyboardConfig> {
     None
 }
 
-/// Enumerates and configures the device found on `port` (already reset, with the given Port
-/// Speed ID) as a HID boot-protocol keyboard: enable slot, address device, read the device and
-/// configuration descriptors, `SET_CONFIGURATION`, configure the interrupt-IN endpoint,
-/// `SET_PROTOCOL`(Boot)/`SET_IDLE`(0), then arm the first report read. `None` on any failure, or
-/// if the device simply isn't a HID boot keyboard -- always logged by the caller.
-pub(crate) fn bring_up(
+/// Finishes a device already enumerated (`super::enumerate`) as a HID boot-protocol keyboard:
+/// `SET_CONFIGURATION`, configure the interrupt-IN endpoint, `SET_PROTOCOL`(Boot)/`SET_IDLE`(0),
+/// then arm the first report read. `None` if the device isn't a HID boot keyboard (before anything
+/// is configured, so the caller can try another driver on the same slot) or on failure.
+pub(crate) fn finish(
     controller: &mut Xhci,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     phys_mem_offset: VirtAddr,
-    port: u8,
-    speed: u8,
+    dev: &mut super::enumerate::EnumeratedDevice,
 ) -> Option<KeyboardDevice> {
-    let slot_id = controller.enable_slot()?;
-
-    let (input_virt, input_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
-    let (_, output_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
-    let (ep0_virt, ep0_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
-    let mut ep0_ring = TrbRing::new(ep0_virt, ep0_phys);
-
-    write_input_control_context(input_virt, (1 << 0) | (1 << 1), 0);
-    write_slot_context(input_virt + 32, speed, port, 1);
-    write_endpoint_context(
-        input_virt + 64,
-        EndpointType::Control,
-        initial_ep0_max_packet(speed),
-        0,
-        ep0_ring.initial_dequeue_pointer(),
-    );
-
-    controller.set_dcbaa_entry(slot_id, output_phys);
-    if !controller.address_device(slot_id, input_phys) {
-        serial_println!("[usb] port {}: Address Device command failed", port);
-        return None;
-    }
-
-    let (desc_virt, desc_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
-
-    // First 8 bytes of the device descriptor -- enough to learn the real bMaxPacketSize0 for a
-    // Full-Speed device (Low/High/Super Speed all use a spec-fixed value already applied above).
-    controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
-        BM_STD_DEV_TO_HOST,
-        REQ_GET_DESCRIPTOR,
-        DESC_TYPE_DEVICE,
-        0,
-        Some((desc_phys, 8)),
-    )?;
-    if speed == 1 {
-        let real_max_packet = unsafe { core::ptr::read_volatile(desc_virt.as_ptr::<u8>().add(7)) };
-        if real_max_packet != 0 && real_max_packet as u16 != initial_ep0_max_packet(speed) {
-            write_input_control_context(input_virt, 1 << 1, 0);
-            write_endpoint_context(
-                input_virt + 64,
-                EndpointType::Control,
-                real_max_packet as u16,
-                0,
-                ep0_ring.initial_dequeue_pointer(),
-            );
-            if !controller.evaluate_context(slot_id, input_phys) {
-                serial_println!(
-                    "[usb] port {}: Evaluate Context (EP0 max packet refinement) failed -- \
-                     continuing with the initial guess",
-                    port
-                );
-            }
-        }
-    }
-
-    // Full 18-byte device descriptor.
-    controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
-        BM_STD_DEV_TO_HOST,
-        REQ_GET_DESCRIPTOR,
-        DESC_TYPE_DEVICE,
-        0,
-        Some((desc_phys, 18)),
-    )?;
-    let vendor = unsafe { core::ptr::read_volatile(desc_virt.as_ptr::<u16>().add(4)) };
-    let product = unsafe { core::ptr::read_volatile(desc_virt.as_ptr::<u16>().add(5)) };
-    serial_println!(
-        "[usb] port {}: device descriptor read, VID:PID {:04x}:{:04x}",
-        port,
-        vendor,
-        product
-    );
-
-    // Configuration descriptor: a 9-byte header first (to learn the real wTotalLength), then the
-    // whole thing (interface + HID + endpoint descriptors included) in one shot.
-    controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
-        BM_STD_DEV_TO_HOST,
-        REQ_GET_DESCRIPTOR,
-        DESC_TYPE_CONFIGURATION,
-        0,
-        Some((desc_phys, 9)),
-    )?;
-    let total_len = unsafe { core::ptr::read_volatile(desc_virt.as_ptr::<u16>().add(1)) };
-    let read_len = (total_len as usize).clamp(9, 4096) as u16;
-    controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
-        BM_STD_DEV_TO_HOST,
-        REQ_GET_DESCRIPTOR,
-        DESC_TYPE_CONFIGURATION,
-        0,
-        Some((desc_phys, read_len)),
-    )?;
-
-    let config_bytes =
-        unsafe { core::slice::from_raw_parts(desc_virt.as_ptr::<u8>(), read_len as usize) };
-    let parsed = parse_hid_keyboard_config(config_bytes)?;
+    let parsed = parse_hid_keyboard_config(&dev.config)?;
     serial_println!(
         "[usb] port {}: HID boot keyboard, interface {}, interrupt IN endpoint {:#04x}, \
          max packet {}, bInterval {}",
-        port,
+        dev.port,
         parsed.interface_number,
         parsed.endpoint_address,
         parsed.max_packet_size,
@@ -508,8 +389,8 @@ pub(crate) fn bring_up(
     );
 
     controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
+        &mut dev.ep0_ring,
+        dev.slot_id,
         BM_STD_HOST_TO_DEV,
         REQ_SET_CONFIGURATION,
         parsed.config_value as u16,
@@ -521,23 +402,23 @@ pub(crate) fn bring_up(
     let (int_virt, int_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
     let mut interrupt_ring = TrbRing::new(int_virt, int_phys);
 
-    write_input_control_context(input_virt, (1 << 0) | (1 << ep_dci), 0);
-    write_slot_context(input_virt + 32, speed, port, ep_dci);
+    write_input_control_context(dev.input_virt, (1 << 0) | (1 << ep_dci), 0);
+    write_slot_context(dev.input_virt + 32, dev.speed, dev.port, ep_dci);
     write_endpoint_context(
-        input_virt + 32 * (ep_dci as u64 + 1),
+        dev.input_virt + 32 * (ep_dci as u64 + 1),
         EndpointType::InterruptIn,
         parsed.max_packet_size.max(8),
-        xhci_interval(speed, parsed.b_interval),
+        xhci_interval(dev.speed, parsed.b_interval),
         interrupt_ring.initial_dequeue_pointer(),
     );
-    if !controller.configure_endpoint(slot_id, input_phys) {
-        serial_println!("[usb] port {}: Configure Endpoint command failed", port);
+    if !controller.configure_endpoint(dev.slot_id, dev.input_phys) {
+        serial_println!("[usb] port {}: Configure Endpoint failed (keyboard)", dev.port);
         return None;
     }
 
     controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
+        &mut dev.ep0_ring,
+        dev.slot_id,
         BM_CLASS_INTERFACE_HOST_TO_DEV,
         HID_REQ_SET_PROTOCOL,
         HID_BOOT_PROTOCOL,
@@ -545,8 +426,8 @@ pub(crate) fn bring_up(
         None,
     )?;
     controller.control_transfer_in(
-        &mut ep0_ring,
-        slot_id,
+        &mut dev.ep0_ring,
+        dev.slot_id,
         BM_CLASS_INTERFACE_HOST_TO_DEV,
         HID_REQ_SET_IDLE,
         0,
@@ -556,10 +437,10 @@ pub(crate) fn bring_up(
 
     let (report_buf_virt, report_buf_phys) = alloc_zeroed_page(frame_allocator, phys_mem_offset)?;
     enqueue_normal_in(&mut interrupt_ring, report_buf_phys, 8);
-    controller.ring_endpoint_doorbell(slot_id, ep_dci);
+    controller.ring_endpoint_doorbell(dev.slot_id, ep_dci);
 
     Some(KeyboardDevice {
-        slot_id,
+        slot_id: dev.slot_id,
         interrupt_ep_dci: ep_dci,
         interrupt_ring,
         report_buf_virt,

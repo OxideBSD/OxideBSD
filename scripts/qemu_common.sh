@@ -98,6 +98,12 @@ fi
 # an always-on USB one would double-push every keystroke.
 if [ "${OXIDEBSD_QEMU_USB:-0}" = 1 ]; then
     set -- "$@" -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0
+    # A USB mass-storage stick on that controller: $OXIDEBSD_QEMU_USB_DISK is its backing image
+    # (raw). Exercises Bulk-Only Transport (INSTALLER.md step 5).
+    if [ -n "${OXIDEBSD_QEMU_USB_DISK:-}" ]; then
+        set -- "$@" -drive "if=none,id=usbdisk,format=raw,file=$OXIDEBSD_QEMU_USB_DISK" \
+            -device usb-storage,bus=xhci.0,drive=usbdisk
+    fi
 fi
 
 if [ "${QEMU_HEADLESS_TEST:-0}" = 1 ]; then

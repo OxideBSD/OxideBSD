@@ -54,6 +54,8 @@ enum Backend {
     Ahci(super::ahci::Unit),
     Virtio(usize),
     Scsi(super::virtio_scsi::Unit),
+    /// A USB mass-storage logical unit over Bulk-Only Transport (`drivers::usb::storage`).
+    Usb(super::usb::storage::MsdUnit),
     Memory,
 }
 
@@ -62,6 +64,7 @@ fn with_scsi<R>(backend: Backend, f: impl FnOnce(&dyn super::scsi::Transport) ->
     match backend {
         Backend::Atapi(channel, drive) => Some(f(&super::ata::Atapi(channel, drive))),
         Backend::Scsi(unit) => Some(f(&unit)),
+        Backend::Usb(unit) => Some(f(&unit)),
         Backend::Ahci(unit) if unit.atapi() => Some(f(&unit)),
         _ => None,
     }
@@ -83,6 +86,7 @@ impl Backend {
             Backend::Ahci(_) => "ahci",
             Backend::Virtio(_) => "virtio_blk",
             Backend::Scsi(_) => "virtio_scsi",
+            Backend::Usb(_) => "usb",
             Backend::Memory => "md",
         }
     }
@@ -140,6 +144,7 @@ pub static ROOT_LOST_EIO: AtomicBool = AtomicBool::new(false);
 const IDE_MAJOR: u32 = 3;
 const SCSI_MAJOR: u32 = 8;
 /// AHCI's unit is the drive's place (`ahci::Unit::number`), not a counter.
+const USB_MAJOR: u32 = 250;
 const SATA_MAJOR: u32 = 251;
 const VIRTIO_MAJOR: u32 = 252;
 /// `/dev/gpt/<label>`: another name for a labelled GPT partition, minors in the order found.
@@ -246,6 +251,30 @@ pub fn init(
             },
             t => {
                 serial_println!("[boot] disk: {}: SCSI device type {:#04x} isn't a disk or CD -- left out", name, t);
+                continue;
+            }
+        }
+        unit += 1;
+    }
+
+    let mut unit = 0;
+    for f in super::usb::probe_storage() {
+        let name = alloc::format!("usb{unit}");
+        let backend = Backend::Usb(f.unit);
+        match f.device_type {
+            super::scsi::TYPE_CDROM => found.push(register_cd(name, backend, f.model, USB_MAJOR, unit)),
+            super::scsi::TYPE_DISK => match super::scsi::capacity(&f.unit).0 {
+                Some((blocks, size)) if (512..=4096).contains(&size) && size.is_power_of_two() => {
+                    let sectors = blocks * (size as u64 / 512);
+                    found.push(register(name, backend, Kind::Disk, sectors, size, f.model, USB_MAJOR, unit));
+                }
+                _ => {
+                    serial_println!("[boot] disk: {}: no medium, or sectors of a size not driven -- left out", name);
+                    continue;
+                }
+            },
+            t => {
+                serial_println!("[boot] disk: {}: USB storage device type {:#04x} isn't a disk or CD -- left out", name, t);
                 continue;
             }
         }
@@ -808,6 +837,9 @@ fn device_read(backend: Backend, ss: u64, lba: u64, buf: &mut [u8]) -> bool {
         Backend::Scsi(unit) => {
             super::scsi::read(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
         }
+        Backend::Usb(unit) => {
+            super::scsi::read(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
+        }
         Backend::Virtio(unit) => super::virtio_blk::read_sectors(unit, lba, buf),
         Backend::Memory => super::md::read_sectors(lba, buf),
     }
@@ -821,6 +853,9 @@ fn device_write(backend: Backend, ss: u64, lba: u64, buf: &[u8]) -> bool {
         Backend::Ahci(unit) if unit.atapi() => false,
         Backend::Ahci(unit) => super::ahci::write(&unit, lba, ss as usize, buf).is_ok(),
         Backend::Scsi(unit) => {
+            super::scsi::write(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
+        }
+        Backend::Usb(unit) => {
             super::scsi::write(&unit, lba, ss as usize, unit.max_blocks(ss as usize), buf).is_ok()
         }
         Backend::Virtio(unit) => super::virtio_blk::write_sectors(unit, lba, buf),

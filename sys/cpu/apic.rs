@@ -28,10 +28,10 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::{Mutex, Once};
+use x86_64::VirtAddr;
 use x86_64::instructions::port::Port;
 use x86_64::registers::model_specific::{ApicBase, ApicBaseFlags};
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
-use x86_64::VirtAddr;
 
 use crate::serial_println;
 
@@ -95,7 +95,9 @@ fn read(off: u64) -> u32 {
 
 fn write(off: u64, val: u32) {
     // SAFETY: as `read`.
-    unsafe { core::ptr::write_volatile((*LAPIC_BASE.get().unwrap() + off).as_mut_ptr::<u32>(), val) }
+    unsafe {
+        core::ptr::write_volatile((*LAPIC_BASE.get().unwrap() + off).as_mut_ptr::<u32>(), val)
+    }
 }
 
 /// Maps the LAPIC's registers and switches the CPU from pure-8259 delivery (what `pic::init` left)
@@ -109,7 +111,8 @@ pub fn init(
     let (frame, _) = ApicBase::read();
     let phys_base = frame.start_address();
     // Uncached HHDM mapping, the same primitive every MMIO BAR goes through.
-    let virt = crate::drivers::pci::map_mmio(mapper, frame_allocator, phys_mem_offset, phys_base, 1);
+    let virt =
+        crate::drivers::pci::map_mmio(mapper, frame_allocator, phys_mem_offset, phys_base, 1);
     LAPIC_BASE.call_once(|| virt);
 
     x86_64::instructions::interrupts::without_interrupts(|| {

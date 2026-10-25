@@ -122,6 +122,11 @@ impl RawTrb {
     pub(crate) fn completion_code(&self) -> u8 {
         ((self.0[2] >> 24) & 0xFF) as u8
     }
+    /// A Transfer Event's residual: bytes of the Transfer Descriptor *not* moved (requested minus
+    /// transferred), in the low 24 bits of the status dword (xHCI spec 6.4.2.1).
+    pub(crate) fn transfer_residual(&self) -> u32 {
+        self.0[2] & 0x00FF_FFFF
+    }
     pub(crate) fn slot_id(&self) -> u8 {
         ((self.0[3] >> 24) & 0xFF) as u8
     }
@@ -856,7 +861,9 @@ pub(crate) fn write_slot_context(base: VirtAddr, speed: u8, root_port: u8, conte
 
 #[derive(Clone, Copy)]
 pub(crate) enum EndpointType {
+    BulkOut = 2,
     Control = 4,
+    BulkIn = 6,
     InterruptIn = 7,
 }
 
@@ -895,7 +902,7 @@ pub(crate) fn endpoint_dci(ep_num: u8, dir_in: bool) -> u8 {
 
 /// Enqueues one real Normal TRB (a single IN transfer request) onto `ring`, with Interrupt On
 /// Completion set -- the shape `hid_keyboard`'s interrupt-IN endpoint polling loop needs, one TRB
-/// per report buffer.
+/// per report buffer. Also used for USB mass storage's small (single-TRB) CBW and CSW transfers.
 pub(crate) fn enqueue_normal_in(ring: &mut TrbRing, buf_phys: PhysAddr, len: u16) -> PhysAddr {
     let control = ((trb_type::NORMAL as u32) << 10) | (1 << 5/* IOC */);
     ring.enqueue(
@@ -904,4 +911,26 @@ pub(crate) fn enqueue_normal_in(ring: &mut TrbRing, buf_phys: PhysAddr, len: u16
         len as u32,
         control,
     )
+}
+
+/// Enqueues a bulk data transfer of `len` bytes from physical `buf_phys` as one Transfer
+/// Descriptor on `ring` (a bulk endpoint's). The buffer is split into Normal TRBs so none crosses
+/// a 64 KiB boundary and none exceeds 64 KiB (xHCI spec 4.11.7.1): all but the last carry the
+/// Chain bit, and only the last carries Interrupt On Completion -- so hardware raises exactly one
+/// transfer event for the whole TD, whose completion code and residual cover it. `len` must be
+/// nonzero (a bulk transfer with no data uses no TRB -- `usb::storage` skips the data stage).
+pub(crate) fn enqueue_bulk_td(ring: &mut TrbRing, buf_phys: PhysAddr, len: u32) {
+    const MAX_TRB: u32 = 0x1_0000; // 64 KiB per TRB
+    let base = buf_phys.as_u64();
+    let mut off: u32 = 0;
+    while off < len {
+        let addr = base + off as u64;
+        let to_boundary = (MAX_TRB - (addr as u32 & 0xFFFF)).min(MAX_TRB);
+        let chunk = (len - off).min(to_boundary);
+        let last = off + chunk >= len;
+        let control = ((trb_type::NORMAL as u32) << 10)
+            | if last { 1 << 5/* IOC */ } else { 1 << 4/* Chain */ };
+        ring.enqueue(addr as u32, (addr >> 32) as u32, chunk, control);
+        off += chunk;
+    }
 }
